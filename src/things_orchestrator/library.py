@@ -13,8 +13,6 @@ from .recurrence import JsonValue, RecurrenceState
 Kind = Literal["task", "project", "area"]
 PublicKind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "done", "dropped"]
-RecurrenceRole = Literal["none", "template", "instance"]
-RecurrenceType = Literal["none", "fixed", "after_completion", "unknown"]
 
 
 def public_id(kind: PublicKind, uuid: str) -> str:
@@ -113,55 +111,11 @@ class Record:
     def public_kind(self) -> PublicKind:
         return "heading" if self.heading else self.kind
 
-    @property
-    def recurrence_role(self) -> RecurrenceRole:
-        return self.recurrence.role
-
-    @recurrence_role.setter
-    def recurrence_role(self, value: RecurrenceRole) -> None:
-        self.recurrence = replace(self.recurrence, role=value)
-
-    @property
-    def recurring_template(self) -> bool:
-        return self.recurrence.role == "template" and self.recurrence.rule is not None
-
-    @property
-    def recurrence_type(self) -> RecurrenceType:
-        return self.recurrence.repeat_type
-
-    @recurrence_type.setter
-    def recurrence_type(self, value: RecurrenceType) -> None:
-        self.recurrence = replace(self.recurrence, repeat_type=value)
-
-    @property
-    def recurrence_template_uuid(self) -> str | None:
-        return self.recurrence.template_uuid
-
-    @recurrence_template_uuid.setter
-    def recurrence_template_uuid(self, value: str | None) -> None:
-        self.recurrence = replace(self.recurrence, template_uuid=value)
-
-    @property
-    def recurrence_rule(self) -> dict[str, JsonValue] | None:
-        return self.recurrence.rule
-
-    @recurrence_rule.setter
-    def recurrence_rule(self, value: dict[str, JsonValue] | None) -> None:
-        self.recurrence = replace(self.recurrence, rule=value)
-
-    @property
-    def recurrence_links(self) -> list[str]:
-        return list(self.recurrence.links)
-
-    @recurrence_links.setter
-    def recurrence_links(self, value: list[str]) -> None:
-        self.recurrence = replace(self.recurrence, links=tuple(value))
-
     def is_open(self) -> bool:
         return (
             self.status == "open"
             and not self.trashed
-            and not self.recurring_template
+            and self.recurrence.role != "template"
             and not self.heading
         )
 
@@ -351,7 +305,7 @@ class MemoryLibrary:
             if item.parent_uuid == root.uuid
             and not item.trashed
             and item.status == "open"
-            and not item.recurring_template
+            and item.recurrence.role != "template"
         ]
         children.sort(
             key=lambda item: (
@@ -373,7 +327,7 @@ class MemoryLibrary:
     def next_index(self, write: Write) -> int:
         siblings: list[Record] = []
         for item in self.records.values():
-            if item.heading or item.recurring_template or item.uuid == write.uuid:
+            if item.heading or item.recurrence.role == "template" or item.uuid == write.uuid:
                 continue
             if write.into_kind == "project" and item.parent_uuid == write.into_uuid:
                 siblings.append(item)
@@ -626,23 +580,8 @@ class MemoryLibrary:
             elif write.action == "trash":
                 item.trashed = True
             elif write.action == "repeat":
-                item.recurrence_rule = deepcopy(write.recurrence_rule)
-                item.recurrence_role = (
-                    "template" if write.recurrence_rule is not None else "none"
-                )
-                code = (
-                    write.recurrence_rule.get("tp")
-                    if write.recurrence_rule is not None
-                    else None
-                )
-                if write.recurrence_rule is None:
-                    item.recurrence_type = "none"
-                elif code == 0:
-                    item.recurrence_type = "fixed"
-                elif code == 1:
-                    item.recurrence_type = "after_completion"
-                else:
-                    item.recurrence_type = "unknown"
+                assert write.recurrence_rule is not None
+                item.recurrence = item.recurrence.fold_rule(write.recurrence_rule)
             elif write.action == "rename_area" and write.title:
                 item.title = write.title
             elif write.action == "move":

@@ -10,6 +10,7 @@ JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 )
 RepeatUnit = Literal["day", "week", "month", "year"]
+RepeatType = Literal["none", "fixed", "after_completion", "unknown"]
 
 _UNITS: dict[int, RepeatUnit] = {
     4: "year",
@@ -24,7 +25,7 @@ class RecurrenceState:
     """One coherent, lossless recurrence value for a Things record."""
 
     role: Literal["none", "template", "instance"] = "none"
-    repeat_type: Literal["none", "fixed", "after_completion", "unknown"] = "none"
+    repeat_type: RepeatType = "none"
     template_uuid: str | None = None
     rule: dict[str, JsonValue] | None = None
     links: tuple[str, ...] = ()
@@ -50,6 +51,56 @@ class RecurrenceState:
             or self.links
         ):
             raise ValueError("Repeat changes need an exact repeating Task template")
+
+    def fold_rule(self, value: object) -> RecurrenceState:
+        if isinstance(value, dict):
+            rule = deepcopy(value)
+            code = rule.get("tp", 0)
+            repeat_type: RepeatType = (
+                "fixed"
+                if code == 0
+                else "after_completion" if code == 1 else "unknown"
+            )
+            return replace(
+                self,
+                role="template",
+                repeat_type=repeat_type,
+                template_uuid=None,
+                rule=rule,
+            )
+        if self.role == "template":
+            return RecurrenceState(links=self.links)
+        return replace(self, rule=None)
+
+    def fold_links(self, value: object) -> RecurrenceState:
+        links = (
+            (str(value),)
+            if isinstance(value, str)
+            else tuple(str(link) for link in value)
+            if isinstance(value, list)
+            else ()
+        )
+        if links:
+            return replace(
+                self,
+                role="instance",
+                template_uuid=links[0],
+                rule=None,
+                links=links,
+            )
+        if self.role == "instance":
+            return RecurrenceState()
+        return replace(self, template_uuid=None, links=())
+
+    def resolve_instance_type(self, repeat_type: RepeatType | None) -> RecurrenceState:
+        if self.role != "instance":
+            return self
+        resolved: RepeatType = (
+            repeat_type
+            if repeat_type in {"fixed", "after_completion"}
+            else "unknown"
+        )
+        return replace(self, repeat_type=resolved)
 
 
 def repeat_unit(rule: dict[str, JsonValue] | None) -> RepeatUnit | None:

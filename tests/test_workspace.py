@@ -1692,13 +1692,14 @@ def test_template_repeat_interval_needs_approval_and_preserves_rule() -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
-    assert template.recurrence_rule == rule
+    assert template.recurrence.rule == rule
 
     applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
 
     assert applied.status == "applied"
-    assert template.recurrence_rule == {**rule, "fa": 3}
-    assert template.recurrence_rule["of"] == rule["of"]
+    assert template.recurrence.rule == {**rule, "fa": 3}
+    assert template.recurrence.rule is not None
+    assert template.recurrence.rule["of"] == rule["of"]
 
 
 def test_template_repeat_interval_plan_stales_when_instance_changes() -> None:
@@ -1746,7 +1747,7 @@ def test_template_repeat_interval_plan_stales_when_instance_changes() -> None:
     result = module.approve(ApproveCall(plan_id=prepared.plan.id))
 
     assert result.status == "stale"
-    assert template.recurrence_rule == {"tp": 0, "fu": 16, "fa": 1}
+    assert template.recurrence.rule == {"tp": 0, "fu": 16, "fa": 1}
 
 
 def test_repeat_interval_rejects_normal_tasks_and_generated_instances() -> None:
@@ -1781,7 +1782,7 @@ def test_repeat_interval_rejects_normal_tasks_and_generated_instances() -> None:
             )
         )
         assert result.status == "unsupported"
-        assert item.recurrence_rule is None
+        assert item.recurrence.rule is None
 
 
 def test_rich_note_changes_stop_safely() -> None:

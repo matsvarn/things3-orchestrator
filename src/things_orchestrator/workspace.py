@@ -657,11 +657,15 @@ class ThingsWorkspace:
         recurrence = RecurrenceFact(
             kind=self._recurrence_kind(item),
             template_id=(
-                f"task:{item.recurrence_template_uuid}"
-                if item.recurrence_template_uuid
+                f"task:{item.recurrence.template_uuid}"
+                if item.recurrence.template_uuid
                 else None
             ),
-            rule=item.recurrence_type if item.recurrence_type != "none" else None,
+            rule=(
+                item.recurrence.repeat_type
+                if item.recurrence.repeat_type != "none"
+                else None
+            ),
             unit=item.recurrence.unit,
             interval=item.recurrence.interval,
         )
@@ -756,7 +760,7 @@ class ThingsWorkspace:
             signals.append("waiting")
         if item.someday:
             signals.append("someday")
-        if item.recurrence_role != "none" and item.recurrence_type == "unknown":
+        if item.recurrence.role != "none" and item.recurrence.repeat_type == "unknown":
             signals.append("recurrence_unknown")
         if checklist_truncated:
             signals.append("checklist_truncated")
@@ -999,16 +1003,6 @@ class ThingsWorkspace:
             if item.notes_format == "rich" and "notes_markdown" in change.model_fields_set:
                 raise _Abort(self._unsupported("That note contains unsupported rich text."))
             if change.repeat_interval is not None:
-                if (
-                    item.recurrence_role != "template"
-                    or item.recurrence_type not in {"fixed", "after_completion"}
-                    or item.recurrence_links
-                ):
-                    raise _Abort(
-                        self._unsupported(
-                            "Change the exact repeating template, not a generated copy."
-                        )
-                    )
                 try:
                     recurrence = item.recurrence.change_interval(
                         change.repeat_interval, kind=item.kind
@@ -1032,7 +1026,7 @@ class ThingsWorkspace:
                 warnings.append("This changes future generated Tasks.")
                 risky = True
                 continue
-            if item.recurrence_role != "none":
+            if item.recurrence.role != "none":
                 raise _Abort(
                     self._unsupported(
                         "This recurring item is read-only because its mutation semantics are not proven safe."
@@ -2159,7 +2153,7 @@ class ThingsWorkspace:
         if write.action == "trash":
             return item.trashed
         if write.action == "repeat":
-            return item.recurrence_rule == write.recurrence_rule
+            return item.recurrence.rule == write.recurrence_rule
         if write.action == "complete":
             return item.status == "done"
         if write.action == "cancel":
@@ -2391,18 +2385,18 @@ class ThingsWorkspace:
             for item in sorted(
                 self._library.records.values(), key=lambda item: item.id
             )
-            if item.uuid == uuid or uuid in item.recurrence_links
+            if item.uuid == uuid or uuid in item.recurrence.links
         ]
         return "s_" + _digest(rows)
 
     @staticmethod
     def _recurrence_kind(item: Record) -> RecurrenceKind:
-        if item.recurrence_role == "template":
+        if item.recurrence.role == "template":
             return "template"
-        if item.recurrence_role == "instance":
-            if item.recurrence_type == "fixed":
+        if item.recurrence.role == "instance":
+            if item.recurrence.repeat_type == "fixed":
                 return "fixed_instance"
-            if item.recurrence_type == "after_completion":
+            if item.recurrence.repeat_type == "after_completion":
                 return "after_completion_instance"
             return "unknown"
         return "none"

@@ -99,13 +99,13 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["head"].heading is True
     assert library.records["head"].is_open() is False
     assert library.records["child"].heading_uuid == "head"
-    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].recurrence.role == "template"
     assert library.records["repeat"].is_open() is False
     fold_events(
         [{"uuid": "repeat", "e": "Task6", "t": 1, "p": {"tt": "Weekly still"}}],
         library=library,
     )
-    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].recurrence.role == "template"
     assert library.records["repeat"].is_open() is False
 
 
@@ -142,23 +142,23 @@ def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
         library=library,
     )
 
-    assert library.records["template"].recurrence_rule == rule
-    assert library.records["template"].recurrence_type == "after_completion"
-    assert library.records["instance"].recurrence_links == ["template"]
+    assert library.records["template"].recurrence.rule == rule
+    assert library.records["template"].recurrence.repeat_type == "after_completion"
+    assert library.records["instance"].recurrence.links == ("template",)
 
     # A sparse event must not erase fields that were not present in the patch.
     fold_events(
         [{"uuid": "template", "e": "Task6", "t": 1, "p": {"tt": "Renamed"}}],
         library=library,
     )
-    assert library.records["template"].recurrence_rule == rule
+    assert library.records["template"].recurrence.rule == rule
 
     fold_events(
         [{"uuid": "template", "e": "Task6", "t": 1, "p": {"rr": None}}],
         library=library,
     )
-    assert library.records["template"].recurrence_rule is None
-    assert library.records["template"].recurrence_role == "none"
+    assert library.records["template"].recurrence.rule is None
+    assert library.records["template"].recurrence.role == "none"
 
 
 def test_fold_sparse_placement_clears_incompatible_home_and_inbox() -> None:
@@ -249,7 +249,7 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
     assert envelope.kind == "Task6"
     assert envelope.payload["rr"] == changed
     assert set(envelope.payload) == {"rr", "md"}
-    assert library.records["template"].recurrence_rule == changed
+    assert library.records["template"].recurrence.rule == changed
 
 
 @pytest.mark.parametrize(
@@ -526,9 +526,9 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
     second = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     second.refresh()
 
-    assert second.records["template"].recurrence_rule == rule
-    assert second.records["instance"].recurrence_links == ["template"]
-    assert second.records["instance"].recurrence_template_uuid == "template"
+    assert second.records["template"].recurrence.rule == rule
+    assert second.records["instance"].recurrence.links == ("template",)
+    assert second.records["instance"].recurrence.template_uuid == "template"
     assert second.client.pages == 1  # type: ignore[attr-defined]
 
 
@@ -1738,9 +1738,9 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
     assert instance.completed_at is not None
     assert instance.notes_source == "structured"
     assert instance.notes_format == "rich"
-    assert instance.recurrence_role == "instance"
-    assert instance.recurrence_template_uuid == "template"
-    assert instance.recurrence_type == "after_completion"
+    assert instance.recurrence.role == "instance"
+    assert instance.recurrence.template_uuid == "template"
+    assert instance.recurrence.repeat_type == "after_completion"
     assert instance.sort_index == 80
 
 

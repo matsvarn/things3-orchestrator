@@ -477,39 +477,9 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "tg" in payload and isinstance(payload["tg"], list):
             item.tag_uuids = [str(tag) for tag in payload["tg"]]
         if "rr" in payload:
-            rule = payload.get("rr")
-            if isinstance(rule, dict):
-                item.recurrence_rule = deepcopy(rule)
-                item.recurrence_role = "template"
-                recurrence_code = rule.get("tp", 0)
-                item.recurrence_type = (
-                    "fixed"
-                    if recurrence_code == 0
-                    else "after_completion" if recurrence_code == 1 else "unknown"
-                )
-            elif item.recurrence_role == "template":
-                item.recurrence_rule = None
-                item.recurrence_role = "none"
-                item.recurrence_type = "none"
+            item.recurrence = item.recurrence.fold_rule(payload.get("rr"))
         if "rt" in payload:
-            links = payload.get("rt")
-            item.recurrence_links = (
-                [str(links)]
-                if isinstance(links, str)
-                else [str(link) for link in links]
-                if isinstance(links, list)
-                else []
-            )
-            if isinstance(links, str) or (isinstance(links, list) and links):
-                item.recurrence_template_uuid = (
-                    links if isinstance(links, str) else str(links[0])
-                )
-                item.recurrence_role = "instance"
-            else:
-                item.recurrence_template_uuid = None
-                if item.recurrence_role == "instance":
-                    item.recurrence_role = "none"
-                    item.recurrence_type = "none"
+            item.recurrence = item.recurrence.fold_links(payload.get("rt"))
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -520,9 +490,11 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             library,
         )
     for item in library.records.values():
-        if item.recurrence_role == "instance" and item.recurrence_template_uuid:
-            template = library.records.get(item.recurrence_template_uuid)
-            item.recurrence_type = template.recurrence_type if template else "unknown"
+        if item.recurrence.role == "instance" and item.recurrence.template_uuid:
+            template = library.records.get(item.recurrence.template_uuid)
+            item.recurrence = item.recurrence.resolve_instance_type(
+                template.recurrence.repeat_type if template else None
+            )
 
 
 def _fold_checklist(uuid: str, action: object, payload: dict[str, Any], library: MemoryLibrary) -> None:
@@ -1076,7 +1048,7 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "ix" not in payload or item.sort_index == int(payload["ix"] or 0),
         "ti" not in payload or item.today_index == int(payload["ti"] or 0),
         "tr" not in payload or item.trashed == bool(payload["tr"]),
-        "rr" not in payload or item.recurrence_rule == payload["rr"],
+        "rr" not in payload or item.recurrence.rule == payload["rr"],
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
@@ -1258,12 +1230,11 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "area_uuid": item.area_uuid,
         "heading_uuid": item.heading_uuid,
         "tag_uuids": item.tag_uuids,
-        "recurring_template": item.recurring_template,
-        "recurrence_role": item.recurrence_role,
-        "recurrence_type": item.recurrence_type,
-        "recurrence_template_uuid": item.recurrence_template_uuid,
-        "recurrence_rule": item.recurrence_rule,
-        "recurrence_links": item.recurrence_links,
+        "recurrence_role": item.recurrence.role,
+        "recurrence_type": item.recurrence.repeat_type,
+        "recurrence_template_uuid": item.recurrence.template_uuid,
+        "recurrence_rule": item.recurrence.rule,
+        "recurrence_links": list(item.recurrence.links),
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
