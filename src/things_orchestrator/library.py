@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal, Protocol
 from uuid import uuid4
 
-from .recurrence import JsonValue
+from .recurrence import JsonValue, validate_interval_template
 
 Kind = Literal["task", "project", "area"]
 PublicKind = Literal["task", "project", "area", "heading"]
@@ -112,7 +112,11 @@ class Record:
 
     @property
     def id(self) -> str:
-        return public_id("heading" if self.heading else self.kind, self.uuid)
+        return public_id(self.public_kind, self.uuid)
+
+    @property
+    def public_kind(self) -> PublicKind:
+        return "heading" if self.heading else self.kind
 
     def is_open(self) -> bool:
         return (
@@ -220,9 +224,7 @@ class MemoryLibrary:
                 if candidate.uuid.startswith(value) or candidate.id == value
             ]
             return matches[0] if len(matches) == 1 else None
-        if kind == "heading" and not item.heading:
-            return None
-        if kind is not None and kind != "heading" and (item.kind != kind or item.heading):
+        if kind is not None and item.public_kind != kind:
             return None
         return item
 
@@ -442,19 +444,15 @@ class MemoryLibrary:
         for write in writes:
             if write.action == "repeat":
                 current = self.records.get(write.uuid)
-                if (
-                    current is None
-                    or current.kind != "task"
-                    or current.recurrence_role != "template"
-                    or current.recurrence_type
-                    not in {"fixed", "after_completion"}
-                    or current.recurrence_rule is None
-                    or bool(current.recurrence_links)
-                    or write.recurrence_rule is None
-                ):
-                    raise ValueError(
-                        "Repeat changes need an exact repeating Task template"
-                    )
+                if current is None or write.recurrence_rule is None:
+                    raise ValueError("Repeat changes need an exact repeating Task template")
+                validate_interval_template(
+                    kind=current.kind,
+                    role=current.recurrence_role,
+                    repeat_type=current.recurrence_type,
+                    rule=current.recurrence_rule,
+                    links=current.recurrence_links,
+                )
             if write.tag_uuids is not None:
                 write = replace(
                     write,

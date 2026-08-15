@@ -47,3 +47,22 @@ def change_interval(
     changed = deepcopy(rule)
     changed["fa"] = interval
     return changed
+
+
+def validate_interval_template(
+    *,
+    kind: str,
+    role: str,
+    repeat_type: str,
+    rule: dict[str, JsonValue] | None,
+    links: list[str],
+) -> None:
+    """Reject an inconsistent or unsupported interval-change target."""
+    if (
+        kind != "task"
+        or role != "template"
+        or repeat_type not in {"fixed", "after_completion"}
+        or rule is None
+        or links
+    ):
+        raise ValueError("Repeat changes need an exact repeating Task template")

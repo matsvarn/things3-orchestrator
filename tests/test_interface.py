@@ -210,6 +210,56 @@ def test_heading_create_rename_assignment_and_clear_are_explicit() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "create, message",
+    [
+        (
+            [
+                {
+                    "key": "$task",
+                    "kind": "task",
+                    "title": "Ship",
+                    "into": "project:p",
+                    "heading_id": "$section",
+                },
+                {
+                    "key": "$section",
+                    "kind": "heading",
+                    "title": "Next",
+                    "into": "project:p",
+                },
+            ],
+            "earlier heading create entry",
+        ),
+        (
+            [
+                {
+                    "key": "$other",
+                    "kind": "task",
+                    "title": "Other",
+                    "into": "project:p",
+                },
+                {
+                    "kind": "task",
+                    "title": "Ship",
+                    "into": "project:p",
+                    "heading_id": "$other",
+                },
+            ],
+            "earlier heading create entry",
+        ),
+    ],
+    ids=["forward-heading", "non-heading"],
+)
+def test_task_create_rejects_invalid_local_heading_references(
+    create: list[dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        CommitCall.model_validate(
+            {"intent_id": "heading-local-invalid-001", "create": create}
+        )
+
+
 def test_repeat_interval_change_is_explicit_and_isolated() -> None:
     call = CommitCall.model_validate(
         {
@@ -535,12 +585,12 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    assert discovery_chars < 10_200
+    assert discovery_chars < 10_300
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 10_800
+    assert wire_chars < 10_900
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC

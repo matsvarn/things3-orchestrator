@@ -1398,6 +1398,134 @@ def test_heading_create_rename_assignment_and_clear() -> None:
     assert any(item.kind == "heading" and item.title == "Later" for item in project_items)
 
 
+def test_task_create_under_existing_exact_heading() -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    heading = Record(
+        uuid="heading",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    module = workspace([project, heading])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "task-existing-heading-001",
+                "create": [
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": project.id,
+                        "heading_id": heading.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Ship"
+    )
+    assert task.parent_uuid == project.uuid
+    assert task.heading_uuid == heading.uuid
+
+
+def test_project_heading_and_task_create_together_with_local_heading() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "task-local-heading-001",
+                "create": [
+                    {"key": "$project", "kind": "project", "title": "Launch"},
+                    {
+                        "key": "$section",
+                        "kind": "heading",
+                        "title": "Next",
+                        "into": "$project",
+                    },
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": "$project",
+                        "heading_id": "$section",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    records = {item.title: item for item in module._library.records.values()}  # noqa: SLF001
+    assert records["Next"].parent_uuid == records["Launch"].uuid
+    assert records["Ship"].parent_uuid == records["Launch"].uuid
+    assert records["Ship"].heading_uuid == records["Next"].uuid
+
+
+@pytest.mark.parametrize(
+    "heading_uuid, expected_status, instruction",
+    [
+        (
+            "other-heading",
+            "rejected",
+            "The heading must belong to the Task's Project.",
+        ),
+        (
+            "not-heading",
+            "needs_input",
+            "I could not find exact item heading:not-heading.",
+        ),
+    ],
+)
+def test_task_create_rejects_heading_outside_project_or_non_heading(
+    heading_uuid: str, expected_status: str, instruction: str
+) -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    other_project = Record(uuid="other-project", kind="project", title="Other")
+    other_heading = Record(
+        uuid="other-heading",
+        kind="task",
+        title="Other section",
+        parent_uuid=other_project.uuid,
+        heading=True,
+    )
+    not_heading = Record(
+        uuid="not-heading",
+        kind="task",
+        title="Ordinary Task",
+        parent_uuid=project.uuid,
+    )
+    module = workspace([project, other_project, other_heading, not_heading])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"task-invalid-heading-{heading_uuid}",
+                "create": [
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": project.id,
+                        "heading_id": f"heading:{heading_uuid}",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == expected_status
+    assert result.instruction == instruction
+    assert all(
+        item.title != "Ship" for item in module._library.records.values()  # noqa: SLF001
+    )
+
+
 def test_area_plan_stales_when_a_new_child_appears() -> None:
     module = workspace(
         [

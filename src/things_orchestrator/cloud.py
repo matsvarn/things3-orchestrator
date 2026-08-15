@@ -29,6 +29,7 @@ from .library import (
     offset_from_remind,
     remind_from_offset,
 )
+from .recurrence import validate_interval_template
 
 ENDPOINT = "https://cloud.culturedcode.com"
 USER_AGENT = "ThingsMac/32209501"
@@ -651,17 +652,21 @@ class CloudLibrary(MemoryLibrary):
         }
         for write in writes:
             current_record = self.records.get(write.uuid)
-            if write.action == "repeat" and (
-                current_record is None
-                or current_record.kind != "task"
-                or current_record.recurrence_role != "template"
-                or current_record.recurrence_type
-                not in {"fixed", "after_completion"}
-                or current_record.recurrence_rule is None
-                or bool(current_record.recurrence_links)
-                or write.recurrence_rule is None
-            ):
-                raise CloudError("Repeat changes need an exact repeating Task template")
+            if write.action == "repeat":
+                if current_record is None or write.recurrence_rule is None:
+                    raise CloudError(
+                        "Repeat changes need an exact repeating Task template"
+                    )
+                try:
+                    validate_interval_template(
+                        kind=current_record.kind,
+                        role=current_record.recurrence_role,
+                        repeat_type=current_record.recurrence_type,
+                        rule=current_record.recurrence_rule,
+                        links=current_record.recurrence_links,
+                    )
+                except ValueError as error:
+                    raise CloudError(str(error)) from error
             planned_kind = created_kinds.get(write.uuid)
             if planned_kind is not None and write.action != "create" and write.kind != planned_kind:
                 write = replace(write, kind=planned_kind)

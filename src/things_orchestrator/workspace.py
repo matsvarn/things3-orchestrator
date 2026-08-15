@@ -669,7 +669,7 @@ class ThingsWorkspace:
         return ItemFact(
             id=item.id,
             revision=self._revision(item),
-            kind="heading" if item.heading else item.kind,
+            kind=item.public_kind,
             title=_bounded_title(item.title),
             status=_public_status(item.status),
             into_id=(
@@ -879,6 +879,39 @@ class ThingsWorkspace:
                 start is not None or someday or tonight
             ):
                 home = (None, None, False, False)
+            created_heading_uuid: str | None = None
+            if entry.heading_id is not None:
+                if entry.kind != "task" or home[1] != "project" or home[0] is None:
+                    raise _Abort(
+                        self._rejected("Only a Task in a Project can use a heading.")
+                    )
+                if entry.heading_id.startswith("$"):
+                    created_heading_uuid = local[entry.heading_id][0]
+                    heading_write = next(
+                        (
+                            write
+                            for write in writes
+                            if write.action == "create_heading"
+                            and write.uuid == created_heading_uuid
+                        ),
+                        None,
+                    )
+                    if heading_write is None or heading_write.into_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                else:
+                    heading = self._required_exact(entry.heading_id)
+                    if not heading.heading or heading.parent_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                    created_heading_uuid = heading.uuid
+                    preconditions[heading.id] = self._revision(heading)
             tags = self._tag_ids(entry.tag_ids, local)
             if entry.waiting:
                 waiting, tag_write = self._waiting_tag(writes)
@@ -920,6 +953,7 @@ class ThingsWorkspace:
                     tonight=tonight,
                     someday=someday,
                     tag_uuids=tags,
+                    heading_uuid=created_heading_uuid,
                     sort_index=sort_index,
                     today_index=today_index,
                     owner_today=self._clock().date(),
@@ -2237,9 +2271,7 @@ class ThingsWorkspace:
         item = self._library.records.get(uuid)
         if item is None:
             return None
-        if kind == "heading":
-            return item if item.heading else None
-        return item if not item.heading and item.kind == kind else None
+        return item if item.public_kind == kind else None
 
     def _required_exact(self, value: str) -> Record:
         item = self._exact_item(value)

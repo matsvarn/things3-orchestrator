@@ -58,6 +58,9 @@ _CHECK_REFERENCE = (
 )
 _AREA_ID = r"^area:[^\s:][^\s]*$"
 _HEADING_ID = r"^heading:[^\s:][^\s]*$"
+_HEADING_REFERENCE = (
+    r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|heading:[^\s:][^\s]*)$"
+)
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 
@@ -173,6 +176,9 @@ class CreateEntry(StrictModel):
     today_after: str | None = Field(
         default=None, pattern=_AFTER_REFERENCE, max_length=512
     )
+    heading_id: str | None = Field(
+        default=None, pattern=_HEADING_REFERENCE, max_length=512
+    )
 
     @field_validator("title")
     @classmethod
@@ -227,6 +233,8 @@ class CreateEntry(StrictModel):
             raise ValueError("only a task can have a checklist")
         if self.next_actions and self.kind != "project":
             raise ValueError("only a Project can have next_actions")
+        if self.heading_id is not None and self.kind != "task":
+            raise ValueError("only a Task can use a heading")
         if self.into in {"inbox", "anytime"} and (
             self.start is not None or self.remind_at is not None
         ):
@@ -477,7 +485,9 @@ class CommitCall(StrictModel):
         known = set(keys)
         refs: list[str | None] = []
         for created in self.create:
-            refs.extend((created.into, created.after, created.today_after))
+            refs.extend(
+                (created.into, created.after, created.today_after, created.heading_id)
+            )
         for changed in self.change:
             refs.extend(
                 (
@@ -552,6 +562,16 @@ class CommitCall(StrictModel):
                     raise ValueError("a Project local home must be an Area")
                 if entry.kind == "heading" and target.kind != "project":
                     raise ValueError("a heading local home must be a Project")
+            if entry.heading_id is not None and entry.heading_id.startswith("$"):
+                target = create_by_key.get(entry.heading_id)
+                if (
+                    target is None
+                    or target.kind != "heading"
+                    or entry.heading_id not in seen_create
+                ):
+                    raise ValueError(
+                        "a local heading must be an earlier heading create entry"
+                    )
             if entry.after is not None and entry.after.startswith("$"):
                 anchor_entry = create_by_key[entry.after]
                 if (
@@ -777,6 +797,11 @@ _CREATE: dict[str, Any] = {
         },
         "after": _AFTER_SCHEMA,
         "today_after": _AFTER_SCHEMA,
+        "heading_id": {
+            "type": "string",
+            "pattern": _HEADING_REFERENCE,
+            "maxLength": 512,
+        },
     },
 }
 

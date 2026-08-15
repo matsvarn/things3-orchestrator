@@ -13,8 +13,6 @@ docs/comparison.md
 docs/maintainer.md
 docs/owner.md
 docs/recovery.md
-docs/research/cloud-capability-audit.md
-docs/research/repeat-rule-writes.md
 docs/research/things3-cloud.md
 docs/trust.md
 plugin/.codex-plugin/plugin.json
