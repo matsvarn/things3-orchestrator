@@ -1,0 +1,22 @@
+# Keep serve-http running after SSH logout.
+# Fill User and WorkingDirectory, then:
+#   sudo cp deploy/serve-http.service /etc/systemd/system/
+#   sudo systemctl enable --now things-orchestrator-http
+#
+# Caddy still terminates TLS. Do not publish port 8787.
+# Do not put Cloud credentials or the MCP token in this unit.
+# login already wrote credentials.json (mode 0600).
+
+[Unit]
+Description=Things Orchestrator MCP HTTP
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR-USER
+WorkingDirectory=/path/to/things-orchestrator
+ExecStart=/usr/bin/uv run things-orchestrator serve-http --port 8787
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

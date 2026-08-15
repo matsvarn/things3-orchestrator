@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf 'Setup stopped: %s\n' "$1" >&2
+  exit 2
+}
+
+TO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$TO_ROOT"
+
+# STAGES — Keep setup short: verify, log in, then show the generated files.
+[[ -f pyproject.toml ]] || fail "run scripts/setup from the project clone."
+
+printf '\nThings Orchestrator setup\n\n'
+
+if ! command -v uv >/dev/null 2>&1; then
+  printf '%s\n' 'Install uv, then run scripts/setup again:' >&2
+  printf '%s\n' 'https://docs.astral.sh/uv/getting-started/installation/' >&2
+  exit 2
+fi
+
+if ! TO_PYTHON="$(uv python find 2>/dev/null)"; then
+  fail "uv could not find the project Python. Run: uv python install 3.12"
+fi
+
+TO_VERSION="$($TO_PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+case "$TO_VERSION" in
+  3.12|3.13|3.14) ;;
+  *) fail "Python $TO_VERSION is not supported. Use Python 3.12, 3.13, or 3.14." ;;
+esac
+
+printf 'Found uv and Python %s.\n' "$TO_VERSION"
+if [[ ! -t 0 || ! -t 1 ]]; then
+  fail "login needs an interactive terminal. Run scripts/setup in a terminal."
+fi
+
+printf 'Preparing the locked project environment...\n'
+uv sync --locked
+
+printf '\nThings Cloud login will ask for your email and password.\n'
+printf 'The password input is hidden. Never paste the password into chat.\n'
+printf 'Things Cloud must be on in Things 3 before login.\n\n'
+
+uv run --locked things-orchestrator login
+
+TO_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/things-orchestrator"
+
+printf '\nLogin succeeded. The client files are here:\n'
+printf '  %s\n' "$TO_CONFIG_ROOT/mcp.stdio.json"
+printf '  %s\n' "$TO_CONFIG_ROOT/mcp.http.json"
+printf '  %s\n' "$TO_CONFIG_ROOT/mcp.hermes.yaml"
+printf '\nFor Hermes, merge the things key into ~/.hermes/config.yaml.\n'
+printf 'Do not replace the whole file.\n'
+printf 'See docs/clients.md for all client steps.\n'
+printf '\nSmoke test prompt:\n'
+printf '  What should I focus on in Things today?\n\n'

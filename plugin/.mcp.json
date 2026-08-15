@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "things": {
+      "command": "./bin/things-orchestrator",
+      "args": ["serve"],
+      "cwd": "./"
+    }
+  }
+}

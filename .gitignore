@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
+.DS_Store
+.env
+.env.*
+
+# Private design and research material. Keep this outside the public tree.
+/.impeccable/
+/DESIGN.md
+/PRODUCT.md
+/paper/
+/docs/ideation/
+/docs/research/launch-competitor-comparison.md
+/docs/research/skill-architecture-decision.md
+/docs/research/task-quality-evidence.md
+/docs/research/things-best-practices.md
+
+# Cloud password, MCP bearer snippets, checkout pointer, sync cache.
+# These names are written under ~/.config and ~/.local/state; never commit them.
+credentials.json
+mcp.stdio.json
+mcp.http.json
+mcp.hermes.yaml
+mcp.hermes.http.yaml
+state.json
+journal.sqlite3
+checkout

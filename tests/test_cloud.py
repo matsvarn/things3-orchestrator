@@ -1,0 +1,1347 @@
+from __future__ import annotations
+
+import os
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from things_orchestrator.cloud import (
+    CloudClient,
+    CloudError,
+    CloudLibrary,
+    Envelope,
+    HistoryPage,
+    fold_events,
+)
+from things_orchestrator.library import (
+    ChecklistLine,
+    MemoryLibrary,
+    Record,
+    Write,
+    day_ts,
+    from_ts,
+    new_uuid,
+)
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
+def test_wire_calendar_dates_do_not_depend_on_host_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = os.environ.get("TZ")
+    target = date(2026, 8, 17)
+    expected = int(datetime(2026, 8, 17, tzinfo=timezone.utc).timestamp())
+    try:
+        monkeypatch.setenv("TZ", "Pacific/Kiritimati")
+        time.tzset()
+        assert day_ts(target) == expected
+        assert day_ts(target + timedelta(days=1)) - day_ts(target) == 86_400
+
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        time.tzset()
+        assert from_ts(expected) == target
+    finally:
+        if previous is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous)
+        time.tzset()
+
+
+def test_commit_does_not_skip_unfetched_head() -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 4
+    client.loaded_index = 4
+    client._request = lambda *args, **kwargs: {"server-head-index": 5}  # noqa: SLF001
+    client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert client.server_index == 5
+    assert client.loaded_index == 4
+
+
+def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "head",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Next", "tp": 2, "ss": 0, "st": 1, "tr": False},
+            },
+            {
+                "uuid": "child",
+                "e": "Task6",
+                "t": 0,
+                "p": {
+                    "tt": "Call bank",
+                    "tp": 0,
+                    "ss": 0,
+                    "st": 1,
+                    "tr": False,
+                    "agr": ["head"],
+                    "pr": ["proj"],
+                },
+            },
+            {
+                "uuid": "repeat",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Weekly", "tp": 0, "ss": 0, "st": 1, "tr": False, "rr": {"tp": 0}},
+            },
+        ],
+        library=library,
+    )
+    assert library.records["head"].heading is True
+    assert library.records["head"].is_open() is False
+    assert library.records["child"].heading_uuid == "head"
+    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].is_open() is False
+    fold_events(
+        [{"uuid": "repeat", "e": "Task6", "t": 1, "p": {"tt": "Weekly still"}}],
+        library=library,
+    )
+    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].is_open() is False
+
+
+def test_fold_appends_checklist_lines() -> None:
+    library = MemoryLibrary([Record(uuid="task", kind="task", title="Pack")])
+    fold_events(
+        [
+            {
+                "uuid": "box",
+                "e": "ChecklistItem3",
+                "t": 0,
+                "p": {"tt": "passport", "ss": 0, "ts": ["task"]},
+            }
+        ],
+        library=library,
+    )
+    assert library.records["task"].checklists[0].title == "passport"
+    assert library.records["task"].checklists[0].done is False
+    fold_events(
+        [{"uuid": "box", "e": "ChecklistItem3", "t": 1, "p": {"ss": 3}}],
+        library=library,
+    )
+    assert library.records["task"].checklists[0].title == "passport"
+    assert library.records["task"].checklists[0].done is True
+
+
+def test_checklist_event_before_parent_in_the_same_page() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "box",
+                "e": "ChecklistItem3",
+                "t": 0,
+                "p": {"tt": "passport", "ss": 0, "ts": ["task"]},
+            },
+            {
+                "uuid": "task",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Pack", "tp": 0, "ss": 0, "st": 0, "tr": False},
+            },
+        ],
+        library=library,
+    )
+    assert library.records["task"].checklists[0].title == "passport"
+
+
+def test_checklist_reparent_removes_the_old_parent_copy() -> None:
+    library = MemoryLibrary(
+        [
+            Record(
+                uuid="first",
+                kind="task",
+                title="First",
+                checklists=[ChecklistLine("row", "Passport")],
+            ),
+            Record(uuid="second", kind="task", title="Second"),
+        ]
+    )
+
+    fold_events(
+        [
+            {
+                "uuid": "row",
+                "e": "ChecklistItem3",
+                "t": 1,
+                "p": {"ts": ["second"], "ix": 20},
+            }
+        ],
+        library=library,
+    )
+
+    assert library.records["first"].checklists == []
+    assert library.records["second"].checklists == [
+        ChecklistLine("row", "Passport", sort_index=20)
+    ]
+
+
+def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.email = "a@b.c"
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.pages = 0
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.pages += 1
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "t1",
+                            "e": "Task6",
+                            "t": 0,
+                            "p": {"tt": "Old", "tp": 0, "ss": 0, "st": 0, "tr": False},
+                        }
+                    ],
+                    current=2,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+
+    first = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
+    first.refresh()
+    assert "t1" in first.records
+    first_pages = first.client.pages  # type: ignore[attr-defined]
+
+    second = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
+    second.refresh()
+    assert "t1" in second.records
+    assert second.client.loaded_index >= 1
+    assert second.client.pages == 1  # type: ignore[attr-defined]
+    assert first_pages >= 1
+
+
+def test_malformed_cache_is_discarded_before_fresh_replay(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+    cache.write_text(
+        '{"version":2,"history_id":"hist","loaded_index":9,'
+        '"server_index":9,"records":[{"title":"missing uuid"}],'
+        '"tags":{},"tag_parents":{}}'
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.starts: list[int] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.starts.append(start_index)
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "fresh",
+                            "e": "Task6",
+                            "t": 0,
+                            "p": {
+                                "tt": "Fresh",
+                                "tp": 0,
+                                "ss": 0,
+                                "st": 0,
+                                "tr": False,
+                            },
+                        }
+                    ],
+                    current=1,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
+
+    client = FakeClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+
+    library.refresh()
+
+    assert client.starts == [0]
+    assert list(library.records) == ["fresh"]
+
+
+def test_create_ix_follows_siblings() -> None:
+    library = MemoryLibrary(
+        [Record(uuid="a", kind="task", title="First", inbox=True, sort_index=0)]
+    )
+    index = library.next_index(Write(action="create", uuid="b", title="Second"))
+    assert index == 1024
+
+
+def test_new_area_ix_follows_areas_not_inbox() -> None:
+    library = MemoryLibrary(
+        [
+            Record(uuid="work", kind="area", title="Work", sort_index=0),
+            Record(uuid="note", kind="task", title="Inbox note", inbox=True, sort_index=50),
+        ]
+    )
+    index = library.next_index(Write(action="create", uuid="home", kind="area", title="Home"))
+    assert index == 1024
+
+
+def test_new_ids_are_compact_base58() -> None:
+    uuid = new_uuid()
+    assert 15 <= len(uuid) <= 22
+    assert all(char not in uuid for char in "0OIl")
+
+
+def test_memory_apply_rolls_back_a_failed_batch() -> None:
+    library = MemoryLibrary()
+
+    with pytest.raises(ValueError, match="needs a task parent"):
+        library.apply(
+            [
+                Write(action="create", uuid="created", title="Should roll back"),
+                Write(
+                    action="checklist",
+                    uuid="row",
+                    title="Invalid",
+                    checklist_parent_uuid="missing",
+                ),
+            ]
+        )
+
+    assert library.records == {}
+
+
+class _CaptureClient:
+    def __init__(self) -> None:
+        self.history_id = "h"
+        self.server_index = 1
+        self.loaded_index = 1
+        self.committed: list[Envelope] = []
+        self.pending: list[dict[str, object]] = []
+
+    def verify(self) -> str:
+        return self.history_id
+
+    def items(self, start_index: int) -> HistoryPage:
+        if self.pending:
+            events = self.pending
+            self.pending = []
+            self.server_index += 1
+            return HistoryPage(
+                events=events,
+                current=self.server_index,
+                groups=1,
+                end_size=self.server_index,
+                latest_size=self.server_index,
+            )
+        return HistoryPage(
+            events=[],
+            current=self.server_index,
+            groups=0,
+            end_size=self.server_index,
+            latest_size=self.server_index,
+        )
+
+    def commit(self, envelopes: list[Envelope]) -> None:
+        self.committed = envelopes
+        self.pending = [
+            {"uuid": item.uuid, "e": item.kind, "t": item.action, "p": item.payload}
+            for item in envelopes
+        ]
+
+
+def test_cloud_serializes_all_date_only_fields_as_utc_days(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    start = date(2026, 8, 17)
+    deadline = date(2026, 8, 24)
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="scheduled",
+                title="Scheduled",
+                start=start,
+                deadline=deadline,
+                remind="10:00",
+                owner_today=date(2026, 8, 15),
+            )
+        ]
+    )
+
+    payload = client.committed[0].payload
+    start_stamp = int(datetime(2026, 8, 17, tzinfo=timezone.utc).timestamp())
+    deadline_stamp = int(datetime(2026, 8, 24, tzinfo=timezone.utc).timestamp())
+    assert payload["sr"] == start_stamp
+    assert payload["tir"] == start_stamp
+    assert payload["rmd"] == start_stamp
+    assert payload["dd"] == deadline_stamp
+    assert payload["ato"] == 36_000
+
+
+def test_today_clears_evening_and_inbox_clears_start(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["abc"] = Record(
+        uuid="abc",
+        kind="task",
+        title="Call",
+        start=date(2026, 8, 13),
+        tonight=True,
+        entity="Task6",
+    )
+    library.apply([Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))])
+    payload = client.committed[0].payload
+    assert payload["sb"] == 0
+    library.apply([Write(action="update", uuid="abc", kind="task", inbox=True)])
+    inbox = client.committed[0].payload
+    assert inbox["st"] == 0
+    assert inbox["sr"] is None
+    assert inbox["tir"] is None
+    assert inbox["agr"] == []
+
+
+def test_scheduled_creates_keep_their_project_or_area(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
+            "area": Record(uuid="area", kind="area", title="Work", entity="Area3"),
+        }
+    )
+    today = date(2026, 8, 15)
+    future = date(2026, 8, 20)
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="later",
+                title="Later",
+                into_uuid="project",
+                into_kind="project",
+                someday=True,
+                owner_today=today,
+            ),
+            Write(
+                action="create",
+                uuid="scheduled",
+                title="Scheduled",
+                into_uuid="area",
+                into_kind="area",
+                start=future,
+                owner_today=today,
+            ),
+        ]
+    )
+
+    envelopes = {item.uuid: item.payload for item in client.committed}
+    assert envelopes["later"]["pr"] == ["project"]
+    assert envelopes["later"]["st"] == 2
+    assert envelopes["scheduled"]["ar"] == ["area"]
+    assert envelopes["scheduled"]["st"] == 2
+    assert library.records["later"].parent_uuid == "project"
+    assert library.records["later"].someday is True
+    assert library.records["scheduled"].area_uuid == "area"
+    assert library.records["scheduled"].start == future
+
+
+def test_combined_schedule_and_move_preserves_both_effects(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "area": Record(uuid="area", kind="area", title="Work", entity="Area3"),
+            "later": Record(uuid="later", kind="task", title="Later", entity="Task6"),
+            "scheduled": Record(
+                uuid="scheduled", kind="task", title="Scheduled", entity="Task6"
+            ),
+        }
+    )
+    today = date(2026, 8, 15)
+    future = date(2026, 8, 20)
+    writes = [
+        Write(
+            action="update",
+            uuid="later",
+            into_uuid="area",
+            into_kind="area",
+            someday=True,
+            owner_today=today,
+        ),
+        Write(
+            action="update",
+            uuid="scheduled",
+            into_uuid="area",
+            into_kind="area",
+            start=future,
+            owner_today=today,
+        ),
+    ]
+
+    library.apply(writes)
+
+    envelopes = {item.uuid: item.payload for item in client.committed}
+    assert envelopes["later"]["ar"] == ["area"]
+    assert envelopes["later"]["st"] == 2
+    assert envelopes["scheduled"]["ar"] == ["area"]
+    assert envelopes["scheduled"]["st"] == 2
+    assert library.records["later"].area_uuid == "area"
+    assert library.records["later"].someday is True
+    assert library.records["scheduled"].area_uuid == "area"
+    assert library.records["scheduled"].start == future
+
+    memory = MemoryLibrary(
+        [
+            Record(uuid="area", kind="area", title="Work"),
+            Record(uuid="later", kind="task", title="Later"),
+            Record(uuid="scheduled", kind="task", title="Scheduled"),
+        ]
+    )
+    memory.apply(writes)
+    assert memory.records["later"].area_uuid == "area"
+    assert memory.records["later"].someday is True
+    assert memory.records["scheduled"].area_uuid == "area"
+    assert memory.records["scheduled"].start == future
+
+
+def test_move_without_schedule_change_keeps_existing_schedule(tmp_path: Path) -> None:
+    future = date(2026, 8, 20)
+    records = [
+        Record(uuid="area", kind="area", title="Work", entity="Area3"),
+        Record(uuid="later", kind="task", title="Later", someday=True, entity="Task6"),
+        Record(
+            uuid="scheduled",
+            kind="task",
+            title="Scheduled",
+            start=future,
+            entity="Task6",
+        ),
+    ]
+    writes = [
+        Write(action="update", uuid="later", into_uuid="area", into_kind="area"),
+        Write(action="update", uuid="scheduled", into_uuid="area", into_kind="area"),
+    ]
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update({item.uuid: item for item in records})
+
+    library.apply(writes)
+
+    envelopes = {item.uuid: item.payload for item in client.committed}
+    assert "st" not in envelopes["later"]
+    assert "st" not in envelopes["scheduled"]
+    assert library.records["later"].someday is True
+    assert library.records["scheduled"].start == future
+
+    memory = MemoryLibrary(
+        [
+            Record(uuid="area", kind="area", title="Work"),
+            Record(uuid="later", kind="task", title="Later", someday=True),
+            Record(uuid="scheduled", kind="task", title="Scheduled", start=future),
+        ]
+    )
+    memory.apply(writes)
+    assert memory.records["later"].someday is True
+    assert memory.records["scheduled"].start == future
+
+
+def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["a"] = Record(uuid="a", kind="task", title="First", inbox=True, sort_index=0, entity="Task6")
+    library.apply(
+        [
+            Write(action="create", uuid="b", title="Second"),
+            Write(action="create", uuid="c", title="Third"),
+        ]
+    )
+    indexes = [item.payload["ix"] for item in client.committed]
+    assert indexes == [1024, 2048]
+
+
+def test_area_rename_keeps_stored_entity(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["work"] = Record(uuid="work", kind="area", title="Work", entity="Area2")
+    library.apply([Write(action="rename_area", uuid="work", kind="area", title="Office")])
+    assert client.committed[0].kind == "Area2"
+
+
+def test_timeout_scans_later_pages_instead_of_reposting() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    client.loaded_index = 1
+    posts = 0
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            if posts == 1:
+                raise CloudError("Things Cloud timed out")
+            return {"server-head-index": 3}
+        start = int((query or {}).get("start-index") or 0)
+        if start == 2:
+            return {
+                "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}}],
+                "current-item-index": 3,
+                "end-total-content-size": 2,
+                "latest-total-content-size": 2,
+            }
+        return {
+            "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Old"}}}],
+            "current-item-index": 2,
+            "end-total-content-size": 1,
+            "latest-total-content-size": 2,
+        }
+
+    client._request = request  # noqa: SLF001
+    client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+
+
+def test_timeout_requires_expected_null_keys_to_be_present() -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    posts = 0
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            raise CloudError("Things Cloud timed out")
+        return {
+            "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}}],
+            "current-item-index": 3,
+            "end-total-content-size": 1,
+            "latest-total-content-size": 1,
+        }
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi", "sp": None})])
+    assert posts == 1
+
+
+def test_timeout_reconciliation_error_remains_outcome_unknown() -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    posts = 0
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            raise CloudError("Things Cloud timed out")
+        raise CloudError("Things Cloud is unreachable")
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+
+
+def test_post_commit_pull_failure_is_an_unknown_outcome(tmp_path: Path) -> None:
+    class ReadbackFailureClient:
+        def __init__(self) -> None:
+            self.history_id = "h"
+            self.server_index = 0
+            self.loaded_index = 0
+            self.pulls = 0
+            self.posts = 0
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, _start_index: int) -> HistoryPage:
+            self.pulls += 1
+            if self.pulls == 1:
+                return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+            raise CloudError("Things Cloud is unreachable")
+
+        def commit(self, _envelopes: list[Envelope]) -> None:
+            self.posts += 1
+
+    client = ReadbackFailureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        library.apply([Write(action="create", uuid="task", title="Call")])
+
+    assert client.posts == 1
+
+
+def test_timeout_partial_overlap_is_unknown_and_does_not_repost() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    client.loaded_index = 1
+    posts = 0
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            if posts == 1:
+                raise CloudError("Things Cloud timed out")
+            return {"server-head-index": 4}
+        return {
+            "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}}],
+            "current-item-index": 3,
+            "end-total-content-size": 2,
+            "latest-total-content-size": 2,
+        }
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit(
+            [
+                Envelope("x", 0, "Task6", {"tt": "Hi"}),
+                Envelope("y", 0, "Task6", {"tt": "Bye"}),
+            ]
+        )
+    assert posts == 1
+
+
+def test_timeout_ignores_older_event_for_the_same_uuid() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    client.loaded_index = 1
+    posts = 0
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            if posts == 1:
+                raise CloudError("Things Cloud timed out")
+            return {"server-head-index": 4}
+        start = int((query or {}).get("start-index") or 0)
+        if start < 2:
+            return {
+                "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}}],
+                "current-item-index": 2,
+                "end-total-content-size": 1,
+                "latest-total-content-size": 2,
+            }
+        return {
+            "items": [],
+            "current-item-index": 2,
+            "end-total-content-size": 2,
+            "latest-total-content-size": 2,
+        }
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+
+
+def test_timeout_never_reposts_when_first_pull_has_no_proof() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    client.loaded_index = 1
+    posts = 0
+    gets = 0
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        nonlocal posts, gets
+        if method == "POST":
+            posts += 1
+            raise CloudError("Things Cloud timed out")
+        gets += 1
+        if gets == 1:
+            return {
+                "items": [],
+                "current-item-index": 2,
+                "end-total-content-size": 1,
+                "latest-total-content-size": 1,
+            }
+        return {
+            "items": [{"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}}],
+            "current-item-index": 3,
+            "end-total-content-size": 2,
+            "latest-total-content-size": 2,
+        }
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+    assert gets == 1
+
+
+def test_empty_history_page_does_not_rewind_head(tmp_path: Path) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_id = "h"
+            self.server_index = 9
+            self.loaded_index = 9
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+
+    library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["t"] = Record(uuid="t", kind="task", title="Call")
+    library.refresh()
+    assert library.client.server_index == 9
+
+
+def test_stale_history_key_re_verifies() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "old"
+    client.loaded_index = 4
+    paths: list[str] = []
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        paths.append(path)
+        if "account" in path:
+            return {"history-key": "new"}
+        if "/history/old/" in path:
+            raise CloudError("Things Cloud HTTP 404")
+        return {
+            "items": [],
+            "current-item-index": 0,
+            "end-total-content-size": 0,
+            "latest-total-content-size": 0,
+        }
+
+    client._request = request  # noqa: SLF001
+    client.items(4)
+    assert client.history_id == "new"
+    assert client.loaded_index == 0
+    assert any("/history/new/" in path for path in paths)
+
+
+def test_history_404_retries_the_requested_index_when_key_is_unchanged() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.loaded_index = 1
+    starts: list[int] = []
+
+    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+        if "account" in path:
+            return {"history-key": "h"}
+        start = int((query or {}).get("start-index") or 0)
+        starts.append(start)
+        if start == 4:
+            raise CloudError("Things Cloud HTTP 404")
+        return {
+            "items": [],
+            "current-item-index": 1,
+            "end-total-content-size": 1,
+            "latest-total-content-size": 1,
+        }
+
+    client._request = request  # noqa: SLF001
+    try:
+        client.items(4)
+    except CloudError as error:
+        assert "404" in str(error)
+    else:
+        raise AssertionError("expected CloudError")
+    assert starts == [4, 4]
+
+
+def test_invalid_json_is_cloud_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from things_orchestrator.cloud import CloudError
+
+    class _Resp:
+        def read(self) -> bytes:
+            return b"not-json"
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    client = CloudClient("a@b.c", "pw")
+    monkeypatch.setattr("things_orchestrator.cloud.urlopen", lambda *args, **kwargs: _Resp())
+    try:
+        client._request("GET", "/version/1/account/a")  # noqa: SLF001
+    except CloudError as error:
+        assert "unreadable" in str(error)
+    else:
+        raise AssertionError("expected CloudError")
+
+
+def test_apply_pulls_after_commit(tmp_path: Path) -> None:
+    import time
+
+    client = _CaptureClient()
+    gets = 0
+    original = client.items
+
+    def items(start_index: int) -> HistoryPage:
+        nonlocal gets
+        gets += 1
+        return original(start_index)
+
+    client.items = items  # type: ignore[method-assign]
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    library._synced_at = time.monotonic()  # noqa: SLF001
+    library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
+    assert gets >= 1
+    assert library.records["abc"].title == "Call bank"
+
+
+def test_empty_incremental_does_not_rewrite_cache(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.email = "a@b.c"
+            self.history_id = "hist"
+            self.server_index = 2
+            self.loaded_index = 1
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+
+    library = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
+    library.records["t1"] = Record(uuid="t1", kind="task", title="Old")
+    library._save_cache()  # noqa: SLF001
+    saves = 0
+    original = library._save_cache
+
+    def save() -> None:
+        nonlocal saves
+        saves += 1
+        original()
+
+    library._save_cache = save  # type: ignore[method-assign]
+    library.refresh()
+    assert saves == 0
+    assert cache.stat().st_mode & 0o777 == 0o600
+
+
+def test_rich_notes_join_paragraphs() -> None:
+    from things_orchestrator.cloud import _note_text
+
+    text = _note_text({"t": 2, "ps": [{"r": "one"}, {"r": "two"}]})
+    assert text == "one\ntwo"
+
+
+def test_fold_create_replaces_task_fields() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "t1",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Old", "tp": 0, "ss": 0, "st": 0, "tr": False, "tg": ["w"]},
+            }
+        ],
+        library=library,
+    )
+    assert library.records["t1"].tag_uuids == ["w"]
+    fold_events(
+        [
+            {
+                "uuid": "t1",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "New", "tp": 0, "ss": 0, "st": 0, "tr": False},
+            }
+        ],
+        library=library,
+    )
+    assert library.records["t1"].title == "New"
+    assert library.records["t1"].tag_uuids == []
+
+
+def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> None:
+    from things_orchestrator.cloud import CloudError
+
+    class ConflictClient:
+        def __init__(self) -> None:
+            self.history_id = "h"
+            self.server_index = 1
+            self.loaded_index = 1
+            self.posts = 0
+            self.pending: list[dict[str, object]] = []
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            if self.pending:
+                events = self.pending
+                self.pending = []
+                return HistoryPage(events=events, current=2, groups=1, end_size=2, latest_size=2)
+            return HistoryPage(events=[], current=1, groups=0, end_size=1, latest_size=1)
+
+        def commit(self, envelopes: list[Envelope]) -> None:
+            self.posts += 1
+            if self.posts == 1:
+                raise CloudError("Things Cloud HTTP 409")
+            self.pending = [
+                {"uuid": item.uuid, "e": item.kind, "t": item.action, "p": item.payload}
+                for item in envelopes
+            ]
+
+    client = ConflictClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    with pytest.raises(CloudError, match="read fresh facts"):
+        library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
+    assert client.posts == 1
+    assert library.records["abc"].title == "Call"
+
+
+def test_commit_retries_404_after_verify() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    posts = 0
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        nonlocal posts
+        if "account" in path:
+            return {"history-key": "h"}
+        if method == "POST":
+            posts += 1
+            if posts == 1:
+                raise CloudError("Things Cloud HTTP 404")
+            return {"server-head-index": 3}
+        raise AssertionError("unexpected GET")
+
+    client._request = request  # noqa: SLF001
+    client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 2
+    assert client.server_index == 3
+
+
+def test_commit_404_does_not_replay_after_history_key_change() -> None:
+    from things_orchestrator.cloud import CloudError
+
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "old"
+    posts = 0
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        nonlocal posts
+        if "account" in path:
+            return {"history-key": "new"}
+        if method == "POST":
+            posts += 1
+            raise CloudError("Things Cloud HTTP 404")
+        raise AssertionError("unexpected GET")
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="HTTP 404"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+    assert client.history_id == "new"
+
+
+def test_empty_library_still_debounces(tmp_path: Path) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.email = "a@b.c"
+            self.history_id = "hist"
+            self.server_index = 0
+            self.loaded_index = 0
+            self.pages = 0
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.pages += 1
+            return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+
+    library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.refresh()
+    library.refresh()
+    assert library.client.pages == 1  # type: ignore[attr-defined]
+    library.refresh(force=True)
+    assert library.client.pages == 2  # type: ignore[attr-defined]
+
+
+def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+
+    result = library.apply(
+        [
+            Write(action="ensure_tag", uuid="waiting", title="Waiting"),
+            Write(action="create", uuid="task", title="Wait for refund", notes="## Next\nEmail support"),
+            Write(action="tags", uuid="task", tag_uuids=["waiting"]),
+        ]
+    )
+
+    assert [item.uuid for item in client.committed] == ["waiting", "task"]
+    task = client.committed[1]
+    assert task.action == 0
+    assert task.payload["tt"] == "Wait for refund"
+    assert task.payload["tg"] == ["waiting"]
+    assert task.payload["nt"]["v"] == "## Next\nEmail support"
+    assert result.verified == ["Wait for refund"]
+    assert library.records["task"].tag_uuids == ["waiting"]
+
+
+def test_existing_update_and_waiting_tag_share_one_envelope(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["task"] = Record(uuid="task", kind="task", title="Refund", entity="Task6")
+
+    library.apply(
+        [
+            Write(action="update", uuid="task", title="Wait for refund"),
+            Write(action="tags", uuid="task", tag_uuids=["waiting"]),
+        ]
+    )
+
+    assert len(client.committed) == 1
+    assert client.committed[0].payload["tt"] == "Wait for refund"
+    assert client.committed[0].payload["tg"] == ["waiting"]
+
+
+def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["area"] = Record(uuid="area", kind="area", title="Work", entity="Area3")
+
+    library.apply(
+        [
+            Write(action="create", uuid="task", title="Draft"),
+            Write(action="update", uuid="task", title="Send draft", notes="Ready"),
+            Write(action="move", uuid="task", into_uuid="area", into_kind="area"),
+            Write(action="tags", uuid="task", tag_uuids=["important"]),
+            Write(action="complete", uuid="task"),
+        ]
+    )
+
+    assert len(client.committed) == 1
+    envelope = client.committed[0]
+    assert envelope.action == 0
+    assert envelope.payload["tt"] == "Send draft"
+    assert envelope.payload["nt"]["v"] == "Ready"
+    assert envelope.payload["ar"] == ["area"]
+    assert envelope.payload["tg"] == ["important"]
+    assert envelope.payload["ss"] == 3
+    assert library.records["task"].status == "done"
+
+
+def test_checklist_create_update_delete_round_trip(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["task"] = Record(uuid="task", kind="task", title="Pack", entity="Task6")
+
+    library.apply(
+        [
+            Write(
+                action="checklist",
+                uuid="row",
+                title="Passport",
+                checklist_parent_uuid="task",
+                checklist_status="open",
+                checklist_index=20,
+            )
+        ]
+    )
+    assert client.committed[0].kind == "ChecklistItem3"
+    assert client.committed[0].payload["ts"] == ["task"]
+    assert library.records["task"].checklists == [
+        ChecklistLine(uuid="row", title="Passport", status="open", sort_index=20)
+    ]
+
+    library.apply(
+        [
+            Write(
+                action="checklist",
+                uuid="row",
+                title="Valid passport",
+                checklist_status="dropped",
+                checklist_index=5,
+            )
+        ]
+    )
+    line = library.records["task"].checklists[0]
+    assert (line.uuid, line.title, line.status, line.sort_index) == (
+        "row",
+        "Valid passport",
+        "dropped",
+        5,
+    )
+
+    library.apply([Write(action="checklist", uuid="row", checklist_remove=True)])
+    assert client.committed[0].action == 2
+    assert library.records["task"].checklists == []
+
+
+def test_fold_retains_cloud_quality_and_safety_facts() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {"uuid": "group", "e": "Tag4", "t": 0, "p": {"tt": "People", "pn": ["root"]}},
+            {"uuid": "area", "e": "Area3", "t": 0, "p": {"tt": "Work", "tg": ["group"], "ix": 40}},
+            {
+                "uuid": "template",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Weekly", "tp": 0, "rr": {"tp": 1}, "rt": [], "st": 1},
+            },
+            {
+                "uuid": "instance",
+                "e": "Task6",
+                "t": 0,
+                "p": {
+                    "tt": "Weekly instance",
+                    "tp": 0,
+                    "ss": 3,
+                    "sp": 1_700_000_000,
+                    "rt": ["template"],
+                    "nt": {"t": 2, "ps": [{"r": "Rich"}]},
+                    "st": 1,
+                    "ix": 80,
+                },
+            },
+        ],
+        library=library,
+    )
+
+    assert library.records["area"].tag_uuids == ["group"]
+    assert library.tag_parents["group"] == ["root"]
+    instance = library.records["instance"]
+    assert instance.completed_at is not None
+    assert instance.notes_source == "structured"
+    assert instance.notes_format == "rich"
+    assert instance.recurrence_role == "instance"
+    assert instance.recurrence_template_uuid == "template"
+    assert instance.recurrence_type == "after_completion"
+    assert instance.sort_index == 80
+
+
+def test_projects_default_to_anytime_and_cannot_enter_inbox(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.apply([Write(action="create", uuid="project", kind="project", title="Launch")])
+    assert client.committed[0].payload["st"] == 1
+    assert library.records["project"].inbox is False
+
+    with pytest.raises(CloudError, match="Projects cannot enter Inbox"):
+        library.apply(
+            [Write(action="update", uuid="project", inbox=True)]
+        )
+
+
+def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(uuid="project", kind="project", title="Launch", entity="Task6"),
+            "heading": Record(
+                uuid="heading",
+                kind="task",
+                title="Next",
+                heading=True,
+                parent_uuid="project",
+                entity="Task6",
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="task",
+                title="Write brief",
+                into_uuid="project",
+                into_kind="project",
+                heading_uuid="heading",
+            )
+        ]
+    )
+    assert client.committed[0].payload["pr"] == ["project"]
+    assert client.committed[0].payload["agr"] == ["heading"]
+    assert library.records["task"].heading_uuid == "heading"
+
+
+def test_commit_rejects_duplicate_wire_ids() -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    with pytest.raises(CloudError, match="unique envelope UUIDs"):
+        client.commit(
+            [
+                Envelope("same", 0, "Task6", {"tt": "One"}),
+                Envelope("same", 1, "Task6", {"tt": "Two"}),
+            ]
+        )

@@ -1,0 +1,34 @@
+{
+  "name": "things-orchestrator",
+  "version": "0.1.0",
+  "description": "Unofficial self-hosted Things Cloud MCP with Read, Commit, and Approve tools",
+  "author": {
+    "name": "Mats Varnskuhler"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "things-3",
+    "things-cloud",
+    "productivity",
+    "self-hosted"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Things Orchestrator",
+    "shortDescription": "Manage tasks and projects in Things 3.",
+    "longDescription": "Read current Things work, apply verified routine changes, and approve unchanged plans for risky changes.",
+    "developerName": "Mats Varnskuhler",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Capture this in Things.",
+      "Organize this brain dump in Things.",
+      "Review my current Things commitments."
+    ]
+  }
+}

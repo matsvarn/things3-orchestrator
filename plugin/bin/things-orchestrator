@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+unset PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE
+export PYTHONNOUSERSITE=1
+
+TO_PLUGIN_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+TO_SOURCE_ROOT=$(CDPATH= cd -- "$TO_PLUGIN_ROOT/.." && pwd)
+TO_CHECKOUT_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/things-orchestrator/checkout"
+# Codex copies plugin/ into a cache that is not next to src/. Prefer the live checkout.
+if [ ! -f "$TO_SOURCE_ROOT/pyproject.toml" ] && [ -f "$TO_CHECKOUT_FILE" ]; then
+  TO_SOURCE_ROOT=$(tr -d '\n' < "$TO_CHECKOUT_FILE")
+fi
+if [ ! -f "$TO_SOURCE_ROOT/pyproject.toml" ]; then
+  echo "From the clone: uv run things-orchestrator login" >&2
+  exit 2
+fi
+if [ -n "${THINGS_ORCHESTRATOR_PYTHON:-}" ]; then
+  TO_PYTHON=$THINGS_ORCHESTRATOR_PYTHON
+elif [ -x "$TO_SOURCE_ROOT/.venv/bin/python" ]; then
+  TO_PYTHON="$TO_SOURCE_ROOT/.venv/bin/python"
+else
+  TO_PYTHON=python3
+fi
+export PYTHONPATH="$TO_SOURCE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+case "${1:-}" in
+  login|serve|serve-http|print-config)
+    exec "$TO_PYTHON" -m things_orchestrator.cli "$@"
+    ;;
+  *)
+    echo "Usage: things-orchestrator {login,serve,serve-http,print-config}" >&2
+    echo "From the clone: uv run things-orchestrator login" >&2
+    exit 2
+    ;;
+esac

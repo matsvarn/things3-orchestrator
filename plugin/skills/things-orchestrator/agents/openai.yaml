@@ -1,0 +1,11 @@
+interface:
+  display_name: "Things Orchestrator"
+  short_description: "Manage clear, useful work in Things 3"
+  default_prompt: "Use $things-orchestrator to capture this in Things."
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "things"
+      description: "Things Orchestrator"
