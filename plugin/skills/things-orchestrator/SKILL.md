@@ -24,13 +24,16 @@ a clear yes, continue.
 - Add a Things checklist for small, known steps that share the Task's finish.
 - Use a Project when several actions can finish separately. Add only the next
   one to three useful actions unless the owner supplied a fixed plan.
+- Use headings for distinct groups inside a Project. Keep a Task under a
+  heading only while it belongs to that group.
 - Put context, links, plans, and finish criteria in Markdown notes. Keep
   executable steps in Things checklist rows or Project Tasks.
 - Use an Area for an ongoing responsibility without a finish.
 - Use a start date when work becomes available. Use a deadline for a real
   latest finish. Add a reminder only for a useful, time-specific start cue.
-- For repeating work, read the exact item first. Keep its repeating template
-  and generated copies unchanged.
+- For repeating work, read the exact item first. Change `repeat_interval` only
+  on the repeating template. State that this changes future generated Tasks,
+  and get the required confirmation. Keep generated copies unchanged.
 - Use a tag only when it will help the owner filter similar work later. Prefer
   an existing matching tag.
 - Use Someday when the owner wants to keep an idea outside active work.
@@ -46,6 +49,9 @@ when the work is finished. Let a later review shape steps that can still change.
 
 Capture clear, accepted work directly. For changes or reviews, use current
 Things facts and preserve anything the owner did not ask to change.
+
+Treat a request to delete a Task or Project as a move to Things Trash. State
+that it can be restored, and get the required confirmation before it moves.
 
 When one unclear choice can change the Task, Project, destination, or date,
 keep the item as it is and ask one short question.

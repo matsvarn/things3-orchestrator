@@ -7,6 +7,7 @@ import os
 import time
 import zlib
 from base64 import b64encode
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -366,6 +367,13 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             library.records.pop(uuid, None)
             library.tags.pop(uuid, None)
             library.tag_parents.pop(uuid, None)
+            if kind in _TAG_KINDS:
+                for item in library.records.values():
+                    item.tag_uuids = [tag for tag in item.tag_uuids if tag != uuid]
+                for tag, parents in library.tag_parents.items():
+                    library.tag_parents[tag] = [
+                        parent for parent in parents if parent != uuid
+                    ]
             continue
         if kind in _AREA_KINDS:
             existing = library.records.get(uuid)
@@ -428,10 +436,6 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             )
         if "tr" in payload and payload["tr"] is not None:
             item.trashed = bool(payload["tr"])
-        if "st" in payload and payload["st"] is not None:
-            state = int(payload["st"])
-            item.inbox = state == 0
-            item.someday = state == 2
         if "sr" in payload:
             item.start = from_ts(payload["sr"] if payload["sr"] is not None else None)
             if item.start is not None:
@@ -450,14 +454,21 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.today_index = int(payload["ti"])
         if "pr" in payload and isinstance(payload["pr"], list) and payload["pr"]:
             item.parent_uuid = str(payload["pr"][0])
+            item.area_uuid = None
             item.inbox = False
         elif "pr" in payload:
             item.parent_uuid = None
         if "ar" in payload and isinstance(payload["ar"], list) and payload["ar"]:
             item.area_uuid = str(payload["ar"][0])
+            item.parent_uuid = None
+            item.heading_uuid = None
             item.inbox = False
         elif "ar" in payload:
             item.area_uuid = None
+        if "st" in payload and payload["st"] is not None:
+            state = int(payload["st"])
+            item.inbox = state == 0 and not item.parent_uuid and not item.area_uuid
+            item.someday = state == 2 and item.start is None
         if "agr" in payload and isinstance(payload["agr"], list) and payload["agr"]:
             item.heading_uuid = str(payload["agr"][0])
         elif "agr" in payload:
@@ -468,6 +479,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             rule = payload.get("rr")
             item.recurring_template = isinstance(rule, dict)
             if isinstance(rule, dict):
+                item.recurrence_rule = deepcopy(rule)
                 item.recurrence_role = "template"
                 recurrence_code = rule.get("tp", 0)
                 item.recurrence_type = (
@@ -476,10 +488,18 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                     else "after_completion" if recurrence_code == 1 else "unknown"
                 )
             elif item.recurrence_role == "template":
+                item.recurrence_rule = None
                 item.recurrence_role = "none"
                 item.recurrence_type = "none"
         if "rt" in payload:
             links = payload.get("rt")
+            item.recurrence_links = (
+                [str(links)]
+                if isinstance(links, str)
+                else [str(link) for link in links]
+                if isinstance(links, list)
+                else []
+            )
             if isinstance(links, str) or (isinstance(links, list) and links):
                 item.recurrence_template_uuid = (
                     links if isinstance(links, str) else str(links[0])
@@ -625,10 +645,23 @@ class CloudLibrary(MemoryLibrary):
         created: dict[str, str] = {}
         created_ix: dict[tuple[str, str | None, str | None], int] = {}
         created_kinds = {
-            write.uuid: write.kind for write in writes if write.action == "create"
+            write.uuid: write.kind
+            for write in writes
+            if write.action in {"create", "create_heading"}
         }
         for write in writes:
             current_record = self.records.get(write.uuid)
+            if write.action == "repeat" and (
+                current_record is None
+                or current_record.kind != "task"
+                or current_record.recurrence_role != "template"
+                or current_record.recurrence_type
+                not in {"fixed", "after_completion"}
+                or current_record.recurrence_rule is None
+                or bool(current_record.recurrence_links)
+                or write.recurrence_rule is None
+            ):
+                raise CloudError("Repeat changes need an exact repeating Task template")
             planned_kind = created_kinds.get(write.uuid)
             if planned_kind is not None and write.action != "create" and write.kind != planned_kind:
                 write = replace(write, kind=planned_kind)
@@ -680,7 +713,7 @@ class CloudLibrary(MemoryLibrary):
                     write,
                     tag_uuids=[tag_map.get(tag, tag) for tag in write.tag_uuids],
                 )
-            if write.action == "create" and write.sort_index is None:
+            if write.action in {"create", "create_heading"} and write.sort_index is None:
                 index = self.next_index(write)
                 key = (write.kind, write.into_uuid, write.into_kind)
                 previous = created_ix.get(key)
@@ -700,7 +733,7 @@ class CloudLibrary(MemoryLibrary):
                     next_index = max((item.sort_index for item in siblings), default=-1) + 1
                     write = replace(write, checklist_index=next_index)
             envelopes.append(self._envelope(write))
-            if write.action == "create" and write.title:
+            if write.action in {"create", "create_heading"} and write.title:
                 created[write.title] = f"{write.kind}:{write.uuid}"
         coalesced = _coalesce_envelopes(envelopes)
         uuids = [item.uuid for item in coalesced]
@@ -716,12 +749,15 @@ class CloudLibrary(MemoryLibrary):
             (existing.entity if existing and existing.entity else "")
             or ("Area3" if write.kind == "area" else "Task6")
         )
-        if write.action == "create":
+        if write.action in {"create", "create_heading"}:
+            create_payload = _create_payload(write)
+            if write.action == "create_heading":
+                create_payload["tp"] = 2
             return Envelope(
                 uuid=write.uuid,
                 action=0,
                 kind="Area3" if write.kind == "area" else "Task6",
-                payload=_create_payload(write),
+                payload=create_payload,
             )
         if write.action == "checklist":
             parent, existing_line = self._find_checklist(write.uuid)
@@ -774,6 +810,20 @@ class CloudLibrary(MemoryLibrary):
             )
         if write.action == "delete_area":
             return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
+        if write.action == "trash":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"tr": True, "md": _now()},
+            )
+        if write.action == "repeat":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"rr": deepcopy(write.recurrence_rule), "md": _now()},
+            )
         if write.action == "rename_area":
             return Envelope(
                 uuid=write.uuid,
@@ -843,6 +893,7 @@ class CloudLibrary(MemoryLibrary):
                 or write.inbox
                 or write.anytime
                 or write.heading_uuid is not None
+                or write.clear_heading
             ):
                 payload.update(_placement(write))
         return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
@@ -903,7 +954,7 @@ class CloudLibrary(MemoryLibrary):
                 uuid = self.tag_uuid(title)
                 if uuid is not None:
                     created[title or uuid] = uuid
-            elif write.action == "create":
+            elif write.action in {"create", "create_heading"}:
                 item = self.records.get(write.uuid)
                 if item is not None:
                     created[item.title] = item.id
@@ -1024,10 +1075,13 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "tg" not in payload or item.tag_uuids == [str(tag) for tag in payload["tg"]],
         "ix" not in payload or item.sort_index == int(payload["ix"] or 0),
         "ti" not in payload or item.today_index == int(payload["ti"] or 0),
+        "tr" not in payload or item.trashed == bool(payload["tr"]),
+        "rr" not in payload or item.recurrence_rule == payload["rr"],
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
         checks.append(item.kind == expected_kind)
+        checks.append(item.heading == (payload["tp"] == 2))
     if "st" in payload:
         state = int(payload["st"])
         has_home = bool(payload.get("pr") or payload.get("ar"))
@@ -1208,6 +1262,8 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_role": item.recurrence_role,
         "recurrence_type": item.recurrence_type,
         "recurrence_template_uuid": item.recurrence_template_uuid,
+        "recurrence_rule": item.recurrence_rule,
+        "recurrence_links": item.recurrence_links,
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
@@ -1230,6 +1286,14 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
     kind: Kind = "project" if kind_name == "project" else "area" if kind_name == "area" else "task"
     status_name = str(payload.get("status") or "open")
     status: Status = "done" if status_name == "done" else "dropped" if status_name == "dropped" else "open"
+    raw_rule = payload.get("recurrence_rule")
+    if raw_rule is not None and not isinstance(raw_rule, dict):
+        raise ValueError("invalid cached recurrence rule")
+    raw_links = payload.get("recurrence_links") or []
+    if not isinstance(raw_links, list) or any(
+        not isinstance(link, str) for link in raw_links
+    ):
+        raise ValueError("invalid cached recurrence links")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1258,6 +1322,8 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         recurrence_role=payload.get("recurrence_role", "none"),
         recurrence_type=payload.get("recurrence_type", "none"),
         recurrence_template_uuid=payload.get("recurrence_template_uuid"),
+        recurrence_rule=raw_rule,
+        recurrence_links=list(raw_links),
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),

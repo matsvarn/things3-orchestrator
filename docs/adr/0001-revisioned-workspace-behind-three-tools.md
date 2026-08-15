@@ -24,4 +24,6 @@ pull after commit and verifies the pulled state. An uncertain outcome returns
 
 We rejected CRUD tools because they repeat identity and safety rules. We
 rejected caller-authored Cloud operations because they expose a shallow seam.
-We keep recurrence rule writes disabled until their Cloud behavior is proven.
+Repeat interval changes use a semantic workspace field. The Cloud adapter
+keeps and replaces the complete opaque rule. Pattern changes stay disabled
+until their companion fields and lifecycle are proven.

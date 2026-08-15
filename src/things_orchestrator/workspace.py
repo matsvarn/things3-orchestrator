@@ -37,6 +37,7 @@ from .library import (
     new_uuid,
     parse_id,
 )
+from .recurrence import change_interval, repeat_interval, repeat_unit
 
 _READ_LIMIT = 40
 _NOTES_LIMIT = 50_000
@@ -662,11 +663,13 @@ class ThingsWorkspace:
                 else None
             ),
             rule=item.recurrence_type if item.recurrence_type != "none" else None,
+            unit=repeat_unit(item.recurrence_rule),
+            interval=repeat_interval(item.recurrence_rule),
         )
         return ItemFact(
             id=item.id,
             revision=self._revision(item),
-            kind=item.kind,
+            kind="heading" if item.heading else item.kind,
             title=_bounded_title(item.title),
             status=_public_status(item.status),
             into_id=(
@@ -830,6 +833,42 @@ class ThingsWorkspace:
             summary.append(f"Ensure tag: {tag_entry.title}")
         for entry in call.create:
             uuid = local[entry.key][0] if entry.key else new_uuid()
+            if entry.kind == "heading":
+                home = self._home(entry.into, "task", local, new_item=True)
+                if home[1] != "project" or home[0] is None:
+                    raise _Abort(self._rejected("A heading needs a Project."))
+                project = self._library.records.get(home[0])
+                if project is not None:
+                    preconditions[project.id] = self._revision(project)
+                    preconditions[f"scope:project:{project.uuid}"] = (
+                        self._project_scope_revision(project.uuid)
+                    )
+                heading_indexes = [
+                    item.sort_index
+                    for item in self._library.records.values()
+                    if item.heading and item.parent_uuid == home[0] and not item.trashed
+                ]
+                heading_indexes.extend(
+                    write.sort_index
+                    for write in writes
+                    if write.action == "create_heading"
+                    and write.into_uuid == home[0]
+                    and write.sort_index is not None
+                )
+                writes.append(
+                    Write(
+                        action="create_heading",
+                        uuid=uuid,
+                        kind="task",
+                        title=entry.title,
+                        into_uuid=home[0],
+                        into_kind="project",
+                        anytime=True,
+                        sort_index=max(heading_indexes, default=-1024) + 1024,
+                    )
+                )
+                summary.append(f"Create heading: {entry.title}")
+                continue
             home = self._home(entry.into, entry.kind, local, new_item=True)
             start, someday, tonight, remind = self._schedule_input(
                 entry.start,
@@ -926,18 +965,71 @@ class ThingsWorkspace:
             preconditions[item.id] = revision
             if item.notes_format == "rich" and "notes_markdown" in change.model_fields_set:
                 raise _Abort(self._unsupported("That note contains unsupported rich text."))
+            if change.repeat_interval is not None:
+                if (
+                    item.recurrence_role != "template"
+                    or item.recurrence_type not in {"fixed", "after_completion"}
+                    or item.recurrence_links
+                ):
+                    raise _Abort(
+                        self._unsupported(
+                            "Change the exact repeating template, not a generated copy."
+                        )
+                    )
+                try:
+                    rule = change_interval(item.recurrence_rule, change.repeat_interval)
+                except ValueError as error:
+                    raise _Abort(self._unsupported(str(error))) from error
+                writes.append(
+                    Write(
+                        action="repeat",
+                        uuid=item.uuid,
+                        kind="task",
+                        recurrence_rule=rule,
+                    )
+                )
+                preconditions[f"scope:repeat:{item.uuid}"] = (
+                    self._recurrence_scope_revision(item.uuid)
+                )
+                summary.append(
+                    f"Change repeat interval for {item.title} to {change.repeat_interval}"
+                )
+                warnings.append("This changes future generated Tasks.")
+                risky = True
+                continue
             if item.recurrence_role != "none":
                 raise _Abort(
                     self._unsupported(
                         "This recurring item is read-only because its mutation semantics are not proven safe."
                     )
                 )
+            if item.heading:
+                if change.title is None:
+                    raise _Abort(self._rejected("A heading change needs a title."))
+                writes.append(
+                    Write(action="update", uuid=item.uuid, kind="task", title=change.title)
+                )
+                summary.append(f"Rename heading: {item.title} to {change.title}")
+                continue
             if item.kind == "area" and change.status is not None:
                 raise _Abort(self._rejected("Areas do not have a completion state."))
             if item.kind == "area" and "into" in change.model_fields_set:
                 raise _Abort(self._rejected("Areas stay in the top-level registry."))
             if item.kind == "area":
                 preconditions["scope:areas"] = self._area_scope_revision()
+
+            if change.trash:
+                if item.kind not in {"task", "project"}:
+                    raise _Abort(self._rejected("Only a Task or Project can move to Trash."))
+                writes.append(Write(action="trash", uuid=item.uuid, kind=item.kind))
+                summary.append(f"Trash {item.kind}: {item.title}")
+                warnings.append(f"{item.title} will move to Trash and can be restored in Things.")
+                if item.kind == "project":
+                    preconditions[f"scope:project:{item.uuid}"] = (
+                        self._project_scope_revision(item.uuid)
+                    )
+                risky = True
+                continue
 
             home = (None, None, False, False)
             if "into" in change.model_fields_set:
@@ -974,6 +1066,22 @@ class ThingsWorkspace:
                     if existing_waiting is not None:
                         tags = [uuid for uuid in tags if uuid != existing_waiting]
             status = _internal_status(change.status) if change.status else None
+            heading_uuid: str | None = None
+            clear_heading = False
+            if "heading_id" in change.model_fields_set:
+                if item.kind != "task" or item.parent_uuid is None:
+                    raise _Abort(
+                        self._rejected("Only a Task in a Project can use a heading.")
+                    )
+                clear_heading = change.heading_id is None
+                if change.heading_id is not None:
+                    heading = self._required_exact(change.heading_id)
+                    if not heading.heading or heading.parent_uuid != item.parent_uuid:
+                        raise _Abort(
+                            self._rejected("The heading must belong to the Task's Project.")
+                        )
+                    heading_uuid = heading.uuid
+                    preconditions[heading.id] = self._revision(heading)
             order_home = (
                 home
                 if "into" in change.model_fields_set
@@ -1016,8 +1124,8 @@ class ThingsWorkspace:
                 title=change.title,
                 notes=notes,
                 status=status,
-                into_uuid=home[0],
-                into_kind=home[1],
+                into_uuid=(item.parent_uuid if "heading_id" in change.model_fields_set else home[0]),
+                into_kind=("project" if "heading_id" in change.model_fields_set else home[1]),
                 inbox=home[2],
                 anytime=home[3],
                 start=start,
@@ -1032,6 +1140,8 @@ class ThingsWorkspace:
                 sort_index=sort_index,
                 today_index=today_index,
                 owner_today=self._clock().date(),
+                heading_uuid=heading_uuid,
+                clear_heading=clear_heading,
             )
             if any(
                 field in change.model_fields_set
@@ -1039,6 +1149,7 @@ class ThingsWorkspace:
                     "title", "status", "notes_markdown", "into", "start", "deadline",
                     "remind_at", "waiting", "tags_add", "tags_remove", "after",
                     "today_after",
+                    "heading_id",
                 }
             ):
                 writes.append(main_write)
@@ -1893,7 +2004,7 @@ class ThingsWorkspace:
         items = [
             self._fact(item, full=False)
             for uuid in ids
-            if (item := self._library.records.get(uuid)) is not None and not item.heading
+            if (item := self._library.records.get(uuid)) is not None
         ][:40]
         tags: list[TagFact] = []
         for write in writes:
@@ -1962,6 +2073,11 @@ class ThingsWorkspace:
                 if self._project_scope_revision(uuid) != expected:
                     return True
                 continue
+            if public_id.startswith("scope:repeat:"):
+                uuid = public_id.removeprefix("scope:repeat:")
+                if self._recurrence_scope_revision(uuid) != expected:
+                    return True
+                continue
             item = self._exact_item(public_id)
             if item is None or self._revision(item) != expected:
                 return True
@@ -2005,6 +2121,10 @@ class ThingsWorkspace:
             return item is None
         if item is None:
             return False
+        if write.action == "trash":
+            return item.trashed
+        if write.action == "repeat":
+            return item.recurrence_rule == write.recurrence_rule
         if write.action == "complete":
             return item.status == "done"
         if write.action == "cancel":
@@ -2041,15 +2161,17 @@ class ThingsWorkspace:
             write.today_index is None or item.today_index == write.today_index,
         ]
         if (
-            write.action == "create"
+            write.action in {"create", "create_heading"}
             or write.into_uuid is not None
             or write.into_kind is not None
             or write.inbox
             or write.anytime
         ):
             checks.append(self._placement_matches(item, write))
-        if write.action == "create":
+        if write.action in {"create", "create_heading"}:
             checks.append(item.kind == write.kind)
+        if write.action == "create_heading":
+            checks.append(item.heading)
         return all(checks)
 
     @staticmethod
@@ -2061,7 +2183,12 @@ class ThingsWorkspace:
                 and item.area_uuid is None
             )
         if write.into_kind == "project":
-            return item.parent_uuid == write.into_uuid and item.area_uuid is None and not item.inbox
+            return (
+                item.parent_uuid == write.into_uuid
+                and item.area_uuid is None
+                and not item.inbox
+                and item.heading_uuid == write.heading_uuid
+            )
         if write.into_kind == "area":
             return item.area_uuid == write.into_uuid and item.parent_uuid is None and not item.inbox
         if (
@@ -2108,7 +2235,11 @@ class ThingsWorkspace:
         if kind is None:
             return None
         item = self._library.records.get(uuid)
-        return item if item is not None and item.kind == kind else None
+        if item is None:
+            return None
+        if kind == "heading":
+            return item if item.heading else None
+        return item if not item.heading and item.kind == kind else None
 
     def _required_exact(self, value: str) -> Record:
         item = self._exact_item(value)
@@ -2138,7 +2269,16 @@ class ThingsWorkspace:
             "tags": item.tag_uuids,
             "sort": item.sort_index,
             "today_sort": item.today_index,
-            "recurrence": [item.recurrence_role, item.recurrence_type, item.recurrence_template_uuid],
+            "recurrence": cast(
+                object,
+                [
+                    item.recurrence_role,
+                    item.recurrence_type,
+                    item.recurrence_template_uuid,
+                    item.recurrence_rule,
+                    item.recurrence_links,
+                ],
+            ),
             "checklist": [
                 [row.uuid, row.title, row.status, row.sort_index]
                 for row in sorted(item.checklists, key=lambda row: (row.sort_index, row.uuid))
@@ -2217,8 +2357,18 @@ class ThingsWorkspace:
             for item in sorted(
                 self._library.records.values(), key=lambda item: item.id
             )
-            if item.parent_uuid == uuid and not item.trashed and not item.heading
+            if item.parent_uuid == uuid and not item.trashed
         )
+        return "s_" + _digest(rows)
+
+    def _recurrence_scope_revision(self, uuid: str) -> str:
+        rows = [
+            [item.id, self._revision(item)]
+            for item in sorted(
+                self._library.records.values(), key=lambda item: item.id
+            )
+            if item.uuid == uuid or uuid in item.recurrence_links
+        ]
         return "s_" + _digest(rows)
 
     @staticmethod

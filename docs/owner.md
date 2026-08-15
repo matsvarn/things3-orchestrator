@@ -11,10 +11,11 @@ The server evaluates Today, Logbook, and reminders in the timezone stored by
 `login`. Run `login --timezone Europe/Berlin` again after a permanent move.
 
 The model has three tools. `things_read` gets current, bounded facts.
-`things_commit` applies routine changes. Only Area changes, broad batches, and
-closing a Project with open actions need approval. These changes write nothing
-until you accept them. The model asks one plain question and keeps tool IDs
-private. Each write needs a Cloud read-back before the tool reports success.
+`things_commit` applies routine changes. Area changes, broad batches, Trash,
+repeat interval changes, and closing a Project with open actions need approval.
+These changes write nothing until you accept them. The model asks one plain
+question and keeps tool IDs private. Each write needs a Cloud read-back before
+the tool reports success.
 
 The tool schemas tell the model how to send safe requests and recover from a
 stopped call. The model skill helps it select a small, useful Things form. It
@@ -25,6 +26,7 @@ also keeps internal tool terms out of the reply.
 - “Capture a task to renew my password in Things.”
 - “What should I focus on in Things today?”
 - “Review my Areas and suggest one cleanup.”
+- “Make this repeating task run every two weeks.”
 
 Current limits are in the [README](../README.md#current-limits).
 

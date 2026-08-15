@@ -15,7 +15,7 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-Kind = Literal["task", "project", "area"]
+Kind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "completed", "canceled"]
 Next = Literal["done", "ask", "approve", "read", "retry_same", "stop"]
 ResultStatus = Literal[
@@ -37,7 +37,7 @@ RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
 
-_ITEM_ID = r"^(?:task|project|area):[^\s:][^\s]*$"
+_ITEM_ID = r"^(?:task|project|area|heading):[^\s:][^\s]*$"
 _CONTAINER_ID = r"^(?:project|area):[^\s:][^\s]*$"
 _CHECK_ID = r"^check:[^\s:][^\s]*$"
 _TAG_ID = r"^tag:[^\s:][^\s]*$"
@@ -57,6 +57,7 @@ _CHECK_REFERENCE = (
     r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|check:[^\s:][^\s]*)$"
 )
 _AREA_ID = r"^area:[^\s:][^\s]*$"
+_HEADING_ID = r"^heading:[^\s:][^\s]*$"
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 
@@ -213,6 +214,15 @@ class CreateEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_kind_fields(self) -> Self:
+        if self.kind == "heading":
+            allowed = {"key", "kind", "title", "into"}
+            if self.into is None:
+                raise ValueError("a heading needs a Project")
+            if not self.into.startswith(("project:", "$")):
+                raise ValueError("a heading needs a Project")
+            if self.model_fields_set - allowed:
+                raise ValueError("a heading accepts only key, kind, title, and into")
+            return self
         if self.checklist and self.kind != "task":
             raise ValueError("only a task can have a checklist")
         if self.next_actions and self.kind != "project":
@@ -279,6 +289,9 @@ class ChangeEntry(StrictModel):
     )
     move_contents_to: str | None = Field(default=None, pattern=_AREA_ID, max_length=512)
     remove_if_empty: Literal[True] | None = None
+    trash: Literal[True] | None = None
+    heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
+    repeat_interval: int | None = Field(default=None, ge=1, le=366)
 
     @field_validator("title")
     @classmethod
@@ -362,6 +375,9 @@ class ChangeEntry(StrictModel):
                 "today_after" in self.model_fields_set,
                 self.move_contents_to is not None,
                 self.remove_if_empty is True,
+                self.trash is True,
+                "heading_id" in self.model_fields_set,
+                self.repeat_interval is not None,
             )
         )
         if not meaningful:
@@ -395,6 +411,20 @@ class ChangeEntry(StrictModel):
                 raise ValueError(
                     "an Area removal cannot combine with source-item changes"
                 )
+        if self.trash:
+            allowed = {"id", "if_revision", "trash"}
+            if self.model_fields_set - allowed:
+                raise ValueError("Trash cannot combine with other changes")
+        if self.id.startswith("heading:"):
+            allowed = {"id", "if_revision", "title"}
+            if self.model_fields_set - allowed or self.title is None:
+                raise ValueError("a heading change can only rename the heading")
+        if self.repeat_interval is not None:
+            allowed = {"id", "if_revision", "repeat_interval"}
+            if self.model_fields_set - allowed:
+                raise ValueError("a repeat interval cannot combine with other changes")
+        if "heading_id" in self.model_fields_set and "into" in self.model_fields_set:
+            raise ValueError("change the Project or heading in separate requests")
         return self
 
 
@@ -520,6 +550,8 @@ class CommitCall(StrictModel):
                     raise ValueError("a local home must be an Area or Project")
                 if entry.kind == "project" and target.kind != "area":
                     raise ValueError("a Project local home must be an Area")
+                if entry.kind == "heading" and target.kind != "project":
+                    raise ValueError("a heading local home must be a Project")
             if entry.after is not None and entry.after.startswith("$"):
                 anchor_entry = create_by_key[entry.after]
                 if (
@@ -579,6 +611,8 @@ class RecurrenceFact(StrictModel):
     kind: RecurrenceKind
     template_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
     rule: str | None = Field(default=None, max_length=2000)
+    unit: Literal["day", "week", "month", "year"] | None = None
+    interval: int | None = Field(default=None, ge=1, le=366)
 
 
 class ItemFact(StrictModel):
@@ -717,7 +751,7 @@ _CREATE: dict[str, Any] = {
     "required": ["title"],
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
-        "kind": {"enum": ["task", "project", "area"], "default": "task"},
+        "kind": {"enum": ["task", "project", "area", "heading"], "default": "task"},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {
@@ -788,6 +822,9 @@ _CHANGE: dict[str, Any] = {
         "today_after": _AFTER_SCHEMA,
         "move_contents_to": _AREA_SCHEMA,
         "remove_if_empty": {"const": True},
+        "trash": {"const": True},
+        "heading_id": {"type": ["string", "null"], "pattern": _HEADING_ID},
+        "repeat_interval": {"type": "integer", "minimum": 1, "maximum": 366},
     },
 }
 
@@ -857,6 +894,8 @@ _RECURRENCE: dict[str, Any] = {
         },
         "template_id": _EXACT_ITEM,
         "rule": {"type": "string"},
+        "unit": {"enum": ["day", "week", "month", "year"]},
+        "interval": {"type": "integer", "minimum": 1, "maximum": 366},
     },
 }
 
@@ -867,7 +906,7 @@ _ITEM_FACT: dict[str, Any] = {
     "properties": {
         "id": _EXACT_ITEM,
         "revision": _STRING,
-        "kind": {"enum": ["task", "project", "area"]},
+        "kind": {"enum": ["task", "project", "area", "heading"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "into_id": _EXACT_ITEM,
@@ -961,7 +1000,7 @@ _ITEM_SUMMARY: dict[str, Any] = {
     "properties": {
         "id": _EXACT_ITEM,
         "revision": _STRING,
-        "kind": {"enum": ["task", "project", "area"]},
+        "kind": {"enum": ["task", "project", "area", "heading"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
     },
@@ -1040,7 +1079,8 @@ COMMIT_DESC = (
     "Commit decided work with a durable intent_id, optional ensure_tags, and create or change rows. "
     "An ensured tag key can be used in tag_ids or tags_add in the same commit. "
     "Changes need an exact id and if_revision. After pending, retry the exact payload. "
-    "High-impact work returns a plan without writes. Ask one natural confirmation and keep its "
+    "Moving a Task or Project to Trash and other high-impact work returns a plan without writes. "
+    "Ask one natural confirmation and keep its "
     "control fields private. Follow next and instruction."
 )
 APPROVE_DESC = (

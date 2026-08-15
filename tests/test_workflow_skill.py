@@ -172,9 +172,7 @@ def test_skill_does_not_claim_unavailable_write_forms() -> None:
     lower = _skill_text().lower()
 
     unavailable_claims = (
-        r"create\w*\s+(?:a\s+)?heading",
         r"change\w*\s+(?:a\s+)?repeat rule",
-        r"delete\w*\s+(?:a\s+)?(?:task|project)",
     )
     assert not any(re.search(pattern, lower) for pattern in unavailable_claims)
 

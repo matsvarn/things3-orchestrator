@@ -148,6 +148,104 @@ def test_commit_accepts_special_homes() -> None:
     assert [entry.into for entry in call.create] == ["inbox", "anytime"]
 
 
+def test_trash_is_explicit_and_cannot_combine_with_other_changes() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "trash-task-001",
+            "change": [{"id": "task:one", "if_revision": "r_1", "trash": True}],
+        }
+    )
+    assert call.change[0].trash is True
+    assert COMMIT_IN["properties"]["change"]["items"]["properties"]["trash"] == {
+        "const": True
+    }
+
+    with pytest.raises(ValidationError, match="Trash cannot combine"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-task-mixed-001",
+                "change": [
+                    {
+                        "id": "task:one",
+                        "if_revision": "r_1",
+                        "trash": True,
+                        "title": "Changed",
+                    }
+                ],
+            }
+        )
+
+
+def test_heading_create_rename_assignment_and_clear_are_explicit() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "heading-operations-001",
+            "create": [
+                {"key": "$section", "kind": "heading", "title": "Next", "into": "project:p"}
+            ],
+            "change": [
+                {"id": "heading:h", "if_revision": "r_h", "title": "Later"},
+                {"id": "task:t", "if_revision": "r_t", "heading_id": None},
+            ],
+        }
+    )
+
+    assert call.create[0].kind == "heading"
+    assert call.change[0].id == "heading:h"
+    assert "heading_id" in call.change[1].model_fields_set
+
+    with pytest.raises(ValidationError, match="accepts only"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-invalid-001",
+                "create": [
+                    {
+                        "kind": "heading",
+                        "title": "Next",
+                        "into": "project:p",
+                        "notes_markdown": "No",
+                    }
+                ],
+            }
+        )
+
+
+def test_repeat_interval_change_is_explicit_and_isolated() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "repeat-interval-001",
+            "change": [
+                {
+                    "id": "task:template",
+                    "if_revision": "r_template",
+                    "repeat_interval": 3,
+                }
+            ],
+        }
+    )
+
+    assert call.change[0].repeat_interval == 3
+
+    for invalid in (
+        {"repeat_interval": 0},
+        {"repeat_interval": 367},
+        {"repeat_interval": 2, "title": "Also rename"},
+    ):
+        with pytest.raises(ValidationError):
+            CommitCall.model_validate(
+                {
+                    "intent_id": "repeat-interval-invalid-001",
+                    "change": [
+                        {
+                            "id": "task:template",
+                            "if_revision": "r_template",
+                            **invalid,
+                        }
+                    ],
+                }
+            )
+
+
 def test_commit_rejects_forward_local_order_anchors() -> None:
     with pytest.raises(ValidationError, match="earlier create entries"):
         CommitCall.model_validate(
@@ -437,12 +535,12 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    assert discovery_chars < 9_800
+    assert discovery_chars < 10_200
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 10_600
+    assert wire_chars < 10_800
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC

@@ -63,12 +63,18 @@ Changing the tools: [docs/maintainer.md](docs/maintainer.md).
 
 The server can create and update Tasks, Projects, Areas, tags, native
 checklists, Markdown notes, dates, reminders, and list order. It can complete
-or cancel Tasks and Projects. It can also remove an empty Area after it moves
-all contained work to another Area.
+or cancel Tasks and Projects. It can move Tasks and Projects to the recoverable
+Things Trash after confirmation. It can also remove an empty Area after it
+moves all contained work to another Area.
 
-The server reads recurrence facts but does not change repeat rules. It does
-not create or change headings. It does not delete Tasks or Projects. These
-writes need live protocol proof before they become public tools.
+The server reads repeat mode, unit, and interval. It can change the interval
+of an existing repeating template after confirmation. The full Cloud rule is
+kept without data loss. It does not create repeat rules, change their pattern,
+or change generated copies. Those operations need more lifecycle proof.
+
+It can create and rename headings, and assign or clear a Task's heading. It
+does not reorder or remove headings. It does not permanently delete Tasks or
+Projects. Deletion moves them to the recoverable Things Trash.
 
 ## Develop
 

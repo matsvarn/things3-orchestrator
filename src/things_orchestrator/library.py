@@ -8,19 +8,22 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from .recurrence import JsonValue
+
 Kind = Literal["task", "project", "area"]
+PublicKind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "done", "dropped"]
 RecurrenceRole = Literal["none", "template", "instance"]
 RecurrenceType = Literal["none", "fixed", "after_completion", "unknown"]
 
 
-def public_id(kind: Kind, uuid: str) -> str:
+def public_id(kind: PublicKind, uuid: str) -> str:
     return f"{kind}:{uuid}"
 
 
-def parse_id(value: str) -> tuple[Kind | None, str]:
+def parse_id(value: str) -> tuple[PublicKind | None, str]:
     prefix, _, rest = value.partition(":")
-    if rest and prefix in {"task", "project", "area"}:
+    if rest and prefix in {"task", "project", "area", "heading"}:
         return prefix, rest  # type: ignore[return-value]
     return None, value
 
@@ -97,6 +100,8 @@ class Record:
     recurrence_role: RecurrenceRole = "none"
     recurrence_type: RecurrenceType = "none"
     recurrence_template_uuid: str | None = None
+    recurrence_rule: dict[str, JsonValue] | None = None
+    recurrence_links: list[str] = field(default_factory=list)
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
@@ -107,7 +112,7 @@ class Record:
 
     @property
     def id(self) -> str:
-        return public_id(self.kind, self.uuid)
+        return public_id("heading" if self.heading else self.kind, self.uuid)
 
     def is_open(self) -> bool:
         return (
@@ -124,6 +129,7 @@ class Write:
 
     action: Literal[
         "create",
+        "create_heading",
         "update",
         "complete",
         "cancel",
@@ -131,8 +137,10 @@ class Write:
         "tags",
         "rename_area",
         "delete_area",
+        "trash",
         "ensure_tag",
         "checklist",
+        "repeat",
     ]
     uuid: str
     kind: Kind = "task"
@@ -153,6 +161,7 @@ class Write:
     inbox: bool = False
     anytime: bool = False
     heading_uuid: str | None = None
+    clear_heading: bool = False
     sort_index: int | None = None
     today_index: int | None = None
     owner_today: date | None = None
@@ -160,6 +169,7 @@ class Write:
     checklist_status: Status | None = None
     checklist_index: int | None = None
     checklist_remove: bool = False
+    recurrence_rule: dict[str, JsonValue] | None = None
 
 
 @dataclass
@@ -210,7 +220,9 @@ class MemoryLibrary:
                 if candidate.uuid.startswith(value) or candidate.id == value
             ]
             return matches[0] if len(matches) == 1 else None
-        if kind is not None and item.kind != kind:
+        if kind == "heading" and not item.heading:
+            return None
+        if kind is not None and kind != "heading" and (item.kind != kind or item.heading):
             return None
         return item
 
@@ -294,14 +306,18 @@ class MemoryLibrary:
             return []
         children = [
             item
-            for item in self._open()
+            for item in self.records.values()
             if item.parent_uuid == root.uuid
+            and not item.trashed
+            and item.status == "open"
+            and not item.recurring_template
         ]
         children.sort(
             key=lambda item: (
                 self.records[item.heading_uuid].sort_index
                 if item.heading_uuid and item.heading_uuid in self.records
-                else -1,
+                else item.sort_index if item.heading else -1,
+                0 if item.heading else 1,
                 item.sort_index,
                 item.title,
             )
@@ -424,6 +440,21 @@ class MemoryLibrary:
         verified: list[str] = []
         tag_aliases: dict[str, str] = {}
         for write in writes:
+            if write.action == "repeat":
+                current = self.records.get(write.uuid)
+                if (
+                    current is None
+                    or current.kind != "task"
+                    or current.recurrence_role != "template"
+                    or current.recurrence_type
+                    not in {"fixed", "after_completion"}
+                    or current.recurrence_rule is None
+                    or bool(current.recurrence_links)
+                    or write.recurrence_rule is None
+                ):
+                    raise ValueError(
+                        "Repeat changes need an exact repeating Task template"
+                    )
             if write.tag_uuids is not None:
                 write = replace(
                     write,
@@ -486,7 +517,7 @@ class MemoryLibrary:
                 destination.checklists.sort(key=lambda item: (item.sort_index, item.uuid))
                 verified.append(replacement.title)
                 continue
-            if write.action == "create":
+            if write.action in {"create", "create_heading"}:
                 parent_uuid: str | None = None
                 area_uuid: str | None = None
                 inbox = (
@@ -543,6 +574,7 @@ class MemoryLibrary:
                         else self.next_index(write)
                     ),
                     today_index=write.today_index or 0,
+                    heading=write.action == "create_heading",
                 )
                 self.records[record.uuid] = record
                 created[record.title] = record.id
@@ -560,6 +592,27 @@ class MemoryLibrary:
             elif write.action == "delete_area":
                 item.trashed = True
                 del self.records[item.uuid]
+            elif write.action == "trash":
+                item.trashed = True
+            elif write.action == "repeat":
+                item.recurrence_rule = deepcopy(write.recurrence_rule)
+                item.recurring_template = write.recurrence_rule is not None
+                item.recurrence_role = (
+                    "template" if write.recurrence_rule is not None else "none"
+                )
+                code = (
+                    write.recurrence_rule.get("tp")
+                    if write.recurrence_rule is not None
+                    else None
+                )
+                if write.recurrence_rule is None:
+                    item.recurrence_type = "none"
+                elif code == 0:
+                    item.recurrence_type = "fixed"
+                elif code == 1:
+                    item.recurrence_type = "after_completion"
+                else:
+                    item.recurrence_type = "unknown"
             elif write.action == "rename_area" and write.title:
                 item.title = write.title
             elif write.action == "move":
@@ -591,6 +644,8 @@ class MemoryLibrary:
             elif write.action == "tags" and write.tag_uuids is not None:
                 item.tag_uuids = list(write.tag_uuids)
             elif write.action == "update":
+                if write.clear_heading:
+                    item.heading_uuid = None
                 if write.status is not None:
                     item.status = write.status
                     item.completed_at = (

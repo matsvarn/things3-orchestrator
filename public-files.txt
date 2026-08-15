@@ -13,6 +13,8 @@ docs/comparison.md
 docs/maintainer.md
 docs/owner.md
 docs/recovery.md
+docs/research/cloud-capability-audit.md
+docs/research/repeat-rule-writes.md
 docs/research/things3-cloud.md
 docs/trust.md
 plugin/.codex-plugin/plugin.json
@@ -33,6 +35,7 @@ src/things_orchestrator/cloud.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
+src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
