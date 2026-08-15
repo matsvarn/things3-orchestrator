@@ -25,6 +25,7 @@ from things_orchestrator.library import (
     from_ts,
     new_uuid,
 )
+from things_orchestrator.recurrence import RecurrenceState
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
@@ -234,10 +235,9 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
         kind="task",
         title="Monthly",
         entity="Task6",
-        recurring_template=True,
-        recurrence_role="template",
-        recurrence_type="fixed",
-        recurrence_rule=rule,
+        recurrence=RecurrenceState(
+            role="template", repeat_type="fixed", rule=rule
+        ),
     )
 
     changed = {**rule, "fa": 3}
@@ -260,28 +260,28 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
             uuid="instance",
             kind="task",
             title="Generated",
-            recurrence_role="instance",
-            recurrence_type="after_completion",
-            recurrence_template_uuid="template",
-            recurrence_links=["template"],
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="after_completion",
+                template_uuid="template",
+                links=("template",),
+            ),
         ),
         Record(
             uuid="unknown",
             kind="task",
             title="Unknown template",
-            recurring_template=True,
-            recurrence_role="template",
-            recurrence_type="unknown",
-            recurrence_rule={"tp": 99, "fu": 256, "fa": 1},
+            recurrence=RecurrenceState(
+                role="template",
+                repeat_type="unknown",
+                rule={"tp": 99, "fu": 256, "fa": 1},
+            ),
         ),
         Record(
             uuid="inconsistent",
             kind="task",
             title="Missing rule",
-            recurring_template=True,
-            recurrence_role="template",
-            recurrence_type="fixed",
-            recurrence_rule=None,
+            recurrence=RecurrenceState(role="template", repeat_type="fixed"),
         ),
     ],
     ids=["normal", "instance", "unknown-template", "template-without-rule"],
@@ -311,28 +311,28 @@ def test_memory_repeat_rejects_non_template_or_inconsistent_records(
             uuid="instance",
             kind="task",
             title="Generated",
-            recurrence_role="instance",
-            recurrence_type="after_completion",
-            recurrence_template_uuid="template",
-            recurrence_links=["template"],
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="after_completion",
+                template_uuid="template",
+                links=("template",),
+            ),
         ),
         Record(
             uuid="unknown",
             kind="task",
             title="Unknown template",
-            recurring_template=True,
-            recurrence_role="template",
-            recurrence_type="unknown",
-            recurrence_rule={"tp": 99, "fu": 256, "fa": 1},
+            recurrence=RecurrenceState(
+                role="template",
+                repeat_type="unknown",
+                rule={"tp": 99, "fu": 256, "fa": 1},
+            ),
         ),
         Record(
             uuid="inconsistent",
             kind="task",
             title="Missing rule",
-            recurring_template=True,
-            recurrence_role="template",
-            recurrence_type="fixed",
-            recurrence_rule=None,
+            recurrence=RecurrenceState(role="template", repeat_type="fixed"),
         ),
     ],
     ids=["normal", "instance", "unknown-template", "template-without-rule"],

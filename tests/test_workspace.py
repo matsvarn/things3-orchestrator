@@ -13,6 +13,7 @@ from things_orchestrator.library import (
     MemoryLibrary,
     Record,
 )
+from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.workspace import ThingsWorkspace
 
 NOW = datetime(2026, 8, 15, 12, tzinfo=timezone.utc)
@@ -1627,8 +1628,10 @@ def test_recurring_items_are_read_only_until_mutations_are_proven_safe(
         uuid="repeat",
         kind="task",
         title="Routine",
-        recurrence_role=role,  # type: ignore[arg-type]
-        recurrence_type=recurrence_type,  # type: ignore[arg-type]
+        recurrence=RecurrenceState(
+            role=role,  # type: ignore[arg-type]
+            repeat_type=recurrence_type,  # type: ignore[arg-type]
+        ),
     )
     module = workspace([recurring])
     repeated = detail(module, "task:repeat")
@@ -1665,10 +1668,9 @@ def test_template_repeat_interval_needs_approval_and_preserves_rule() -> None:
         uuid="template",
         kind="task",
         title="Routine",
-        recurring_template=True,
-        recurrence_role="template",
-        recurrence_type="after_completion",
-        recurrence_rule=rule,
+        recurrence=RecurrenceState(
+            role="template", repeat_type="after_completion", rule=rule
+        ),
     )
     module = workspace([template])
     current = detail(module, template.id)
@@ -1704,19 +1706,22 @@ def test_template_repeat_interval_plan_stales_when_instance_changes() -> None:
         uuid="template",
         kind="task",
         title="Routine",
-        recurring_template=True,
-        recurrence_role="template",
-        recurrence_type="fixed",
-        recurrence_rule={"tp": 0, "fu": 16, "fa": 1},
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 16, "fa": 1},
+        ),
     )
     instance = Record(
         uuid="instance",
         kind="task",
         title="Routine copy",
-        recurrence_role="instance",
-        recurrence_type="fixed",
-        recurrence_template_uuid="template",
-        recurrence_links=["template"],
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid="template",
+            links=("template",),
+        ),
     )
     module = workspace([template, instance])
     current = detail(module, template.id)
@@ -1750,10 +1755,12 @@ def test_repeat_interval_rejects_normal_tasks_and_generated_instances() -> None:
         uuid="instance",
         kind="task",
         title="Generated",
-        recurrence_role="instance",
-        recurrence_type="after_completion",
-        recurrence_template_uuid="template",
-        recurrence_links=["template"],
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="after_completion",
+            template_uuid="template",
+            links=("template",),
+        ),
     )
     module = workspace([normal, instance])
 

@@ -37,7 +37,6 @@ from .library import (
     new_uuid,
     parse_id,
 )
-from .recurrence import change_interval, repeat_interval, repeat_unit
 
 _READ_LIMIT = 40
 _NOTES_LIMIT = 50_000
@@ -663,8 +662,8 @@ class ThingsWorkspace:
                 else None
             ),
             rule=item.recurrence_type if item.recurrence_type != "none" else None,
-            unit=repeat_unit(item.recurrence_rule),
-            interval=repeat_interval(item.recurrence_rule),
+            unit=item.recurrence.unit,
+            interval=item.recurrence.interval,
         )
         return ItemFact(
             id=item.id,
@@ -1011,7 +1010,9 @@ class ThingsWorkspace:
                         )
                     )
                 try:
-                    rule = change_interval(item.recurrence_rule, change.repeat_interval)
+                    recurrence = item.recurrence.change_interval(
+                        change.repeat_interval, kind=item.kind
+                    )
                 except ValueError as error:
                     raise _Abort(self._unsupported(str(error))) from error
                 writes.append(
@@ -1019,7 +1020,7 @@ class ThingsWorkspace:
                         action="repeat",
                         uuid=item.uuid,
                         kind="task",
-                        recurrence_rule=rule,
+                        recurrence_rule=recurrence.rule,
                     )
                 )
                 preconditions[f"scope:repeat:{item.uuid}"] = (
@@ -2301,16 +2302,7 @@ class ThingsWorkspace:
             "tags": item.tag_uuids,
             "sort": item.sort_index,
             "today_sort": item.today_index,
-            "recurrence": cast(
-                object,
-                [
-                    item.recurrence_role,
-                    item.recurrence_type,
-                    item.recurrence_template_uuid,
-                    item.recurrence_rule,
-                    item.recurrence_links,
-                ],
-            ),
+            "recurrence": cast(object, asdict(item.recurrence)),
             "checklist": [
                 [row.uuid, row.title, row.status, row.sort_index]
                 for row in sorted(item.checklists, key=lambda row: (row.sort_index, row.uuid))

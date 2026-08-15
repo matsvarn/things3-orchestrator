@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal, Protocol
 from uuid import uuid4
 
-from .recurrence import JsonValue, validate_interval_template
+from .recurrence import JsonValue, RecurrenceState
 
 Kind = Literal["task", "project", "area"]
 PublicKind = Literal["task", "project", "area", "heading"]
@@ -96,12 +96,7 @@ class Record:
     parent_uuid: str | None = None
     area_uuid: str | None = None
     tag_uuids: list[str] = field(default_factory=list)
-    recurring_template: bool = False
-    recurrence_role: RecurrenceRole = "none"
-    recurrence_type: RecurrenceType = "none"
-    recurrence_template_uuid: str | None = None
-    recurrence_rule: dict[str, JsonValue] | None = None
-    recurrence_links: list[str] = field(default_factory=list)
+    recurrence: RecurrenceState = field(default_factory=RecurrenceState)
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
@@ -117,6 +112,50 @@ class Record:
     @property
     def public_kind(self) -> PublicKind:
         return "heading" if self.heading else self.kind
+
+    @property
+    def recurrence_role(self) -> RecurrenceRole:
+        return self.recurrence.role
+
+    @recurrence_role.setter
+    def recurrence_role(self, value: RecurrenceRole) -> None:
+        self.recurrence = replace(self.recurrence, role=value)
+
+    @property
+    def recurring_template(self) -> bool:
+        return self.recurrence.role == "template" and self.recurrence.rule is not None
+
+    @property
+    def recurrence_type(self) -> RecurrenceType:
+        return self.recurrence.repeat_type
+
+    @recurrence_type.setter
+    def recurrence_type(self, value: RecurrenceType) -> None:
+        self.recurrence = replace(self.recurrence, repeat_type=value)
+
+    @property
+    def recurrence_template_uuid(self) -> str | None:
+        return self.recurrence.template_uuid
+
+    @recurrence_template_uuid.setter
+    def recurrence_template_uuid(self, value: str | None) -> None:
+        self.recurrence = replace(self.recurrence, template_uuid=value)
+
+    @property
+    def recurrence_rule(self) -> dict[str, JsonValue] | None:
+        return self.recurrence.rule
+
+    @recurrence_rule.setter
+    def recurrence_rule(self, value: dict[str, JsonValue] | None) -> None:
+        self.recurrence = replace(self.recurrence, rule=value)
+
+    @property
+    def recurrence_links(self) -> list[str]:
+        return list(self.recurrence.links)
+
+    @recurrence_links.setter
+    def recurrence_links(self, value: list[str]) -> None:
+        self.recurrence = replace(self.recurrence, links=tuple(value))
 
     def is_open(self) -> bool:
         return (
@@ -446,13 +485,7 @@ class MemoryLibrary:
                 current = self.records.get(write.uuid)
                 if current is None or write.recurrence_rule is None:
                     raise ValueError("Repeat changes need an exact repeating Task template")
-                validate_interval_template(
-                    kind=current.kind,
-                    role=current.recurrence_role,
-                    repeat_type=current.recurrence_type,
-                    rule=current.recurrence_rule,
-                    links=current.recurrence_links,
-                )
+                current.recurrence.validate_interval_template(kind=current.kind)
             if write.tag_uuids is not None:
                 write = replace(
                     write,
@@ -594,7 +627,6 @@ class MemoryLibrary:
                 item.trashed = True
             elif write.action == "repeat":
                 item.recurrence_rule = deepcopy(write.recurrence_rule)
-                item.recurring_template = write.recurrence_rule is not None
                 item.recurrence_role = (
                     "template" if write.recurrence_rule is not None else "none"
                 )

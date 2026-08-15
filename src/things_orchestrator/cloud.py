@@ -29,7 +29,7 @@ from .library import (
     offset_from_remind,
     remind_from_offset,
 )
-from .recurrence import validate_interval_template
+from .recurrence import RecurrenceState
 
 ENDPOINT = "https://cloud.culturedcode.com"
 USER_AGENT = "ThingsMac/32209501"
@@ -478,7 +478,6 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.tag_uuids = [str(tag) for tag in payload["tg"]]
         if "rr" in payload:
             rule = payload.get("rr")
-            item.recurring_template = isinstance(rule, dict)
             if isinstance(rule, dict):
                 item.recurrence_rule = deepcopy(rule)
                 item.recurrence_role = "template"
@@ -658,12 +657,8 @@ class CloudLibrary(MemoryLibrary):
                         "Repeat changes need an exact repeating Task template"
                     )
                 try:
-                    validate_interval_template(
-                        kind=current_record.kind,
-                        role=current_record.recurrence_role,
-                        repeat_type=current_record.recurrence_type,
-                        rule=current_record.recurrence_rule,
-                        links=current_record.recurrence_links,
+                    current_record.recurrence.validate_interval_template(
+                        kind=current_record.kind
                     )
                 except ValueError as error:
                     raise CloudError(str(error)) from error
@@ -1323,12 +1318,13 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         area_uuid=payload.get("area_uuid"),
         heading_uuid=payload.get("heading_uuid"),
         tag_uuids=list(payload.get("tag_uuids") or []),
-        recurring_template=bool(payload.get("recurring_template")),
-        recurrence_role=payload.get("recurrence_role", "none"),
-        recurrence_type=payload.get("recurrence_type", "none"),
-        recurrence_template_uuid=payload.get("recurrence_template_uuid"),
-        recurrence_rule=raw_rule,
-        recurrence_links=list(raw_links),
+        recurrence=RecurrenceState(
+            role=payload.get("recurrence_role", "none"),
+            repeat_type=payload.get("recurrence_type", "none"),
+            template_uuid=payload.get("recurrence_template_uuid"),
+            rule=raw_rule,
+            links=tuple(raw_links),
+        ),
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),

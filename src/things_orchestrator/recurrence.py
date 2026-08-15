@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 JsonValue: TypeAlias = (
@@ -16,6 +17,39 @@ _UNITS: dict[int, RepeatUnit] = {
     16: "month",
     256: "week",
 }
+
+
+@dataclass(frozen=True)
+class RecurrenceState:
+    """One coherent, lossless recurrence value for a Things record."""
+
+    role: Literal["none", "template", "instance"] = "none"
+    repeat_type: Literal["none", "fixed", "after_completion", "unknown"] = "none"
+    template_uuid: str | None = None
+    rule: dict[str, JsonValue] | None = None
+    links: tuple[str, ...] = ()
+
+    @property
+    def unit(self) -> RepeatUnit | None:
+        return repeat_unit(self.rule)
+
+    @property
+    def interval(self) -> int | None:
+        return repeat_interval(self.rule)
+
+    def change_interval(self, interval: int, *, kind: str) -> RecurrenceState:
+        self.validate_interval_template(kind=kind)
+        return replace(self, rule=change_interval(self.rule, interval))
+
+    def validate_interval_template(self, *, kind: str) -> None:
+        if (
+            kind != "task"
+            or self.role != "template"
+            or self.repeat_type not in {"fixed", "after_completion"}
+            or self.rule is None
+            or self.links
+        ):
+            raise ValueError("Repeat changes need an exact repeating Task template")
 
 
 def repeat_unit(rule: dict[str, JsonValue] | None) -> RepeatUnit | None:
@@ -47,22 +81,3 @@ def change_interval(
     changed = deepcopy(rule)
     changed["fa"] = interval
     return changed
-
-
-def validate_interval_template(
-    *,
-    kind: str,
-    role: str,
-    repeat_type: str,
-    rule: dict[str, JsonValue] | None,
-    links: list[str],
-) -> None:
-    """Reject an inconsistent or unsupported interval-change target."""
-    if (
-        kind != "task"
-        or role != "template"
-        or repeat_type not in {"fixed", "after_completion"}
-        or rule is None
-        or links
-    ):
-        raise ValueError("Repeat changes need an exact repeating Task template")
