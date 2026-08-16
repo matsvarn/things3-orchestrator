@@ -106,6 +106,21 @@ class _DesiredItemChange:
     heading_uuid: str | None
     sort_index: int
     today_index: int
+    checklist: _ChecklistProjection
+
+
+@dataclass(frozen=True)
+class _ProjectedChecklistRow:
+    uuid: str
+    title: str
+    status: Status
+    sort_index: int
+
+
+@dataclass(frozen=True)
+class _ChecklistProjection:
+    rows: tuple[_ProjectedChecklistRow, ...]
+    removed_uuids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1101,7 +1116,6 @@ class ThingsWorkspace:
         self,
         item: Record,
         change: ChangeEntry,
-        local: dict[str, tuple[str, Kind | str]],
         context: _PreparationContext,
         desired: _DesiredItemChange | None = None,
     ) -> bool:
@@ -1181,15 +1195,15 @@ class ThingsWorkspace:
                     recurrence_rule=rule,
                 )
             )
-            for title, sort_index in self._future_checklist_rows(item, change):
+            for projected_row in desired.checklist.rows:
                 writes.append(
                     Write(
                         action="checklist",
                         uuid=new_uuid(),
-                        title=title,
+                        title=projected_row.title,
                         checklist_parent_uuid=template_uuid,
                         checklist_status="open",
-                        checklist_index=sort_index,
+                        checklist_index=projected_row.sort_index,
                     )
                 )
             writes.append(
@@ -1231,11 +1245,11 @@ class ThingsWorkspace:
                             recurrence_links=[],
                         )
                     )
-                for row in item.checklists:
+                for checklist_row in item.checklists:
                     writes.append(
                         Write(
                             action="checklist",
-                            uuid=row.uuid,
+                            uuid=checklist_row.uuid,
                             checklist_parent_uuid=item.uuid,
                             checklist_remove=True,
                         )
@@ -1351,15 +1365,37 @@ class ThingsWorkspace:
             change.remind_at,
             start_present="start" in change.model_fields_set,
         )
-        schedule_changes = (
-            "start" in change.model_fields_set or change.remind_at is not None
+        start_present = "start" in change.model_fields_set
+        remind_present = "remind_at" in change.model_fields_set
+        placement_clears_schedule = "into" in change.model_fields_set and (
+            home[2] or home[3]
         )
-        desired_start = start if schedule_changes else item.start
-        desired_someday = someday if schedule_changes else item.someday
-        desired_tonight = tonight if schedule_changes else item.tonight
-        desired_remind = (
-            remind if "remind_at" in change.model_fields_set else item.remind
-        )
+        if placement_clears_schedule:
+            desired_start = None
+            desired_someday = False
+            desired_tonight = False
+            desired_remind = None
+        elif start_present:
+            desired_start = start
+            desired_someday = someday
+            desired_tonight = tonight
+            desired_remind = (
+                remind
+                if remind_present
+                else item.remind
+                if start is not None and not someday
+                else None
+            )
+        elif change.remind_at is not None:
+            desired_start = start
+            desired_someday = someday
+            desired_tonight = tonight
+            desired_remind = remind
+        else:
+            desired_start = item.start
+            desired_someday = item.someday
+            desired_tonight = item.tonight
+            desired_remind = None if remind_present else item.remind
         desired_deadline = (
             date.fromisoformat(change.deadline)
             if change.deadline
@@ -1386,14 +1422,18 @@ class ThingsWorkspace:
                 tags = [uuid for uuid in tags if uuid != waiting]
                 tags.append(waiting)
             else:
-                existing_waiting = self._library.tag_uuid(
-                    self._library.waiting_tag()
-                )
+                existing_waiting = self._library.tag_uuid(self._library.waiting_tag())
                 if existing_waiting is not None:
                     tags = [uuid for uuid in tags if uuid != existing_waiting]
 
         heading_uuid = item.heading_uuid
-        clear_heading = False
+        clear_heading = (
+            "into" in change.model_fields_set
+            and item.heading_uuid is not None
+            and (home[1] != "project" or home[0] != item.parent_uuid)
+        )
+        if clear_heading:
+            heading_uuid = None
         if "heading_id" in change.model_fields_set:
             clear_heading = change.heading_id is None
             heading_uuid = None
@@ -1441,6 +1481,13 @@ class ThingsWorkspace:
             if "notes_markdown" in change.model_fields_set
             else item.notes
         )
+        template_home = home
+        if (
+            "into" not in change.model_fields_set
+            and home[3]
+            and (desired_start is not None or desired_someday or desired_tonight)
+        ):
+            template_home = (None, None, False, False)
         update_home = (
             home
             if "into" in change.model_fields_set
@@ -1466,7 +1513,7 @@ class ThingsWorkspace:
                 else None,
                 clear_deadline="deadline" in change.model_fields_set
                 and change.deadline is None,
-                remind=remind,
+                remind=desired_remind if start_present else remind,
                 clear_remind="remind_at" in change.model_fields_set
                 and change.remind_at is None,
                 tonight=tonight,
@@ -1482,7 +1529,7 @@ class ThingsWorkspace:
                 else None,
                 clear_heading=clear_heading,
             ),
-            home=home,
+            home=template_home,
             title=change.title or item.title,
             notes=notes,
             start=desired_start,
@@ -1494,31 +1541,51 @@ class ThingsWorkspace:
             heading_uuid=heading_uuid,
             sort_index=desired_sort_index,
             today_index=desired_today_index,
+            checklist=self._project_checklist(item, change, local),
         )
 
-    def _future_checklist_rows(
-        self, item: Record, change: ChangeEntry
-    ) -> list[tuple[str, int]]:
-        """Return the future template checklist after the current-copy edits."""
+    def _project_checklist(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        local: dict[str, tuple[str, Kind | str]],
+    ) -> _ChecklistProjection:
+        """Project the final current checklist once for both repeat copies."""
         if not (
             change.checklist_add
             or change.checklist_change
             or change.checklist_remove
             or change.checklist_order is not None
         ):
-            return [
-                (row.title, row.sort_index)
-                for row in sorted(
-                    item.checklists, key=lambda row: (row.sort_index, row.uuid)
-                )
-            ]
+            return _ChecklistProjection(
+                rows=tuple(
+                    _ProjectedChecklistRow(
+                        uuid=row.uuid,
+                        title=row.title,
+                        status=row.status,
+                        sort_index=row.sort_index,
+                    )
+                    for row in sorted(
+                        item.checklists, key=lambda row: (row.sort_index, row.uuid)
+                    )
+                ),
+                removed_uuids=(),
+            )
+        rows = {
+            f"check:{row.uuid}": _ProjectedChecklistRow(
+                uuid=row.uuid,
+                title=row.title,
+                status=row.status,
+                sort_index=row.sort_index,
+            )
+            for row in item.checklists
+        }
         order = [
             f"check:{row.uuid}"
             for row in sorted(
                 item.checklists, key=lambda row: (row.sort_index, row.uuid)
             )
         ]
-        titles = {f"check:{row.uuid}": row.title for row in item.checklists}
 
         def place(reference: str, after: str | None, *, present: bool) -> None:
             if not present:
@@ -1530,14 +1597,20 @@ class ThingsWorkspace:
             if after not in order:
                 raise _Abort(
                     self._needs_input(
-                        f"Checklist row {after} is not available for future order."
+                        f"Checklist row {after} is not available for final order."
                     )
                 )
             order.insert(order.index(after) + 1, reference)
 
         for index, addition in enumerate(change.checklist_add):
-            reference = addition.key or f"$future_checklist_{index}"
-            titles[reference] = addition.title
+            reference = addition.key or f"$checklist_{index}_{new_uuid()}"
+            uuid = local[addition.key][0] if addition.key else new_uuid()
+            rows[reference] = _ProjectedChecklistRow(
+                uuid=uuid,
+                title=addition.title,
+                status="open",
+                sort_index=0,
+            )
             order.append(reference)
             place(
                 reference,
@@ -1546,28 +1619,38 @@ class ThingsWorkspace:
             )
         for row_change in change.checklist_change:
             reference = row_change.id
-            if reference not in titles:
+            row = rows.get(reference)
+            if row is None:
                 raise _Abort(
                     self._needs_input(
                         f"Checklist row {reference} is not on {item.title}."
                     )
                 )
-            if row_change.title is not None:
-                titles[reference] = row_change.title
+            rows[reference] = replace(
+                row,
+                title=row_change.title or row.title,
+                status=(
+                    cast(Status, _internal_status(row_change.status))
+                    if row_change.status
+                    else row.status
+                ),
+            )
             place(
                 reference,
                 row_change.after,
                 present="after" in row_change.model_fields_set,
             )
+        removed_uuids: list[str] = []
         for reference in change.checklist_remove:
-            if reference not in titles:
+            row = rows.pop(reference, None)
+            if row is None:
                 raise _Abort(
                     self._needs_input(
                         f"Checklist row {reference} is not on {item.title}."
                     )
                 )
             order.remove(reference)
-            del titles[reference]
+            removed_uuids.append(row.uuid)
         if change.checklist_order is not None:
             if set(change.checklist_order) != set(order):
                 raise _Abort(
@@ -1576,9 +1659,13 @@ class ThingsWorkspace:
                     )
                 )
             order = list(change.checklist_order)
-        return [
-            (titles[reference], index * 1024) for index, reference in enumerate(order)
-        ]
+        return _ChecklistProjection(
+            rows=tuple(
+                replace(rows[reference], sort_index=index * 1024)
+                for index, reference in enumerate(order)
+            ),
+            removed_uuids=tuple(removed_uuids),
+        )
 
     def _prepare_lifecycle_or_heading_change(
         self, item: Record, change: ChangeEntry, context: _PreparationContext
@@ -1726,113 +1813,39 @@ class ThingsWorkspace:
     def _prepare_checklist_change(
         self,
         item: Record,
-        change: ChangeEntry,
-        local: dict[str, tuple[str, Kind | str]],
+        projection: _ChecklistProjection,
         context: _PreparationContext,
     ) -> None:
-        """Plan checklist additions, edits, removals, and ordering."""
-        writes = context.writes
-        checklist_ids: dict[str, str] = {}
-        for addition in change.checklist_add:
-            uuid = local[addition.key][0] if addition.key else new_uuid()
-            checklist_ids[addition.key or f"check:{uuid}"] = uuid
-            writes.append(
+        """Move the current checklist to its already validated final projection."""
+        existing = {row.uuid: row for row in item.checklists}
+        for row in projection.rows:
+            previous = existing.get(row.uuid)
+            if previous is not None and (
+                previous.title,
+                previous.status,
+                previous.sort_index,
+            ) == (row.title, row.status, row.sort_index):
+                continue
+            context.writes.append(
                 Write(
                     action="checklist",
-                    uuid=uuid,
-                    title=addition.title,
-                    checklist_parent_uuid=item.uuid,
-                    checklist_status="open",
-                    checklist_index=self._check_after_index(
-                        item,
-                        addition.after,
-                        local,
-                        writes,
-                        present="after" in addition.model_fields_set,
-                    ),
-                )
-            )
-        known_rows = {row.uuid: row for row in item.checklists}
-        for row_change in change.checklist_change:
-            uuid = row_change.id.removeprefix("check:")
-            if uuid not in known_rows:
-                raise _Abort(
-                    self._needs_input(
-                        f"Checklist row {row_change.id} is not on {item.title}."
-                    )
-                )
-            writes.append(
-                Write(
-                    action="checklist",
-                    uuid=uuid,
-                    title=row_change.title,
+                    uuid=row.uuid,
+                    title=row.title
+                    if previous is None or row.title != previous.title
+                    else None,
                     checklist_parent_uuid=item.uuid,
                     checklist_status=(
-                        _internal_status(row_change.status)
-                        if row_change.status
+                        row.status
+                        if previous is None or row.status != previous.status
                         else None
                     ),
-                    checklist_index=self._check_after_index(
-                        item,
-                        row_change.after,
-                        local,
-                        writes,
-                        present="after" in row_change.model_fields_set,
-                        moving_uuid=uuid,
-                    ),
+                    checklist_index=row.sort_index,
                 )
             )
-        for row_id in change.checklist_remove:
-            uuid = row_id.removeprefix("check:")
-            if uuid not in known_rows:
-                raise _Abort(
-                    self._needs_input(f"Checklist row {row_id} is not on {item.title}.")
-                )
-            writes.append(Write(action="checklist", uuid=uuid, checklist_remove=True))
-        if change.checklist_order is not None:
-            remaining = {f"check:{row.uuid}" for row in item.checklists} - set(
-                change.checklist_remove
+        for uuid in projection.removed_uuids:
+            context.writes.append(
+                Write(action="checklist", uuid=uuid, checklist_remove=True)
             )
-            added = {
-                key if key.startswith("$") else f"check:{uuid}"
-                for key, uuid in checklist_ids.items()
-            }
-            if set(change.checklist_order) != remaining | added:
-                raise _Abort(
-                    self._rejected(
-                        "checklist_order must name every remaining row once."
-                    )
-                )
-            for order, reference in enumerate(change.checklist_order):
-                uuid = (
-                    local[reference][0]
-                    if reference.startswith("$")
-                    else reference.removeprefix("check:")
-                )
-                if uuid not in known_rows:
-                    planned_index = next(
-                        (
-                            index
-                            for index, write in enumerate(writes)
-                            if write.action == "checklist"
-                            and write.uuid == uuid
-                            and not write.checklist_remove
-                        ),
-                        None,
-                    )
-                    if planned_index is not None:
-                        writes[planned_index] = replace(
-                            writes[planned_index], checklist_index=order * 1024
-                        )
-                        continue
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=uuid,
-                        checklist_parent_uuid=item.uuid,
-                        checklist_index=order * 1024,
-                    )
-                )
 
     def _prepare_changes(self, call: CommitCall, context: _PreparationContext) -> None:
         """Plan existing-item changes as one atomic batch."""
@@ -1878,7 +1891,7 @@ class ThingsWorkspace:
                 if starts_repeating
                 else None
             )
-            if self._prepare_recurrence_change(item, change, local, context, desired):
+            if self._prepare_recurrence_change(item, change, context, desired):
                 continue
             if self._prepare_lifecycle_or_heading_change(item, change, context):
                 continue
@@ -1903,7 +1916,7 @@ class ThingsWorkspace:
             ):
                 writes.append(desired.update)
 
-            self._prepare_checklist_change(item, change, local, context)
+            self._prepare_checklist_change(item, desired.checklist, context)
 
             if change.move_contents_to is not None:
                 if item.kind != "area":

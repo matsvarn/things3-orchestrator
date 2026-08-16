@@ -10,7 +10,8 @@ import argparse
 import json
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Callable
 
@@ -439,9 +440,51 @@ def run() -> dict[str, bool]:
             existing_repeat = own("Task6")
             existing_repeat_check = own("ChecklistItem3")
             existing_repeat_remove = own("ChecklistItem3")
+            existing_repeat_project = own("Task6")
+            existing_repeat_heading = own("Task6")
+            existing_repeat_list_anchor = own("Task6")
+            existing_repeat_today_anchor = own("Task6")
             existing_repeat_title = f"{prefix} existing recurring"
+            local_now = datetime.now().astimezone()
+            repeat_today = local_now.date()
+            repeat_deadline = repeat_today + timedelta(days=3)
+            repeat_reminder = datetime.combine(
+                repeat_today, dt_time(9, 30), tzinfo=local_now.tzinfo
+            )
             library.apply(
                 [
+                    Write(
+                        action="create",
+                        uuid=existing_repeat_project,
+                        kind="project",
+                        title=f"{prefix} repeat destination",
+                        anytime=True,
+                    ),
+                    Write(
+                        action="create_heading",
+                        uuid=existing_repeat_heading,
+                        title=f"{prefix} repeat heading",
+                        into_uuid=existing_repeat_project,
+                        into_kind="project",
+                        anytime=True,
+                    ),
+                    Write(
+                        action="create",
+                        uuid=existing_repeat_list_anchor,
+                        title=f"{prefix} repeat list anchor",
+                        into_uuid=existing_repeat_project,
+                        into_kind="project",
+                        anytime=True,
+                        sort_index=0,
+                    ),
+                    Write(
+                        action="create",
+                        uuid=existing_repeat_today_anchor,
+                        title=f"{prefix} repeat today anchor",
+                        start=repeat_today,
+                        today_index=0,
+                        owner_today=repeat_today,
+                    ),
                     Write(
                         action="create",
                         uuid=existing_repeat,
@@ -481,6 +524,13 @@ def run() -> dict[str, bool]:
                                     "interval": 2,
                                     "weekdays": ["monday", "friday"],
                                 },
+                                "into": f"project:{existing_repeat_project}",
+                                "heading_id": f"heading:{existing_repeat_heading}",
+                                "start": "today",
+                                "deadline": repeat_deadline.isoformat(),
+                                "remind_at": repeat_reminder.isoformat(),
+                                "after": f"task:{existing_repeat_list_anchor}",
+                                "today_after": f"task:{existing_repeat_today_anchor}",
                                 "checklist_add": [
                                     {"key": "$new_step", "title": "Added step"}
                                 ],
@@ -524,6 +574,21 @@ def run() -> dict[str, bool]:
                 }
                 and library.records[existing_repeat].notes == "Preserve this note"
                 and existing_template_record.notes == "Preserve this note"
+                and all(
+                    record.parent_uuid == existing_repeat_project
+                    and record.heading_uuid == existing_repeat_heading
+                    and record.start == repeat_today
+                    and record.deadline == repeat_deadline
+                    and record.remind == "09:30"
+                    and record.sort_index
+                    > library.records[existing_repeat_list_anchor].sort_index
+                    and record.today_index
+                    > library.records[existing_repeat_today_anchor].today_index
+                    for record in (
+                        library.records[existing_repeat],
+                        existing_template_record,
+                    )
+                )
                 and [row.title for row in current_rows]
                 == ["Added step", "Preserved and completed"]
                 and [row.status for row in current_rows] == ["open", "done"]
@@ -600,9 +665,17 @@ def run() -> dict[str, bool]:
                         for row in current_rows
                     ],
                     Write(action="permanent_delete", uuid=existing_repeat),
+                    Write(action="permanent_delete", uuid=existing_repeat_list_anchor),
+                    Write(action="permanent_delete", uuid=existing_repeat_today_anchor),
+                    Write(action="permanent_delete", uuid=existing_repeat_heading),
+                    Write(action="permanent_delete", uuid=existing_repeat_project),
                 ]
             )
             owned.pop(existing_repeat)
+            owned.pop(existing_repeat_list_anchor)
+            owned.pop(existing_repeat_today_anchor)
+            owned.pop(existing_repeat_heading)
+            owned.pop(existing_repeat_project)
             for row in current_rows:
                 owned.pop(row.uuid)
 

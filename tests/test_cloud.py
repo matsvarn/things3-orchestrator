@@ -16,6 +16,8 @@ from things_orchestrator.cloud import (
     HistoryPage,
     fold_events,
 )
+from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
+from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import (
     ChecklistLine,
     MemoryLibrary,
@@ -26,6 +28,7 @@ from things_orchestrator.library import (
     new_uuid,
 )
 from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.workspace import ThingsWorkspace
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
@@ -1786,6 +1789,151 @@ def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
     assert client.committed[0].payload["lt"] is True
     assert library.records["existing"].recurrence.role == "instance"
     assert library.records["existing"].recurrence.template_uuid == "template"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_inbox", "expected_someday"),
+    [
+        ({"into": "anytime"}, False, False),
+        ({"into": "inbox"}, True, False),
+        ({"start": "someday"}, False, True),
+        ({"start": None}, False, False),
+    ],
+)
+def test_cloud_repeat_conversion_reads_back_final_schedule_semantics(
+    tmp_path: Path,
+    fields: dict[str, object],
+    expected_inbox: bool,
+    expected_someday: bool,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    task = Record(
+        uuid="cloud-scheduled-repeat",
+        kind="task",
+        title="Routine",
+        start=date(2026, 8, 15),
+        remind="09:30",
+        entity="Task6",
+    )
+    library.records[task.uuid] = task
+    module = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+    )
+    current = module.read(ReadCall(id=task.id)).items[0]
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"cloud-repeat-schedule-{next(iter(fields))}-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "repeat": {"unit": "week"},
+                        **fields,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    template = next(
+        item for item in library.records.values() if item.recurrence.role == "template"
+    )
+    for record in (task, template):
+        assert record.start is None
+        assert record.remind is None
+        assert record.inbox is expected_inbox
+        assert record.someday is expected_someday
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_cloud_repeat_conversion_projects_heading_and_chained_checklist_order(
+    tmp_path: Path, replacement: bool
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    old_project = Record(
+        uuid="cloud-old-project", kind="project", title="Old", entity="Task6"
+    )
+    new_project = Record(
+        uuid="cloud-new-project", kind="project", title="New", entity="Task6"
+    )
+    old_heading = Record(
+        uuid="cloud-old-heading",
+        kind="task",
+        title="Old section",
+        parent_uuid=old_project.uuid,
+        heading=True,
+        entity="Task6",
+    )
+    new_heading = Record(
+        uuid="cloud-new-heading",
+        kind="task",
+        title="New section",
+        parent_uuid=new_project.uuid,
+        heading=True,
+        entity="Task6",
+    )
+    task = Record(
+        uuid="cloud-heading-repeat",
+        kind="task",
+        title="Routine",
+        parent_uuid=old_project.uuid,
+        heading_uuid=old_heading.uuid,
+        entity="Task6",
+        checklists=[
+            ChecklistLine("cloud-after-a", "A", sort_index=0),
+            ChecklistLine("cloud-after-b", "B", sort_index=1024),
+            ChecklistLine("cloud-after-c", "C", sort_index=2048),
+        ],
+    )
+    library.records.update(
+        {
+            item.uuid: item
+            for item in [old_project, new_project, old_heading, new_heading, task]
+        }
+    )
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    current = module.read(ReadCall(id=task.id)).items[0]
+    change: dict[str, object] = {
+        "id": task.id,
+        "if_revision": current.revision,
+        "repeat": {"unit": "week"},
+        "into": new_project.id,
+        "checklist_change": [
+            {"id": "check:cloud-after-b", "after": "check:cloud-after-c"},
+            {"id": "check:cloud-after-a", "after": "check:cloud-after-b"},
+        ],
+    }
+    if replacement:
+        change["heading_id"] = new_heading.id
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"cloud-repeat-heading-{replacement}-001",
+                "change": [change],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item for item in library.records.values() if item.recurrence.role == "template"
+    )
+    expected_heading = new_heading.uuid if replacement else None
+    for record in (task, template):
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == expected_heading
+        assert [row.title for row in record.checklists] == ["C", "B", "A"]
 
 
 def test_memory_lifecycle_and_tag_admin_actions_are_reversible_until_delete() -> None:

@@ -2513,6 +2513,161 @@ def test_repeat_conversion_projects_one_desired_state_to_copy_and_template() -> 
     assert [row.status for row in template.checklists] == ["open", "open", "open"]
 
 
+@pytest.mark.parametrize(
+    ("fields", "expected_inbox", "expected_someday"),
+    [
+        ({"into": "anytime"}, False, False),
+        ({"into": "inbox"}, True, False),
+        ({"start": "someday"}, False, True),
+        ({"start": None}, False, False),
+    ],
+)
+def test_repeat_conversion_projects_schedule_clearing_semantics(
+    fields: dict[str, object], expected_inbox: bool, expected_someday: bool
+) -> None:
+    task = Record(
+        uuid="scheduled-repeat",
+        kind="task",
+        title="Scheduled routine",
+        start=NOW.date(),
+        remind="09:30",
+    )
+    module = workspace([task])
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"repeat-schedule-{next(iter(fields))}-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "repeat": {"unit": "week"},
+                        **fields,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    for record in (task, template):
+        assert record.start is None
+        assert record.remind is None
+        assert record.inbox is expected_inbox
+        assert record.someday is expected_someday
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_repeat_conversion_resolves_heading_when_moving_projects(
+    replacement: bool,
+) -> None:
+    old_project = Record(uuid="heading-old-project", kind="project", title="Old")
+    new_project = Record(uuid="heading-new-project", kind="project", title="New")
+    old_heading = Record(
+        uuid="heading-old",
+        kind="task",
+        title="Old section",
+        parent_uuid=old_project.uuid,
+        heading=True,
+    )
+    new_heading = Record(
+        uuid="heading-new",
+        kind="task",
+        title="New section",
+        parent_uuid=new_project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="heading-move-task",
+        kind="task",
+        title="Move routine",
+        parent_uuid=old_project.uuid,
+        heading_uuid=old_heading.uuid,
+    )
+    module = workspace([old_project, new_project, old_heading, new_heading, task])
+    change: dict[str, object] = {
+        "id": task.id,
+        "if_revision": detail(module, task.id).revision,
+        "repeat": {"unit": "week"},
+        "into": new_project.id,
+    }
+    if replacement:
+        change["heading_id"] = new_heading.id
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"repeat-heading-move-{replacement}-001",
+                "change": [change],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    expected_heading = new_heading.uuid if replacement else None
+    for record in (task, template):
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == expected_heading
+
+
+def test_repeat_conversion_chains_checklist_after_edits_for_both_copies() -> None:
+    task = Record(
+        uuid="repeat-check-after",
+        kind="task",
+        title="Routine",
+        checklists=[
+            ChecklistLine("after-a", "A", sort_index=0),
+            ChecklistLine("after-b", "B", sort_index=1024),
+            ChecklistLine("after-c", "C", sort_index=2048),
+        ],
+    )
+    module = workspace([task])
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-check-after-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "repeat": {"unit": "week"},
+                        "checklist_change": [
+                            {"id": "check:after-b", "after": "check:after-c"},
+                            {"id": "check:after-a", "after": "check:after-b"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    assert [row.title for row in task.checklists] == ["C", "B", "A"]
+    assert [row.uuid for row in task.checklists] == ["after-c", "after-b", "after-a"]
+    assert [row.title for row in template.checklists] == ["C", "B", "A"]
+
+
 def test_template_and_current_copy_metadata_change_in_one_approved_batch() -> None:
     template = Record(
         uuid="future-template",
