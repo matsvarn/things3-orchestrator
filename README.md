@@ -84,6 +84,16 @@ does not leave detached Tasks. Irreversible changes need confirmation.
 It reads structured rich notes without overwriting them. An explicit approved
 operation can replace the complete rich note with Markdown.
 
+The model uses a short path for each operation. A clear capture needs one
+commit. An exact edit needs one change-focused read and one commit. A repeat
+change first uses one recurrence inspection read to verify the template and
+generated copy, then uses the needed change context. A Project restructure
+needs one organize-focused read and one commit.
+The reads return opaque context and short refs, so the model does not copy
+revisions. A restructure uses an editable desired-state draft. Omitted work
+stays in place. Structured recovery gives one safe next step when context is
+old or incomplete. Risky work still needs approval.
+
 See the executable [capability proof](docs/capability-proof.md) for each memory,
 Cloud, live, approval, and read-back gate.
 

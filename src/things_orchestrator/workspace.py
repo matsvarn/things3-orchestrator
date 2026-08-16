@@ -3,24 +3,49 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields, replace
+import re
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import Callable, cast
+from typing import Callable, Literal, cast
 
 from .cloud import CloudError
+from .context import (
+    CompletenessFact,
+    ContextConflict,
+    ContextCorrupt,
+    ContextExpired,
+    ContextNotFound,
+    ContextRef,
+    ContextStore,
+    MemoryContextStore,
+    ReadContext,
+    ReadIncludeSelector,
+    ReadSelector,
+    UnknownReference,
+)
+from .contextual import (
+    ContextualCommitCompiler,
+    ContextualCompileError,
+    ContextualInputError,
+)
 from .interface import (
     ApproveCall,
     ChangeEntry,
     ChecklistFact,
     CommitCall,
+    ContextFact,
     ItemFact,
+    LayoutFact,
+    LayoutSectionFact,
     PlanFact,
     ReadCall,
+    RecoveryFact,
     RecurrenceFact,
     RecurrenceKind,
     Result,
+    ResultStatus,
     ReviewSection,
     TagFact,
     Weekday,
@@ -42,6 +67,8 @@ from .library import (
 from .recurrence import RepeatMode, new_rule
 
 _READ_LIMIT = 40
+_CONTEXT_LIMIT = 120
+_CHANGE_FIND_LIMIT = 40
 _NOTES_LIMIT = 50_000
 _TITLE_LIMIT = 1000
 _ORDER_MIN = -(2**63)
@@ -57,6 +84,24 @@ _WEEKDAY_CODES = {
     "saturday": 6,
 }
 _WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
+_SEARCH_ARTICLES = frozenset({"a", "an", "the"})
+_SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+@dataclass(frozen=True)
+class _NormalizedSearchText:
+    """Keep the old substring search and provide exact token fallback."""
+
+    folded: str
+    tokens: tuple[str, ...]
+
+
+def _normalize_search_text(text: str) -> _NormalizedSearchText:
+    folded = text.casefold()
+    return _NormalizedSearchText(
+        folded=folded,
+        tokens=tuple(_SEARCH_TOKEN_PATTERN.findall(folded)),
+    )
 
 
 @dataclass(frozen=True)
@@ -77,6 +122,9 @@ class _PreparationContext:
     preconditions: dict[str, str]
     summary: list[str]
     warnings: list[str]
+    project_trash_sources: list[str] = field(default_factory=list)
+    project_heading_moves: dict[str, str] = field(default_factory=dict)
+    allow_project_heading_moves: bool = False
     risky: bool = False
 
     def result(self) -> _Prepared:
@@ -124,6 +172,14 @@ class _ChecklistProjection:
 
 
 @dataclass(frozen=True)
+class _HeadingOrderRow:
+    uuid: str
+    sort_index: int
+    record: Record | None = None
+    create_index: int | None = None
+
+
+@dataclass(frozen=True)
 class _ItemCursor:
     ids: list[str]
     offset: int
@@ -166,10 +222,18 @@ class ThingsWorkspace:
         *,
         journal: Journal | None = None,
         clock: Callable[[], datetime] | None = None,
+        context_store: ContextStore | None = None,
+        account_id: str | None = None,
     ) -> None:
         self._library = library
         self._journal = journal or MemoryJournal()
         self._clock = clock or (lambda: datetime.now().astimezone())
+        self._context_store = context_store or MemoryContextStore(
+            clock=self._clock,
+            token_factory=lambda: token_urlsafe(18),
+        )
+        self._account_id = account_id or f"workspace:{token_urlsafe(18)}"
+        self._contextual_compiler = ContextualCommitCompiler()
         self._cursors: dict[str, _ItemCursor] = {}
         self._tag_cursors: dict[str, _TagCursor] = {}
         self._detail_cursors: dict[str, _DetailCursor] = {}
@@ -180,6 +244,13 @@ class ThingsWorkspace:
             return failed
         if call.cursor is not None:
             return self._continue(call.cursor, call.limit)
+
+        if call.purpose == "change":
+            return self._context_change(call)
+        if call.purpose == "organize":
+            return self._context_organize(call)
+        if call.purpose == "recurrence":
+            return self._recurrence_read(call)
 
         view = call.view or "today"
         if call.id is not None:
@@ -198,7 +269,13 @@ class ThingsWorkspace:
         if call.find is not None:
             within = self._exact_item(call.within) if call.within else None
             if call.within and within is None:
-                return self._needs_input("I could not find that exact search scope.")
+                return self._context_recovery(
+                    code="context_required",
+                    instruction="I could not find that exact search scope. Read it again.",
+                    retry="read",
+                    read=self._selector_arguments(call),
+                    status="needs_input",
+                )
             if within is not None and within.kind not in {"area", "project"}:
                 return self._needs_input("Search within an exact Area or Project.")
             matches = self._search(call.find, within)
@@ -231,6 +308,578 @@ class ThingsWorkspace:
             public_scope=(self._area_scope_revision() if view == "system" else None),
         )
 
+    def _context_change(self, call: ReadCall) -> Result:
+        if call.id is not None:
+            target = self._exact_item(call.id)
+            if target is None:
+                return self._needs_input(
+                    "I could not find that exact item. Read or search again."
+                )
+        else:
+            assert call.find is not None
+            within = self._exact_item(call.within) if call.within else None
+            if call.within and within is None:
+                return self._needs_input(
+                    "I could not find that exact search scope. Read the Project or Area, then search again."
+                )
+            if within is not None and within.kind not in {"area", "project"}:
+                return self._needs_input("Search within an exact Area or Project.")
+            matches = self._search(call.find, within)
+            if len(matches) > _CHANGE_FIND_LIMIT:
+                return self._needs_input(
+                    f"That change search matches more than {_CHANGE_FIND_LIMIT} active items. Use a narrower find or exact id."
+                )
+            if not matches:
+                return self._needs_input(
+                    "That change search found no active item. Use a narrower find or exact id."
+                )
+            if len(matches) > 1:
+                return Result(
+                    next="ask",
+                    status="needs_input",
+                    instruction=(
+                        f"That change search matches {len(matches)} active items. "
+                        "Choose one item, then read it with purpose=change and its exact id."
+                    ),
+                    items=[
+                        self._fact(item, full=False, include_revision=False)
+                        for item in matches
+                    ],
+                )
+            target = matches[0]
+        if not self._context_detail_is_complete(target):
+            return self._context_recovery(
+                code="context_incomplete",
+                instruction=(
+                    "That item is too large for one safe change context. "
+                    "Use the exact paged read and a revisioned change."
+                ),
+                retry="rebuild",
+                read=self._selector_arguments(call),
+                status="unsupported",
+            )
+        included = self._resolve_change_includes(call)
+        if isinstance(included, Result):
+            return included
+        placement_ids: set[str] = set()
+        if target.kind == "area":
+            records = [
+                target,
+                *[item for item in self._library.system() if item.id != target.id],
+            ]
+            for included_record in included:
+                for dependency in self._include_dependencies(included_record):
+                    if dependency.uuid not in {item.uuid for item in records}:
+                        records.append(dependency)
+        else:
+            # A Task or heading change can move across Projects and into a
+            # destination heading. Include the active placement registry in
+            # the same context, so the model can select both refs in one
+            # read. Keep the target and its direct dependencies first. This
+            # preserves the full target detail and the existing change seam.
+            records = self._change_dependencies(target)
+            for included_record in included:
+                for dependency in self._include_dependencies(included_record):
+                    if dependency.uuid not in {item.uuid for item in records}:
+                        records.append(dependency)
+            if target.kind == "task":
+                placement = self._active_placement_registry()
+                placement_ids = {item.uuid for item in placement}
+                seen = {item.uuid for item in records}
+                records.extend(item for item in placement if item.uuid not in seen)
+        if len(records) > _CONTEXT_LIMIT:
+            return self._oversized_context(call, len(records))
+        refs, by_id = self._context_refs(records)
+        context = self._create_context(
+            call,
+            refs,
+            scope="system" if target.kind == "area" else f"change:{target.id}",
+        )
+        facts = [
+            self._fact(
+                record,
+                full=record.uuid == target.uuid,
+                include_revision=(
+                    record.uuid in placement_ids
+                    or record.uuid in {item.uuid for item in included}
+                ),
+            ).model_copy(update={"ref": by_id[record.id]})
+            for record in records
+        ]
+        return Result(
+            next="done",
+            status="ok",
+            instruction=(
+                "Use context_id and short refs for one coherent change. "
+                "Omitted item fields remain unchanged."
+            ),
+            items=facts,
+            context=self._public_context(context),
+            scope_revision=(
+                self._area_scope_revision()
+                if target.kind == "area"
+                else self._detail_revision(target)
+            ),
+        )
+
+    def _active_placement_registry(self) -> list[Record]:
+        """Return active Areas, Projects, and headings for contextual moves."""
+
+        def active(item: Record) -> bool:
+            if item.trashed or item.status != "open":
+                return False
+            if item.recurrence.role == "template":
+                return False
+            if item.kind in {"area", "project"}:
+                return not item.heading
+            return item.kind == "task" and item.heading and item.parent_uuid is not None
+
+        kind_order = {"area": 0, "project": 1, "heading": 2}
+        return sorted(
+            (item for item in self._library.records.values() if active(item)),
+            key=lambda item: (
+                kind_order[item.public_kind],
+                item.sort_index,
+                item.title.casefold(),
+                item.uuid,
+            ),
+        )
+
+    def _resolve_change_includes(self, call: ReadCall) -> list[Record] | Result:
+        """Resolve each bounded include without scanning a task registry."""
+        resolved: list[Record] = []
+        for include in call.include:
+            within = self._exact_item(include.within) if include.within else None
+            if include.within and (
+                within is None
+                or within.kind not in {"area", "project"}
+                or not self._is_searchable(within)
+            ):
+                return self._needs_input(
+                    "An include scope must identify an active Area or Project."
+                )
+            if include.id is not None:
+                exact = self._exact_item(include.id)
+                matches = [exact] if exact is not None and self._is_searchable(exact) else []
+            else:
+                assert include.find is not None
+                matches = self._search(include.find, within)
+            if len(matches) != 1:
+                candidates = [
+                    self._fact(item, full=False, include_revision=False)
+                    for item in matches[:_CHANGE_FIND_LIMIT]
+                ]
+                if not matches:
+                    instruction = (
+                        "That include found no active item. Use an exact id or a narrower find."
+                    )
+                else:
+                    instruction = (
+                        f"That include matches {len(matches)} active items. "
+                        "Choose one item or narrow the find."
+                    )
+                return Result(
+                    next="ask",
+                    status="needs_input",
+                    instruction=instruction,
+                    items=candidates,
+                )
+            assert matches[0] is not None
+            record = matches[0]
+            if all(existing.uuid != record.uuid for existing in resolved):
+                resolved.append(record)
+        return resolved
+
+    def _include_dependencies(self, record: Record) -> list[Record]:
+        """Return one included item and only its direct placement facts."""
+        dependencies: list[Record] = []
+
+        def add(item: Record | None) -> None:
+            if item is not None and all(saved.uuid != item.uuid for saved in dependencies):
+                dependencies.append(item)
+
+        add(record)
+        add(self._library.records.get(record.parent_uuid or ""))
+        add(self._library.records.get(record.area_uuid or ""))
+        add(self._library.records.get(record.heading_uuid or ""))
+        return dependencies
+
+    def _recurrence_read(self, call: ReadCall) -> Result:
+        """Read one Task and verify its repeat template/copy relationship."""
+        assert call.id is not None
+        target = self._exact_item(call.id)
+        if target is None or target.kind != "task" or target.heading:
+            return self._unsupported(
+                "Recurrence inspection needs one exact Task, not a Project or heading."
+            )
+        if not self._recurrence_relationship_is_valid(target):
+            return self._unsupported(
+                "Things returned an inconsistent repeat template and generated-copy relationship."
+            )
+        relationship = (
+            "No existing repeat relationship is present."
+            if target.recurrence.role == "none"
+            else "The repeat template and generated copy relationship is verified."
+        )
+        return Result(
+            next="done",
+            status="ok",
+            instruction=(
+                f"{relationship} Use this recurrence fact before a repeat mutation."
+            ),
+            items=[self._fact(target, full=True)],
+            signals=["recurrence_relationship_verified"],
+        )
+
+    def _context_organize(self, call: ReadCall) -> Result:
+        project: Record | None = None
+        if call.id is not None:
+            project = self._exact_item(call.id)
+            if (
+                project is None
+                or project.kind != "project"
+                or not project.is_open()
+            ):
+                return self._context_recovery(
+                    code="context_required",
+                    instruction=(
+                        "That exact Project is not an active visible Project. "
+                        "Read an active Project again."
+                    ),
+                    retry="read",
+                    read=self._selector_arguments(call),
+                    status="needs_input",
+                )
+        elif call.find is not None:
+            within = self._exact_item(call.within) if call.within else None
+            if call.within and (within is None or not within.is_open()):
+                return self._context_recovery(
+                    code="context_required",
+                    instruction=(
+                        "That search scope is not an active visible Area or Project. "
+                        "Read it again."
+                    ),
+                    retry="read",
+                    read=self._selector_arguments(call),
+                    status="needs_input",
+                )
+            if within is not None and within.kind not in {"area", "project"}:
+                return self._needs_input("Search within an exact Area or Project.")
+            projects = [
+                item
+                for item in self._search(call.find, within)
+                if item.kind == "project" and not item.heading
+            ]
+            if not projects:
+                return self._context_recovery(
+                    code="context_required",
+                    instruction=(
+                        "I could not find one active Project. Use a narrower find "
+                        "or exact id."
+                    ),
+                    retry="rebuild",
+                    read=self._selector_arguments(call),
+                    status="needs_input",
+                )
+            if len(projects) > 1:
+                return Result(
+                    next="ask",
+                    status="needs_input",
+                    instruction=(
+                        f"That Project find matches {len(projects)} active Projects. "
+                        "Choose one Project, then read it with purpose=organize and its exact id."
+                    ),
+                    items=[self._fact(item, full=False, include_revision=False) for item in projects],
+                    recovery=RecoveryFact(
+                        code="context_incomplete",
+                        retry="rebuild",
+                    ),
+                )
+            project = projects[0]
+        elif call.view == "project":
+            assert call.within is not None
+            project = self._exact_item(call.within)
+            if (
+                project is None
+                or project.kind != "project"
+                or not project.is_open()
+            ):
+                return self._context_recovery(
+                    code="context_required",
+                    instruction=(
+                        "That exact Project is not an active visible Project. "
+                        "Read an active Project again."
+                    ),
+                    retry="read",
+                    read=self._selector_arguments(call),
+                    status="needs_input",
+                )
+        else:
+            raise AssertionError("organize selector must identify a Project")
+        assert project is not None
+        source_records = self._library.project(project.id)
+        scope = project.id
+
+        # An exact Project organize read is also the one-read seam for a safe
+        # Project merge. Include every active destination Project and its Area
+        # anchor in the same bounded context. The compiler can then emit one
+        # exact, revision-checked batch without a second registry read.
+        destination_projects = [
+            item
+            for item in self._library.records.values()
+            if item.kind == "project"
+            and item.uuid != project.uuid
+            and item.is_open()
+            and not item.parent_uuid
+        ]
+        destination_projects.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
+        authority_records: list[Record] = []
+        for destination in destination_projects:
+            authority_records.append(destination)
+            if destination.area_uuid:
+                area = self._library.records.get(destination.area_uuid)
+                if area is not None and area.kind == "area" and area.is_open():
+                    authority_records.append(area)
+
+        records: list[Record] = []
+        seen: set[str] = set()
+        for record in [*source_records, *authority_records]:
+            if record.uuid not in seen:
+                seen.add(record.uuid)
+                records.append(record)
+        if len(records) > _CONTEXT_LIMIT:
+            return self._oversized_context(call, len(records))
+        refs, by_id = self._context_refs(records)
+        context = self._create_context(call, refs, scope=scope)
+        facts = [
+            self._fact(
+                record,
+                full=False,
+                # Source layout facts stay compact. Destination Projects and
+                # their Areas expose the same authoritative revision that is
+                # already bound in the opaque context.
+                include_revision=record in authority_records,
+            ).model_copy(
+                update={"ref": by_id[record.id]}
+            )
+            for record in records
+        ]
+        layouts = (
+            [self._project_layout(project, source_records, by_id)]
+            if project is not None
+            else []
+        )
+        return Result(
+            next="done",
+            status="ok",
+            instruction=(
+                "Use one organize draft with this context. Listed work can move; "
+                "unlisted work stays unchanged."
+            ),
+            items=facts,
+            layouts=layouts,
+            context=self._public_context(context),
+            scope_revision=(
+                self._project_scope_revision(project.uuid)
+                if project is not None
+                else self._area_scope_revision()
+            ),
+        )
+
+    def _context_detail_is_complete(self, item: Record) -> bool:
+        checklist, direct, inherited = self._detail_lists(item)
+        linked = [
+            candidate
+            for candidate in self._library.records.values()
+            if item.uuid in candidate.recurrence.links
+            or candidate.recurrence.template_uuid == item.uuid
+        ]
+        return (
+            len(item.notes) <= _NOTES_LIMIT
+            and len(checklist) <= 100
+            and len(direct) <= 40
+            and len(inherited) <= 40
+            and len(linked) <= 40
+        )
+
+    def _change_dependencies(self, target: Record) -> list[Record]:
+        records: list[Record] = []
+
+        def add(item: Record | None) -> None:
+            if item is not None and all(saved.uuid != item.uuid for saved in records):
+                records.append(item)
+
+        def add_place(item: Record) -> None:
+            add(self._library.records.get(item.parent_uuid or ""))
+            add(self._library.records.get(item.area_uuid or ""))
+            add(self._library.records.get(item.heading_uuid or ""))
+
+        add(target)
+        add_place(target)
+        if target.kind == "project":
+            for area in self._library.areas():
+                add(area)
+        template = self._library.records.get(target.recurrence.template_uuid or "")
+        if template is not None:
+            add(template)
+            add_place(template)
+        if target.recurrence.role == "template":
+            for candidate in sorted(
+                self._library.records.values(), key=lambda item: item.id
+            ):
+                if (
+                    candidate.recurrence.template_uuid == target.uuid
+                    or target.uuid in candidate.recurrence.links
+                ):
+                    add(candidate)
+        return records
+
+    def _context_refs(
+        self, records: list[Record]
+    ) -> tuple[list[ContextRef], dict[str, str]]:
+        counters = {"task": 0, "project": 0, "area": 0, "heading": 0}
+        prefixes = {"task": "t", "project": "p", "area": "a", "heading": "h"}
+        refs: list[ContextRef] = []
+        by_id: dict[str, str] = {}
+        for record in records:
+            kind = record.public_kind
+            counters[kind] += 1
+            short = f"{prefixes[kind]}{counters[kind]}"
+            refs.append(
+                ContextRef(
+                    ref=short,
+                    exact_id=record.id,
+                    revision=self._revision(record),
+                )
+            )
+            by_id[record.id] = short
+        return refs, by_id
+
+    def _create_context(
+        self, call: ReadCall, refs: list[ContextRef], *, scope: str
+    ) -> ReadContext:
+        return self._context_store.create(
+            account_id=self._account_id,
+            selector=ReadSelector(
+                purpose=call.purpose,
+                view=call.view,
+                item_id=call.id,
+                find=call.find,
+                within=call.within,
+                from_date=call.from_date,
+                to_date=call.to_date,
+                limit=call.limit,
+                includes=tuple(
+                    ReadIncludeSelector(
+                        item_id=entry.id,
+                        find=entry.find,
+                        within=entry.within,
+                    )
+                    for entry in call.include
+                ),
+            ),
+            refs=refs,
+            completeness=(
+                CompletenessFact(
+                    scope=scope,
+                    seen=len(refs),
+                    total=len(refs),
+                    complete=True,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _public_context(context: ReadContext) -> ContextFact:
+        return ContextFact(
+            id=context.id,
+            purpose=context.selector.purpose,
+            expires_at=context.expires_at.isoformat(),
+            complete=context.complete,
+        )
+
+    @staticmethod
+    def _project_layout(
+        project: Record, records: list[Record], by_id: dict[str, str]
+    ) -> LayoutFact:
+        headings = sorted(
+            [record for record in records if record.heading],
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        tasks = [
+            record for record in records if record.kind == "task" and not record.heading
+        ]
+        sections = [
+            LayoutSectionFact(
+                heading_ref=by_id[heading.id],
+                task_refs=[
+                    by_id[task.id]
+                    for task in sorted(
+                        [task for task in tasks if task.heading_uuid == heading.uuid],
+                        key=lambda item: (item.sort_index, item.uuid),
+                    )
+                ],
+            )
+            for heading in headings
+        ]
+        unheaded = sorted(
+            [task for task in tasks if task.heading_uuid is None],
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        if unheaded:
+            sections.append(
+                LayoutSectionFact(task_refs=[by_id[task.id] for task in unheaded])
+            )
+        return LayoutFact(
+            project_ref=by_id[project.id], sections=sections, complete=True
+        )
+
+    def _oversized_context(self, call: ReadCall, count: int) -> Result:
+        read = self._selector_arguments(call)
+        if not call.include:
+            read.pop("purpose", None)
+        read["limit"] = _READ_LIMIT
+        return self._context_recovery(
+            code="context_incomplete",
+            instruction=(
+                f"This scope has {count} required items. A safe context can contain "
+                f"at most {_CONTEXT_LIMIT}. Use the suggested paged review, then "
+                "narrow the requested structure."
+            ),
+            retry="rebuild",
+            read=read,
+            status="needs_input",
+        )
+
+    @staticmethod
+    def _selector_arguments(call: ReadCall) -> dict[str, object]:
+        values: dict[str, object] = {"purpose": call.purpose}
+        selectors = {
+            "view": call.view,
+            "id": call.id,
+            "find": call.find,
+            "within": call.within,
+            "from": call.from_date,
+            "to": call.to_date,
+        }
+        values.update({key: value for key, value in selectors.items() if value})
+        if call.limit != 20:
+            values["limit"] = call.limit
+        if call.include:
+            values["include"] = [
+                {
+                    key: value
+                    for key, value in {
+                        "id": entry.id,
+                        "find": entry.find,
+                        "within": entry.within,
+                    }.items()
+                    if value is not None
+                }
+                for entry in call.include
+            ]
+        return values
+
     def commit(self, call: CommitCall) -> Result:
         fingerprint = _fingerprint(call.model_dump(mode="json", by_alias=True))
         stored = self._journal.get(call.intent_id)
@@ -244,8 +893,18 @@ class ThingsWorkspace:
         failed = self._refresh(force=True)
         if failed is not None:
             return failed
+        prepared_call = call
+        contextual_commit = False
+        if call.context_id is not None:
+            contextual = self._compile_contextual(call)
+            if isinstance(contextual, Result):
+                return contextual
+            prepared_call = contextual
+            contextual_commit = True
         try:
-            prepared = self._prepare(call)
+            prepared = self._prepare(
+                prepared_call, contextual_commit=contextual_commit
+            )
         except _Abort as error:
             return error.result
 
@@ -266,6 +925,162 @@ class ThingsWorkspace:
                 )
             return self._resume(claimed, allow_apply=claimed.state == "prepared")
         return self._apply(claimed)
+
+    def _compile_contextual(self, call: CommitCall) -> CommitCall | Result:
+        assert call.context_id is not None
+        try:
+            context = self._context_store.get(
+                call.context_id, account_id=self._account_id
+            )
+        except ContextCorrupt:
+            return self._context_recovery(
+                code="context_corrupt",
+                instruction=(
+                    "That saved read context is not usable. Read the target again."
+                ),
+                retry="read",
+                status="stale",
+            )
+        except ContextExpired as expired:
+            return self._context_recovery(
+                code="context_expired",
+                instruction="That read context expired. Repeat the suggested read.",
+                retry="read",
+                read=(
+                    expired.selector.recovery_arguments()
+                    if expired.selector is not None
+                    else None
+                ),
+                status="stale",
+            )
+        except ContextNotFound:
+            return self._context_recovery(
+                code="context_required",
+                instruction=(
+                    "That read context is not available for this Things account. "
+                    "Read the target again."
+                ),
+                retry="read",
+                status="stale",
+            )
+        if call.organize and not context.complete:
+            return self._context_recovery(
+                code="context_incomplete",
+                instruction="Complete the organization read before changing structure.",
+                retry="read",
+                read=context.selector.recovery_arguments(),
+                status="stale",
+            )
+        context_refs = {entry.ref for entry in context.refs}
+        context_ids = {entry.exact_id: entry.ref for entry in context.refs}
+        touched_refs = {
+            reference
+            for change in call.change
+            for reference in (change.ref, change.into)
+            if reference in context_refs
+        }
+        # Relationship destinations and anchors are part of the write's read
+        # evidence. Check them before compilation, too. This keeps a changed
+        # destination from producing a plan against an old ordering or scope.
+        for change in call.change:
+            for reference in (
+                change.into,
+                change.after,
+                change.today_after,
+                change.move_contents_to,
+                change.heading_id,
+            ):
+                if reference in context_refs:
+                    touched_refs.add(reference)
+                elif reference in context_ids:
+                    touched_refs.add(context_ids[reference])
+        for create in call.create:
+            for reference in (
+                create.into,
+                create.after,
+                create.today_after,
+                create.heading_id,
+            ):
+                if reference in context_refs:
+                    touched_refs.add(reference)
+                elif reference in context_ids:
+                    touched_refs.add(context_ids[reference])
+        if call.organize or context.is_complete("system"):
+            touched_refs.update(entry.ref for entry in context.refs)
+        for entry in context.refs:
+            if entry.ref not in touched_refs:
+                continue
+            current = self._exact_item(entry.exact_id)
+            if current is None or self._revision(current) != entry.revision:
+                return self._context_recovery(
+                    code="context_conflict",
+                    instruction=(
+                        "Relevant Things data changed. Read it and prepare again."
+                    ),
+                    retry="read",
+                    read=context.selector.recovery_arguments(),
+                    status="stale",
+                )
+        compile_call = call
+        if context.is_complete("system"):
+            current_system_ids = {item.id for item in self._library.system()}
+            context_system_ids = {entry.exact_id for entry in context.refs}
+            if current_system_ids != context_system_ids:
+                return self._context_recovery(
+                    code="context_conflict",
+                    instruction=(
+                        "The Area or Project registry changed. Read it again."
+                    ),
+                    retry="read",
+                    read=context.selector.recovery_arguments(),
+                    status="stale",
+                )
+            if call.scope_revision is None:
+                compile_call = call.model_copy(
+                    update={"scope_revision": self._area_scope_revision()}
+                )
+        try:
+            return self._contextual_compiler.compile(
+                compile_call, context, self._library
+            )
+        except ContextualInputError as error:
+            return self._needs_input(str(error))
+        except (ContextualCompileError, ContextConflict, UnknownReference) as error:
+            message = str(error).casefold()
+            incomplete = "incomplete" in message or "complete project scope" in message
+            return self._context_recovery(
+                code="context_incomplete" if incomplete else "context_conflict",
+                instruction=(
+                    "The saved context is incomplete for that change. Read it again."
+                    if incomplete
+                    else "Relevant Things data changed. Read it and prepare again."
+                ),
+                retry="read",
+                read=context.selector.recovery_arguments(),
+                status="stale",
+            )
+
+    @staticmethod
+    def _context_recovery(
+        *,
+        code: Literal[
+            "context_required",
+            "context_expired",
+            "context_incomplete",
+            "context_conflict",
+            "context_corrupt",
+        ],
+        instruction: str,
+        retry: Literal["read", "same", "rebuild"],
+        status: ResultStatus,
+        read: dict[str, object] | None = None,
+    ) -> Result:
+        return Result(
+            next="read" if retry in {"read", "rebuild"} else "retry_same",
+            status=status,
+            instruction=instruction,
+            recovery=RecoveryFact(code=code, retry=retry, read=read),
+        )
 
     def approve(self, call: ApproveCall) -> Result:
         stored = self._journal.get_by_plan_id(call.plan_id)
@@ -342,16 +1157,12 @@ class ThingsWorkspace:
         return []
 
     def _search(self, text: str, within: Record | None) -> list[Record]:
-        needle = text.casefold()
+        needle = _normalize_search_text(text)
         items = [
             item
             for item in self._library.records.values()
-            if item.is_open()
-            and (
-                needle in item.title.casefold()
-                or needle in item.notes.casefold()
-                or any(needle in row.title.casefold() for row in item.checklists)
-            )
+            if self._is_searchable(item)
+            and self._search_item(item, needle)
         ]
         if within is not None:
             if within.kind == "area":
@@ -374,6 +1185,33 @@ class ThingsWorkspace:
                     if item.uuid == within.uuid or item.parent_uuid == within.uuid
                 ]
         return sorted(items, key=lambda item: (item.sort_index, item.title))
+
+    @staticmethod
+    def _search_item(item: Record, needle: _NormalizedSearchText) -> bool:
+        fields = (item.title, item.notes, *(row.title for row in item.checklists))
+        if any(needle.folded in field.casefold() for field in fields):
+            return True
+
+        # Retry only with whole content words after the normal substring search
+        # finds nothing. Articles are safe filler to ignore; all other words
+        # must occur in one field. This avoids stemming and fuzzy matches.
+        terms = {token for token in needle.tokens if token not in _SEARCH_ARTICLES}
+        if not terms:
+            return False
+        return any(
+            terms.issubset(set(_normalize_search_text(field).tokens))
+            for field in fields
+        )
+
+    @staticmethod
+    def _is_searchable(item: Record) -> bool:
+        """Search active work, including headings that can be renamed."""
+
+        return (
+            item.status == "open"
+            and not item.trashed
+            and item.recurrence.role != "template"
+        )
 
     def _page(
         self,
@@ -725,6 +1563,7 @@ class ThingsWorkspace:
         item: Record,
         *,
         full: bool,
+        include_revision: bool = True,
         include_notes: bool = True,
         note_offset: int = 0,
         checklist: list[ChecklistFact] | None = None,
@@ -772,7 +1611,7 @@ class ThingsWorkspace:
         )
         return ItemFact(
             id=item.id,
-            revision=self._revision(item),
+            revision=self._revision(item) if include_revision else None,
             kind=item.public_kind,
             title=_bounded_title(item.title),
             status=_public_status(item.status),
@@ -892,14 +1731,30 @@ class ThingsWorkspace:
         tz = self._clock().tzinfo
         return datetime.combine(item.start, time(hour, minute), tzinfo=tz).isoformat()
 
-    def _prepare(self, call: CommitCall) -> _Prepared:
-        context = self._preparation_context(call)
+    def _prepare(
+        self, call: CommitCall, *, contextual_commit: bool = False
+    ) -> _Prepared:
+        context = self._preparation_context(
+            call, contextual_commit=contextual_commit
+        )
         self._prepare_tag_registry(call, context)
         self._prepare_items(call, context)
         self._finish_preparation(call, context)
         return context.result()
 
     def _prepare_items(self, call: CommitCall, context: _PreparationContext) -> None:
+        # Pre-index heading moves. A Task that follows its heading in the same
+        # merge must retain that heading UUID after both records enter the
+        # destination Project.
+        for change in call.change:
+            if change.id is None or "into" not in change.model_fields_set:
+                continue
+            item = self._library.records.get(parse_id(change.id)[1])
+            destination = self._exact_item(change.into) if change.into else None
+            if item is not None and item.heading and destination is not None:
+                if destination.kind != "project":
+                    raise _Abort(self._rejected("A heading needs a destination Project."))
+                context.project_heading_moves[item.uuid] = destination.uuid
         self._prepare_creates(call, context)
         self._prepare_changes(call, context)
 
@@ -946,6 +1801,21 @@ class ThingsWorkspace:
                         sort_index=max(heading_indexes, default=-1024) + 1024,
                     )
                 )
+                if "after" in entry.model_fields_set:
+                    writes.extend(
+                        self._project_heading_order_writes(
+                            _HeadingOrderRow(
+                                uuid=uuid,
+                                sort_index=writes[-1].sort_index or 0,
+                                create_index=len(writes) - 1,
+                            ),
+                            project_uuid=home[0],
+                            after=entry.after,
+                            local=local,
+                            planned=writes,
+                            preconditions=preconditions,
+                        )
+                    )
                 summary.append(f"Create heading: {entry.title}")
                 continue
             home = self._home(entry.into, entry.kind, local, new_item=True)
@@ -1432,6 +2302,12 @@ class ThingsWorkspace:
             and item.heading_uuid is not None
             and (home[1] != "project" or home[0] != item.parent_uuid)
         )
+        if (
+            clear_heading
+            and item.heading_uuid in context.project_heading_moves
+            and context.project_heading_moves[item.heading_uuid] == home[0]
+        ):
+            clear_heading = False
         if clear_heading:
             heading_uuid = None
         if "heading_id" in change.model_fields_set:
@@ -1444,13 +2320,33 @@ class ThingsWorkspace:
                     raise _Abort(
                         self._rejected("A heading needs a destination Project.")
                     )
-                heading = self._required_exact(change.heading_id)
-                if not heading.heading or heading.parent_uuid != home[0]:
-                    raise _Abort(
-                        self._rejected("The heading must belong to the Task's Project.")
+                if change.heading_id.startswith("$"):
+                    heading_uuid = local[change.heading_id][0]
+                    heading_write = next(
+                        (
+                            write
+                            for write in context.writes
+                            if write.action == "create_heading"
+                            and write.uuid == heading_uuid
+                        ),
+                        None,
                     )
-                heading_uuid = heading.uuid
-                context.preconditions[heading.id] = self._revision(heading)
+                    if heading_write is None or heading_write.into_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                else:
+                    heading = self._required_exact(change.heading_id)
+                    if not heading.heading or heading.parent_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                    heading_uuid = heading.uuid
+                    context.preconditions[heading.id] = self._revision(heading)
 
         sort_index = self._after_index(
             change.after,
@@ -1524,9 +2420,12 @@ class ThingsWorkspace:
                 sort_index=sort_index,
                 today_index=today_index,
                 owner_today=self._clock().date(),
-                heading_uuid=heading_uuid
-                if "heading_id" in change.model_fields_set
-                else None,
+                heading_uuid=(
+                    heading_uuid
+                    if "heading_id" in change.model_fields_set
+                    or ("into" in change.model_fields_set and not clear_heading)
+                    else None
+                ),
                 clear_heading=clear_heading,
             ),
             home=template_home,
@@ -1677,6 +2576,16 @@ class ThingsWorkspace:
         warnings = context.warnings
         lifecycle = change.lifecycle or ("trash" if change.trash else None)
         if item.heading:
+            if "into" in change.model_fields_set:
+                # A merge moves headings with their source Project. Their
+                # assigned Tasks keep the heading UUID, so moving the heading
+                # first preserves the source layout in the destination.
+                desired = self._desired_item_change(
+                    item, change, context.local, context
+                )
+                writes.append(desired.update)
+                summary.append(f"Move heading: {item.title}")
+                return True
             if lifecycle == "delete_permanently":
                 assigned = [
                     child
@@ -1721,6 +2630,8 @@ class ThingsWorkspace:
                     self._heading_order_writes(
                         item,
                         after=change.after,
+                        local=context.local,
+                        planned=writes,
                         preconditions=preconditions,
                     )
                 )
@@ -1747,6 +2658,8 @@ class ThingsWorkspace:
             warnings.append(
                 f"{item.title} will move to Trash and can be restored in Things."
             )
+            if item.kind == "project":
+                context.project_trash_sources.append(item.uuid)
         elif lifecycle == "restore":
             if not item.trashed:
                 raise _Abort(self._rejected(f"{item.title} is not in Trash."))
@@ -1854,7 +2767,14 @@ class ThingsWorkspace:
         preconditions = context.preconditions
         summary = context.summary
         warnings = context.warnings
+        self._validate_requested_project_destinations(call, context)
         for change in call.change:
+            if change.id is None or change.if_revision is None:
+                raise _Abort(
+                    self._rejected(
+                        "A context change must compile to an exact revision first."
+                    )
+                )
             item = self._required_exact(change.id)
             revision = self._revision(item)
             if revision != change.if_revision:
@@ -1986,12 +2906,57 @@ class ThingsWorkspace:
                             f"{item.title} still has {len(open_children)} open actions."
                         )
 
+    def _validate_requested_project_destinations(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Reject lifecycle edits that compete with a same-batch merge target."""
+        destinations: dict[str, Record] = {}
+        for change in call.change:
+            if "into" not in change.model_fields_set or change.into in {
+                None,
+                "inbox",
+                "anytime",
+            }:
+                continue
+            target = self._exact_item(change.into)
+            if target is not None and target.kind == "project":
+                destinations[target.uuid] = target
+        if not destinations:
+            return
+        for target in destinations.values():
+            if not target.is_open():
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project must be active and visible."
+                    )
+                )
+            context.preconditions[target.id] = self._revision(target)
+        for change in call.change:
+            if change.id is None:
+                continue
+            item = self._exact_item(change.id)
+            if item is None or item.uuid not in destinations:
+                continue
+            if (
+                change.status is not None
+                or change.trash
+                or change.lifecycle is not None
+            ):
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project cannot change lifecycle in "
+                        "the same batch."
+                    )
+                )
+
     def _finish_preparation(
         self, call: CommitCall, context: _PreparationContext
     ) -> None:
         """Apply batch-wide invariants after all planners finish."""
         if not context.writes:
             raise _Abort(self._rejected("The request did not produce a change."))
+        self._validate_project_destinations(context)
+        self._validate_project_trash_batches(context)
         if any(write.action == "delete_area" for write in context.writes):
             expected_scope = self._area_scope_revision()
             if call.scope_revision != expected_scope:
@@ -2003,10 +2968,266 @@ class ThingsWorkspace:
             context.risky = True
             context.warnings.append("This is a broad batch change.")
 
-    def _preparation_context(self, call: CommitCall) -> _PreparationContext:
+    def _validate_project_destinations(
+        self, context: _PreparationContext
+    ) -> None:
+        """Keep every merge destination visible throughout the whole batch.
+
+        A destination Project is part of the merge's safety contract.  Validate
+        its current and projected lifecycle, plus its parent Area, before an
+        approval plan can be staged.  The destination revision is also a plan
+        precondition, so an approval-window edit cannot turn the destination
+        into a hidden or detached result.
+        """
+        destination_uuids = list(
+            dict.fromkeys(
+                write.into_uuid
+                for write in context.writes
+                if write.into_kind == "project" and write.into_uuid is not None
+            )
+        )
+        for destination_uuid in destination_uuids:
+            destination = self._library.records.get(destination_uuid)
+            destination_create = next(
+                (
+                    write
+                    for write in context.writes
+                    if write.uuid == destination_uuid
+                    and write.action == "create"
+                    and write.kind == "project"
+                ),
+                None,
+            )
+            if destination is None and destination_create is not None:
+                projected_status = destination_create.status or "open"
+                projected_trashed = False
+                projected_parent = None
+                projected_area = (
+                    destination_create.into_uuid
+                    if destination_create.into_kind == "area"
+                    else None
+                )
+                destination_exists = True
+            elif destination is not None and destination.kind == "project":
+                if not destination.is_open():
+                    raise _Abort(
+                        self._rejected(
+                            "A merge destination Project must be active and visible."
+                        )
+                    )
+                projected_status = destination.status
+                projected_trashed = destination.trashed
+                projected_parent = destination.parent_uuid
+                projected_area = destination.area_uuid
+                destination_exists = True
+            else:
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project must be active and visible."
+                    )
+                )
+            if destination is not None:
+                context.preconditions[destination.id] = self._revision(destination)
+                # A destination Project's child membership and order are part
+                # of the merge contract. A concurrent child edit must stale
+                # the approval before any source move or trash is applied.
+                context.preconditions[f"scope:project:{destination.uuid}"] = (
+                    self._project_scope_revision(destination.uuid)
+                )
+
+            projected_exists = destination_exists
+            lifecycle_conflict = False
+            for write in context.writes:
+                if write.uuid != destination_uuid:
+                    continue
+                if write.action in {
+                    "complete",
+                    "cancel",
+                    "trash",
+                    "restore",
+                    "permanent_delete",
+                    "delete_area",
+                }:
+                    lifecycle_conflict = True
+                if write.action == "update" and write.status is not None:
+                    lifecycle_conflict = True
+                if write.action in {"permanent_delete", "delete_area"}:
+                    projected_exists = False
+                elif write.action == "trash":
+                    projected_trashed = True
+                elif write.action == "restore":
+                    projected_trashed = False
+                elif write.action == "complete":
+                    projected_status = "done"
+                elif write.action == "cancel":
+                    projected_status = "dropped"
+                elif write.action in {"update", "move"}:
+                    if write.status is not None:
+                        projected_status = write.status
+                    if write.into_kind == "project":
+                        projected_parent = write.into_uuid
+                        projected_area = None
+                    elif write.into_kind == "area":
+                        projected_parent = None
+                        projected_area = write.into_uuid
+                    elif (
+                        write.into_uuid is not None
+                        or write.inbox
+                        or write.anytime
+                    ):
+                        projected_parent = None
+                        projected_area = None
+
+            if lifecycle_conflict:
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project cannot change lifecycle in "
+                        "the same batch."
+                    )
+                )
+            if not projected_exists or projected_status != "open" or projected_trashed:
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project must remain active and visible."
+                    )
+                )
+            if projected_parent is not None:
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project must not be hidden under "
+                        "another Project."
+                    )
+                )
+            if projected_area is None:
+                continue
+            area = self._library.records.get(projected_area)
+            area_create = next(
+                (
+                    write
+                    for write in context.writes
+                    if write.uuid == projected_area
+                    and write.action == "create"
+                    and write.kind == "area"
+                ),
+                None,
+            )
+            area_deleted = any(
+                write.uuid == projected_area
+                and write.action in {"delete_area", "permanent_delete", "trash"}
+                for write in context.writes
+            )
+            if (
+                area is not None
+                and area.kind == "area"
+                and not area.trashed
+                and not area_deleted
+            ):
+                # The destination Area is part of the approval contract. A
+                # title, placement, or lifecycle change during approval must
+                # make this whole batch stale, even when child move writes
+                # still look satisfied by themselves.
+                context.preconditions[area.id] = self._revision(area)
+            elif area_create is None or area_deleted:
+                raise _Abort(
+                    self._rejected(
+                        "A merge destination Project must remain attached to a "
+                        "visible Area or the top-level registry."
+                    )
+                )
+
+    def _validate_project_trash_batches(
+        self, context: _PreparationContext
+    ) -> None:
+        """Require a grouped project trash to leave no direct child behind.
+
+        A plain project-trash request keeps its historical behavior.  Once a
+        batch moves one child of that project, however, the planner treats the
+        source trash as the final step of one operation.  It checks the
+        projected parent state before approval, so a partial move cannot
+        produce a hidden or orphaned source project.
+        """
+        for source_uuid in dict.fromkeys(context.project_trash_sources):
+            source = self._library.records.get(source_uuid)
+            if source is None or source.kind != "project":
+                continue
+            children = sorted(
+                (
+                    item
+                    for item in self._library.records.values()
+                    if item.parent_uuid == source_uuid
+                ),
+                key=lambda item: (item.sort_index, item.uuid),
+            )
+            if not children:
+                continue
+
+            projected_parents = {
+                item.uuid: item.parent_uuid for item in children
+            }
+            hidden_after_move: set[str] = set()
+            for write in context.writes:
+                if write.uuid not in projected_parents:
+                    continue
+                if write.action not in {"update", "move"}:
+                    continue
+                if write.into_kind == "project":
+                    projected_parents[write.uuid] = write.into_uuid
+                elif write.into_kind == "area":
+                    projected_parents[write.uuid] = None
+                elif write.inbox or write.anytime:
+                    projected_parents[write.uuid] = None
+                elif write.action == "move" and write.into_uuid is None:
+                    projected_parents[write.uuid] = None
+
+            moved = [
+                child
+                for child in children
+                if projected_parents[child.uuid] != source_uuid
+            ]
+            if not moved:
+                continue
+
+            hidden_after_move.update(
+                child.uuid
+                for child in children
+                if child.trashed
+                or child.status != "open"
+                or child.recurrence.role == "template"
+                or (child.heading and not context.allow_project_heading_moves)
+                # Headings are visible direct children and can move with their
+                # assigned Tasks during a Project merge.
+            )
+            if hidden_after_move:
+                raise _Abort(
+                    self._rejected(
+                        f"Cannot trash {source.title} with hidden, completed, "
+                        "or heading children. Read the full Project and move "
+                        "every active child first."
+                    )
+                )
+            if len(moved) != len(children):
+                raise _Abort(
+                    self._needs_input(
+                        f"{source.title} still contains work. Move every child "
+                        "in the same batch before trashing the Project."
+                    )
+                )
+            context.summary.append(
+                f"Move {len(moved)} children out before trashing Project: "
+                f"{source.title}"
+            )
+            context.warnings.append(
+                "The source Project is checked empty after all child moves."
+            )
+            context.risky = True
+
+    def _preparation_context(
+        self, call: CommitCall, *, contextual_commit: bool = False
+    ) -> _PreparationContext:
         """Validate registry snapshots and allocate all local references."""
         changes_areas = any(entry.kind == "area" for entry in call.create) or any(
-            change.id.startswith("area:") for change in call.change
+            change.id is not None and change.id.startswith("area:")
+            for change in call.change
         )
         if changes_areas:
             expected_scope = self._area_scope_revision()
@@ -2056,6 +3277,7 @@ class ThingsWorkspace:
             preconditions={},
             summary=[],
             warnings=[],
+            allow_project_heading_moves=contextual_commit,
         )
         uses_tags = (
             bool(call.ensure_tags or call.change_tags)
@@ -2433,52 +3655,124 @@ class ThingsWorkspace:
         heading: Record,
         *,
         after: str | None,
+        local: dict[str, tuple[str, Kind | str]],
+        planned: list[Write],
         preconditions: dict[str, str],
     ) -> list[Write]:
-        """Return one complete, stable heading order for a Project."""
         project_uuid = heading.parent_uuid
         if project_uuid is None:
             raise _Abort(self._rejected("A heading needs a Project."))
-        ordered = sorted(
-            (
-                item
-                for item in self._library.records.values()
-                if item.heading
-                and item.parent_uuid == project_uuid
-                and not item.trashed
-                and item.uuid != heading.uuid
+        return self._project_heading_order_writes(
+            _HeadingOrderRow(
+                uuid=heading.uuid,
+                sort_index=heading.sort_index,
+                record=heading,
             ),
-            key=lambda item: (item.sort_index, item.uuid),
+            project_uuid=project_uuid,
+            after=after,
+            local=local,
+            planned=planned,
+            preconditions=preconditions,
+        )
+
+    def _project_heading_order_writes(
+        self,
+        moving: _HeadingOrderRow,
+        *,
+        project_uuid: str,
+        after: str | None,
+        local: dict[str, tuple[str, Kind | str]],
+        planned: list[Write],
+        preconditions: dict[str, str],
+    ) -> list[Write]:
+        """Return one complete order across current and newly created headings."""
+        projected_indexes = {
+            write.uuid: write.sort_index
+            for write in planned
+            if write.action == "update" and write.sort_index is not None
+        }
+        ordered = [
+            _HeadingOrderRow(
+                uuid=item.uuid,
+                sort_index=projected_indexes.get(item.uuid, item.sort_index),
+                record=item,
+            )
+            for item in self._library.records.values()
+            if item.heading
+            and item.parent_uuid == project_uuid
+            and not item.trashed
+            and item.uuid != moving.uuid
+        ]
+        ordered.extend(
+            _HeadingOrderRow(
+                uuid=write.uuid,
+                sort_index=write.sort_index or 0,
+                create_index=index,
+            )
+            for index, write in enumerate(planned)
+            if write.action == "create_heading"
+            and write.into_uuid == project_uuid
+            and write.uuid != moving.uuid
+        )
+        ordered.sort(key=lambda row: (row.sort_index, row.uuid))
+        moving = replace(
+            moving,
+            sort_index=projected_indexes.get(moving.uuid, moving.sort_index),
         )
         if after is None:
-            ordered.insert(0, heading)
+            ordered.insert(0, moving)
         else:
-            anchor = self._required_exact(after)
-            if not anchor.heading or anchor.parent_uuid != project_uuid:
-                raise _Abort(
-                    self._rejected(
-                        "A heading after reference must be in the same Project."
-                    )
+            if after.startswith("$"):
+                anchor_uuid = local[after][0]
+                anchor_row = next(
+                    (row for row in ordered if row.uuid == anchor_uuid), None
                 )
+                if anchor_row is None or anchor_row.create_index is None:
+                    raise _Abort(
+                        self._rejected(
+                            "A local heading anchor must be created in this Project."
+                        )
+                    )
+            else:
+                anchor = self._required_exact(after)
+                if (
+                    not anchor.heading
+                    or anchor.parent_uuid != project_uuid
+                    or anchor.uuid == moving.uuid
+                ):
+                    raise _Abort(
+                        self._rejected(
+                            "A heading after reference must be in the same Project."
+                        )
+                    )
+                anchor_uuid = anchor.uuid
+                preconditions[anchor.id] = self._revision(anchor)
             position = next(
-                index for index, item in enumerate(ordered) if item.uuid == anchor.uuid
+                index for index, row in enumerate(ordered) if row.uuid == anchor_uuid
             )
-            ordered.insert(position + 1, heading)
+            ordered.insert(position + 1, moving)
         preconditions[f"scope:project:{project_uuid}"] = self._project_scope_revision(
             project_uuid
         )
         writes: list[Write] = []
-        for index, item in enumerate(ordered):
-            preconditions[item.id] = self._revision(item)
+        for index, row in enumerate(ordered):
             wanted = index * 1024
-            if item.sort_index != wanted:
+            if row.record is not None:
+                preconditions[row.record.id] = self._revision(row.record)
+                if row.sort_index == wanted:
+                    continue
                 writes.append(
                     Write(
                         action="update",
-                        uuid=item.uuid,
+                        uuid=row.uuid,
                         kind="task",
                         sort_index=wanted,
                     )
+                )
+            else:
+                assert row.create_index is not None
+                planned[row.create_index] = replace(
+                    planned[row.create_index], sort_index=wanted
                 )
         return writes
 
@@ -2967,7 +4261,7 @@ class ThingsWorkspace:
             self._fact(item, full=False)
             for uuid in ids
             if (item := self._library.records.get(uuid)) is not None
-        ][:40]
+        ][:_CONTEXT_LIMIT]
         tags: list[TagFact] = []
         for write in writes:
             if write.action != "ensure_tag":
@@ -3223,6 +4517,32 @@ class ThingsWorkspace:
             if item.uuid == uuid or uuid in item.recurrence.links
         ]
         return "s_" + _digest(rows)
+
+    def _recurrence_relationship_is_valid(self, target: Record) -> bool:
+        """Check the native one-way link before exposing repeat mutation facts."""
+        recurrence = target.recurrence
+        if recurrence.role == "none":
+            return not any(
+                candidate.recurrence.template_uuid == target.uuid
+                or target.uuid in candidate.recurrence.links
+                for candidate in self._library.records.values()
+                if candidate.uuid != target.uuid
+            )
+        if recurrence.role == "template":
+            return all(
+                candidate.recurrence.role == "instance"
+                and candidate.recurrence.template_uuid == target.uuid
+                for candidate in self._library.records.values()
+                if candidate.recurrence.template_uuid == target.uuid
+            )
+        if recurrence.role != "instance" or recurrence.template_uuid is None:
+            return False
+        template = self._library.records.get(recurrence.template_uuid)
+        return (
+            template is not None
+            and template.recurrence.role == "template"
+            and template.recurrence.rule is not None
+        )
 
     @staticmethod
     def _recurrence_kind(item: Record) -> RecurrenceKind:

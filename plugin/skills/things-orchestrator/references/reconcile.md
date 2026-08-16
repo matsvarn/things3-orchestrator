@@ -12,6 +12,12 @@ Use this sequence for a weekly review, full review, or Area redesign.
    owner accepts the proposed result.
 7. Confirm what changed and name anything that still needs a choice.
 
+For a Project restructure, use one `purpose=organize` Project read. Build one
+editable draft from its context refs and complete layout. Put sections in the
+required order. Use existing headings or create useful headings. Use
+`unlisted=keep` so omitted work stays in place. Batch related normal changes
+with the draft. If structured recovery asks for new context, read and rebuild once.
+
 Prefer a few stable Areas to speculative categories. Keep an Area when it
 still supports a real responsibility. Before removing or combining Areas,
 account for every contained Task and Project.

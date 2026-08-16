@@ -20,9 +20,11 @@
   port 8787 without TLS.
 - **Claude.ai / ChatGPT.** This server has no MCP OAuth. Use Hermes, Cursor,
   Codex, or Claude Code.
-- **A write returns `retry_same`.** Repeat the exact same call. Keep its
-  `intent_id` and payload. The server reads Cloud state before it can post
-  again.
+- **A write returns `retry_same`, or the response is lost.** Repeat the exact
+  same call with the same `intent_id` and a byte-equivalent semantic payload.
+  Do not read first, add `scope_revision`, or rebuild. The server reads Cloud
+  state before it can post again. Use a fresh read only for stale or expired
+  context recovery.
 - **A write returns `read`.** Read fresh facts. Use their revisions in a new
   intent.
 - **A write returns `approve`.** Ask one natural confirmation from the visible

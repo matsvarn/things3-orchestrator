@@ -5,7 +5,7 @@ Once [scripts/setup](../scripts/setup) and one client in
 
 New titles are short action phrases in the language of existing titles.
 The model can keep native checklists, Markdown notes, tags, order, and waiting
-state. Existing-item changes use fresh revision facts.
+state.
 
 The server evaluates Today, Logbook, and reminders in the timezone stored by
 `login`. Run `login --timezone Europe/Berlin` again after a permanent move.
@@ -21,6 +21,17 @@ the tool reports success.
 The tool schemas tell the model how to send safe requests and recover from a
 stopped call. The model skill helps it select a small, useful Things form. It
 also keeps internal tool terms out of the reply.
+
+A clear capture normally takes one tool call. An exact edit normally takes one
+focused `purpose=change` read and one commit. A repeat-rule change first uses
+`purpose=recurrence` with the exact Task id to inspect the native template and
+generated-copy relationship. If the request also changes normal Task fields,
+make a separate `purpose=change` read for the target before using contextual
+refs; do not reuse recurrence facts as change refs. A Project restructure uses
+one complete Project read and one editable desired-state draft. Work that the
+draft does not list stays in place. The model can include related edits in the
+same commit. If the context changes or expires, structured recovery tells the
+model which fresh read it needs. Risky work adds one approval step.
 
 ## Talk
 

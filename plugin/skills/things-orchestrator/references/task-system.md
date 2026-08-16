@@ -22,13 +22,18 @@ When titles match, use the parent, notes, tags, and exact Things identity to
 tell items apart. If they still match, ask the owner which item they mean.
 
 Use headings when they reveal stable Project sections. Rename or reorder a heading
-when the section meaning changes. Deleting it keeps its Tasks in the Project.
+when the section meaning changes. Delete it with an organize draft's
+`delete_headings`; never use item `lifecycle`. Deleting it keeps its Tasks in the Project.
 
-For repeating work, separate the future cadence from today's work. Change the
-repeating template for future copies. Change the generated copy for the current cycle.
-Batch both changes when both must match. A complete repeat rule can turn
-an existing Task into the current copy without losing its identity or metadata.
-Stop repetition when the owner wants to keep the work without new copies.
+For an exact edit, search a named existing item before editing it. Create only
+when the owner asks to add. Use one `purpose=change` read and its context refs
+in one commit. Define local refs before use; create parent tags before children.
+For repeating work, search first, then use `purpose=recurrence` with the exact
+Task id, then `purpose=change` only when editable context is needed. Change the
+repeating template for future copies and the generated copy for the current
+cycle. Batch both changes when both must match. A complete repeat rule keeps
+the existing Task identity and metadata.
+For a Task, Project, or heading order anchor outside the returned facts, use one bounded `include` lookup by exact id or unique active find. Use `after` for item or heading order; use `today_after` only for a Task on Today. Use `within` only with `find`; resolve an ambiguous include before preparing a commit.
+Use `start=evening` for evening work. Stop repetition when new copies must stop.
 
-Keep the answer in the owner's words. Finish when each unclear choice has one
-supported interpretation or one concise question for the owner.
+Keep the answer in the owner's words. Finish when each unclear choice has one supported interpretation or one concise question for the owner.
