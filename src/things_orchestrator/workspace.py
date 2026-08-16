@@ -12,6 +12,7 @@ from typing import Callable, cast
 from .cloud import CloudError
 from .interface import (
     ApproveCall,
+    ChangeEntry,
     ChecklistFact,
     CommitCall,
     ItemFact,
@@ -847,7 +848,13 @@ class ThingsWorkspace:
     def _prepare_items(
         self, call: CommitCall, context: _PreparationContext
     ) -> None:
-        """Plan task, project, heading, checklist, and Area mutations."""
+        self._prepare_creates(call, context)
+        self._prepare_changes(call, context)
+
+    def _prepare_creates(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Plan all create entries, including generated copies and children."""
         local = context.local
         writes = context.writes
         preconditions = context.preconditions
@@ -1055,6 +1062,374 @@ class ThingsWorkspace:
                 preconditions["scope:areas"] = self._area_scope_revision()
                 warnings.append("The Area registry will change.")
 
+    def _prepare_recurrence_change(
+        self, item: Record, change: ChangeEntry, context: _PreparationContext
+    ) -> bool:
+        """Plan a repeat-rule change and report whether it ends item planning."""
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        repeat_edit = change.repeat
+        repeat_rule_changed = False
+        repeat_interval = (
+            change.repeat_interval
+            if change.repeat_interval is not None
+            else repeat_edit.interval if repeat_edit is not None else None
+        )
+        if change.repeat_interval is not None or repeat_edit is not None:
+            if repeat_edit is not None and repeat_edit.remove:
+                try:
+                    item.recurrence.validate_interval_template(kind=item.kind)
+                except ValueError as error:
+                    raise _Abort(self._unsupported(str(error))) from error
+                linked = [
+                    candidate
+                    for candidate in self._library.records.values()
+                    if item.uuid in candidate.recurrence.links
+                ]
+                for candidate in linked:
+                    preconditions[candidate.id] = self._revision(candidate)
+                    writes.append(
+                        Write(
+                            action="repeat_link",
+                            uuid=candidate.uuid,
+                            kind="task",
+                            recurrence_links=[],
+                        )
+                    )
+                writes.append(
+                    Write(
+                        action="permanent_delete",
+                        uuid=item.uuid,
+                        kind="task",
+                    )
+                )
+                preconditions[f"scope:repeat:{item.uuid}"] = (
+                    self._recurrence_scope_revision(item.uuid)
+                )
+                summary.append(f"Stop repeating: {item.title}")
+                warnings.append(
+                    "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
+                )
+                context.risky = True
+                return True
+            try:
+                if (
+                    repeat_edit is not None
+                    and repeat_edit.weekdays
+                    and (repeat_edit.mode or item.recurrence.repeat_type)
+                    != "fixed"
+                ):
+                    raise ValueError("Weekdays need fixed repeat mode")
+                recurrence = item.recurrence.transition(
+                    kind=item.kind,
+                    mode=repeat_edit.mode if repeat_edit else None,
+                    unit=repeat_edit.unit if repeat_edit else None,
+                    interval=repeat_interval,
+                    weekday_codes=(
+                        [
+                            _WEEKDAY_CODES[weekday]
+                            for weekday in repeat_edit.weekdays
+                        ]
+                        if repeat_edit is not None
+                        and repeat_edit.weekdays is not None
+                        else None
+                    ),
+                )
+            except ValueError as error:
+                raise _Abort(self._unsupported(str(error))) from error
+            writes.append(
+                Write(
+                    action="repeat",
+                    uuid=item.uuid,
+                    kind="task",
+                    recurrence_rule=recurrence.rule,
+                )
+            )
+            preconditions[f"scope:repeat:{item.uuid}"] = (
+                self._recurrence_scope_revision(item.uuid)
+            )
+            parts = []
+            if repeat_edit is not None and repeat_edit.mode is not None:
+                parts.append(f"mode to {repeat_edit.mode.replace('_', ' ')}")
+            if repeat_edit is not None and repeat_edit.unit is not None:
+                parts.append(f"unit to {repeat_edit.unit}")
+            if repeat_interval is not None:
+                parts.append(f"interval to {repeat_interval}")
+            summary.append(f"Change repeat rule for {item.title}: {', '.join(parts)}")
+            warnings.append("This changes future generated Tasks.")
+            context.risky = True
+            repeat_rule_changed = True
+        if item.recurrence.role == "template" and not repeat_rule_changed:
+            raise _Abort(
+                self._unsupported(
+                    "This recurring item is read-only because its mutation semantics are not proven safe."
+                )
+            )
+        if (
+            item.recurrence.role == "instance"
+            and item.recurrence.repeat_type == "unknown"
+        ):
+            raise _Abort(
+                self._unsupported(
+                    "This generated Task has an unknown repeat template. Read its "
+                    "template before changing it."
+                )
+            )
+        return False
+
+    def _prepare_lifecycle_or_heading_change(
+        self, item: Record, change: ChangeEntry, context: _PreparationContext
+    ) -> bool:
+        """Plan heading and lifecycle changes that end normal item planning."""
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        lifecycle = change.lifecycle or ("trash" if change.trash else None)
+        if item.heading:
+            if lifecycle == "delete_permanently":
+                assigned = [
+                    child
+                    for child in self._library.records.values()
+                    if child.heading_uuid == item.uuid
+                ]
+                for child in assigned:
+                    child_home = self._record_home(child)
+                    preconditions[child.id] = self._revision(child)
+                    writes.append(
+                        Write(
+                            action="update",
+                            uuid=child.uuid,
+                            kind=child.kind,
+                            into_uuid=child_home[0],
+                            into_kind=child_home[1],
+                            inbox=child_home[2],
+                            anytime=child_home[3],
+                            clear_heading=True,
+                        )
+                    )
+                writes.append(
+                    Write(action="permanent_delete", uuid=item.uuid, kind="task")
+                )
+                summary.append(f"Permanently delete heading: {item.title}")
+                if assigned:
+                    summary.append(
+                        f"Clear the heading from {len(assigned)} assigned Tasks"
+                    )
+                warnings.append("This heading deletion cannot be undone.")
+                context.risky = True
+                return True
+            if change.title is not None:
+                writes.append(
+                    Write(action="update", uuid=item.uuid, kind="task", title=change.title)
+                )
+                summary.append(f"Rename heading: {item.title} to {change.title}")
+            if "after" in change.model_fields_set:
+                writes.extend(
+                    self._heading_order_writes(
+                        item,
+                        after=change.after,
+                        preconditions=preconditions,
+                    )
+                )
+                summary.append(f"Reorder heading: {item.title}")
+            return True
+        if item.kind == "area" and change.status is not None:
+            raise _Abort(self._rejected("Areas do not have a completion state."))
+        if item.kind == "area" and "into" in change.model_fields_set:
+            raise _Abort(self._rejected("Areas stay in the top-level registry."))
+        if item.kind == "area":
+            preconditions["scope:areas"] = self._area_scope_revision()
+
+        if lifecycle is None:
+            return False
+        if item.kind not in {"task", "project"}:
+            raise _Abort(self._rejected("Only a Task or Project has this lifecycle."))
+        if item.kind == "project":
+            preconditions[f"scope:project:{item.uuid}"] = (
+                self._project_scope_revision(item.uuid)
+            )
+        if lifecycle == "trash":
+            writes.append(Write(action="trash", uuid=item.uuid, kind=item.kind))
+            summary.append(f"Trash {item.kind}: {item.title}")
+            warnings.append(
+                f"{item.title} will move to Trash and can be restored in Things."
+            )
+        elif lifecycle == "restore":
+            if not item.trashed:
+                raise _Abort(self._rejected(f"{item.title} is not in Trash."))
+            writes.append(Write(action="restore", uuid=item.uuid, kind=item.kind))
+            summary.append(f"Restore {item.kind}: {item.title}")
+            warnings.append(f"{item.title} will return to its prior Things location.")
+        else:
+            if not item.trashed:
+                raise _Abort(
+                    self._needs_input(
+                        f"Move {item.title} to Trash before permanent deletion."
+                    )
+                )
+            descendants = (
+                self._project_descendants(item.uuid)
+                if item.kind == "project"
+                else []
+            )
+            if item.kind == "project" and descendants and not change.delete_contents:
+                raise _Abort(
+                    self._needs_input(
+                        f"{item.title} still contains {len(descendants)} records. "
+                        "Move them first or retry with delete_contents true."
+                    )
+                )
+            if item.kind == "project" and change.delete_contents:
+                for descendant in descendants:
+                    preconditions[descendant.id] = self._revision(descendant)
+                    for child_row in descendant.checklists:
+                        writes.append(
+                            Write(
+                                action="checklist",
+                                uuid=child_row.uuid,
+                                checklist_parent_uuid=descendant.uuid,
+                                checklist_remove=True,
+                            )
+                        )
+                    writes.append(
+                        Write(
+                            action="permanent_delete",
+                            uuid=descendant.uuid,
+                            kind=descendant.kind,
+                        )
+                    )
+            for item_row in item.checklists:
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=item_row.uuid,
+                        checklist_parent_uuid=item.uuid,
+                        checklist_remove=True,
+                    )
+                )
+            writes.append(
+                Write(action="permanent_delete", uuid=item.uuid, kind=item.kind)
+            )
+            summary.append(f"Permanently delete {item.kind}: {item.title}")
+            warnings.append("This deletion cannot be undone.")
+            if descendants:
+                warnings.append(
+                    f"{len(descendants)} contained records will also be deleted."
+                )
+        context.risky = True
+        return True
+
+    def _prepare_checklist_change(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        local: dict[str, tuple[str, Kind | str]],
+        context: _PreparationContext,
+    ) -> None:
+        """Plan checklist additions, edits, removals, and ordering."""
+        writes = context.writes
+        checklist_ids: dict[str, str] = {}
+        for addition in change.checklist_add:
+            uuid = local[addition.key][0] if addition.key else new_uuid()
+            checklist_ids[addition.key or f"check:{uuid}"] = uuid
+            writes.append(
+                Write(
+                    action="checklist",
+                    uuid=uuid,
+                    title=addition.title,
+                    checklist_parent_uuid=item.uuid,
+                    checklist_status="open",
+                    checklist_index=self._check_after_index(
+                        item,
+                        addition.after,
+                        local,
+                        writes,
+                        present="after" in addition.model_fields_set,
+                    ),
+                )
+            )
+        known_rows = {row.uuid: row for row in item.checklists}
+        for row_change in change.checklist_change:
+            uuid = row_change.id.removeprefix("check:")
+            if uuid not in known_rows:
+                raise _Abort(
+                    self._needs_input(
+                        f"Checklist row {row_change.id} is not on {item.title}."
+                    )
+                )
+            writes.append(
+                Write(
+                    action="checklist",
+                    uuid=uuid,
+                    title=row_change.title,
+                    checklist_parent_uuid=item.uuid,
+                    checklist_status=(
+                        _internal_status(row_change.status)
+                        if row_change.status
+                        else None
+                    ),
+                    checklist_index=self._check_after_index(
+                        item,
+                        row_change.after,
+                        local,
+                        writes,
+                        present="after" in row_change.model_fields_set,
+                        moving_uuid=uuid,
+                    ),
+                )
+            )
+        for row_id in change.checklist_remove:
+            uuid = row_id.removeprefix("check:")
+            if uuid not in known_rows:
+                raise _Abort(self._needs_input(f"Checklist row {row_id} is not on {item.title}."))
+            writes.append(Write(action="checklist", uuid=uuid, checklist_remove=True))
+        if change.checklist_order is not None:
+            remaining = {f"check:{row.uuid}" for row in item.checklists} - set(change.checklist_remove)
+            added = {
+                key if key.startswith("$") else f"check:{uuid}"
+                for key, uuid in checklist_ids.items()
+            }
+            if set(change.checklist_order) != remaining | added:
+                raise _Abort(self._rejected("checklist_order must name every remaining row once."))
+            for order, reference in enumerate(change.checklist_order):
+                uuid = local[reference][0] if reference.startswith("$") else reference.removeprefix("check:")
+                if uuid not in known_rows:
+                    planned_index = next(
+                        (
+                            index
+                            for index, write in enumerate(writes)
+                            if write.action == "checklist"
+                            and write.uuid == uuid
+                            and not write.checklist_remove
+                        ),
+                        None,
+                    )
+                    if planned_index is not None:
+                        writes[planned_index] = replace(
+                            writes[planned_index], checklist_index=order * 1024
+                        )
+                        continue
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=uuid,
+                        checklist_parent_uuid=item.uuid,
+                        checklist_index=order * 1024,
+                    )
+                )
+
+    def _prepare_changes(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Plan existing-item changes as one atomic batch."""
+        local = context.local
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
         for change in call.change:
             item = self._required_exact(change.id)
             revision = self._revision(item)
@@ -1077,248 +1452,17 @@ class ThingsWorkspace:
                 raise _Abort(
                     self._rejected("replace_rich_note is only for an existing rich note.")
                 )
-            repeat_edit = change.repeat
-            repeat_rule_changed = False
-            repeat_interval = (
-                change.repeat_interval
-                if change.repeat_interval is not None
-                else repeat_edit.interval if repeat_edit is not None else None
+            if self._prepare_recurrence_change(item, change, context):
+                continue
+            if self._prepare_lifecycle_or_heading_change(item, change, context):
+                continue
+
+            home: tuple[str | None, Kind | None, bool, bool] = (
+                None,
+                None,
+                False,
+                False,
             )
-            if change.repeat_interval is not None or repeat_edit is not None:
-                if repeat_edit is not None and repeat_edit.remove:
-                    try:
-                        item.recurrence.validate_interval_template(kind=item.kind)
-                    except ValueError as error:
-                        raise _Abort(self._unsupported(str(error))) from error
-                    linked = [
-                        candidate
-                        for candidate in self._library.records.values()
-                        if item.uuid in candidate.recurrence.links
-                    ]
-                    for candidate in linked:
-                        preconditions[candidate.id] = self._revision(candidate)
-                        writes.append(
-                            Write(
-                                action="repeat_link",
-                                uuid=candidate.uuid,
-                                kind="task",
-                                recurrence_links=[],
-                            )
-                        )
-                    writes.append(
-                        Write(
-                            action="permanent_delete",
-                            uuid=item.uuid,
-                            kind="task",
-                        )
-                    )
-                    preconditions[f"scope:repeat:{item.uuid}"] = (
-                        self._recurrence_scope_revision(item.uuid)
-                    )
-                    summary.append(f"Stop repeating: {item.title}")
-                    warnings.append(
-                        "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
-                    )
-                    context.risky = True
-                    continue
-                try:
-                    if (
-                        repeat_edit is not None
-                        and repeat_edit.weekdays
-                        and (repeat_edit.mode or item.recurrence.repeat_type)
-                        != "fixed"
-                    ):
-                        raise ValueError("Weekdays need fixed repeat mode")
-                    recurrence = item.recurrence.transition(
-                        kind=item.kind,
-                        mode=repeat_edit.mode if repeat_edit else None,
-                        unit=repeat_edit.unit if repeat_edit else None,
-                        interval=repeat_interval,
-                        weekday_codes=(
-                            [
-                                _WEEKDAY_CODES[weekday]
-                                for weekday in repeat_edit.weekdays
-                            ]
-                            if repeat_edit is not None
-                            and repeat_edit.weekdays is not None
-                            else None
-                        ),
-                    )
-                except ValueError as error:
-                    raise _Abort(self._unsupported(str(error))) from error
-                writes.append(
-                    Write(
-                        action="repeat",
-                        uuid=item.uuid,
-                        kind="task",
-                        recurrence_rule=recurrence.rule,
-                    )
-                )
-                preconditions[f"scope:repeat:{item.uuid}"] = (
-                    self._recurrence_scope_revision(item.uuid)
-                )
-                parts = []
-                if repeat_edit is not None and repeat_edit.mode is not None:
-                    parts.append(f"mode to {repeat_edit.mode.replace('_', ' ')}")
-                if repeat_edit is not None and repeat_edit.unit is not None:
-                    parts.append(f"unit to {repeat_edit.unit}")
-                if repeat_interval is not None:
-                    parts.append(f"interval to {repeat_interval}")
-                summary.append(f"Change repeat rule for {item.title}: {', '.join(parts)}")
-                warnings.append("This changes future generated Tasks.")
-                context.risky = True
-                repeat_rule_changed = True
-            if item.recurrence.role == "template" and not repeat_rule_changed:
-                raise _Abort(
-                    self._unsupported(
-                        "This recurring item is read-only because its mutation semantics are not proven safe."
-                    )
-                )
-            if (
-                item.recurrence.role == "instance"
-                and item.recurrence.repeat_type == "unknown"
-            ):
-                raise _Abort(
-                    self._unsupported(
-                        "This generated Task has an unknown repeat template. Read its "
-                        "template before changing it."
-                    )
-                )
-            lifecycle = change.lifecycle or ("trash" if change.trash else None)
-            if item.heading:
-                if lifecycle == "delete_permanently":
-                    assigned = [
-                        child
-                        for child in self._library.records.values()
-                        if child.heading_uuid == item.uuid
-                    ]
-                    for child in assigned:
-                        child_home = self._record_home(child)
-                        preconditions[child.id] = self._revision(child)
-                        writes.append(
-                            Write(
-                                action="update",
-                                uuid=child.uuid,
-                                kind=child.kind,
-                                into_uuid=child_home[0],
-                                into_kind=child_home[1],
-                                inbox=child_home[2],
-                                anytime=child_home[3],
-                                clear_heading=True,
-                            )
-                        )
-                    writes.append(
-                        Write(action="permanent_delete", uuid=item.uuid, kind="task")
-                    )
-                    summary.append(f"Permanently delete heading: {item.title}")
-                    if assigned:
-                        summary.append(
-                            f"Clear the heading from {len(assigned)} assigned Tasks"
-                        )
-                    warnings.append("This heading deletion cannot be undone.")
-                    context.risky = True
-                    continue
-                if change.title is not None:
-                    writes.append(
-                        Write(action="update", uuid=item.uuid, kind="task", title=change.title)
-                    )
-                    summary.append(f"Rename heading: {item.title} to {change.title}")
-                if "after" in change.model_fields_set:
-                    writes.extend(
-                        self._heading_order_writes(
-                            item,
-                            after=change.after,
-                            preconditions=preconditions,
-                        )
-                    )
-                    summary.append(f"Reorder heading: {item.title}")
-                continue
-            if item.kind == "area" and change.status is not None:
-                raise _Abort(self._rejected("Areas do not have a completion state."))
-            if item.kind == "area" and "into" in change.model_fields_set:
-                raise _Abort(self._rejected("Areas stay in the top-level registry."))
-            if item.kind == "area":
-                preconditions["scope:areas"] = self._area_scope_revision()
-
-            if lifecycle is not None:
-                if item.kind not in {"task", "project"}:
-                    raise _Abort(self._rejected("Only a Task or Project has this lifecycle."))
-                if item.kind == "project":
-                    preconditions[f"scope:project:{item.uuid}"] = (
-                        self._project_scope_revision(item.uuid)
-                    )
-                if lifecycle == "trash":
-                    writes.append(Write(action="trash", uuid=item.uuid, kind=item.kind))
-                    summary.append(f"Trash {item.kind}: {item.title}")
-                    warnings.append(
-                        f"{item.title} will move to Trash and can be restored in Things."
-                    )
-                elif lifecycle == "restore":
-                    if not item.trashed:
-                        raise _Abort(self._rejected(f"{item.title} is not in Trash."))
-                    writes.append(Write(action="restore", uuid=item.uuid, kind=item.kind))
-                    summary.append(f"Restore {item.kind}: {item.title}")
-                    warnings.append(f"{item.title} will return to its prior Things location.")
-                else:
-                    if not item.trashed:
-                        raise _Abort(
-                            self._needs_input(
-                                f"Move {item.title} to Trash before permanent deletion."
-                            )
-                        )
-                    descendants = (
-                        self._project_descendants(item.uuid)
-                        if item.kind == "project"
-                        else []
-                    )
-                    if item.kind == "project" and descendants and not change.delete_contents:
-                        raise _Abort(
-                            self._needs_input(
-                                f"{item.title} still contains {len(descendants)} records. "
-                                "Move them first or retry with delete_contents true."
-                            )
-                        )
-                    if item.kind == "project" and change.delete_contents:
-                        for descendant in descendants:
-                            preconditions[descendant.id] = self._revision(descendant)
-                            for child_row in descendant.checklists:
-                                writes.append(
-                                    Write(
-                                        action="checklist",
-                                        uuid=child_row.uuid,
-                                        checklist_parent_uuid=descendant.uuid,
-                                        checklist_remove=True,
-                                    )
-                                )
-                            writes.append(
-                                Write(
-                                    action="permanent_delete",
-                                    uuid=descendant.uuid,
-                                    kind=descendant.kind,
-                                )
-                            )
-                    for item_row in item.checklists:
-                        writes.append(
-                            Write(
-                                action="checklist",
-                                uuid=item_row.uuid,
-                                checklist_parent_uuid=item.uuid,
-                                checklist_remove=True,
-                            )
-                        )
-                    writes.append(
-                        Write(action="permanent_delete", uuid=item.uuid, kind=item.kind)
-                    )
-                    summary.append(f"Permanently delete {item.kind}: {item.title}")
-                    warnings.append("This deletion cannot be undone.")
-                    if descendants:
-                        warnings.append(
-                            f"{len(descendants)} contained records will also be deleted."
-                        )
-                context.risky = True
-                continue
-
-            home = (None, None, False, False)
             if "into" in change.model_fields_set:
                 home = self._home(change.into, item.kind, local, new_item=False)
             start, someday, tonight, remind = self._schedule_input(
@@ -1461,95 +1605,7 @@ class ThingsWorkspace:
             ):
                 writes.append(main_write)
 
-            checklist_ids: dict[str, str] = {}
-            for addition in change.checklist_add:
-                uuid = local[addition.key][0] if addition.key else new_uuid()
-                checklist_ids[addition.key or f"check:{uuid}"] = uuid
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=uuid,
-                        title=addition.title,
-                        checklist_parent_uuid=item.uuid,
-                        checklist_status="open",
-                        checklist_index=self._check_after_index(
-                            item,
-                            addition.after,
-                            local,
-                            writes,
-                            present="after" in addition.model_fields_set,
-                        ),
-                    )
-                )
-            known_rows = {row.uuid: row for row in item.checklists}
-            for row_change in change.checklist_change:
-                uuid = row_change.id.removeprefix("check:")
-                if uuid not in known_rows:
-                    raise _Abort(
-                        self._needs_input(
-                            f"Checklist row {row_change.id} is not on {item.title}."
-                        )
-                    )
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=uuid,
-                        title=row_change.title,
-                        checklist_parent_uuid=item.uuid,
-                        checklist_status=(
-                            _internal_status(row_change.status)
-                            if row_change.status
-                            else None
-                        ),
-                        checklist_index=self._check_after_index(
-                            item,
-                            row_change.after,
-                            local,
-                            writes,
-                            present="after" in row_change.model_fields_set,
-                            moving_uuid=uuid,
-                        ),
-                    )
-                )
-            for row_id in change.checklist_remove:
-                uuid = row_id.removeprefix("check:")
-                if uuid not in known_rows:
-                    raise _Abort(self._needs_input(f"Checklist row {row_id} is not on {item.title}."))
-                writes.append(Write(action="checklist", uuid=uuid, checklist_remove=True))
-            if change.checklist_order is not None:
-                remaining = {f"check:{row.uuid}" for row in item.checklists} - set(change.checklist_remove)
-                added = {
-                    key if key.startswith("$") else f"check:{uuid}"
-                    for key, uuid in checklist_ids.items()
-                }
-                if set(change.checklist_order) != remaining | added:
-                    raise _Abort(self._rejected("checklist_order must name every remaining row once."))
-                for order, reference in enumerate(change.checklist_order):
-                    uuid = local[reference][0] if reference.startswith("$") else reference.removeprefix("check:")
-                    if uuid not in known_rows:
-                        planned_index = next(
-                            (
-                                index
-                                for index, write in enumerate(writes)
-                                if write.action == "checklist"
-                                and write.uuid == uuid
-                                and not write.checklist_remove
-                            ),
-                            None,
-                        )
-                        if planned_index is not None:
-                            writes[planned_index] = replace(
-                                writes[planned_index], checklist_index=order * 1024
-                            )
-                            continue
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=uuid,
-                            checklist_parent_uuid=item.uuid,
-                            checklist_index=order * 1024,
-                        )
-                    )
+            self._prepare_checklist_change(item, change, local, context)
 
             if change.move_contents_to is not None:
                 if item.kind != "area":
