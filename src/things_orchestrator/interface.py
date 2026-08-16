@@ -531,6 +531,13 @@ class ChangeEntry(StrictModel):
                 "checklist_change",
                 "checklist_remove",
                 "checklist_order",
+                "into",
+                "start",
+                "deadline",
+                "remind_at",
+                "after",
+                "today_after",
+                "heading_id",
             }
             if self.repeat.remove:
                 allowed = {"id", "if_revision", "repeat"}
@@ -1453,6 +1460,7 @@ COMMIT_DESC = (
     "Commit decided work with a durable intent_id and one coherent batch. "
     "It supports repeat rules, headings, tag structure, rich-note replacement, Trash, restore, and permanent deletion. "
     "A complete repeat rule on an exact ordinary Task keeps it as the current copy and creates its future template. "
+    "Batch requested metadata, schedule, placement, order, and checklist changes into that conversion; both copies get the desired future content. "
     "An ensured tag key can be used in tag_ids or tags_add in the same commit. "
     "Changes need an exact id and if_revision. After pending, retry the exact payload. "
     "Moving a Task or Project to Trash and other high-impact work returns a plan without writes. "

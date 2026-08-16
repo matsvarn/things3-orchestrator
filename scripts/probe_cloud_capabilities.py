@@ -438,6 +438,7 @@ def run() -> dict[str, bool]:
             # Recurrence: convert an existing Task without replacing its identity.
             existing_repeat = own("Task6")
             existing_repeat_check = own("ChecklistItem3")
+            existing_repeat_remove = own("ChecklistItem3")
             existing_repeat_title = f"{prefix} existing recurring"
             library.apply(
                 [
@@ -453,6 +454,14 @@ def run() -> dict[str, bool]:
                         title="Preserve this checklist",
                         checklist_parent_uuid=existing_repeat,
                         checklist_status="open",
+                    ),
+                    Write(
+                        action="checklist",
+                        uuid=existing_repeat_remove,
+                        title="Remove this checklist",
+                        checklist_parent_uuid=existing_repeat,
+                        checklist_status="done",
+                        checklist_index=1024,
                     ),
                 ]
             )
@@ -472,6 +481,21 @@ def run() -> dict[str, bool]:
                                     "interval": 2,
                                     "weekdays": ["monday", "friday"],
                                 },
+                                "checklist_add": [
+                                    {"key": "$new_step", "title": "Added step"}
+                                ],
+                                "checklist_change": [
+                                    {
+                                        "id": f"check:{existing_repeat_check}",
+                                        "title": "Preserved and completed",
+                                        "status": "completed",
+                                    }
+                                ],
+                                "checklist_remove": [f"check:{existing_repeat_remove}"],
+                                "checklist_order": [
+                                    "$new_step",
+                                    f"check:{existing_repeat_check}",
+                                ],
                             }
                         ],
                     }
@@ -485,6 +509,11 @@ def run() -> dict[str, bool]:
             )
             existing_template = existing_template_record.uuid
             owned[existing_template] = existing_template_record.entity or "Task6"
+            owned.pop(existing_repeat_remove)
+            current_rows = library.records[existing_repeat].checklists
+            template_rows = existing_template_record.checklists
+            for row in [*current_rows, *template_rows]:
+                owned[row.uuid] = "ChecklistItem3"
             _proof(
                 library.records[existing_repeat].recurrence.template_uuid
                 == existing_template
@@ -495,8 +524,12 @@ def run() -> dict[str, bool]:
                 }
                 and library.records[existing_repeat].notes == "Preserve this note"
                 and existing_template_record.notes == "Preserve this note"
-                and [row.title for row in existing_template_record.checklists]
-                == ["Preserve this checklist"],
+                and [row.title for row in current_rows]
+                == ["Added step", "Preserved and completed"]
+                and [row.status for row in current_rows] == ["open", "done"]
+                and [row.title for row in template_rows]
+                == ["Added step", "Preserved and completed"]
+                and [row.status for row in template_rows] == ["open", "open"],
                 "recurrence.convert_existing_task",
                 results,
             )
@@ -551,20 +584,27 @@ def run() -> dict[str, bool]:
                     }
                 ),
             )
+            for row in template_rows:
+                owned.pop(row.uuid)
             owned.pop(existing_template)
+            current_rows = library.records[existing_repeat].checklists
             library.apply(
                 [
-                    Write(
-                        action="checklist",
-                        uuid=existing_repeat_check,
-                        checklist_parent_uuid=existing_repeat,
-                        checklist_remove=True,
-                    ),
+                    *[
+                        Write(
+                            action="checklist",
+                            uuid=row.uuid,
+                            checklist_parent_uuid=existing_repeat,
+                            checklist_remove=True,
+                        )
+                        for row in current_rows
+                    ],
                     Write(action="permanent_delete", uuid=existing_repeat),
                 ]
             )
             owned.pop(existing_repeat)
-            owned.pop(existing_repeat_check)
+            for row in current_rows:
+                owned.pop(row.uuid)
 
             # Recurrence: create a template and current generated copy atomically.
             recurring_title = f"{prefix} recurring"

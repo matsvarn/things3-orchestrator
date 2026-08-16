@@ -687,6 +687,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
+    assert "exact ordinary Task" in COMMIT_DESC
+    assert "future template" in COMMIT_DESC
     assert "private" in APPROVE_DESC
 
 

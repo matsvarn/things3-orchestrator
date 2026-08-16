@@ -67,6 +67,8 @@ or cancel Tasks and Projects.
 
 It can make a new or existing Task repeat. It keeps an existing Task as the
 current generated copy and preserves its metadata in the future template. It
+can batch schedule, placement, order, and checklist edits into that conversion.
+The current checklist keeps its completion state. Future checklist rows start open. It
 can change repeat mode, unit, interval, and weekly pattern. It can change a
 template and its current copy in one batch. It can stop a repeat rule and keep
 linked copies as ordinary Tasks. Rule changes keep unknown Cloud fields.

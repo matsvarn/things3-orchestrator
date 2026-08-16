@@ -176,6 +176,8 @@ def test_skill_teaches_the_proven_write_forms() -> None:
         "rename or reorder a heading",
         "repeating template for future copies",
         "generated copy for the current cycle",
+        "complete repeat rule",
+        "batch both changes",
         "repair tag names and parent relationships",
         "restore accidental cleanup",
         "permanently delete",

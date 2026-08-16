@@ -2404,6 +2404,115 @@ def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> 
     assert template.recurrence.weekday_codes == (1, 5)
 
 
+def test_repeat_conversion_projects_one_desired_state_to_copy_and_template() -> None:
+    old_project = Record(uuid="old-project", kind="project", title="Old")
+    new_project = Record(uuid="new-project", kind="project", title="New")
+    heading = Record(
+        uuid="new-heading",
+        kind="task",
+        title="Cadence",
+        parent_uuid=new_project.uuid,
+        heading=True,
+    )
+    list_anchor = Record(
+        uuid="list-anchor",
+        kind="task",
+        title="First in project",
+        parent_uuid=new_project.uuid,
+        sort_index=1024,
+    )
+    today_anchor = Record(
+        uuid="today-anchor",
+        kind="task",
+        title="First today",
+        start=NOW.date(),
+        today_index=1024,
+    )
+    task = Record(
+        uuid="repeat-batched",
+        kind="task",
+        title="Old routine",
+        parent_uuid=old_project.uuid,
+        checklists=[
+            ChecklistLine("row-a", "Remove", status="done", sort_index=0),
+            ChecklistLine("row-b", "Rename", sort_index=1024),
+            ChecklistLine("row-c", "Keep", status="done", sort_index=2048),
+        ],
+    )
+    module = workspace(
+        [old_project, new_project, heading, list_anchor, today_anchor, task]
+    )
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-desired-state-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "title": "New routine",
+                        "into": new_project.id,
+                        "heading_id": heading.id,
+                        "start": "today",
+                        "deadline": (NOW.date() + timedelta(days=3)).isoformat(),
+                        "remind_at": "2026-08-15T09:30:00+00:00",
+                        "after": list_anchor.id,
+                        "today_after": today_anchor.id,
+                        "repeat": {"unit": "week"},
+                        "checklist_add": [{"key": "$new", "title": "Added"}],
+                        "checklist_change": [
+                            {
+                                "id": "check:row-b",
+                                "title": "Renamed",
+                                "status": "completed",
+                            }
+                        ],
+                        "checklist_remove": ["check:row-a"],
+                        "checklist_order": [
+                            "check:row-c",
+                            "$new",
+                            "check:row-b",
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    assert {item.id for item in applied.items} == {task.id, template.id}
+    assert task.uuid == "repeat-batched"
+    for record in (task, template):
+        assert record.title == "New routine"
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == heading.uuid
+        assert record.start == NOW.date()
+        assert record.deadline == NOW.date() + timedelta(days=3)
+        assert record.remind == "09:30"
+        assert record.sort_index > list_anchor.sort_index
+        assert record.today_index > today_anchor.today_index
+    assert [(row.uuid, row.title, row.status) for row in task.checklists] == [
+        ("row-c", "Keep", "done"),
+        (task.checklists[1].uuid, "Added", "open"),
+        ("row-b", "Renamed", "done"),
+    ]
+    assert [row.title for row in template.checklists] == [
+        "Keep",
+        "Added",
+        "Renamed",
+    ]
+    assert [row.status for row in template.checklists] == ["open", "open", "open"]
+
+
 def test_template_and_current_copy_metadata_change_in_one_approved_batch() -> None:
     template = Record(
         uuid="future-template",

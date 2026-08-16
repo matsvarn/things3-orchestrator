@@ -56,7 +56,7 @@ when the owner wants a full replacement and accepts that visible consequence.
 
 For repeat changes, read the generated copy and its repeating template. Change
 the template for future cadence or content and the generated copy for current work.
-Batch both when both cycles must change. A complete repeat rule makes an existing Task the current copy and creates its future template. Stopping repetition keeps linked copies as ordinary Tasks.
+Batch both when both cycles must change. A complete repeat rule makes an existing Task the current copy and creates its future template. Include requested metadata, schedule, placement, order, and checklist changes in the same conversion. The current copy keeps checklist completion. Future checklist rows start open. Stopping repetition keeps linked copies as ordinary Tasks.
 
 When one unclear choice can change the Task, Project, destination, or date,
 keep the item as it is and ask one short question.

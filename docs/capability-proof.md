@@ -50,7 +50,7 @@ repeat, and Project transitions use the public commit and approval path. The
 - Task Trash, restore, and purge;
 - structured rich-note write and explicit Markdown replacement;
 - repeat template plus generated-copy creation;
-- existing-Task conversion with identity and metadata preservation;
+- existing-Task conversion with identity, desired-state, and checklist-batch preservation;
 - future-template and current-copy metadata changes in one approved batch;
 - full repeat rule change and generated-copy edit;
 - generated-copy completion;
