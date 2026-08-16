@@ -24,6 +24,7 @@ from .cloud import (
     save_credentials,
     state_cache_path,
 )
+from .context import SQLiteContextStore
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
 from .workspace import ThingsWorkspace
@@ -342,11 +343,25 @@ def _server(parser: argparse.ArgumentParser) -> ThingsMCPServer:
         timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
     except ZoneInfoNotFoundError:
         parser.error("Stored timezone is invalid. Run login --timezone Europe/Berlin.")
+
+    def clock() -> datetime:
+        return datetime.now(timezone)
+
+    account_journal = journal_path(email)
+    context_path = account_journal.with_name(
+        account_journal.name.replace("journal", "contexts", 1)
+    )
     return ThingsMCPServer(
         ThingsWorkspace(
             library,
-            journal=SQLiteJournal(journal_path(email)),
-            clock=lambda: datetime.now(timezone),
+            journal=SQLiteJournal(account_journal),
+            clock=clock,
+            context_store=SQLiteContextStore(
+                context_path,
+                clock=clock,
+                token_factory=lambda: token_urlsafe(24),
+            ),
+            account_id=email,
         )
     )
 

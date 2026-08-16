@@ -26,6 +26,65 @@ from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall, Res
 from things_orchestrator.library import Write, new_uuid
 from things_orchestrator.workspace import ThingsWorkspace
 
+# Keep this mapping beside the disposable cases.  The proof document and its
+# structural test use these exact keys; no live network call runs in CI.
+PROBE_CAPABILITY_KEYS: dict[str, tuple[str, ...]] = {
+    "Capture a Task": ("recurrence.create_template_and_instance",),
+    "Capture a Project and Area": ("ax.project_move_to_area",),
+    "Schedule start, deadline, reminder, and placement": (
+        "recurrence.convert_existing_task",
+    ),
+    "Checklist add, change, remove, order, and preservation": (
+        "recurrence.convert_existing_task",
+        "project.restore_tree",
+    ),
+    "Task and Project Trash or restore": ("task.restore", "project.restore_tree"),
+    "Task purge and descendant-first Project purge": (
+        "task.purge",
+        "project.purge_tree_descendants_first",
+    ),
+    "Task, Project, and heading placement": (
+        "ax.project_move_to_area",
+        "ax.organize_draft",
+    ),
+    "Area registry create and Project-to-Area placement": (
+        "ax.project_move_to_area",
+    ),
+    "Context refs for exact change and placement": (
+        "ax.context_change",
+        "ax.project_move_to_area",
+    ),
+    "Editable Project organize drafts": ("ax.organize_draft",),
+    "Atomic Project merge": ("ax.project_merge",),
+    "Heading create, rename, assign, clear, and reorder": (
+        "ax.organize_draft",
+        "heading.reorder",
+        "heading.rename",
+        "heading.clear_assignment",
+        "heading.delete_with_assignments",
+    ),
+    "Heading deletion with assignment cleanup": ("heading.delete_with_assignments",),
+    "Tag create, assign, rename, reparent, and delete": (
+        "tag.create_hierarchy",
+        "tag.assign_task_readback",
+        "tag.rename_reparent",
+        "tag.delete",
+    ),
+    "Markdown write and explicit rich-note replacement": (
+        "note.write_rich_structure",
+        "note.replace_rich_with_markdown",
+    ),
+    "Repeat inspect, create, convert, edit, complete, and stop": (
+        "recurrence.inspect_relationship",
+        "recurrence.create_template_and_instance",
+        "recurrence.convert_existing_task",
+        "recurrence.change_full_rule",
+        "recurrence.change_generated_copy",
+        "recurrence.complete_current_copy",
+        "recurrence.remove_keep_copy",
+    ),
+}
+
 
 def _wait_for(
     library: CloudLibrary,
@@ -67,6 +126,16 @@ def _approved_commit(module: ThingsWorkspace, call: CommitCall) -> Result:
     return applied
 
 
+def _applied_commit(module: ThingsWorkspace, call: CommitCall) -> Result:
+    """Apply one public commit, including approval when the plan requires it."""
+    result = module.commit(call)
+    if result.status == "needs_approval" and result.plan is not None:
+        result = module.approve(ApproveCall(plan_id=result.plan.id))
+    if result.status not in {"applied", "unchanged"}:
+        raise RuntimeError(f"live proof commit did not apply: {result}")
+    return result
+
+
 def _revision(module: ThingsWorkspace, item_id: str) -> str:
     result = module.read(ReadCall(id=item_id, limit=40))
     if result.status != "ok" or len(result.items) != 1:
@@ -79,6 +148,158 @@ def _tags_revision(module: ThingsWorkspace) -> str:
     if result.status != "ok" or result.scope_revision is None:
         raise RuntimeError(f"live proof could not read tags: {result}")
     return result.scope_revision
+
+
+def _record_depth(uuid: str, records: dict[str, object]) -> int:
+    """Return a bounded parent depth for descendant-first cleanup."""
+    depth = 0
+    current = records.get(uuid)
+    seen: set[str] = set()
+    while current is not None and getattr(current, "parent_uuid", None):
+        parent_uuid = str(getattr(current, "parent_uuid"))
+        if parent_uuid in seen:
+            break
+        seen.add(parent_uuid)
+        depth += 1
+        current = records.get(parent_uuid)
+        if depth >= 100:
+            break
+    return depth
+
+
+def _tag_depth(uuid: str, parents: dict[str, list[str]]) -> int:
+    depth = 0
+    current = uuid
+    seen: set[str] = set()
+    while parents.get(current):
+        parent = parents[current][0]
+        if parent in seen:
+            break
+        seen.add(parent)
+        depth += 1
+        current = parent
+        if depth >= 100:
+            break
+    return depth
+
+
+def _cleanup_probe_records(
+    client: CloudClient,
+    library: CloudLibrary,
+    owned: dict[str, str],
+    prefix: str,
+) -> None:
+    """Delete only this run's UUIDs, deepest first, and prove cleanup."""
+    errors: list[Exception] = []
+    try:
+        library.refresh(force=True)
+    except Exception as error:
+        errors.append(error)
+
+    # A unique title prefix lets us recover records created by a timed-out
+    # commit.  UUIDs remain the deletion authority for every known record.
+    for uuid, item in library.records.items():
+        if item.title.startswith(prefix):
+            owned.setdefault(uuid, item.entity or "Task6")
+    for uuid, title in library.tags.items():
+        if title.startswith(prefix):
+            owned.setdefault(uuid, "Tag4")
+    for item in library.records.values():
+        for row in item.checklists:
+            if row.title.startswith(prefix):
+                owned.setdefault(row.uuid, "ChecklistItem3")
+
+    records = library.records
+    checklists = sorted(
+        {
+            uuid: kind
+            for uuid, kind in owned.items()
+            if kind.startswith("ChecklistItem")
+        }.items()
+    )
+    # Checklist rows are separate Cloud entities. Delete them before their
+    # parent Tasks or Projects so no orphaned rows can survive a purge.
+    if checklists:
+        try:
+            client.commit([Envelope(uuid, 2, kind, {}) for uuid, kind in checklists])
+        except Exception as error:
+            errors.append(error)
+
+    record_entries = [
+        (uuid, kind)
+        for uuid, kind in owned.items()
+        if not kind.startswith("ChecklistItem") and uuid not in library.tags
+    ]
+    record_entries.sort(
+        key=lambda entry: (-_record_depth(entry[0], records), entry[0])
+    )
+    for depth in sorted(
+        {_record_depth(uuid, records) for uuid, _kind in record_entries},
+        reverse=True,
+    ):
+        batch = [
+            Envelope(uuid, 2, kind, {})
+            for uuid, kind in record_entries
+            if _record_depth(uuid, records) == depth
+        ]
+        if not batch:
+            continue
+        try:
+            client.commit(batch)
+        except Exception as error:
+            errors.append(error)
+
+    tag_entries = [
+        (uuid, kind) for uuid, kind in owned.items() if kind.startswith("Tag")
+    ]
+    for depth in sorted(
+        {_tag_depth(uuid, library.tag_parents) for uuid, _kind in tag_entries},
+        reverse=True,
+    ):
+        batch = [
+            Envelope(uuid, 2, kind, {})
+            for uuid, kind in tag_entries
+            if _tag_depth(uuid, library.tag_parents) == depth
+        ]
+        if not batch:
+            continue
+        try:
+            client.commit(batch)
+        except Exception as error:
+            errors.append(error)
+
+    try:
+        library.refresh(force=True)
+    except Exception as error:
+        errors.append(error)
+
+    remaining_records = [
+        item.uuid
+        for item in library.records.values()
+        if item.title.startswith(prefix) or item.uuid in owned
+    ]
+    remaining_tags = [
+        uuid
+        for uuid, title in library.tags.items()
+        if title.startswith(prefix) or uuid in owned
+    ]
+    remaining_checklists = [
+        row.uuid
+        for item in library.records.values()
+        for row in item.checklists
+        if row.title.startswith(prefix) or row.uuid in owned
+    ]
+    if remaining_records or remaining_tags or remaining_checklists:
+        errors.append(
+            RuntimeError(
+                "probe cleanup left exact UUIDs: "
+                f"records={remaining_records}, tags={remaining_tags}, "
+                f"checklists={remaining_checklists}"
+            )
+        )
+    if errors:
+        detail = "; ".join(str(error) for error in errors)
+        raise RuntimeError(f"live probe cleanup failed: {detail}") from errors[0]
 
 
 def run() -> dict[str, bool]:
@@ -100,8 +321,10 @@ def run() -> dict[str, bool]:
         try:
             # Tags: hierarchy, rename, reparent, and deletion.
             parent_tag = own("Tag4")
+            second_parent_tag = own("Tag4")
             child_tag = own("Tag4")
             tag_parent_title = f"{prefix} tag parent"
+            tag_second_parent_title = f"{prefix} tag second parent"
             tag_child_title = f"{prefix} tag child"
             created_tags = module.commit(
                 CommitCall.model_validate(
@@ -109,6 +332,7 @@ def run() -> dict[str, bool]:
                         "intent_id": f"probe-tag-create-{parent_tag}",
                         "ensure_tags": [
                             {"key": "$parent", "title": tag_parent_title},
+                            {"key": "$second", "title": tag_second_parent_title},
                             {
                                 "key": "$child",
                                 "title": tag_child_title,
@@ -121,17 +345,75 @@ def run() -> dict[str, bool]:
             if created_tags.status != "applied":
                 raise RuntimeError(f"live tag create did not apply: {created_tags}")
             actual_parent_tag = library.tag_uuid(tag_parent_title)
+            actual_second_parent_tag = library.tag_uuid(tag_second_parent_title)
             actual_child_tag = library.tag_uuid(tag_child_title)
-            if actual_parent_tag is None or actual_child_tag is None:
+            if (
+                actual_parent_tag is None
+                or actual_second_parent_tag is None
+                or actual_child_tag is None
+            ):
                 raise RuntimeError("live tag create did not return exact tags")
             owned.pop(parent_tag)
+            owned.pop(second_parent_tag)
             owned.pop(child_tag)
-            parent_tag, child_tag = actual_parent_tag, actual_child_tag
+            parent_tag, second_parent_tag, child_tag = (
+                actual_parent_tag,
+                actual_second_parent_tag,
+                actual_child_tag,
+            )
             owned[parent_tag] = "Tag4"
+            owned[second_parent_tag] = "Tag4"
             owned[child_tag] = "Tag4"
             _proof(
                 library.tag_parents.get(child_tag) == [parent_tag],
                 "tag.create_hierarchy",
+                results,
+            )
+            tag_target = own("Task6")
+            library.apply(
+                [
+                    Write(
+                        action="create",
+                        uuid=tag_target,
+                        title=f"{prefix} tag assignment target",
+                    )
+                ]
+            )
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-tag-assign-{tag_target}",
+                        "tags_revision": _tags_revision(module),
+                        "change": [
+                            {
+                                "id": f"task:{tag_target}",
+                                "if_revision": _revision(
+                                    module, f"task:{tag_target}"
+                                ),
+                                "tags_add": [f"tag:{child_tag}"],
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def tag_assignment_is_visible() -> bool:
+                library.refresh(force=True)
+                target = library.records.get(tag_target)
+                if target is None or child_tag not in target.tag_uuids:
+                    return False
+                read_back = module.read(ReadCall(id=f"task:{tag_target}"))
+                return (
+                    read_back.status == "ok"
+                    and len(read_back.items) == 1
+                    and f"tag:{child_tag}"
+                    in {tag.id for tag in read_back.items[0].direct_tags}
+                )
+
+            _proof(
+                _wait_for(library, tag_assignment_is_visible),
+                "tag.assign_task_readback",
                 results,
             )
             renamed_tag_title = f"{prefix} tag renamed"
@@ -145,7 +427,7 @@ def run() -> dict[str, bool]:
                             {
                                 "id": f"tag:{child_tag}",
                                 "title": renamed_tag_title,
-                                "parent_id": None,
+                                "parent_id": f"tag:{second_parent_tag}",
                             }
                         ],
                     }
@@ -153,11 +435,11 @@ def run() -> dict[str, bool]:
             )
             _proof(
                 library.tags.get(child_tag) == renamed_tag_title
-                and library.tag_parents.get(child_tag) == [],
+                and library.tag_parents.get(child_tag) == [second_parent_tag],
                 "tag.rename_reparent",
                 results,
             )
-            for tag_uuid in (child_tag, parent_tag):
+            for tag_uuid in (child_tag, second_parent_tag, parent_tag):
                 _approved_commit(
                     module,
                     CommitCall.model_validate(
@@ -178,65 +460,619 @@ def run() -> dict[str, bool]:
                 "tag.delete",
                 results,
             )
+            library.apply([Write(action="permanent_delete", uuid=tag_target)])
+            _proof(tag_target not in library.records, "tag.assignment_target_cleanup", results)
             owned.pop(child_tag)
+            owned.pop(second_parent_tag)
             owned.pop(parent_tag)
+            owned.pop(tag_target)
 
+            # Public contextual path: short refs and one desired Project layout.
+            ax_project = own("Task6")
+            ax_heading = own("Task6")
+            ax_changed = own("Task6")
+            ax_assigned = own("Task6")
+            ax_unlisted = own("Task6")
+            ax_changed_title = f"{prefix} context changed"
+            ax_unlisted_title = f"{prefix} unlisted"
+            library.apply(
+                [
+                    Write(
+                        action="create",
+                        uuid=ax_project,
+                        kind="project",
+                        title=f"{prefix} AX project",
+                    ),
+                    Write(
+                        action="create_heading",
+                        uuid=ax_heading,
+                        title=f"{prefix} AX existing heading",
+                        into_uuid=ax_project,
+                        into_kind="project",
+                        sort_index=0,
+                    ),
+                    Write(
+                        action="create",
+                        uuid=ax_changed,
+                        title=f"{prefix} context original",
+                        notes="Keep context metadata",
+                        into_uuid=ax_project,
+                        into_kind="project",
+                        heading_uuid=ax_heading,
+                        sort_index=0,
+                    ),
+                    Write(
+                        action="create",
+                        uuid=ax_assigned,
+                        title=f"{prefix} assign to new heading",
+                        into_uuid=ax_project,
+                        into_kind="project",
+                        sort_index=1024,
+                    ),
+                    Write(
+                        action="create",
+                        uuid=ax_unlisted,
+                        title=ax_unlisted_title,
+                        notes="This work is intentionally unlisted.",
+                        into_uuid=ax_project,
+                        into_kind="project",
+                        sort_index=2048,
+                    ),
+                ]
+            )
+
+            change_read = module.read(
+                ReadCall(purpose="change", id=f"task:{ax_changed}", limit=20)
+            )
+            if change_read.status != "ok" or change_read.context is None:
+                raise RuntimeError(f"live contextual change read failed: {change_read}")
+            changed_ref = next(
+                item.ref
+                for item in change_read.items
+                if item.id == f"task:{ax_changed}"
+            )
+            if changed_ref is None:
+                raise RuntimeError("live contextual change read omitted its short ref")
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-ax-change-{ax_changed}",
+                        "context_id": change_read.context.id,
+                        "change": [{"ref": changed_ref, "title": ax_changed_title}],
+                    }
+                ),
+            )
+            _proof(
+                _wait_for(
+                    library,
+                    lambda: (
+                        ax_changed in library.records
+                        and library.records[ax_changed].title == ax_changed_title
+                    ),
+                ),
+                "ax.context_change",
+                results,
+            )
+
+            organize_read = module.read(
+                ReadCall(
+                    purpose="organize",
+                    view="project",
+                    within=f"project:{ax_project}",
+                    limit=20,
+                )
+            )
+            if (
+                organize_read.status != "ok"
+                or organize_read.context is None
+                or not organize_read.context.complete
+            ):
+                raise RuntimeError(
+                    f"live contextual organize read failed: {organize_read}"
+                )
+            refs = {item.id: item.ref for item in organize_read.items}
+            required_ids = {
+                f"project:{ax_project}",
+                f"heading:{ax_heading}",
+                f"task:{ax_changed}",
+                f"task:{ax_assigned}",
+            }
+            if any(refs.get(item_id) is None for item_id in required_ids):
+                raise RuntimeError(
+                    "live contextual organize read omitted required refs"
+                )
+            unlisted_before = library.records[ax_unlisted]
+            unlisted_state = (
+                unlisted_before.title,
+                unlisted_before.notes,
+                unlisted_before.heading_uuid,
+                unlisted_before.sort_index,
+                unlisted_before.status,
+            )
+            new_heading_title = f"{prefix} AX new heading"
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-ax-organize-{ax_project}",
+                        "context_id": organize_read.context.id,
+                        "organize": [
+                            {
+                                "project_ref": refs[f"project:{ax_project}"],
+                                "sections": [
+                                    {
+                                        "heading_key": "$new",
+                                        "heading_title": new_heading_title,
+                                        "task_refs": [refs[f"task:{ax_assigned}"]],
+                                    },
+                                    {
+                                        "heading_ref": refs[f"heading:{ax_heading}"],
+                                        "task_refs": [refs[f"task:{ax_changed}"]],
+                                    },
+                                ],
+                                "unlisted": "keep",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def organized_layout_is_visible() -> bool:
+                candidates = [
+                    item
+                    for item in library.records.values()
+                    if item.title == new_heading_title and item.heading
+                ]
+                if len(candidates) != 1:
+                    return False
+                candidate = candidates[0]
+                current_heading = library.records.get(ax_heading)
+                current_assigned = library.records.get(ax_assigned)
+                current_changed = library.records.get(ax_changed)
+                current_unlisted = library.records.get(ax_unlisted)
+                if any(
+                    item is None
+                    for item in (
+                        current_heading,
+                        current_assigned,
+                        current_changed,
+                        current_unlisted,
+                    )
+                ):
+                    return False
+                assert current_heading is not None
+                assert current_assigned is not None
+                assert current_changed is not None
+                assert current_unlisted is not None
+                return (
+                    candidate.parent_uuid == ax_project
+                    and candidate.sort_index < current_heading.sort_index
+                    and current_assigned.heading_uuid == candidate.uuid
+                    and current_changed.heading_uuid == ax_heading
+                    and (
+                        current_unlisted.title,
+                        current_unlisted.notes,
+                        current_unlisted.heading_uuid,
+                        current_unlisted.sort_index,
+                        current_unlisted.status,
+                    )
+                    == unlisted_state
+                )
+
+            _proof(
+                _wait_for(library, organized_layout_is_visible),
+                "ax.organize_draft",
+                results,
+            )
+            new_heading = next(
+                item
+                for item in library.records.values()
+                if item.title == new_heading_title and item.heading
+            )
+            owned[new_heading.uuid] = new_heading.entity or "Task6"
+            library.apply(
+                [
+                    Write(action="permanent_delete", uuid=ax_changed),
+                    Write(action="permanent_delete", uuid=ax_assigned),
+                    Write(action="permanent_delete", uuid=ax_unlisted),
+                    Write(action="permanent_delete", uuid=new_heading.uuid),
+                    Write(action="permanent_delete", uuid=ax_heading),
+                    Write(action="permanent_delete", uuid=ax_project),
+                ]
+            )
+            for uuid in (
+                ax_changed,
+                ax_assigned,
+                ax_unlisted,
+                new_heading.uuid,
+                ax_heading,
+                ax_project,
+            ):
+                owned.pop(uuid)
+
+            # Public contextual path: merge one Project in one approved batch.
+            # The organize read carries source members, destination Project
+            # refs, and the destination Area anchor in one bounded context.
+            merge_area = own("Area3")
+            merge_source = own("Task6")
+            merge_destination = own("Task6")
+            merge_heading = own("Task6")
+            merge_task = own("Task6")
+            library.apply(
+                [
+                    Write(
+                        action="create",
+                        uuid=merge_area,
+                        kind="area",
+                        title=f"{prefix} merge area",
+                    ),
+                    Write(
+                        action="create",
+                        uuid=merge_source,
+                        kind="project",
+                        title=f"{prefix} merge source",
+                    ),
+                    Write(
+                        action="create",
+                        uuid=merge_destination,
+                        kind="project",
+                        title=f"{prefix} merge destination",
+                        into_uuid=merge_area,
+                        into_kind="area",
+                    ),
+                    Write(
+                        action="create_heading",
+                        uuid=merge_heading,
+                        title=f"{prefix} merge heading",
+                        into_uuid=merge_source,
+                        into_kind="project",
+                    ),
+                    Write(
+                        action="create",
+                        uuid=merge_task,
+                        title=f"{prefix} merge task",
+                        into_uuid=merge_source,
+                        into_kind="project",
+                        heading_uuid=merge_heading,
+                    ),
+                ]
+            )
+            merge_read = module.read(
+                ReadCall(purpose="organize", id=f"project:{merge_source}")
+            )
+            if merge_read.status != "ok" or merge_read.context is None:
+                raise RuntimeError(f"live Project merge read failed: {merge_read}")
+            merge_refs = {item.id: item.ref for item in merge_read.items}
+            required_merge_ids = {
+                f"project:{merge_source}",
+                f"project:{merge_destination}",
+                f"area:{merge_area}",
+                f"heading:{merge_heading}",
+                f"task:{merge_task}",
+            }
+            if any(merge_refs.get(item_id) is None for item_id in required_merge_ids):
+                raise RuntimeError("live Project merge read omitted required refs")
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-ax-project-merge-{merge_source}",
+                        "context_id": merge_read.context.id,
+                        "change": [
+                            {
+                                "ref": merge_refs[f"heading:{merge_heading}"],
+                                "into": merge_refs[f"project:{merge_destination}"],
+                            },
+                            {
+                                "ref": merge_refs[f"task:{merge_task}"],
+                                "into": merge_refs[f"project:{merge_destination}"],
+                            },
+                            {
+                                "ref": merge_refs[f"project:{merge_source}"],
+                                "lifecycle": "trash",
+                            },
+                        ],
+                    }
+                ),
+            )
+
+            def merged_tree_is_visible() -> bool:
+                library.refresh(force=True)
+                source = library.records.get(merge_source)
+                heading = library.records.get(merge_heading)
+                task = library.records.get(merge_task)
+                return (
+                    source is not None
+                    and source.trashed
+                    and heading is not None
+                    and heading.parent_uuid == merge_destination
+                    and task is not None
+                    and task.parent_uuid == merge_destination
+                    and task.heading_uuid == merge_heading
+                )
+
+            _proof(
+                _wait_for(library, merged_tree_is_visible),
+                "ax.project_merge",
+                results,
+            )
+            merge_read_back = module.read(ReadCall(id=f"task:{merge_task}"))
+            if merge_read_back.status != "ok" or not merge_read_back.items:
+                raise RuntimeError("live Project merge read-back failed")
+            _proof(
+                merge_read_back.items[0].into_id == f"project:{merge_destination}",
+                "ax.project_merge_readback",
+                results,
+            )
+            library.apply(
+                [
+                    Write(action="permanent_delete", uuid=merge_task),
+                    Write(action="permanent_delete", uuid=merge_heading),
+                    Write(action="permanent_delete", uuid=merge_source),
+                    Write(action="permanent_delete", uuid=merge_destination),
+                    Write(action="permanent_delete", uuid=merge_area),
+                ]
+            )
+            for uuid in (
+                merge_task,
+                merge_heading,
+                merge_source,
+                merge_destination,
+                merge_area,
+            ):
+                owned.pop(uuid)
+
+            # Public contextual path: move a Project to an Area with short refs.
+            # Create both Areas and the Project through the same public commit
+            # path.  This also proves that the destination Area is available in
+            # the Project change context, without copying a revision.
+            areas_before = module.read(ReadCall(view="system", limit=40))
+            if areas_before.status != "ok" or areas_before.scope_revision is None:
+                raise RuntimeError(
+                    f"live Area registry read failed: {areas_before}"
+                )
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-ax-project-area-{new_uuid()}",
+                        "scope_revision": areas_before.scope_revision,
+                        "create": [
+                            {
+                                "key": "$source",
+                                "kind": "area",
+                                "title": f"{prefix} source area",
+                            },
+                            {
+                                "key": "$destination",
+                                "kind": "area",
+                                "title": f"{prefix} destination area",
+                            },
+                            {
+                                "key": "$project",
+                                "kind": "project",
+                                "title": f"{prefix} movable project",
+                                "into": "$source",
+                            },
+                        ],
+                    }
+                ),
+            )
+
+            def created_project_area_layout_is_visible() -> bool:
+                return any(
+                    item.kind == "area"
+                    and item.title == f"{prefix} source area"
+                    for item in library.records.values()
+                ) and any(
+                    item.kind == "area"
+                    and item.title == f"{prefix} destination area"
+                    for item in library.records.values()
+                ) and any(
+                    item.kind == "project"
+                    and item.title == f"{prefix} movable project"
+                    for item in library.records.values()
+                )
+
+            if not _wait_for(library, created_project_area_layout_is_visible):
+                raise RuntimeError("live Project to Area setup did not become visible")
+            source_area = next(
+                item
+                for item in library.records.values()
+                if item.kind == "area" and item.title == f"{prefix} source area"
+            )
+            destination_area = next(
+                item
+                for item in library.records.values()
+                if item.kind == "area" and item.title == f"{prefix} destination area"
+            )
+            movable_project = next(
+                item
+                for item in library.records.values()
+                if item.kind == "project" and item.title == f"{prefix} movable project"
+            )
+            for item in (source_area, destination_area, movable_project):
+                owned[item.uuid] = item.entity or (
+                    "Area3" if item.kind == "area" else "Task6"
+                )
+
+            project_change = module.read(
+                ReadCall(purpose="change", id=f"project:{movable_project.uuid}")
+            )
+            if project_change.status != "ok" or project_change.context is None:
+                raise RuntimeError(
+                    f"live Project Area context read failed: {project_change}"
+                )
+            context_refs = {item.id: item.ref for item in project_change.items}
+            project_ref = context_refs.get(f"project:{movable_project.uuid}")
+            destination_ref = context_refs.get(f"area:{destination_area.uuid}")
+            if project_ref is None or destination_ref is None:
+                raise RuntimeError(
+                    "live Project Area context omitted Project or destination ref"
+                )
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-ax-project-move-{movable_project.uuid}",
+                        "context_id": project_change.context.id,
+                        "change": [
+                            {"ref": project_ref, "into": destination_ref},
+                        ],
+                    }
+                ),
+            )
+
+            def project_move_is_visible() -> bool:
+                moved = library.records.get(movable_project.uuid)
+                if moved is None or moved.area_uuid != destination_area.uuid:
+                    return False
+                read_back = module.read(
+                    ReadCall(id=f"project:{movable_project.uuid}")
+                )
+                return (
+                    read_back.status == "ok"
+                    and len(read_back.items) == 1
+                    and read_back.items[0].into_id == f"area:{destination_area.uuid}"
+                )
+
+            _proof(
+                _wait_for(library, project_move_is_visible),
+                "ax.project_move_to_area",
+                results,
+            )
             # Headings and a non-empty Project lifecycle.
             project = own("Task6")
             heading_a = own("Task6")
             heading_b = own("Task6")
             project_task = own("Task6")
             checklist = own("ChecklistItem3")
-            library.apply(
-                [
-                    Write(
-                        action="create",
-                        uuid=project,
-                        kind="project",
-                        title=f"{prefix} project",
-                    ),
-                    Write(
-                        action="create_heading",
-                        uuid=heading_a,
-                        title=f"{prefix} heading A",
-                        into_uuid=project,
-                        into_kind="project",
-                        sort_index=0,
-                    ),
-                    Write(
-                        action="create_heading",
-                        uuid=heading_b,
-                        title=f"{prefix} heading B",
-                        into_uuid=project,
-                        into_kind="project",
-                        sort_index=1024,
-                    ),
-                    Write(
-                        action="create",
-                        uuid=project_task,
-                        title=f"{prefix} project task",
-                        into_uuid=project,
-                        into_kind="project",
-                        heading_uuid=heading_a,
-                    ),
-                    Write(
-                        action="checklist",
-                        uuid=checklist,
-                        title=f"{prefix} project checklist",
-                        checklist_parent_uuid=project_task,
-                        checklist_status="open",
-                    ),
-                ]
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-fixture-{project}",
+                        "create": [
+                            {
+                                "key": "$project",
+                                "kind": "project",
+                                "title": f"{prefix} project",
+                            },
+                            {
+                                "key": "$heading_a",
+                                "kind": "heading",
+                                "title": f"{prefix} heading A",
+                                "into": "$project",
+                            },
+                            {
+                                "key": "$heading_b",
+                                "kind": "heading",
+                                "title": f"{prefix} heading B",
+                                "into": "$project",
+                            },
+                            {
+                                "key": "$project_task",
+                                "kind": "task",
+                                "title": f"{prefix} project task",
+                                "into": "$project",
+                                "heading_id": "$heading_a",
+                                "checklist": [f"{prefix} project checklist"],
+                            },
+                        ],
+                    }
+                ),
             )
-            library.apply(
-                [
-                    Write(action="update", uuid=heading_b, sort_index=0),
-                    Write(action="update", uuid=heading_a, sort_index=1024),
+            if not _wait_for(
+                library,
+                lambda: all(
+                    any(item.title == title for item in library.records.values())
+                    for title in (
+                        f"{prefix} project",
+                        f"{prefix} heading A",
+                        f"{prefix} heading B",
+                        f"{prefix} project task",
+                    )
+                ),
+            ):
+                raise RuntimeError("public heading fixture did not become visible")
+
+            def created_uuid(title: str) -> str:
+                matches = [
+                    item.uuid
+                    for item in library.records.values()
+                    if item.title == title
                 ]
+                if len(matches) != 1:
+                    raise RuntimeError(f"public fixture title was not unique: {title}")
+                return matches[0]
+
+            fixture_ids = {
+                "project": created_uuid(f"{prefix} project"),
+                "heading_a": created_uuid(f"{prefix} heading A"),
+                "heading_b": created_uuid(f"{prefix} heading B"),
+                "project_task": created_uuid(f"{prefix} project task"),
+            }
+            for placeholder in (project, heading_a, heading_b, project_task):
+                owned.pop(placeholder)
+            project = fixture_ids["project"]
+            heading_a = fixture_ids["heading_a"]
+            heading_b = fixture_ids["heading_b"]
+            project_task = fixture_ids["project_task"]
+            owned.update(
+                {
+                    project: "Task6",
+                    heading_a: "Task6",
+                    heading_b: "Task6",
+                    project_task: "Task6",
+                }
             )
+            task_fixture_read = module.read(
+                ReadCall(id=f"task:{project_task}", limit=40)
+            )
+            if (
+                task_fixture_read.status != "ok"
+                or len(task_fixture_read.items) != 1
+                or len(task_fixture_read.items[0].checklist) != 1
+            ):
+                raise RuntimeError("public heading fixture lost its checklist")
+            owned.pop(checklist)
+            checklist = task_fixture_read.items[0].checklist[0].id.removeprefix(
+                "check:"
+            )
+            owned[checklist] = "ChecklistItem3"
+
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-reorder-{heading_b}",
+                        "change": [
+                            {
+                                "id": f"heading:{heading_b}",
+                                "if_revision": _revision(
+                                    module, f"heading:{heading_b}"
+                                ),
+                                "after": None,
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def heading_reorder_is_visible() -> bool:
+                moved_read = module.read(ReadCall(id=f"heading:{heading_b}"))
+                first_read = module.read(ReadCall(id=f"heading:{heading_a}"))
+                return (
+                    moved_read.status == "ok"
+                    and first_read.status == "ok"
+                    and len(moved_read.items) == 1
+                    and len(first_read.items) == 1
+                    and moved_read.items[0].order < first_read.items[0].order
+                )
+
             _proof(
-                library.records[heading_b].sort_index
-                < library.records[heading_a].sort_index,
+                _wait_for(library, heading_reorder_is_visible),
                 "heading.reorder",
                 results,
             )
@@ -303,6 +1139,76 @@ def run() -> dict[str, bool]:
                 and library.records[heading_a].title.endswith("heading renamed"),
                 "heading.rename",
                 results,
+            )
+            # Exercise explicit assignment and clearing through the public
+            # change path.  The exact read-back proves that Cloud removed the
+            # heading assignment, not only that the request was accepted.
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-assign-{project_task}",
+                        "change": [
+                            {
+                                "id": f"task:{project_task}",
+                                "if_revision": _revision(
+                                    module, f"task:{project_task}"
+                                ),
+                                "heading_id": f"heading:{heading_b}",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def heading_clear_is_visible() -> bool:
+                read_back = module.read(ReadCall(id=f"task:{project_task}"))
+                return (
+                    read_back.status == "ok"
+                    and len(read_back.items) == 1
+                    and read_back.items[0].heading_id is None
+                )
+
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-clear-{project_task}",
+                        "change": [
+                            {
+                                "id": f"task:{project_task}",
+                                "if_revision": _revision(
+                                    module, f"task:{project_task}"
+                                ),
+                                "heading_id": None,
+                            }
+                        ],
+                    }
+                ),
+            )
+            _proof(
+                _wait_for(library, heading_clear_is_visible),
+                "heading.clear_assignment",
+                results,
+            )
+            # Keep the later heading-deletion proof meaningful: it still
+            # deletes a heading with an assigned disposable Task.
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-reassign-{project_task}",
+                        "change": [
+                            {
+                                "id": f"task:{project_task}",
+                                "if_revision": _revision(
+                                    module, f"task:{project_task}"
+                                ),
+                                "heading_id": f"heading:{heading_a}",
+                            }
+                        ],
+                    }
+                ),
             )
             _approved_commit(
                 module,
@@ -377,16 +1283,110 @@ def run() -> dict[str, bool]:
                 owned.pop(uuid)
 
             # Standalone Task lifecycle.
-            task = own("Task6")
-            library.apply(
-                [Write(action="create", uuid=task, title=f"{prefix} lifecycle")]
+            task_placeholder = own("Task6")
+            _applied_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-task-lifecycle-create-{task_placeholder}",
+                        "create": [{"title": f"{prefix} lifecycle"}],
+                    }
+                ),
             )
-            library.apply([Write(action="trash", uuid=task)])
-            library.apply([Write(action="restore", uuid=task)])
-            _proof(not library.records[task].trashed, "task.restore", results)
-            library.apply([Write(action="trash", uuid=task)])
-            library.apply([Write(action="permanent_delete", uuid=task)])
-            _proof(task not in library.records, "task.purge", results)
+            if not _wait_for(
+                library,
+                lambda: any(
+                    item.title == f"{prefix} lifecycle"
+                    for item in library.records.values()
+                ),
+            ):
+                raise RuntimeError("public Task lifecycle fixture did not appear")
+            task_matches = [
+                item.uuid
+                for item in library.records.values()
+                if item.title == f"{prefix} lifecycle"
+            ]
+            if len(task_matches) != 1:
+                raise RuntimeError("public Task lifecycle fixture was not unique")
+            task = task_matches[0]
+            owned.pop(task_placeholder)
+            owned[task] = "Task6"
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-task-trash-{task}",
+                        "change": [
+                            {
+                                "id": f"task:{task}",
+                                "if_revision": _revision(module, f"task:{task}"),
+                                "lifecycle": "trash",
+                            }
+                        ],
+                    }
+                ),
+            )
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-task-restore-{task}",
+                        "change": [
+                            {
+                                "id": f"task:{task}",
+                                "if_revision": _revision(module, f"task:{task}"),
+                                "lifecycle": "restore",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def task_restore_is_visible() -> bool:
+                read_back = module.read(ReadCall(id=f"task:{task}"))
+                return (
+                    read_back.status == "ok"
+                    and len(read_back.items) == 1
+                    and read_back.items[0].status == "open"
+                )
+
+            _proof(_wait_for(library, task_restore_is_visible), "task.restore", results)
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-task-retrash-{task}",
+                        "change": [
+                            {
+                                "id": f"task:{task}",
+                                "if_revision": _revision(module, f"task:{task}"),
+                                "lifecycle": "trash",
+                            }
+                        ],
+                    }
+                ),
+            )
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-task-purge-{task}",
+                        "change": [
+                            {
+                                "id": f"task:{task}",
+                                "if_revision": _revision(module, f"task:{task}"),
+                                "lifecycle": "delete_permanently",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            def task_purge_is_visible() -> bool:
+                read_back = module.read(ReadCall(id=f"task:{task}"))
+                return read_back.status == "needs_input" and not read_back.items
+
+            _proof(_wait_for(library, task_purge_is_visible), "task.purge", results)
             owned.pop(task)
 
             # Rich structured note acceptance and explicit Markdown replacement.
@@ -715,6 +1715,30 @@ def run() -> dict[str, bool]:
                 "recurrence.create_template_and_instance",
                 results,
             )
+            template_inspection = module.read(
+                ReadCall(purpose="recurrence", id=f"task:{template}")
+            )
+            instance_inspection = module.read(
+                ReadCall(purpose="recurrence", id=f"task:{instance}")
+            )
+            _proof(
+                template_inspection.status == "ok"
+                and instance_inspection.status == "ok"
+                and "recurrence_relationship_verified"
+                in template_inspection.signals
+                and "recurrence_relationship_verified"
+                in instance_inspection.signals
+                and len(template_inspection.items) == 1
+                and len(instance_inspection.items) == 1
+                and template_inspection.items[0].recurrence is not None
+                and instance_inspection.items[0].recurrence is not None
+                and f"task:{instance}"
+                in template_inspection.items[0].recurrence.linked_item_ids
+                and instance_inspection.items[0].recurrence.template_id
+                == f"task:{template}",
+                "recurrence.inspect_relationship",
+                results,
+            )
             _approved_commit(
                 module,
                 CommitCall.model_validate(
@@ -832,21 +1856,7 @@ def run() -> dict[str, bool]:
 
             return results
         finally:
-            # Delete only UUIDs created by this run. This path is best-effort.
-            try:
-                library.refresh(force=True)
-                for item in library.records.values():
-                    if item.title.startswith(prefix):
-                        owned.setdefault(item.uuid, item.entity or "Task6")
-            except Exception:
-                pass
-            if owned:
-                try:
-                    client.commit(
-                        [Envelope(uuid, 2, kind, {}) for uuid, kind in owned.items()]
-                    )
-                except Exception:
-                    pass
+            _cleanup_probe_records(client, library, owned, prefix)
 
 
 def main() -> None:

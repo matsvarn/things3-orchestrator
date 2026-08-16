@@ -36,30 +36,50 @@ ResultStatus = Literal[
 View = Literal[
     "today", "inbox", "week", "system", "project", "logbook", "trash", "tags"
 ]
+Purpose = Literal["review", "change", "organize", "recurrence"]
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
 
-_ITEM_ID = r"^(?:task|project|area|heading):[^\s:][^\s]*$"
-_CONTAINER_ID = r"^(?:project|area):[^\s:][^\s]*$"
-_CHECK_ID = r"^check:[^\s:][^\s]*$"
-_TAG_ID = r"^tag:[^\s:][^\s]*$"
+_ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
+_CONTAINER_ID = r"^(project|area):[^\s:]+$"
+_CHECK_ID = r"^check:[^\s:]+$"
+_TAG_ID = r"^tag:[^\s:]+$"
 _LOCAL_KEY = r"^\$[A-Za-z][A-Za-z0-9_-]{0,79}$"
-_TAG_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|tag:[^\s:][^\s]*)$"
+_TAG_REFERENCE = r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|tag:[^\s:]\S*)$"
 _HOME_REFERENCE = (
-    r"^(?:inbox|anytime|\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
-    r"(?:project|area):[^\s:][^\s]*)$"
+    r"^(inbox|anytime|\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"(project|area):[^\s:]+)$"
+)
+_CONTEXT_HOME_REFERENCE = (
+    r"^(inbox|anytime|\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"(project|area):[^\s:]+|[a-z][a-z0-9]{0,11})$"
+)
+_CONTEXT_AFTER_REFERENCE = (
+    r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"(task|project|area|heading):[^\s:]+|[a-z][a-z0-9]{0,11})$"
+)
+_CONTEXT_AREA_REFERENCE = (
+    r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"area:[^\s:]+|[a-z][a-z0-9]{0,11})$"
+)
+_CONTEXT_HEADING_REFERENCE = (
+    r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"heading:[^\s:]+|[a-z][a-z0-9]{0,11})$"
 )
 _AFTER_REFERENCE = (
-    r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
-    r"(?:task|project|area|heading):[^\s:][^\s]*)$"
+    r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
+    r"(task|project|area|heading):[^\s:]+)$"
 )
-_CHECK_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|check:[^\s:][^\s]*)$"
-_AREA_ID = r"^area:[^\s:][^\s]*$"
-_HEADING_ID = r"^heading:[^\s:][^\s]*$"
-_HEADING_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|heading:[^\s:][^\s]*)$"
+_CHECK_REFERENCE = r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|check:[^\s:]\S*)$"
+_AREA_ID = r"^area:[^\s:]+$"
+_HEADING_ID = r"^heading:[^\s:]+$"
+_HEADING_REFERENCE = r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|heading:[^\s:]+)$"
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
+_CONTEXT_ID = r"^ctx_[A-Za-z0-9_-]{8,120}$"
+_SHORT_REF = r"^[a-z][a-z0-9]{0,11}$"
+_SHORT_OR_LOCAL_REF = r"^([a-z][a-z0-9]{0,11}|\$[A-Za-z][A-Za-z0-9_-]{0,79})$"
 
 
 def _validate_date(value: str | None, *, name: str) -> str | None:
@@ -94,6 +114,22 @@ def _duplicates(values: Sequence[str]) -> bool:
     return len(values) != len(set(values))
 
 
+class ReadInclude(StrictModel):
+    """One bounded item lookup to add to a change context."""
+
+    id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    find: str | None = Field(default=None, min_length=1, max_length=500)
+    within: str | None = Field(default=None, pattern=_CONTAINER_ID, max_length=512)
+
+    @model_validator(mode="after")
+    def valid_include(self) -> Self:
+        if (self.id is None) == (self.find is None):
+            raise ValueError("include needs exactly one id or find")
+        if self.within is not None and self.find is None:
+            raise ValueError("include within needs find")
+        return self
+
+
 class ReadCall(StrictModel):
     """Select one ordered Things read. An empty call selects Today."""
 
@@ -105,6 +141,7 @@ class ReadCall(StrictModel):
         serialize_by_alias=True,
     )
 
+    purpose: Purpose = "review"
     view: View | None = None
     id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
     find: str | None = Field(default=None, min_length=1, max_length=500)
@@ -113,6 +150,7 @@ class ReadCall(StrictModel):
     to_date: str | None = Field(default=None, alias="to", max_length=10)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
     limit: int = Field(default=20, ge=1, le=40)
+    include: list[ReadInclude] = Field(default_factory=list, max_length=10)
 
     @field_validator("from_date")
     @classmethod
@@ -138,6 +176,8 @@ class ReadCall(StrictModel):
             )
         ):
             raise ValueError("cursor cannot combine with another selector")
+        if self.cursor is not None and self.include:
+            raise ValueError("cursor cannot combine with include")
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if selectors > 1:
             raise ValueError("use only one of view, id, or find")
@@ -153,6 +193,39 @@ class ReadCall(StrictModel):
         if self.from_date is not None and self.to_date is not None:
             if self.from_date > self.to_date:
                 raise ValueError("from must not be after to")
+        if self.purpose == "change" and self.id is None and self.find is None:
+            raise ValueError("change purpose needs an exact id or unique find")
+        if self.include and self.purpose != "change":
+            raise ValueError("include is only available for change purpose")
+        if self.purpose == "recurrence" and self.id is None:
+            raise ValueError("recurrence purpose needs an exact Task id")
+        if self.purpose == "recurrence" and any(
+            value is not None
+            for value in (
+                self.view,
+                self.find,
+                self.within,
+                self.from_date,
+                self.to_date,
+            )
+        ):
+            raise ValueError("recurrence purpose accepts only an exact Task id")
+        if self.purpose == "organize" and not (
+            self.id is not None
+            or self.find is not None
+            or (self.view == "project" and self.within is not None)
+        ):
+            raise ValueError(
+                "organize purpose needs an exact Project id, Project find, or Project read"
+            )
+        if self.purpose == "organize" and self.id is not None:
+            if not self.id.startswith("project:"):
+                raise ValueError("organize purpose needs an exact Project id")
+        if self.purpose == "organize" and self.view == "project":
+            if self.within is None or not self.within.startswith("project:"):
+                raise ValueError("organize Project view needs a Project scope")
+        if self.cursor is not None and "purpose" in self.model_fields_set:
+            raise ValueError("cursor cannot combine with purpose")
         return self
 
 
@@ -198,18 +271,22 @@ class CreateEntry(StrictModel):
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
     next_actions: list[str] = Field(default_factory=list, max_length=20)
-    into: str | None = Field(default=None, pattern=_HOME_REFERENCE, max_length=512)
+    into: str | None = Field(
+        default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
+    )
     start: str | None = Field(default=None, max_length=32)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     waiting: bool | None = None
     tag_ids: list[str] = Field(default_factory=list, max_length=20)
-    after: str | None = Field(default=None, pattern=_AFTER_REFERENCE, max_length=512)
+    after: str | None = Field(
+        default=None, pattern=_CONTEXT_AFTER_REFERENCE, max_length=512
+    )
     today_after: str | None = Field(
-        default=None, pattern=_AFTER_REFERENCE, max_length=512
+        default=None, pattern=_CONTEXT_AFTER_REFERENCE, max_length=512
     )
     heading_id: str | None = Field(
-        default=None, pattern=_HEADING_REFERENCE, max_length=512
+        default=None, pattern=_CONTEXT_HEADING_REFERENCE, max_length=512
     )
     repeat: RepeatCreate | None = None
 
@@ -254,13 +331,18 @@ class CreateEntry(StrictModel):
     @model_validator(mode="after")
     def valid_kind_fields(self) -> Self:
         if self.kind == "heading":
-            allowed = {"key", "kind", "title", "into"}
+            allowed = {"key", "kind", "title", "into", "after"}
             if self.into is None:
                 raise ValueError("a heading needs a Project")
-            if not self.into.startswith(("project:", "$")):
+            if not (
+                self.into.startswith(("project:", "$"))
+                or re.fullmatch(_SHORT_REF, self.into) is not None
+            ):
                 raise ValueError("a heading needs a Project")
             if self.model_fields_set - allowed:
-                raise ValueError("a heading accepts only key, kind, title, and into")
+                raise ValueError(
+                    "a heading accepts only key, kind, title, into, and after"
+                )
             return self
         if self.checklist and self.kind != "task":
             raise ValueError("only a task can have a checklist")
@@ -340,8 +422,9 @@ class RepeatEdit(StrictModel):
 
 
 class ChangeEntry(StrictModel):
-    id: str = Field(pattern=_ITEM_ID, max_length=512)
-    if_revision: str = Field(min_length=1, max_length=512)
+    id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    if_revision: str | None = Field(default=None, min_length=1, max_length=512)
+    ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
     title: str | None = Field(default=None, min_length=1, max_length=1000)
     status: Status | None = None
     notes_markdown: str | None = Field(default=None, max_length=50_000)
@@ -351,23 +434,31 @@ class ChangeEntry(StrictModel):
     )
     checklist_remove: list[str] = Field(default_factory=list, max_length=500)
     checklist_order: list[str] | None = Field(default=None, max_length=500)
-    into: str | None = Field(default=None, pattern=_HOME_REFERENCE, max_length=512)
+    into: str | None = Field(
+        default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
+    )
     start: str | None = Field(default=None, max_length=32)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     waiting: bool | None = None
     tags_add: list[str] = Field(default_factory=list, max_length=20)
     tags_remove: list[str] = Field(default_factory=list, max_length=20)
-    after: str | None = Field(default=None, pattern=_AFTER_REFERENCE, max_length=512)
-    today_after: str | None = Field(
-        default=None, pattern=_AFTER_REFERENCE, max_length=512
+    after: str | None = Field(
+        default=None, pattern=_CONTEXT_AFTER_REFERENCE, max_length=512
     )
-    move_contents_to: str | None = Field(default=None, pattern=_AREA_ID, max_length=512)
+    today_after: str | None = Field(
+        default=None, pattern=_CONTEXT_AFTER_REFERENCE, max_length=512
+    )
+    move_contents_to: str | None = Field(
+        default=None, pattern=_CONTEXT_AREA_REFERENCE, max_length=512
+    )
     remove_if_empty: Literal[True] | None = None
     trash: Literal[True] | None = None
     lifecycle: Literal["trash", "restore", "delete_permanently"] | None = None
     delete_contents: Literal[True] | None = None
-    heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
+    heading_id: str | None = Field(
+        default=None, pattern=_CONTEXT_HEADING_REFERENCE, max_length=512
+    )
     repeat_interval: int | None = Field(default=None, ge=1, le=366)
     repeat: RepeatEdit | None = None
     replace_rich_note: Literal[True] | None = None
@@ -434,6 +525,16 @@ class ChangeEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_change(self) -> Self:
+        exact = self.id is not None or self.if_revision is not None
+        if self.ref is None and exact and (self.id is None or self.if_revision is None):
+            raise ValueError("an exact change needs id and if_revision")
+        # A model can copy the exact identity from the contextual result while
+        # also sending its short ref.  Keep that request valid, then let the
+        # contextual compiler prove that both identities match.  This keeps
+        # ref-only changes the normal path without turning a mismatch into a
+        # silent overwrite.
+        if self.ref is None and not exact:
+            raise ValueError("a change needs an exact id or context ref")
         meaningful = any(
             (
                 self.title is not None,
@@ -489,6 +590,7 @@ class ChangeEntry(StrictModel):
             allowed = {
                 "id",
                 "if_revision",
+                "ref",
                 "move_contents_to",
                 "remove_if_empty",
             }
@@ -497,29 +599,39 @@ class ChangeEntry(StrictModel):
                     "an Area removal cannot combine with source-item changes"
                 )
         if self.trash:
-            allowed = {"id", "if_revision", "trash"}
+            allowed = {"id", "if_revision", "ref", "trash"}
             if self.model_fields_set - allowed:
                 raise ValueError("Trash cannot combine with other changes")
         if self.lifecycle is not None:
-            allowed = {"id", "if_revision", "lifecycle", "delete_contents"}
+            allowed = {"id", "if_revision", "ref", "lifecycle", "delete_contents"}
             if self.model_fields_set - allowed:
                 raise ValueError("a lifecycle change cannot combine with other changes")
         if self.delete_contents and self.lifecycle != "delete_permanently":
             raise ValueError("delete_contents needs permanent deletion")
-        if self.id.startswith("heading:"):
-            allowed = {"id", "if_revision", "title", "after", "lifecycle"}
+        if self.id is not None and self.id.startswith("heading:"):
+            if "into" in self.model_fields_set:
+                # A heading can move with its source Project during a merge.
+                # The compiler and workspace still verify the destination Project.
+                allowed = {"id", "if_revision", "ref", "into"}
+                if self.model_fields_set - allowed:
+                    raise ValueError(
+                        "a heading move can only specify its destination Project"
+                    )
+                return self
+            allowed = {"id", "if_revision", "ref", "title", "after", "lifecycle"}
             if self.model_fields_set - allowed:
                 raise ValueError("a heading can only rename, reorder, or delete")
             if self.lifecycle not in {None, "delete_permanently"}:
                 raise ValueError("a heading supports only permanent deletion")
         if self.repeat_interval is not None:
-            allowed = {"id", "if_revision", "repeat_interval"}
+            allowed = {"id", "if_revision", "ref", "repeat_interval"}
             if self.model_fields_set - allowed:
                 raise ValueError("a repeat interval cannot combine with other changes")
         if self.repeat is not None:
             allowed = {
                 "id",
                 "if_revision",
+                "ref",
                 "repeat",
                 "title",
                 "notes_markdown",
@@ -540,7 +652,7 @@ class ChangeEntry(StrictModel):
                 "heading_id",
             }
             if self.repeat.remove:
-                allowed = {"id", "if_revision", "repeat"}
+                allowed = {"id", "if_revision", "ref", "repeat"}
             if self.model_fields_set - allowed:
                 raise ValueError("a repeat change cannot combine with that item change")
         if self.replace_rich_note and "notes_markdown" not in self.model_fields_set:
@@ -587,24 +699,134 @@ class ChangeTag(StrictModel):
         return self
 
 
+class OrganizeSection(StrictModel):
+    """One ordered Project section in a contextual organization draft."""
+
+    heading_ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
+    heading_key: str | None = Field(default=None, pattern=_LOCAL_KEY)
+    heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
+    task_refs: list[str] = Field(default_factory=list, max_length=120)
+
+    @field_validator("task_refs")
+    @classmethod
+    def valid_task_refs(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_SHORT_OR_LOCAL_REF, item) is None for item in value
+        ):
+            raise ValueError("task_refs need unique context refs or local keys")
+        return value
+
+    @model_validator(mode="after")
+    def valid_heading(self) -> Self:
+        if self.heading_ref is not None and self.heading_key is not None:
+            raise ValueError("a section uses an existing or new heading, not both")
+        if self.heading_key is not None and self.heading_title is None:
+            raise ValueError("a new heading needs heading_title")
+        if self.heading_key is None and self.heading_ref is None:
+            if self.heading_title is not None:
+                raise ValueError("heading_title needs an existing or new heading")
+            if not self.task_refs:
+                raise ValueError("an unheaded section needs tasks")
+        return self
+
+
+class OrganizeDraft(StrictModel):
+    project_ref: str = Field(pattern=_SHORT_REF, max_length=12)
+    sections: list[OrganizeSection] = Field(min_length=1, max_length=120)
+    delete_headings: list[str] = Field(default_factory=list, max_length=120)
+    unlisted: Literal["keep"] = "keep"
+
+    @field_validator("delete_headings")
+    @classmethod
+    def valid_deleted_headings(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_SHORT_REF, item) is None for item in value
+        ):
+            raise ValueError("delete_headings need unique context refs")
+        return value
+
+    @model_validator(mode="after")
+    def unique_layout_refs(self) -> Self:
+        tasks = [ref for section in self.sections for ref in section.task_refs]
+        headings = [
+            section.heading_ref
+            for section in self.sections
+            if section.heading_ref is not None
+        ]
+        keys = [
+            section.heading_key
+            for section in self.sections
+            if section.heading_key is not None
+        ]
+        if _duplicates(tasks):
+            raise ValueError("each task can appear in one organize section")
+        if _duplicates(headings) or _duplicates(keys):
+            raise ValueError("each heading can appear in one organize section")
+        if set(headings).intersection(self.delete_headings):
+            raise ValueError("a heading cannot be kept and deleted")
+        return self
+
+
 class CommitCall(StrictModel):
     intent_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,120}$")
+    context_id: str | None = Field(default=None, pattern=_CONTEXT_ID, max_length=124)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     tags_revision: str | None = Field(default=None, min_length=1, max_length=512)
     ensure_tags: list[EnsureTag] = Field(default_factory=list, max_length=20)
     change_tags: list[ChangeTag] = Field(default_factory=list, max_length=40)
     create: list[CreateEntry] = Field(default_factory=list, max_length=40)
-    change: list[ChangeEntry] = Field(default_factory=list, max_length=100)
+    change: list[ChangeEntry] = Field(default_factory=list, max_length=120)
+    organize: list[OrganizeDraft] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def valid_commit(self) -> Self:
-        ids = [entry.id for entry in self.change]
+        ids = [entry.id for entry in self.change if entry.id is not None]
         if _duplicates(ids):
             raise ValueError("each existing item can change once")
+        context_refs = [entry.ref for entry in self.change if entry.ref is not None]
+        if _duplicates(context_refs):
+            raise ValueError("each context item can change once")
+        if (context_refs or self.organize) and self.context_id is None:
+            raise ValueError("context refs need context_id")
+        project_refs = [draft.project_ref for draft in self.organize]
+        if _duplicates(project_refs):
+            raise ValueError("each Project can have one organize draft")
 
         changes_areas = any(entry.kind == "area" for entry in self.create) or any(
-            entry.id.startswith("area:") for entry in self.change
+            entry.id is not None and entry.id.startswith("area:")
+            for entry in self.change
         )
+        short_context_refs = [
+            reference
+            for entry in self.create
+            for reference in (
+                entry.into,
+                entry.after,
+                entry.today_after,
+                entry.heading_id,
+            )
+            if reference is not None
+            and reference not in {"inbox", "anytime"}
+            and re.fullmatch(_SHORT_REF, reference) is not None
+        ]
+        short_context_refs.extend(
+            reference
+            for entry in self.change
+            for reference in (
+                entry.into,
+                entry.after,
+                entry.today_after,
+                entry.move_contents_to,
+                entry.heading_id,
+            )
+            if reference is not None
+            and reference not in {"inbox", "anytime"}
+            and re.fullmatch(_SHORT_REF, reference) is not None
+        )
+        if short_context_refs and self.context_id is None:
+            raise ValueError(
+                "short relationship refs need context_id; this includes short Area refs"
+            )
         if changes_areas and self.scope_revision is None:
             raise ValueError("Area changes need a system scope_revision")
         if self.change_tags and self.tags_revision is None:
@@ -615,6 +837,12 @@ class CommitCall(StrictModel):
 
         keys = [entry.key for entry in self.ensure_tags]
         keys.extend(entry.key for entry in self.create if entry.key is not None)
+        keys.extend(
+            section.heading_key
+            for draft in self.organize
+            for section in draft.sections
+            if section.heading_key is not None
+        )
         keys.extend(
             row.key
             for entry in self.change
@@ -629,26 +857,52 @@ class CommitCall(StrictModel):
             raise ValueError("ensure_tags titles must be unique")
 
         known = set(keys)
-        refs: list[str | None] = []
+        local_refs: list[str | None] = []
         for created in self.create:
-            refs.extend(
+            local_refs.extend(
                 (created.into, created.after, created.today_after, created.heading_id)
             )
         for changed in self.change:
-            refs.extend(
+            local_refs.extend(
                 (
                     changed.into,
                     changed.after,
                     changed.today_after,
                     changed.move_contents_to,
+                    changed.heading_id,
                 )
             )
-            refs.extend(row.after for row in changed.checklist_add)
-            refs.extend(row.after for row in changed.checklist_change)
-            refs.extend(changed.checklist_order or [])
-        unknown = sorted({ref for ref in refs if ref and ref.startswith("$")} - known)
+            local_refs.extend(row.after for row in changed.checklist_add)
+            local_refs.extend(row.after for row in changed.checklist_change)
+            local_refs.extend(changed.checklist_order or [])
+        unknown = sorted(
+            {ref for ref in local_refs if ref and ref.startswith("$")} - known
+        )
         if unknown:
             raise ValueError(f"unknown local keys: {', '.join(unknown)}")
+        organize_task_refs = {
+            ref
+            for draft in self.organize
+            for section in draft.sections
+            for ref in section.task_refs
+            if ref.startswith("$")
+        }
+        create_keys_for_organize = {
+            entry.key for entry in self.create if entry.key is not None
+        }
+        unknown_organize = sorted(organize_task_refs - create_keys_for_organize)
+        if unknown_organize:
+            raise ValueError(
+                "organize local task refs need create keys: "
+                + ", ".join(unknown_organize)
+            )
+        non_task_organize = sorted(
+            ref
+            for ref in organize_task_refs
+            if any(entry.key == ref and entry.kind != "task" for entry in self.create)
+        )
+        if non_task_organize:
+            raise ValueError("organize local task refs must identify Tasks")
 
         tag_keys = {entry.key for entry in self.ensure_tags}
         seen_tag_keys: set[str] = set()
@@ -757,6 +1011,10 @@ class CommitCall(StrictModel):
                 target = create_by_key.get(changed.into)
                 if target is None or target.kind not in {"area", "project"}:
                     raise ValueError("a local home must be a created Area or Project")
+            if changed.heading_id is not None and changed.heading_id.startswith("$"):
+                target = create_by_key.get(changed.heading_id)
+                if target is None or target.kind != "heading":
+                    raise ValueError("a local heading must be a created heading")
             row_keys = {row.key for row in changed.checklist_add if row.key is not None}
             seen_rows: set[str] = set()
             for row in changed.checklist_add:
@@ -838,8 +1096,9 @@ class RecurrenceFact(StrictModel):
 
 
 class ItemFact(StrictModel):
+    ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
     id: str = Field(pattern=_ITEM_ID, max_length=512)
-    revision: str = Field(min_length=1, max_length=512)
+    revision: str | None = Field(default=None, min_length=1, max_length=512)
     kind: Kind
     title: str = Field(min_length=1, max_length=1000)
     status: Status
@@ -881,6 +1140,73 @@ class ReviewSection(StrictModel):
         return value
 
 
+class ContextFact(StrictModel):
+    id: str = Field(pattern=_CONTEXT_ID, max_length=124)
+    purpose: Purpose
+    expires_at: str = Field(max_length=40)
+    complete: bool = False
+
+    @field_validator("expires_at")
+    @classmethod
+    def valid_expiry(cls, value: str) -> str:
+        checked = _validate_reminder(value)
+        assert checked is not None
+        return checked
+
+
+class LayoutSectionFact(StrictModel):
+    heading_ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
+    task_refs: list[str] = Field(default_factory=list, max_length=120)
+
+    @field_validator("task_refs")
+    @classmethod
+    def unique_task_refs(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_SHORT_REF, item) is None for item in value
+        ):
+            raise ValueError("layout task_refs need unique context refs")
+        return value
+
+
+class LayoutFact(StrictModel):
+    project_ref: str = Field(pattern=_SHORT_REF, max_length=12)
+    sections: list[LayoutSectionFact] = Field(default_factory=list, max_length=120)
+    complete: bool = False
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> Self:
+        tasks = [ref for section in self.sections for ref in section.task_refs]
+        headings = [
+            section.heading_ref
+            for section in self.sections
+            if section.heading_ref is not None
+        ]
+        if _duplicates(tasks) or _duplicates(headings):
+            raise ValueError("layout refs must appear once")
+        return self
+
+
+class RecoveryFact(StrictModel):
+    code: Literal[
+        "context_required",
+        "context_expired",
+        "context_incomplete",
+        "context_conflict",
+        "context_corrupt",
+    ]
+    retry: Literal["read", "same", "rebuild"]
+    read: dict[str, Any] | None = None
+
+    @field_validator("read")
+    @classmethod
+    def valid_read(
+        cls, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if value is not None:
+            ReadCall.model_validate(value)
+        return value
+
+
 class PlanFact(StrictModel):
     id: str = Field(pattern=r"^plan_[A-Za-z0-9_-]{8,120}$")
     expires_at: str = Field(max_length=40)
@@ -900,15 +1226,27 @@ class Result(StrictModel):
     next: Next
     status: ResultStatus
     instruction: str = Field(min_length=1, max_length=1000)
-    items: list[ItemFact] = Field(default_factory=list, max_length=40)
+    items: list[ItemFact] = Field(default_factory=list, max_length=120)
     tags: list[TagFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=20)
+    layouts: list[LayoutFact] = Field(default_factory=list, max_length=10)
     signals: list[str] = Field(default_factory=list, max_length=40)
+    context: ContextFact | None = None
+    recovery: RecoveryFact | None = None
     plan: PlanFact | None = None
     receipt: str | None = Field(default=None, min_length=1, max_length=512)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
     truncated: bool = False
+
+    @model_validator(mode="after")
+    def contextual_facts_have_context(self) -> Self:
+        refs = [item.ref for item in self.items if item.ref is not None]
+        if _duplicates(refs):
+            raise ValueError("item context refs must be unique")
+        if (refs or self.layouts) and self.context is None:
+            raise ValueError("context refs and layouts need context")
+        return self
 
 
 # MCP discovery needs flat schemas without refs or unions. The contract-parity test
@@ -923,6 +1261,40 @@ _TAG_REFERENCE_SCHEMA: dict[str, Any] = {
 }
 _EXACT_CHECK: dict[str, Any] = {**_STRING, "pattern": _CHECK_ID}
 _HOME_SCHEMA: dict[str, Any] = {**_NULLABLE_STRING, "pattern": _HOME_REFERENCE}
+_CONTEXT_HOME_SCHEMA: dict[str, Any] = {
+    **_NULLABLE_STRING,
+    "pattern": _CONTEXT_HOME_REFERENCE,
+}
+_CONTEXT_AFTER_SCHEMA: dict[str, Any] = {
+    **_NULLABLE_STRING,
+    "pattern": _CONTEXT_AFTER_REFERENCE,
+}
+_CONTEXT_AREA_SCHEMA: dict[str, Any] = {
+    **_STRING,
+    "pattern": _CONTEXT_AREA_REFERENCE,
+}
+_CONTEXT_HEADING_SCHEMA: dict[str, Any] = {
+    "type": ["string", "null"],
+    "pattern": _CONTEXT_HEADING_REFERENCE,
+    "maxLength": 512,
+}
+_READ_INCLUDE: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "minProperties": 1,
+    # ReadInclude keeps the length bounds at the runtime boundary. Avoid
+    # repeating them in this bounded, model-facing selector schema.
+    "properties": {
+        "id": {"type": "string", "pattern": _ITEM_ID},
+        "find": {"type": "string", "minLength": 1},
+        "within": {
+            "type": "string",
+            "pattern": _CONTAINER_ID,
+        },
+    },
+    # An exact id is the only one-property selector. A find may add within.
+    "not": {"required": ["id"], "minProperties": 2},
+}
 _AFTER_SCHEMA: dict[str, Any] = {**_NULLABLE_STRING, "pattern": _AFTER_REFERENCE}
 _CHECK_REFERENCE_SCHEMA: dict[str, Any] = {
     **_NULLABLE_STRING,
@@ -960,6 +1332,10 @@ READ_IN: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
+        "purpose": {
+            "enum": ["review", "change", "organize", "recurrence"],
+            "default": "review",
+        },
         "view": {
             "enum": [
                 "today",
@@ -979,6 +1355,7 @@ READ_IN: dict[str, Any] = {
         "to": {"type": "string", "format": "date", "maxLength": 10},
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
+        "include": {"type": "array", "maxItems": 10, "items": _READ_INCLUDE},
     },
 }
 
@@ -1024,7 +1401,7 @@ _CREATE: dict[str, Any] = {
             "maxItems": 20,
             "items": {"type": "string", "minLength": 1, "maxLength": 1000},
         },
-        "into": _HOME_SCHEMA,
+        "into": _CONTEXT_HOME_SCHEMA,
         "start": {"type": ["string", "null"], "maxLength": 32},
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
@@ -1035,13 +1412,9 @@ _CREATE: dict[str, Any] = {
             "uniqueItems": True,
             "items": _TAG_REFERENCE_SCHEMA,
         },
-        "after": _AFTER_SCHEMA,
-        "today_after": _AFTER_SCHEMA,
-        "heading_id": {
-            "type": "string",
-            "pattern": _HEADING_REFERENCE,
-            "maxLength": 512,
-        },
+        "after": _CONTEXT_AFTER_SCHEMA,
+        "today_after": _CONTEXT_AFTER_SCHEMA,
+        "heading_id": _CONTEXT_HEADING_SCHEMA,
         "repeat": {
             "type": "object",
             "additionalProperties": False,
@@ -1067,10 +1440,10 @@ _CREATE: dict[str, Any] = {
 _CHANGE: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "if_revision"],
     "properties": {
         "id": _EXACT_ITEM,
         "if_revision": _STRING,
+        "ref": {"type": "string", "pattern": _SHORT_REF, "maxLength": 12},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
@@ -1098,7 +1471,7 @@ _CHANGE: dict[str, Any] = {
             "maxItems": 500,
             "items": {**_STRING, "pattern": _CHECK_REFERENCE},
         },
-        "into": _HOME_SCHEMA,
+        "into": _CONTEXT_HOME_SCHEMA,
         "start": {"type": ["string", "null"], "maxLength": 32},
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
@@ -1117,18 +1490,14 @@ _CHANGE: dict[str, Any] = {
             "uniqueItems": True,
             "items": _EXACT_TAG,
         },
-        "after": _AFTER_SCHEMA,
-        "today_after": _AFTER_SCHEMA,
-        "move_contents_to": _AREA_SCHEMA,
+        "after": _CONTEXT_AFTER_SCHEMA,
+        "today_after": _CONTEXT_AFTER_SCHEMA,
+        "move_contents_to": _CONTEXT_AREA_SCHEMA,
         "remove_if_empty": {"const": True},
         "trash": {"const": True},
         "lifecycle": {"enum": ["trash", "restore", "delete_permanently"]},
         "delete_contents": {"const": True},
-        "heading_id": {
-            "type": ["string", "null"],
-            "pattern": _HEADING_ID,
-            "maxLength": 512,
-        },
+        "heading_id": _CONTEXT_HEADING_SCHEMA,
         "repeat_interval": {"type": "integer", "minimum": 1, "maximum": 366},
         "repeat": {
             "type": "object",
@@ -1168,18 +1537,68 @@ _CHANGE_TAG: dict[str, Any] = {
     },
 }
 
+_ORGANIZE_SECTION: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "heading_ref": {
+            "type": "string",
+            "pattern": _SHORT_REF,
+            "maxLength": 12,
+        },
+        "heading_key": {"type": "string", "pattern": _LOCAL_KEY},
+        "heading_title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "task_refs": {
+            "type": "array",
+            "maxItems": 120,
+            "items": {"type": "string", "pattern": _SHORT_OR_LOCAL_REF},
+        },
+    },
+}
+
+_ORGANIZE: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["project_ref", "sections"],
+    "properties": {
+        "project_ref": {
+            "type": "string",
+            "pattern": _SHORT_REF,
+            "maxLength": 12,
+        },
+        "sections": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 120,
+            "items": _ORGANIZE_SECTION,
+        },
+        "delete_headings": {
+            "type": "array",
+            "maxItems": 120,
+            "items": {"type": "string", "pattern": _SHORT_REF},
+        },
+        "unlisted": {"const": "keep", "default": "keep"},
+    },
+}
+
 COMMIT_IN: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["intent_id"],
     "properties": {
         "intent_id": {"type": "string", "pattern": r"^[A-Za-z0-9._:-]{8,120}$"},
+        "context_id": {
+            "type": "string",
+            "pattern": _CONTEXT_ID,
+            "maxLength": 124,
+        },
         "scope_revision": _STRING,
         "tags_revision": _STRING,
         "ensure_tags": {"type": "array", "maxItems": 20, "items": _ENSURE_TAG},
         "change_tags": {"type": "array", "maxItems": 40, "items": _CHANGE_TAG},
         "create": {"type": "array", "maxItems": 40, "items": _CREATE},
-        "change": {"type": "array", "maxItems": 100, "items": _CHANGE},
+        "change": {"type": "array", "maxItems": 120, "items": _CHANGE},
+        "organize": {"type": "array", "maxItems": 10, "items": _ORGANIZE},
     },
 }
 
@@ -1269,8 +1688,9 @@ _RECURRENCE: dict[str, Any] = {
 _ITEM_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "revision", "kind", "title", "status", "order"],
+    "required": ["id", "kind", "title", "status", "order"],
     "properties": {
+        "ref": {"type": "string", "pattern": _SHORT_REF, "maxLength": 12},
         "id": _EXACT_ITEM,
         "revision": _STRING,
         "kind": {"enum": ["task", "project", "area", "heading"]},
@@ -1314,6 +1734,69 @@ _SECTION: dict[str, Any] = {
             "items": _EXACT_ITEM,
         },
         "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
+    },
+}
+
+_CONTEXT_FACT: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "purpose", "expires_at"],
+    "properties": {
+        "id": {"type": "string", "pattern": _CONTEXT_ID},
+        "purpose": {"enum": ["review", "change", "organize", "recurrence"]},
+        "expires_at": {"type": "string"},
+        "complete": {"type": "boolean", "default": False},
+    },
+}
+
+_LAYOUT_SECTION: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "heading_ref": {
+            "type": "string",
+            "pattern": _SHORT_REF,
+            "maxLength": 12,
+        },
+        "task_refs": {
+            "type": "array",
+            "maxItems": 120,
+            "items": {"type": "string", "pattern": _SHORT_REF},
+        },
+    },
+}
+
+_LAYOUT: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["project_ref"],
+    "properties": {
+        "project_ref": {
+            "type": "string",
+            "pattern": _SHORT_REF,
+            "maxLength": 12,
+        },
+        "sections": {"type": "array", "maxItems": 120, "items": _LAYOUT_SECTION},
+        "complete": {"type": "boolean", "default": False},
+    },
+}
+
+_RECOVERY: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["code", "retry"],
+    "properties": {
+        "code": {
+            "enum": [
+                "context_required",
+                "context_expired",
+                "context_incomplete",
+                "context_conflict",
+                "context_corrupt",
+            ]
+        },
+        "retry": {"enum": ["read", "same", "rebuild"]},
+        "read": {"type": "object"},
     },
 }
 
@@ -1362,10 +1845,13 @@ RESULT_OUT: dict[str, Any] = {
             ]
         },
         "instruction": {"type": "string", "minLength": 1, "maxLength": 1000},
-        "items": {"type": "array", "maxItems": 40, "items": _ITEM_FACT},
+        "items": {"type": "array", "maxItems": 120, "items": _ITEM_FACT},
         "tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
         "sections": {"type": "array", "maxItems": 20, "items": _SECTION},
+        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
         "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
+        "context": _CONTEXT_FACT,
+        "recovery": _RECOVERY,
         "plan": _PLAN,
         "receipt": _STRING,
         "scope_revision": _STRING,
@@ -1377,8 +1863,9 @@ RESULT_OUT: dict[str, Any] = {
 _ITEM_SUMMARY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "revision", "kind", "title", "status"],
+    "required": ["id", "kind", "title", "status"],
     "properties": {
+        "ref": {"type": "string", "pattern": _SHORT_REF, "maxLength": 12},
         "id": _EXACT_ITEM,
         "revision": _STRING,
         "kind": {"enum": ["task", "project", "area", "heading"]},
@@ -1393,12 +1880,12 @@ _CONTROL_PROPERTIES: dict[str, Any] = {
 }
 _SUMMARY_ITEMS: dict[str, Any] = {
     "type": "array",
-    "maxItems": 40,
+    "maxItems": 120,
     "items": _ITEM_SUMMARY,
 }
 _READ_ITEMS: dict[str, Any] = {
     "type": "array",
-    "maxItems": 40,
+    "maxItems": 120,
     "items": {**_ITEM_SUMMARY, "additionalProperties": True},
 }
 
@@ -1415,7 +1902,9 @@ READ_OUT: dict[str, Any] = {
             "maxItems": 20,
             "items": _SECTION,
         },
+        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
         "signals": RESULT_OUT["properties"]["signals"],
+        "context": _CONTEXT_FACT,
         "scope_revision": _STRING,
         "cursor": _STRING,
         "truncated": {"type": "boolean"},
@@ -1431,6 +1920,7 @@ COMMIT_OUT: dict[str, Any] = {
         "items": _SUMMARY_ITEMS,
         "tags": RESULT_OUT["properties"]["tags"],
         "signals": RESULT_OUT["properties"]["signals"],
+        "recovery": _RECOVERY,
         "plan": _PLAN,
         "receipt": _STRING,
     },
@@ -1450,19 +1940,31 @@ APPROVE_OUT: dict[str, Any] = {
 }
 
 READ_DESC = (
-    "Read Things. Empty input reads Today. Select one view, exact id, or find query. "
-    "Project needs within. Logbook needs from and to. Trash returns recoverable items. Send a cursor without selectors. "
+    "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
+    "Select exactly one view, exact id, or find query. A view stands alone; project view also needs within. Never combine view with id or find. Logbook needs from and to. Trash returns recoverable items. Send a cursor without selectors. "
+    "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
     "remind_at, recurrence, order, today_order, and signals. "
-    "Use returned IDs and revisions for changes. Follow next and instruction."
+    "For a Project purpose change, the context also includes short refs for active Areas. "
+    "For a Task or Project after anchor, or a heading order anchor, outside the target's returned facts, add up to 10 compact include lookups to the same change read. Use today_after only for a Task on Today. Each include uses one exact id or one unique active find; use within only with find. An ambiguous or missing include returns candidates and creates no context. "
+    "Use the returned context_id and item ref in change; use an Area ref as into for a Project move. Do not send id or if_revision with ref. "
+    "Review reads can use returned IDs and revisions for legacy changes. Follow next and instruction."
 )
 COMMIT_DESC = (
     "Commit decided work with a durable intent_id and one coherent batch. "
+    "Prefer context_id with short refs from a change or organize read. An organize draft orders listed work and preserves unlisted work. "
     "It supports repeat rules, headings, tag structure, rich-note replacement, Trash, restore, and permanent deletion. "
     "A complete repeat rule on an exact ordinary Task keeps it as the current copy and creates its future template. "
     "Batch requested metadata, schedule, placement, order, and checklist changes into that conversion; both copies get the desired future content. "
-    "An ensured tag key can be used in tag_ids or tags_add in the same commit. "
-    "Changes need an exact id and if_revision. After pending, retry the exact payload. "
+    "An ensured tag key can be used in tag_ids or tags_add in the same commit. Define local refs before use and parent tags before children. Use start=evening for evening work. "
+    "Use organize.delete_headings to delete Project headings; never use lifecycle for headings. Use change_tags.delete_permanently for tag deletion. "
+    "For a context change, send context_id and ref only; ref is authoritative and the context supplies the revision. "
+    "For a Project move, send the Project ref and the destination Area ref as into; do not use an organize draft. "
+    "Ordinary Task or Project Trash uses only lifecycle='trash'. delete_contents is only for permanent Project deletion with lifecycle='delete_permanently'. remove_if_empty and move_contents_to are Area-only. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. Permanent deletion of a non-empty Project additionally requires a complete Project read, lifecycle='delete_permanently' with delete_contents=true, and approval. "
+    "For an atomic Project merge, read one complete Project first. In one approved commit, move every active visible direct child to an active destination Project, then set the source Project to lifecycle='trash' only. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup. "
+    "If you also send id and if_revision, they must exactly match the context. After pending, retry the exact payload. "
+    "If the client loses the response or the outcome is pending or unknown, retry the exact same intent_id and byte-equivalent semantic payload. "
+    "Do not read first, add scope_revision, or rebuild. Use a fresh read only for stale or expired context recovery. "
     "Moving a Task or Project to Trash and other high-impact work returns a plan without writes. "
     "Ask one natural confirmation and keep its "
     "control fields private. Follow next and instruction."

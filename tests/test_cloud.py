@@ -2324,6 +2324,73 @@ def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
     assert library.records["task"].heading_uuid == "heading"
 
 
+def test_project_merge_projects_heading_move_before_assigned_task_validation(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    source = Record(
+        uuid="merge-source",
+        kind="project",
+        title="Source",
+        entity="Task6",
+    )
+    destination = Record(
+        uuid="merge-destination",
+        kind="project",
+        title="Destination",
+        entity="Task6",
+    )
+    heading = Record(
+        uuid="merge-heading",
+        kind="task",
+        title="Next",
+        parent_uuid=source.uuid,
+        heading=True,
+        entity="Task6",
+    )
+    task = Record(
+        uuid="merge-task",
+        kind="task",
+        title="Ship",
+        parent_uuid=source.uuid,
+        heading_uuid=heading.uuid,
+        entity="Task6",
+    )
+    library.records.update(
+        {item.uuid: item for item in [source, destination, heading, task]}
+    )
+
+    # Keep the Task first. The planner must still project the heading move.
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid=task.uuid,
+                kind="task",
+                into_uuid=destination.uuid,
+                into_kind="project",
+                heading_uuid=heading.uuid,
+            ),
+            Write(
+                action="update",
+                uuid=heading.uuid,
+                kind="task",
+                into_uuid=destination.uuid,
+                into_kind="project",
+            ),
+        ]
+    )
+
+    payloads = {envelope.uuid: envelope.payload for envelope in client.committed}
+    assert payloads[task.uuid]["pr"] == [destination.uuid]
+    assert payloads[task.uuid]["agr"] == [heading.uuid]
+    assert payloads[heading.uuid]["pr"] == [destination.uuid]
+    assert task.parent_uuid == destination.uuid
+    assert task.heading_uuid == heading.uuid
+    assert heading.parent_uuid == destination.uuid
+
+
 def test_commit_rejects_duplicate_wire_ids() -> None:
     client = CloudClient("a@b.c", "pw")
     client.history_id = "h"

@@ -867,6 +867,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
         self.created_ix: dict[tuple[str, str | None, str | None], int] = {}
         self.created_kinds: dict[str, Kind] = {}
         self.created_headings: dict[str, str | None] = {}
+        self.project_heading_moves: dict[str, str] = {}
 
     def plan(self, writes: list[Write]) -> tuple[list[Envelope], dict[str, str]]:
         self.created_kinds = {
@@ -879,6 +880,16 @@ class _CloudPlanHandler(_MutationHandler[None]):
             for item in writes
             if item.action == "create_heading"
         }
+        # A Project merge can move a heading and its assigned Tasks in one
+        # batch. Project the heading destination before validating any Task
+        # envelope, so planning does not depend on input order.
+        self.project_heading_moves = {}
+        for write in writes:
+            if write.into_kind != "project" or not write.into_uuid:
+                continue
+            current = self.library.records.get(write.uuid)
+            if current is not None and current.heading:
+                self.project_heading_moves[current.uuid] = write.into_uuid
         for write in writes:
             mutation = _compile_mutation(write)
             mutation = self._prepare(mutation)
@@ -914,11 +925,17 @@ class _CloudPlanHandler(_MutationHandler[None]):
                 and bool(project_uuid)
                 and heading.parent_uuid == project_uuid
             )
+            projected = (
+                heading is not None
+                and heading.heading
+                and bool(project_uuid)
+                and self.project_heading_moves.get(heading.uuid) == project_uuid
+            )
             planned = (
                 bool(project_uuid)
                 and self.created_headings.get(write.heading_uuid) == project_uuid
             )
-            if not existing and not planned:
+            if not existing and not projected and not planned:
                 raise CloudError("The heading must belong to the destination Project")
         return mutation
 

@@ -84,6 +84,203 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     assert item.revision.startswith("r_")
 
 
+def test_change_find_resolves_one_active_item_and_hides_revision() -> None:
+    module = workspace(
+        [
+            Record(uuid="invoice", kind="task", title="Pay invoice"),
+            Record(uuid="other", kind="task", title="Book travel"),
+        ]
+    )
+
+    result = module.read(ReadCall(purpose="change", find="invoice"))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.purpose == "change"
+    assert result.items[0].ref is not None
+    assert result.items[0].revision is None
+
+    changed = module.commit(
+        CommitCall(
+            intent_id="change-find-unique-001",
+            context_id=result.context.id,
+            change=[{"ref": result.items[0].ref, "title": "Pay invoice today"}],
+        )
+    )
+    assert changed.status == "applied"
+    assert module.read(ReadCall(id="task:invoice")).items[0].title == (
+        "Pay invoice today"
+    )
+
+
+def test_change_find_requires_one_active_match() -> None:
+    empty = workspace([Record(uuid="one", kind="task", title="Pay rent")])
+    no_match = empty.read(ReadCall(purpose="change", find="invoice"))
+    assert no_match.status == "needs_input"
+    assert no_match.context is None
+    assert no_match.recovery is None
+
+    ambiguous = workspace(
+        [
+            Record(uuid="one", kind="task", title="Pay invoice"),
+            Record(uuid="two", kind="task", title="Email invoice"),
+        ]
+    ).read(ReadCall(purpose="change", find="invoice"))
+    assert ambiguous.status == "needs_input"
+    assert ambiguous.context is None
+    assert "matches 2 active items" in ambiguous.instruction
+    assert {item.id for item in ambiguous.items} == {"task:one", "task:two"}
+    assert all(item.revision is None for item in ambiguous.items)
+
+
+def test_change_find_ignores_articles_for_one_unique_title_match() -> None:
+    module = workspace([Record(uuid="plants", kind="task", title="Water plants")])
+
+    result = module.read(ReadCall(purpose="change", find="water the plants"))
+
+    assert result.status == "ok"
+    assert result.items[0].id == "task:plants"
+    assert result.context is not None
+
+
+def test_change_find_keeps_article_fallback_ambiguous() -> None:
+    module = workspace(
+        [
+            Record(uuid="one", kind="task", title="Water plants"),
+            Record(uuid="two", kind="task", title="Water the plants"),
+        ]
+    )
+
+    result = module.read(ReadCall(purpose="change", find="water the plants"))
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert {item.id for item in result.items} == {"task:one", "task:two"}
+
+
+@pytest.mark.parametrize(
+    "record, query",
+    [
+        (
+            Record(
+                uuid="note", kind="task", title="Chores", notes="Water plants"
+            ),
+            "water the plants",
+        ),
+        (
+            Record(
+                uuid="checklist",
+                kind="task",
+                title="Chores",
+                checklists=[ChecklistLine("row", "Water plants")],
+            ),
+            "water the plants",
+        ),
+    ],
+)
+def test_change_find_article_fallback_matches_notes_and_checklists(
+    record: Record, query: str
+) -> None:
+    result = workspace([record]).read(ReadCall(purpose="change", find=query))
+
+    assert result.status == "ok"
+    assert result.items[0].id == f"task:{record.uuid}"
+
+
+def test_change_find_does_not_stem_or_fuzz_token_fallback() -> None:
+    module = workspace([Record(uuid="plants", kind="task", title="Water plants")])
+
+    result = module.read(ReadCall(purpose="change", find="water planting"))
+
+    assert result.status == "needs_input"
+    assert result.context is None
+    assert "found no active item" in result.instruction
+
+
+def test_find_includes_active_headings_for_rename() -> None:
+    heading = Record(
+        uuid="prep", kind="task", title="Prep", heading=True, parent_uuid="project"
+    )
+    module = workspace([heading])
+
+    contextual = module.read(ReadCall(purpose="change", find="Prep"))
+    review = module.read(ReadCall(find="Prep"))
+
+    assert contextual.status == "ok"
+    assert contextual.items[0].id == "heading:prep"
+    assert review.status == "ok"
+    assert review.items[0].id == "heading:prep"
+
+
+def test_find_excludes_completed_trashed_and_repeat_template_headings() -> None:
+    records = [
+        Record(uuid="done", kind="task", title="Prep done", status="done"),
+        Record(uuid="trash", kind="task", title="Prep trash", trashed=True),
+        Record(
+            uuid="template",
+            kind="task",
+            title="Prep template",
+            heading=True,
+            recurrence=RecurrenceState(role="template"),
+        ),
+    ]
+
+    result = workspace(records).read(ReadCall(purpose="change", find="Prep"))
+
+    assert result.status == "needs_input"
+    assert result.context is None
+    assert "found no active item" in result.instruction
+
+
+def test_context_change_accepts_matching_redundant_identity_but_rejects_mismatch() -> None:
+    task = Record(uuid="invoice", kind="task", title="Pay invoice")
+    module = workspace([task])
+    exact = detail(module, task.id)
+    contextual = module.read(ReadCall(purpose="change", find="invoice"))
+    assert contextual.context is not None
+    ref = contextual.items[0].ref
+    assert ref is not None
+    assert exact.revision is not None
+
+    matching = module.commit(
+        CommitCall(
+            intent_id="change-find-matching-001",
+            context_id=contextual.context.id,
+            change=[
+                {
+                    "ref": ref,
+                    "id": task.id,
+                    "if_revision": exact.revision,
+                    "title": "Pay invoice now",
+                }
+            ],
+        )
+    )
+    assert matching.status == "applied"
+
+    fresh = module.read(ReadCall(purpose="change", find="invoice"))
+    assert fresh.context is not None
+    fresh_ref = fresh.items[0].ref
+    assert fresh_ref is not None
+    mismatch = module.commit(
+        CommitCall(
+            intent_id="change-find-mismatch-001",
+            context_id=fresh.context.id,
+            change=[
+                {
+                    "ref": fresh_ref,
+                    "id": task.id,
+                    "if_revision": "r_mismatch",
+                    "title": "Must not apply",
+                }
+            ],
+        )
+    )
+    assert mismatch.status == "needs_input"
+    assert "Remove if_revision" in mismatch.instruction
+    assert module.read(ReadCall(id=task.id)).items[0].title == "Pay invoice now"
+
+
 def test_exact_read_exposes_heading_repeat_pattern_and_linked_copy() -> None:
     project = Record(uuid="facts-project", kind="project", title="Plan")
     heading = Record(
@@ -125,6 +322,64 @@ def test_exact_read_exposes_heading_repeat_pattern_and_linked_copy() -> None:
     assert item.recurrence.mode == "fixed"
     assert item.recurrence.weekdays == ["monday", "friday"]
     assert item.recurrence.linked_item_ids == [copy.id]
+
+
+def test_recurrence_read_verifies_template_and_generated_copy_relationship() -> None:
+    template = Record(
+        uuid="inspect-template",
+        kind="task",
+        title="Review",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+    )
+    copy = Record(
+        uuid="inspect-copy",
+        kind="task",
+        title="Review",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, copy])
+
+    template_result = module.read(
+        ReadCall(purpose="recurrence", id=template.id)
+    )
+    copy_result = module.read(ReadCall(purpose="recurrence", id=copy.id))
+
+    assert template_result.status == "ok"
+    assert copy_result.status == "ok"
+    assert "recurrence_relationship_verified" in template_result.signals
+    assert "recurrence_relationship_verified" in copy_result.signals
+    assert template_result.items[0].recurrence is not None
+    assert copy_result.items[0].recurrence is not None
+    assert copy.id in template_result.items[0].recurrence.linked_item_ids
+    assert copy_result.items[0].recurrence.template_id == template.id
+
+
+def test_recurrence_read_rejects_dangling_generated_copy() -> None:
+    copy = Record(
+        uuid="dangling-copy",
+        kind="task",
+        title="Broken repeat",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid="missing-template",
+            links=("missing-template",),
+        ),
+    )
+
+    result = workspace([copy]).read(ReadCall(purpose="recurrence", id=copy.id))
+
+    assert result.status == "unsupported"
+    assert result.next == "stop"
 
 
 def test_trash_view_returns_recoverable_exact_items() -> None:
@@ -1360,6 +1615,441 @@ def test_trash_needs_approval_and_keeps_project_children() -> None:
     assert settled.status == "applied"
     assert project.trashed is True
     assert child.parent_uuid == project.uuid
+
+
+def test_project_children_move_and_trash_as_one_approved_batch() -> None:
+    source = Record(uuid="merge-source", kind="project", title="Source")
+    destination = Record(uuid="merge-destination", kind="project", title="Destination")
+    first = Record(
+        uuid="merge-first",
+        kind="task",
+        title="First",
+        parent_uuid=source.uuid,
+        notes="Keep this note.",
+        checklists=[ChecklistLine("merge-check", "Keep this row")],
+    )
+    second = Record(
+        uuid="merge-second", kind="task", title="Second", parent_uuid=source.uuid
+    )
+    module = workspace([source, destination, first, second])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-merge-approval-001",
+                "change": [
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                    {
+                        "id": first.id,
+                        "if_revision": detail(module, first.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": second.id,
+                        "if_revision": detail(module, second.id).revision,
+                        "into": destination.id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert any("Move 2 children" in line for line in prepared.plan.summary)
+    assert source.trashed is False
+    assert first.parent_uuid == source.uuid
+    assert second.parent_uuid == source.uuid
+
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert applied.status == "applied"
+    assert source.trashed is True
+    assert first.parent_uuid == destination.uuid
+    assert second.parent_uuid == destination.uuid
+    assert first.notes == "Keep this note."
+    assert [(row.uuid, row.title) for row in first.checklists] == [
+        ("merge-check", "Keep this row")
+    ]
+
+
+def test_project_merge_rejects_partial_move_without_writes() -> None:
+    source = Record(uuid="partial-source", kind="project", title="Source")
+    destination = Record(
+        uuid="partial-destination", kind="project", title="Destination"
+    )
+    first = Record(
+        uuid="partial-first", kind="task", title="First", parent_uuid=source.uuid
+    )
+    second = Record(
+        uuid="partial-second", kind="task", title="Second", parent_uuid=source.uuid
+    )
+    module = workspace([source, destination, first, second])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-merge-partial-001",
+                "change": [
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                    {
+                        "id": first.id,
+                        "if_revision": detail(module, first.id).revision,
+                        "into": destination.id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert source.trashed is False
+    assert first.parent_uuid == source.uuid
+    assert second.parent_uuid == source.uuid
+
+
+@pytest.mark.parametrize("edge", ["heading", "trashed"])
+def test_project_merge_rejects_hidden_children_without_writes(edge: str) -> None:
+    source = Record(uuid=f"{edge}-source", kind="project", title="Source")
+    destination = Record(
+        uuid=f"{edge}-destination", kind="project", title="Destination"
+    )
+    child = Record(
+        uuid=f"{edge}-child",
+        kind="task",
+        title="Child",
+        parent_uuid=source.uuid,
+        heading=edge == "heading",
+        trashed=edge == "trashed",
+    )
+    movable = Record(
+        uuid=f"{edge}-movable",
+        kind="task",
+        title="Movable",
+        parent_uuid=source.uuid,
+    )
+    module = workspace([source, destination, child, movable])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"project-merge-{edge}-001",
+                "change": [
+                    {
+                        "id": movable.id,
+                        "if_revision": detail(module, movable.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert source.trashed is False
+    assert movable.parent_uuid == source.uuid
+    assert child.parent_uuid == source.uuid
+
+
+@pytest.mark.parametrize("hidden", ["completed", "trashed"])
+def test_project_merge_rejects_hidden_destination_without_writes(hidden: str) -> None:
+    source = Record(uuid=f"hidden-source-{hidden}", kind="project", title="Source")
+    destination = Record(
+        uuid=f"hidden-destination-{hidden}",
+        kind="project",
+        title="Destination",
+        status="done" if hidden == "completed" else "open",
+        trashed=hidden == "trashed",
+    )
+    child = Record(
+        uuid=f"hidden-child-{hidden}",
+        kind="task",
+        title="Child",
+        parent_uuid=source.uuid,
+    )
+    module = workspace([source, destination, child])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"project-merge-hidden-destination-{hidden}",
+                "change": [
+                    {
+                        "id": child.id,
+                        "if_revision": detail(module, child.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert source.trashed is False
+    assert child.parent_uuid == source.uuid
+
+
+@pytest.mark.parametrize("lifecycle", ["complete", "trash", "delete"])
+def test_project_merge_rejects_same_batch_destination_lifecycle_without_writes(
+    lifecycle: str,
+) -> None:
+    source = Record(uuid=f"lifecycle-source-{lifecycle}", kind="project", title="Source")
+    destination = Record(
+        uuid=f"lifecycle-destination-{lifecycle}", kind="project", title="Destination"
+    )
+    child = Record(
+        uuid=f"lifecycle-child-{lifecycle}",
+        kind="task",
+        title="Child",
+        parent_uuid=source.uuid,
+    )
+    destination_change: dict[str, object] = {
+        "id": destination.id,
+        "if_revision": "",
+    }
+    if lifecycle == "complete":
+        destination_change["status"] = "completed"
+    elif lifecycle == "trash":
+        destination_change["trash"] = True
+    else:
+        destination_change["lifecycle"] = "delete_permanently"
+    module = workspace([source, destination, child])
+    destination_change["if_revision"] = detail(module, destination.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"project-merge-destination-lifecycle-{lifecycle}",
+                "change": [
+                    {
+                        "id": child.id,
+                        "if_revision": detail(module, child.id).revision,
+                        "into": destination.id,
+                    },
+                    destination_change,
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert source.trashed is False
+    assert destination.trashed is False
+    assert destination.status == "open"
+    assert child.parent_uuid == source.uuid
+
+
+def test_project_merge_destination_change_after_approval_is_stale_without_writes() -> None:
+    source = Record(uuid="race-source", kind="project", title="Source")
+    destination = Record(uuid="race-destination", kind="project", title="Destination")
+    child = Record(
+        uuid="race-child", kind="task", title="Child", parent_uuid=source.uuid
+    )
+    module = workspace([source, destination, child])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-merge-destination-race-001",
+                "change": [
+                    {
+                        "id": child.id,
+                        "if_revision": detail(module, child.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    destination.title = "Changed while waiting"
+    stale = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert stale.status == "stale"
+    assert source.trashed is False
+    assert child.parent_uuid == source.uuid
+
+
+def test_project_merge_destination_child_change_after_approval_is_stale_without_writes() -> None:
+    source = Record(uuid="race-child-source", kind="project", title="Source")
+    destination = Record(
+        uuid="race-child-destination", kind="project", title="Destination"
+    )
+    child = Record(
+        uuid="race-child-move", kind="task", title="Move", parent_uuid=source.uuid
+    )
+    module = workspace([source, destination, child])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-merge-destination-child-race-001",
+                "change": [
+                    {
+                        "id": child.id,
+                        "if_revision": detail(module, child.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    # A new destination child changes membership without changing the
+    # destination Project revision itself.
+    module._library.records["race-child-existing"] = Record(  # noqa: SLF001
+        uuid="race-child-existing",
+        kind="task",
+        title="Already there",
+        parent_uuid=destination.uuid,
+    )
+    stale = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert stale.status == "stale"
+    assert source.trashed is False
+    assert child.parent_uuid == source.uuid
+
+
+@pytest.mark.parametrize("mutation", ["title", "trashed"])
+def test_project_merge_destination_area_change_after_approval_is_stale_without_writes(
+    mutation: str,
+) -> None:
+    area = Record(uuid="race-area", kind="area", title="Work")
+    source = Record(uuid="race-area-source", kind="project", title="Source")
+    destination = Record(
+        uuid="race-area-destination",
+        kind="project",
+        title="Destination",
+        area_uuid=area.uuid,
+    )
+    child = Record(
+        uuid="race-area-child",
+        kind="task",
+        title="Child",
+        parent_uuid=source.uuid,
+    )
+    module = workspace([area, source, destination, child])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"project-merge-destination-area-race-{mutation}-001",
+                "change": [
+                    {
+                        "id": child.id,
+                        "if_revision": detail(module, child.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": source.id,
+                        "if_revision": detail(module, source.id).revision,
+                        "trash": True,
+                    },
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    if mutation == "title":
+        area.title = "Changed while waiting"
+    else:
+        area.trashed = True
+    stale = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert stale.status == "stale"
+    assert source.trashed is False
+    assert child.parent_uuid == source.uuid
+
+
+def test_project_merge_accepts_local_area_project_task_batch() -> None:
+    module = workspace()
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "local-area-project-task-001",
+                "scope_revision": system_scope(module),
+                "create": [
+                    {"key": "$area", "kind": "area", "title": "Work"},
+                    {
+                        "key": "$project",
+                        "kind": "project",
+                        "title": "Launch",
+                        "into": "$area",
+                    },
+                    {
+                        "key": "$task",
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": "$project",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert applied.status == "applied"
+    area = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "area"
+    )
+    project = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "project"
+    )
+    task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "task"
+    )
+    assert project.area_uuid == area.uuid
+    assert task.parent_uuid == project.uuid
+    assert task.area_uuid is None
 
 
 def test_trash_rejects_areas() -> None:

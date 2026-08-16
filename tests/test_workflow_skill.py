@@ -182,8 +182,76 @@ def test_skill_teaches_the_proven_write_forms() -> None:
         "restore accidental cleanup",
         "permanently delete",
         "rich notes",
+        "lifecycle=trash",
+        "ordinary task or project",
+        "every active visible direct child",
     ):
         assert capability in lower
+
+
+def test_skill_teaches_safe_delete_and_merge_forms() -> None:
+    lower = _skill_text().lower()
+
+    assert "lifecycle=trash` only for an ordinary task or project delete" in lower
+    assert "set the source project to `lifecycle=trash` only" in lower
+    assert "every active visible direct child" in lower
+    assert "if completed, trashed, template, or hidden children exist" in lower
+    assert "do not use atomic merge" in lower
+    assert "choose separate safe cleanup" in lower
+    assert "every permanent task or project deletion target must already be in trash" in lower
+    assert "including tasks and empty projects" in lower
+    assert "for a non-empty project, read it completely" in lower
+    assert "lifecycle=delete_permanently` with `delete_contents=true`" in lower
+    assert "then approve the plan" in lower
+    assert "organize.delete_headings" in lower
+    assert "change_tags.delete_permanently" in lower
+
+
+def test_skill_teaches_the_contextual_short_path() -> None:
+    lower = _skill_text().lower()
+
+    for instruction in (
+        "purpose=change",
+        "purpose=organize",
+        "context refs",
+        "do not copy revisions",
+        "editable draft",
+        "ordered sections",
+        "unlisted=keep",
+        "batch related normal changes",
+        "structured recovery",
+        "current copy and template",
+    ):
+        assert instruction in lower
+
+    assert "read once" in lower
+    assert "one commit" in lower
+    assert "rebuild once" in lower
+    assert "response is lost" in lower
+    assert "pending or unknown" in lower
+    assert "no new facts" in lower
+    assert "stale or expired" in lower
+
+
+def test_skill_teaches_weak_model_selector_and_dependency_rules() -> None:
+    lower = _skill_text().lower()
+
+    for instruction in (
+        "select one view",
+        "only a project view uses `within`",
+        "never combine a view with id or find",
+        "search named existing items and edit them",
+        "create only when asked to add",
+        "search first",
+        "purpose=recurrence",
+        "purpose=change",
+        "define local refs before use",
+        "parent tags before children",
+        "start=evening",
+        "delete_headings",
+        "never `lifecycle`",
+    ):
+        assert instruction in lower
 
 
 def test_main_and_reference_files_stay_lean() -> None:

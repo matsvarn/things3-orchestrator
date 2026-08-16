@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from things_orchestrator.cli import build_parser, main
+from things_orchestrator.cli import _server, build_parser, main
 from things_orchestrator.cloud import CloudError
 
 ROOT = Path(__file__).parents[1]
@@ -188,6 +188,73 @@ def test_serve_without_credentials_points_at_login(
     err = capsys.readouterr().err
     assert "uv run things-orchestrator login" in err
     assert "THINGS_PASSWORD" not in err
+
+
+def test_server_binds_a_persistent_context_store_to_the_cloud_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    account_journal = tmp_path / "journal-accountdigest.sqlite3"
+    captured: dict[str, object] = {}
+    journal = object()
+
+    class FakeClient:
+        def __init__(self, email: str, password: str) -> None:
+            assert (email, password) == ("owner@example.com", "cloud-secret")
+
+    class FakeWorkspace:
+        def __init__(self, library: object, **kwargs: object) -> None:
+            captured["library"] = library
+            captured.update(kwargs)
+
+    class FakeContextStore:
+        def __init__(
+            self,
+            path: Path,
+            *,
+            clock: object,
+            token_factory: object,
+        ) -> None:
+            captured["context_path"] = path
+            captured["context_clock"] = clock
+            captured["token_factory"] = token_factory
+            captured["context_store_instance"] = self
+
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_credentials",
+        lambda: ("owner@example.com", "cloud-secret", None),
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_timezone", lambda: "Europe/Berlin"
+    )
+    monkeypatch.setattr("things_orchestrator.cli.CloudClient", FakeClient)
+    monkeypatch.setattr("things_orchestrator.cli.CloudLibrary", lambda client: client)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.journal_path", lambda email: account_journal
+    )
+    monkeypatch.setattr("things_orchestrator.cli.SQLiteJournal", lambda path: journal)
+    monkeypatch.setattr("things_orchestrator.cli.SQLiteContextStore", FakeContextStore)
+    monkeypatch.setattr("things_orchestrator.cli.ThingsWorkspace", FakeWorkspace)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.ThingsMCPServer", lambda workspace: workspace
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.cli.token_urlsafe",
+        lambda size: "secure-context-token" if size == 24 else "wrong-size",
+    )
+
+    workspace = _server(build_parser())
+
+    assert workspace is not None
+    assert captured["journal"] is journal
+    assert captured["account_id"] == "owner@example.com"
+    assert captured["context_store"] is captured["context_store_instance"]
+    assert captured["context_path"] == tmp_path / "contexts-accountdigest.sqlite3"
+    context_clock = captured["context_clock"]
+    assert callable(context_clock)
+    assert context_clock().utcoffset() is not None  # type: ignore[operator]
+    token_factory = captured["token_factory"]
+    assert callable(token_factory)
+    assert token_factory() == "secure-context-token"  # type: ignore[operator]
 
 
 def test_setup_wizard_is_linked_and_does_not_store_cloud_secrets() -> None:
