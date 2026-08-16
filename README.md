@@ -65,10 +65,11 @@ The server can create and update Tasks, Projects, Areas, tags, native
 checklists, Markdown notes, dates, reminders, and list order. It can complete
 or cancel Tasks and Projects.
 
-It can create repeat rules. It can change repeat mode, unit, interval, and
-weekly pattern. It can edit or complete a generated copy. It can stop a repeat
-rule and keep linked copies as ordinary Tasks. Rule changes keep unknown Cloud
-fields.
+It can make a new or existing Task repeat. It keeps an existing Task as the
+current generated copy and preserves its metadata in the future template. It
+can change repeat mode, unit, interval, and weekly pattern. It can change a
+template and its current copy in one batch. It can stop a repeat rule and keep
+linked copies as ordinary Tasks. Rule changes keep unknown Cloud fields.
 
 It can create, rename, reorder, assign, clear, and remove headings. It can
 create nested tags, rename or reparent them, and remove their references before

@@ -188,7 +188,12 @@ def run() -> dict[str, bool]:
             checklist = own("ChecklistItem3")
             library.apply(
                 [
-                    Write(action="create", uuid=project, kind="project", title=f"{prefix} project"),
+                    Write(
+                        action="create",
+                        uuid=project,
+                        kind="project",
+                        title=f"{prefix} project",
+                    ),
                     Write(
                         action="create_heading",
                         uuid=heading_a,
@@ -229,7 +234,8 @@ def run() -> dict[str, bool]:
                 ]
             )
             _proof(
-                library.records[heading_b].sort_index < library.records[heading_a].sort_index,
+                library.records[heading_b].sort_index
+                < library.records[heading_a].sort_index,
                 "heading.reorder",
                 results,
             )
@@ -282,7 +288,9 @@ def run() -> dict[str, bool]:
                         "change": [
                             {
                                 "id": f"heading:{heading_a}",
-                                "if_revision": _revision(module, f"heading:{heading_a}"),
+                                "if_revision": _revision(
+                                    module, f"heading:{heading_a}"
+                                ),
                                 "title": f"{prefix} heading renamed",
                             }
                         ],
@@ -303,7 +311,9 @@ def run() -> dict[str, bool]:
                         "change": [
                             {
                                 "id": f"heading:{heading_a}",
-                                "if_revision": _revision(module, f"heading:{heading_a}"),
+                                "if_revision": _revision(
+                                    module, f"heading:{heading_a}"
+                                ),
                                 "lifecycle": "delete_permanently",
                             }
                         ],
@@ -367,7 +377,9 @@ def run() -> dict[str, bool]:
 
             # Standalone Task lifecycle.
             task = own("Task6")
-            library.apply([Write(action="create", uuid=task, title=f"{prefix} lifecycle")])
+            library.apply(
+                [Write(action="create", uuid=task, title=f"{prefix} lifecycle")]
+            )
             library.apply([Write(action="trash", uuid=task)])
             library.apply([Write(action="restore", uuid=task)])
             _proof(not library.records[task].trashed, "task.restore", results)
@@ -390,8 +402,10 @@ def run() -> dict[str, bool]:
             _proof(
                 _wait_for(
                     library,
-                    lambda: rich in library.records
-                    and library.records[rich].notes_format == "rich",
+                    lambda: (
+                        rich in library.records
+                        and library.records[rich].notes_format == "rich"
+                    ),
                 ),
                 "note.write_rich_structure",
                 results,
@@ -421,6 +435,137 @@ def run() -> dict[str, bool]:
             library.apply([Write(action="permanent_delete", uuid=rich)])
             owned.pop(rich)
 
+            # Recurrence: convert an existing Task without replacing its identity.
+            existing_repeat = own("Task6")
+            existing_repeat_check = own("ChecklistItem3")
+            existing_repeat_title = f"{prefix} existing recurring"
+            library.apply(
+                [
+                    Write(
+                        action="create",
+                        uuid=existing_repeat,
+                        title=existing_repeat_title,
+                        notes="Preserve this note",
+                    ),
+                    Write(
+                        action="checklist",
+                        uuid=existing_repeat_check,
+                        title="Preserve this checklist",
+                        checklist_parent_uuid=existing_repeat,
+                        checklist_status="open",
+                    ),
+                ]
+            )
+            converted_existing = _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-repeat-convert-{existing_repeat}",
+                        "change": [
+                            {
+                                "id": f"task:{existing_repeat}",
+                                "if_revision": _revision(
+                                    module, f"task:{existing_repeat}"
+                                ),
+                                "repeat": {
+                                    "unit": "week",
+                                    "interval": 2,
+                                    "weekdays": ["monday", "friday"],
+                                },
+                            }
+                        ],
+                    }
+                ),
+            )
+            existing_template_record = next(
+                item
+                for item in library.records.values()
+                if item.title == existing_repeat_title
+                and item.recurrence.role == "template"
+            )
+            existing_template = existing_template_record.uuid
+            owned[existing_template] = existing_template_record.entity or "Task6"
+            _proof(
+                library.records[existing_repeat].recurrence.template_uuid
+                == existing_template
+                and {item.id for item in converted_existing.items}
+                == {
+                    f"task:{existing_repeat}",
+                    f"task:{existing_template}",
+                }
+                and library.records[existing_repeat].notes == "Preserve this note"
+                and existing_template_record.notes == "Preserve this note"
+                and [row.title for row in existing_template_record.checklists]
+                == ["Preserve this checklist"],
+                "recurrence.convert_existing_task",
+                results,
+            )
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-repeat-metadata-{existing_repeat}",
+                        "change": [
+                            {
+                                "id": f"task:{existing_template}",
+                                "if_revision": _revision(
+                                    module, f"task:{existing_template}"
+                                ),
+                                "title": f"{prefix} future recurring",
+                                "notes_markdown": "Future cycles",
+                            },
+                            {
+                                "id": f"task:{existing_repeat}",
+                                "if_revision": _revision(
+                                    module, f"task:{existing_repeat}"
+                                ),
+                                "title": f"{prefix} current recurring",
+                            },
+                        ],
+                    }
+                ),
+            )
+            _proof(
+                library.records[existing_template].title.endswith("future recurring")
+                and library.records[existing_template].notes == "Future cycles"
+                and library.records[existing_repeat].title.endswith(
+                    "current recurring"
+                ),
+                "recurrence.change_template_and_current_metadata",
+                results,
+            )
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-repeat-convert-stop-{existing_template}",
+                        "change": [
+                            {
+                                "id": f"task:{existing_template}",
+                                "if_revision": _revision(
+                                    module, f"task:{existing_template}"
+                                ),
+                                "repeat": {"remove": True},
+                            }
+                        ],
+                    }
+                ),
+            )
+            owned.pop(existing_template)
+            library.apply(
+                [
+                    Write(
+                        action="checklist",
+                        uuid=existing_repeat_check,
+                        checklist_parent_uuid=existing_repeat,
+                        checklist_remove=True,
+                    ),
+                    Write(action="permanent_delete", uuid=existing_repeat),
+                ]
+            )
+            owned.pop(existing_repeat)
+            owned.pop(existing_repeat_check)
+
             # Recurrence: create a template and current generated copy atomically.
             recurring_title = f"{prefix} recurring"
             _approved_commit(
@@ -440,14 +585,12 @@ def run() -> dict[str, bool]:
             template_record = next(
                 item
                 for item in library.records.values()
-                if item.title == recurring_title
-                and item.recurrence.role == "template"
+                if item.title == recurring_title and item.recurrence.role == "template"
             )
             instance_record = next(
                 item
                 for item in library.records.values()
-                if item.title == recurring_title
-                and item.recurrence.role == "instance"
+                if item.title == recurring_title and item.recurrence.role == "instance"
             )
             template = template_record.uuid
             instance = instance_record.uuid

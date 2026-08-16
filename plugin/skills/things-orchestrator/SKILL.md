@@ -48,15 +48,15 @@ when the work is finished. Let a later review shape steps that can still change.
 Capture clear, accepted work directly. For changes or reviews, use current
 Things facts and preserve anything the owner did not ask to change.
 
-Use Trash for an ordinary delete because it is recoverable. Restore it when the
-owner reverses that choice. Read Trash when the exact item is not known. Permanently delete only after an explicit request.
-For a Project, account for its contents in the same approved cleanup.
+Use Trash for an ordinary delete because it is recoverable. Restore it when the owner reverses that choice.
+Read Trash when the exact item is not known. Permanently delete only after an explicit request. For a Project, account for its contents in the same approved cleanup.
 
 Preserve rich notes by default. Replace rich formatting with Markdown only
 when the owner wants a full replacement and accepts that visible consequence.
 
 For repeat changes, read the generated copy and its repeating template. Change
-the template for future cadence and the generated copy for current work. Stopping repetition keeps linked copies as ordinary Tasks.
+the template for future cadence or content and the generated copy for current work.
+Batch both when both cycles must change. A complete repeat rule makes an existing Task the current copy and creates its future template. Stopping repetition keeps linked copies as ordinary Tasks.
 
 When one unclear choice can change the Task, Project, destination, or date,
 keep the item as it is and ask one short question.

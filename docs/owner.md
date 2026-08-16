@@ -12,7 +12,7 @@ The server evaluates Today, Logbook, and reminders in the timezone stored by
 
 The model has three tools. `things_read` gets current, bounded facts.
 `things_commit` applies routine changes. Area changes, broad batches, Trash,
-repeat-rule changes, registry cleanup, rich-note replacement, permanent
+repeat-rule or future-template changes, registry cleanup, rich-note replacement, permanent
 deletion, and closing a Project with open actions need approval.
 These changes write nothing until you accept them. The model asks one plain
 question and keeps tool IDs private. Each write needs a Cloud read-back before

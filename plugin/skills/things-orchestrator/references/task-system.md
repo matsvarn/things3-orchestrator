@@ -26,6 +26,8 @@ when the section meaning changes. Deleting it keeps its Tasks in the Project.
 
 For repeating work, separate the future cadence from today's work. Change the
 repeating template for future copies. Change the generated copy for the current cycle.
+Batch both changes when both must match. A complete repeat rule can turn
+an existing Task into the current copy without losing its identity or metadata.
 Stop repetition when the owner wants to keep the work without new copies.
 
 Keep the answer in the owner's words. Finish when each unclear choice has one

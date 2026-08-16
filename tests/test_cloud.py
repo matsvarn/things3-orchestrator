@@ -91,7 +91,14 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
                 "uuid": "repeat",
                 "e": "Task6",
                 "t": 0,
-                "p": {"tt": "Weekly", "tp": 0, "ss": 0, "st": 1, "tr": False, "rr": {"tp": 0}},
+                "p": {
+                    "tt": "Weekly",
+                    "tp": 0,
+                    "ss": 0,
+                    "st": 1,
+                    "tr": False,
+                    "rr": {"tp": 0},
+                },
             },
         ],
         library=library,
@@ -206,7 +213,9 @@ def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
     library = MemoryLibrary(
         [
             Record(uuid="task", kind="task", title="Tagged", tag_uuids=["tag"]),
-            Record(uuid="area", kind="area", title="Tagged area", tag_uuids=["tag", "keep"]),
+            Record(
+                uuid="area", kind="area", title="Tagged area", tag_uuids=["tag", "keep"]
+            ),
         ]
     )
     library.tags.update({"tag": "Removed", "keep": "Keep"})
@@ -235,9 +244,7 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
         kind="task",
         title="Monthly",
         entity="Task6",
-        recurrence=RecurrenceState(
-            role="template", repeat_type="fixed", rule=rule
-        ),
+        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule=rule),
     )
 
     changed = {**rule, "fa": 3}
@@ -465,7 +472,9 @@ def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
                     end_size=1,
                     latest_size=1,
                 )
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     first = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     first.refresh()
@@ -519,7 +528,9 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
                     end_size=1,
                     latest_size=1,
                 )
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     first = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     first.refresh()
@@ -654,7 +665,9 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
                     end_size=1,
                     latest_size=1,
                 )
-            return HistoryPage(events=[], current=1, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
 
     client = FakeClient()
     library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
@@ -676,10 +689,14 @@ def test_new_area_ix_follows_areas_not_inbox() -> None:
     library = MemoryLibrary(
         [
             Record(uuid="work", kind="area", title="Work", sort_index=0),
-            Record(uuid="note", kind="task", title="Inbox note", inbox=True, sort_index=50),
+            Record(
+                uuid="note", kind="task", title="Inbox note", inbox=True, sort_index=50
+            ),
         ]
     )
-    index = library.next_index(Write(action="create", uuid="home", kind="area", title="Home"))
+    index = library.next_index(
+        Write(action="create", uuid="home", kind="area", title="Home")
+    )
     assert index == 1024
 
 
@@ -788,7 +805,9 @@ def test_today_clears_evening_and_inbox_clears_start(tmp_path: Path) -> None:
         tonight=True,
         entity="Task6",
     )
-    library.apply([Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))])
+    library.apply(
+        [Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))]
+    )
     payload = client.committed[0].payload
     assert payload["sb"] == 0
     library.apply([Write(action="update", uuid="abc", kind="task", inbox=True)])
@@ -950,7 +969,9 @@ def test_move_without_schedule_change_keeps_existing_schedule(tmp_path: Path) ->
 def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["a"] = Record(uuid="a", kind="task", title="First", inbox=True, sort_index=0, entity="Task6")
+    library.records["a"] = Record(
+        uuid="a", kind="task", title="First", inbox=True, sort_index=0, entity="Task6"
+    )
     library.apply(
         [
             Write(action="create", uuid="b", title="Second"),
@@ -964,8 +985,12 @@ def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
 def test_area_rename_keeps_stored_entity(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["work"] = Record(uuid="work", kind="area", title="Work", entity="Area2")
-    library.apply([Write(action="rename_area", uuid="work", kind="area", title="Office")])
+    library.records["work"] = Record(
+        uuid="work", kind="area", title="Work", entity="Area2"
+    )
+    library.apply(
+        [Write(action="rename_area", uuid="work", kind="area", title="Office")]
+    )
     assert client.committed[0].kind == "Area2"
 
 
@@ -978,7 +1003,13 @@ def test_timeout_scans_later_pages_instead_of_reposting() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -1074,7 +1105,9 @@ def test_post_commit_pull_failure_is_an_unknown_outcome(tmp_path: Path) -> None:
         def items(self, _start_index: int) -> HistoryPage:
             self.pulls += 1
             if self.pulls == 1:
-                return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+                return HistoryPage(
+                    events=[], current=0, groups=0, end_size=0, latest_size=0
+                )
             raise CloudError("Things Cloud is unreachable")
 
         def commit(self, _envelopes: list[Envelope]) -> None:
@@ -1098,7 +1131,13 @@ def test_timeout_partial_overlap_is_unknown_and_does_not_repost() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -1132,7 +1171,13 @@ def test_timeout_ignores_older_event_for_the_same_uuid() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -1170,7 +1215,13 @@ def test_timeout_never_reposts_when_first_pull_has_no_proof() -> None:
     posts = 0
     gets = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts, gets
         if method == "POST":
             posts += 1
@@ -1208,7 +1259,9 @@ def test_empty_history_page_does_not_rewind_head(tmp_path: Path) -> None:
             return self.history_id
 
         def items(self, start_index: int) -> HistoryPage:
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records["t"] = Record(uuid="t", kind="task", title="Call")
@@ -1224,7 +1277,13 @@ def test_stale_history_key_re_verifies() -> None:
     client.loaded_index = 4
     paths: list[str] = []
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         paths.append(path)
         if "account" in path:
             return {"history-key": "new"}
@@ -1252,7 +1311,13 @@ def test_history_404_retries_the_requested_index_when_key_is_unchanged() -> None
     client.loaded_index = 1
     starts: list[int] = []
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         if "account" in path:
             return {"history-key": "h"}
         start = int((query or {}).get("start-index") or 0)
@@ -1290,7 +1355,9 @@ def test_invalid_json_is_cloud_error(monkeypatch: pytest.MonkeyPatch) -> None:
             return False
 
     client = CloudClient("a@b.c", "pw")
-    monkeypatch.setattr("things_orchestrator.cloud.urlopen", lambda *args, **kwargs: _Resp())
+    monkeypatch.setattr(
+        "things_orchestrator.cloud.urlopen", lambda *args, **kwargs: _Resp()
+    )
     try:
         client._request("GET", "/version/1/account/a")  # noqa: SLF001
     except CloudError as error:
@@ -1313,7 +1380,9 @@ def test_apply_pulls_after_commit(tmp_path: Path) -> None:
 
     client.items = items  # type: ignore[method-assign]
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
     library._synced_at = time.monotonic()  # noqa: SLF001
     library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
     assert gets >= 1
@@ -1334,7 +1403,9 @@ def test_empty_incremental_does_not_rewrite_cache(tmp_path: Path) -> None:
             return self.history_id
 
         def items(self, start_index: int) -> HistoryPage:
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     library = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     library.records["t1"] = Record(uuid="t1", kind="task", title="Old")
@@ -1407,8 +1478,12 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
             if self.pending:
                 events = self.pending
                 self.pending = []
-                return HistoryPage(events=events, current=2, groups=1, end_size=2, latest_size=2)
-            return HistoryPage(events=[], current=1, groups=0, end_size=1, latest_size=1)
+                return HistoryPage(
+                    events=events, current=2, groups=1, end_size=2, latest_size=2
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
 
         def commit(self, envelopes: list[Envelope]) -> None:
             self.posts += 1
@@ -1421,9 +1496,13 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
 
     client = ConflictClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
     with pytest.raises(CloudError, match="read fresh facts"):
-        library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
+        library.apply(
+            [Write(action="update", uuid="abc", kind="task", title="Call bank")]
+        )
     assert client.posts == 1
     assert library.records["abc"].title == "Call"
 
@@ -1502,7 +1581,9 @@ def test_empty_library_still_debounces(tmp_path: Path) -> None:
 
         def items(self, start_index: int) -> HistoryPage:
             self.pages += 1
-            return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+            return HistoryPage(
+                events=[], current=0, groups=0, end_size=0, latest_size=0
+            )
 
     library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.refresh()
@@ -1519,7 +1600,12 @@ def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
     result = library.apply(
         [
             Write(action="ensure_tag", uuid="waiting", title="Waiting"),
-            Write(action="create", uuid="task", title="Wait for refund", notes="## Next\nEmail support"),
+            Write(
+                action="create",
+                uuid="task",
+                title="Wait for refund",
+                notes="## Next\nEmail support",
+            ),
             Write(action="tags", uuid="task", tag_uuids=["waiting"]),
         ]
     )
@@ -1537,7 +1623,9 @@ def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
 def test_existing_update_and_waiting_tag_share_one_envelope(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["task"] = Record(uuid="task", kind="task", title="Refund", entity="Task6")
+    library.records["task"] = Record(
+        uuid="task", kind="task", title="Refund", entity="Task6"
+    )
 
     library.apply(
         [
@@ -1657,6 +1745,47 @@ def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> No
     assert link.payload["rt"] == []
     assert library.records["instance"].recurrence.role == "none"
     assert "template" not in library.records
+
+
+def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template": Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 8, "fa": 1},
+                ),
+            ),
+            "existing": Record(
+                uuid="existing", kind="task", title="Routine", entity="Task6"
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat_link",
+                uuid="existing",
+                recurrence_links=["template"],
+                recurrence_generated=True,
+            )
+        ]
+    )
+
+    assert client.committed[0].payload["rt"] == ["template"]
+    assert client.committed[0].payload["lt"] is True
+    assert library.records["existing"].recurrence.role == "instance"
+    assert library.records["existing"].recurrence.template_uuid == "template"
 
 
 def test_memory_lifecycle_and_tag_admin_actions_are_reversible_until_delete() -> None:
@@ -1871,7 +2000,9 @@ def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
 def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["area"] = Record(uuid="area", kind="area", title="Work", entity="Area3")
+    library.records["area"] = Record(
+        uuid="area", kind="area", title="Work", entity="Area3"
+    )
 
     library.apply(
         [
@@ -1897,7 +2028,9 @@ def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None
 def test_checklist_create_update_delete_round_trip(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["task"] = Record(uuid="task", kind="task", title="Pack", entity="Task6")
+    library.records["task"] = Record(
+        uuid="task", kind="task", title="Pack", entity="Task6"
+    )
 
     library.apply(
         [
@@ -1945,8 +2078,18 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
     library = MemoryLibrary()
     fold_events(
         [
-            {"uuid": "group", "e": "Tag4", "t": 0, "p": {"tt": "People", "pn": ["root"]}},
-            {"uuid": "area", "e": "Area3", "t": 0, "p": {"tt": "Work", "tg": ["group"], "ix": 40}},
+            {
+                "uuid": "group",
+                "e": "Tag4",
+                "t": 0,
+                "p": {"tt": "People", "pn": ["root"]},
+            },
+            {
+                "uuid": "area",
+                "e": "Area3",
+                "t": 0,
+                "p": {"tt": "Work", "tg": ["group"], "ix": 40},
+            },
             {
                 "uuid": "template",
                 "e": "Task6",
@@ -1987,14 +2130,14 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
 def test_projects_default_to_anytime_and_cannot_enter_inbox(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.apply([Write(action="create", uuid="project", kind="project", title="Launch")])
+    library.apply(
+        [Write(action="create", uuid="project", kind="project", title="Launch")]
+    )
     assert client.committed[0].payload["st"] == 1
     assert library.records["project"].inbox is False
 
     with pytest.raises(CloudError, match="Projects cannot enter Inbox"):
-        library.apply(
-            [Write(action="update", uuid="project", inbox=True)]
-        )
+        library.apply([Write(action="update", uuid="project", inbox=True)])
 
 
 def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
@@ -2002,7 +2145,9 @@ def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records.update(
         {
-            "project": Record(uuid="project", kind="project", title="Launch", entity="Task6"),
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
             "heading": Record(
                 uuid="heading",
                 kind="task",

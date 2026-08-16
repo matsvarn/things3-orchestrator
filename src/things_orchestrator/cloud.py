@@ -24,8 +24,15 @@ from .library import (
     Record,
     Status,
     Write,
+    _ChecklistMutation,
     _compile_mutation,
+    _CreateMutation,
+    _EditMutation,
+    _LifecycleMutation,
+    _Mutation,
     _MutationHandler,
+    _RecurrenceMutation,
+    _TagMutation,
     day_ts,
     from_ts,
     offset_from_remind,
@@ -836,6 +843,8 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "rr" not in payload or item.recurrence.rule == payload["rr"],
         "rt" not in payload
         or list(item.recurrence.links) == [str(link) for link in payload["rt"]],
+        "lt" not in payload
+        or bool(payload["lt"]) == (item.recurrence.role == "instance"),
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
@@ -880,7 +889,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
             raise CloudError("planned envelope UUIDs must be unique")
         return envelopes, self.created
 
-    def _prepare(self, mutation: Any) -> Any:
+    def _prepare(self, mutation: _Mutation) -> _Mutation:
         write = mutation.write
         current = self.library.records.get(write.uuid)
         planned_kind = self.created_kinds.get(write.uuid)
@@ -916,12 +925,17 @@ class _CloudPlanHandler(_MutationHandler[None]):
     def _emit(self, write: Write) -> None:
         self.envelopes.append(self.library._envelope(write))  # noqa: SLF001
 
-    def create(self, mutation: Any) -> None:
+    def _normalize_item_tags(self, write: Write) -> Write:
+        if not write.tag_uuids:
+            return write
+        return replace(
+            write,
+            tag_uuids=[self.tag_map.get(tag, tag) for tag in write.tag_uuids],
+        )
+
+    def create(self, mutation: _CreateMutation) -> None:
         write = mutation.write
-        if write.tag_uuids:
-            write = replace(
-                write, tag_uuids=[self.tag_map.get(tag, tag) for tag in write.tag_uuids]
-            )
+        write = self._normalize_item_tags(write)
         if write.sort_index is None:
             index = self.library.next_index(write)
             key = (write.kind, write.into_uuid, write.into_kind)
@@ -933,31 +947,13 @@ class _CloudPlanHandler(_MutationHandler[None]):
         if write.title:
             self.created[write.title] = f"{write.kind}:{write.uuid}"
 
-    def edit(self, mutation: Any) -> None:
-        write = mutation.write
-        if write.action in {"rename_tag", "reparent_tag", "delete_tag"}:
-            write = replace(
-                write,
-                uuid=self.tag_map.get(write.uuid, write.uuid),
-                tag_parent_uuids=(
-                    [
-                        self.tag_map.get(parent, parent)
-                        for parent in write.tag_parent_uuids
-                    ]
-                    if write.tag_parent_uuids is not None
-                    else None
-                ),
-            )
-        elif write.tag_uuids:
-            write = replace(
-                write, tag_uuids=[self.tag_map.get(tag, tag) for tag in write.tag_uuids]
-            )
-        self._emit(write)
+    def edit(self, mutation: _EditMutation) -> None:
+        self._emit(self._normalize_item_tags(mutation.write))
 
-    def lifecycle(self, mutation: Any) -> None:
+    def lifecycle(self, mutation: _LifecycleMutation) -> None:
         self._emit(mutation.write)
 
-    def tag(self, mutation: Any) -> None:
+    def tag(self, mutation: _TagMutation) -> None:
         write = mutation.write
         if write.action == "ensure_tag":
             title = write.title or ""
@@ -996,9 +992,18 @@ class _CloudPlanHandler(_MutationHandler[None]):
                     )
                 self.created[title or existing] = existing
             return
-        self.edit(mutation)
+        write = replace(
+            write,
+            uuid=self.tag_map.get(write.uuid, write.uuid),
+            tag_parent_uuids=(
+                [self.tag_map.get(parent, parent) for parent in write.tag_parent_uuids]
+                if write.tag_parent_uuids is not None
+                else None
+            ),
+        )
+        self._emit(write)
 
-    def checklist(self, mutation: Any) -> None:
+    def checklist(self, mutation: _ChecklistMutation) -> None:
         write = mutation.write
         parent, _ = self.library._find_checklist(write.uuid)  # noqa: SLF001
         destination_uuid = write.checklist_parent_uuid or (
@@ -1021,7 +1026,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
             )
         self._emit(write)
 
-    def recurrence(self, mutation: Any) -> None:
+    def recurrence(self, mutation: _RecurrenceMutation) -> None:
         write = mutation.write
         current = self.library.records.get(write.uuid)
         if write.action == "repeat":
@@ -1044,7 +1049,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             "Area3" if write.kind == "area" else "Task6"
         )
 
-    def create(self, mutation: Any) -> Envelope:
+    def create(self, mutation: _CreateMutation) -> Envelope:
         write = mutation.write
         payload = _create_payload(write)
         if mutation.heading:
@@ -1056,7 +1061,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             payload=payload,
         )
 
-    def checklist(self, mutation: Any) -> Envelope:
+    def checklist(self, mutation: _ChecklistMutation) -> Envelope:
         write = mutation.write
         parent, existing = self.library._find_checklist(write.uuid)  # noqa: SLF001
         if write.checklist_remove:
@@ -1107,7 +1112,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             uuid=write.uuid, action=1, kind="ChecklistItem3", payload=payload
         )
 
-    def lifecycle(self, mutation: Any) -> Envelope:
+    def lifecycle(self, mutation: _LifecycleMutation) -> Envelope:
         write = mutation.write
         entity = self._entity(write)
         if write.action in {"delete_area", "permanent_delete"}:
@@ -1126,7 +1131,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
         }
         return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
 
-    def tag(self, mutation: Any) -> Envelope:
+    def tag(self, mutation: _TagMutation) -> Envelope:
         write = mutation.write
         if write.action == "rename_tag":
             if not write.title or not write.title.strip():
@@ -1148,7 +1153,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             return Envelope(uuid=write.uuid, action=2, kind="Tag4", payload={})
         raise CloudError("ensure_tag envelopes are planned by the tag handler")
 
-    def recurrence(self, mutation: Any) -> Envelope:
+    def recurrence(self, mutation: _RecurrenceMutation) -> Envelope:
         write = mutation.write
         payload: dict[str, Any] = {"md": _now()}
         payload["rr" if write.action == "repeat" else "rt"] = deepcopy(
@@ -1156,11 +1161,13 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             if write.action == "repeat"
             else list(write.recurrence_links or [])
         )
+        if write.action == "repeat_link" and write.recurrence_generated:
+            payload["lt"] = True
         return Envelope(
             uuid=write.uuid, action=1, kind=self._entity(write), payload=payload
         )
 
-    def edit(self, mutation: Any) -> Envelope:
+    def edit(self, mutation: _EditMutation) -> Envelope:
         write = mutation.write
         entity = self._entity(write)
         if write.action == "rename_area":

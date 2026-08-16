@@ -57,7 +57,11 @@ class RecurrenceState:
             if not isinstance(offset, dict):
                 return ()
             code = offset.get("wd")
-            if not isinstance(code, int) or isinstance(code, bool) or not 0 <= code <= 6:
+            if (
+                not isinstance(code, int)
+                or isinstance(code, bool)
+                or not 0 <= code <= 6
+            ):
                 return ()
             codes.append(code)
         return tuple(codes)
@@ -175,9 +179,7 @@ class RecurrenceState:
             rule = deepcopy(value)
             code = rule.get("tp", 0)
             repeat_type: RepeatType = (
-                "fixed"
-                if code == 0
-                else "after_completion" if code == 1 else "unknown"
+                "fixed" if code == 0 else "after_completion" if code == 1 else "unknown"
             )
             return replace(
                 self,
@@ -214,9 +216,7 @@ class RecurrenceState:
         if self.role != "instance":
             return self
         resolved: RepeatType = (
-            repeat_type
-            if repeat_type in {"fixed", "after_completion"}
-            else "unknown"
+            repeat_type if repeat_type in {"fixed", "after_completion"} else "unknown"
         )
         return replace(self, repeat_type=resolved)
 
@@ -279,11 +279,11 @@ def new_rule(
         raise ValueError("Weekday selectors need a weekly repeat rule")
     if any(code < 0 or code > 6 for code in codes) or len(codes) != len(set(codes)):
         raise ValueError("Weekday selectors must be unique values from 0 through 6")
-    if unit == "week":
-        offsets: list[JsonValue] = [
-            {"wd": code}
-            for code in (codes or [(anchor.weekday() + 1) % 7])
-        ]
+    offsets: list[JsonValue]
+    if mode == "after_completion":
+        offsets = []
+    elif unit == "week":
+        offsets = [{"wd": code} for code in (codes or [(anchor.weekday() + 1) % 7])]
     elif unit == "month":
         offsets = [{"dy": anchor.day - 1}]
     elif unit == "year":

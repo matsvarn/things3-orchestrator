@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.recurrence import RecurrenceState, new_rule
 
 
 def template(
@@ -248,3 +248,14 @@ def test_after_completion_rejects_weekday_selectors() -> None:
             mode="after_completion",
             weekday_codes=[1],
         )
+
+
+def test_new_after_completion_rule_has_no_fixed_offsets() -> None:
+    rule = new_rule(
+        mode="after_completion",
+        unit="week",
+        interval=2,
+        anchor=datetime(2026, 8, 17, tzinfo=timezone.utc).date(),
+    )
+
+    assert rule["of"] == []

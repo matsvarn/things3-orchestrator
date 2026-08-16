@@ -16,7 +16,8 @@ Every capability group in this document passed all six release gates:
 | Capability group | Model | Memory | Cloud fixture | Live Cloud | Approval | Read-back |
 | --- | --- | --- | --- | --- | --- | --- |
 | Repeat inspect and generated-copy edit | Yes | Yes | Yes | Yes | Defined | Yes |
-| Repeat create, mode, unit, interval, and weekly pattern | Yes | Yes | Yes | Yes | Yes | Yes |
+| Repeat create or convert, mode, unit, interval, and weekly pattern | Yes | Yes | Yes | Yes | Yes | Yes |
+| Future-template and current-copy metadata batching | Yes | Yes | Yes | Yes | Yes | Yes |
 | Stop repeat and keep linked copies | Yes | Yes | Yes | Yes | Yes | Yes |
 | Task and Project Trash or restore | Yes | Yes | Yes | Yes | Yes | Yes |
 | Task purge and descendant-first Project purge | Yes | Yes | Yes | Yes | Yes | Yes |
@@ -49,6 +50,8 @@ repeat, and Project transitions use the public commit and approval path. The
 - Task Trash, restore, and purge;
 - structured rich-note write and explicit Markdown replacement;
 - repeat template plus generated-copy creation;
+- existing-Task conversion with identity and metadata preservation;
+- future-template and current-copy metadata changes in one approved batch;
 - full repeat rule change and generated-copy edit;
 - generated-copy completion;
 - repeat removal while the linked copy remains;
