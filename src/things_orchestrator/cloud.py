@@ -7,6 +7,7 @@ import os
 import time
 import zlib
 from base64 import b64encode
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -23,11 +24,21 @@ from .library import (
     Record,
     Status,
     Write,
+    _ChecklistMutation,
+    _compile_mutation,
+    _CreateMutation,
+    _EditMutation,
+    _LifecycleMutation,
+    _Mutation,
+    _MutationHandler,
+    _RecurrenceMutation,
+    _TagMutation,
     day_ts,
     from_ts,
     offset_from_remind,
     remind_from_offset,
 )
+from .recurrence import RecurrenceState
 
 ENDPOINT = "https://cloud.culturedcode.com"
 USER_AGENT = "ThingsMac/32209501"
@@ -83,7 +94,9 @@ def _note_text(value: object) -> str:
                 if isinstance(paragraph, dict):
                     run = paragraph.get("r")
                     if isinstance(run, str) and run:
-                        lines.append(run.replace("\u2028", "\n").replace("\u2029", "\n"))
+                        lines.append(
+                            run.replace("\u2028", "\n").replace("\u2029", "\n")
+                        )
             return "\n".join(lines)
     return ""
 
@@ -134,7 +147,9 @@ class CloudClient:
         self._last_write = 0.0
 
     def _headers(self, *, write: bool = False) -> dict[str, str]:
-        info = b64encode(json.dumps(CLIENT_INFO, separators=(",", ":")).encode()).decode()
+        info = b64encode(
+            json.dumps(CLIENT_INFO, separators=(",", ":")).encode()
+        ).decode()
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "application/json",
@@ -192,7 +207,9 @@ class CloudClient:
             raise CloudError(f"Things Cloud HTTP {error.code}") from error
         except URLError as error:
             reason = error.reason
-            timed_out = isinstance(reason, TimeoutError) or "timed out" in str(reason).lower()
+            timed_out = (
+                isinstance(reason, TimeoutError) or "timed out" in str(reason).lower()
+            )
             if timed_out:
                 raise CloudError("Things Cloud timed out") from error
             raise CloudError("Things Cloud is unreachable") from error
@@ -363,14 +380,34 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         raw = event.get("p")
         payload: dict[str, Any] = raw if isinstance(raw, dict) else {}
         if action == 2:
+            deleted = library.records.get(uuid)
+            if deleted is not None:
+                for item in library.records.values():
+                    if item.parent_uuid == uuid:
+                        item.parent_uuid = None
+                    if item.area_uuid == uuid:
+                        item.area_uuid = None
+                    if item.heading_uuid == uuid:
+                        item.heading_uuid = None
             library.records.pop(uuid, None)
             library.tags.pop(uuid, None)
             library.tag_parents.pop(uuid, None)
+            if kind in _TAG_KINDS:
+                for item in library.records.values():
+                    item.tag_uuids = [tag for tag in item.tag_uuids if tag != uuid]
+                for tag, parents in library.tag_parents.items():
+                    library.tag_parents[tag] = [
+                        parent for parent in parents if parent != uuid
+                    ]
             continue
         if kind in _AREA_KINDS:
             existing = library.records.get(uuid)
             title = str(payload.get("tt") or (existing.title if existing else ""))
-            index = int(payload["ix"]) if payload.get("ix") is not None else (existing.sort_index if existing else 0)
+            index = (
+                int(payload["ix"])
+                if payload.get("ix") is not None
+                else (existing.sort_index if existing else 0)
+            )
             item = existing or Record(uuid=uuid, kind="area", title=title)
             item.title = title
             item.entity = kind
@@ -418,7 +455,9 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 item.kind = "project" if type_code == 1 else "task"
         if "ss" in payload and payload["ss"] is not None:
             status = int(payload["ss"])
-            item.status = "done" if status == 3 else "dropped" if status == 2 else "open"
+            item.status = (
+                "done" if status == 3 else "dropped" if status == 2 else "open"
+            )
         if "sp" in payload:
             raw_completed = payload.get("sp")
             item.completed_at = (
@@ -428,16 +467,14 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             )
         if "tr" in payload and payload["tr"] is not None:
             item.trashed = bool(payload["tr"])
-        if "st" in payload and payload["st"] is not None:
-            state = int(payload["st"])
-            item.inbox = state == 0
-            item.someday = state == 2
         if "sr" in payload:
             item.start = from_ts(payload["sr"] if payload["sr"] is not None else None)
             if item.start is not None:
                 item.someday = False
         if "dd" in payload:
-            item.deadline = from_ts(payload["dd"] if payload["dd"] is not None else None)
+            item.deadline = from_ts(
+                payload["dd"] if payload["dd"] is not None else None
+            )
         if "ato" in payload:
             item.remind = remind_from_offset(
                 int(payload["ato"]) if payload["ato"] is not None else None
@@ -450,14 +487,21 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.today_index = int(payload["ti"])
         if "pr" in payload and isinstance(payload["pr"], list) and payload["pr"]:
             item.parent_uuid = str(payload["pr"][0])
+            item.area_uuid = None
             item.inbox = False
         elif "pr" in payload:
             item.parent_uuid = None
         if "ar" in payload and isinstance(payload["ar"], list) and payload["ar"]:
             item.area_uuid = str(payload["ar"][0])
+            item.parent_uuid = None
+            item.heading_uuid = None
             item.inbox = False
         elif "ar" in payload:
             item.area_uuid = None
+        if "st" in payload and payload["st"] is not None:
+            state = int(payload["st"])
+            item.inbox = state == 0 and not item.parent_uuid and not item.area_uuid
+            item.someday = state == 2 and item.start is None
         if "agr" in payload and isinstance(payload["agr"], list) and payload["agr"]:
             item.heading_uuid = str(payload["agr"][0])
         elif "agr" in payload:
@@ -465,31 +509,9 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "tg" in payload and isinstance(payload["tg"], list):
             item.tag_uuids = [str(tag) for tag in payload["tg"]]
         if "rr" in payload:
-            rule = payload.get("rr")
-            item.recurring_template = isinstance(rule, dict)
-            if isinstance(rule, dict):
-                item.recurrence_role = "template"
-                recurrence_code = rule.get("tp", 0)
-                item.recurrence_type = (
-                    "fixed"
-                    if recurrence_code == 0
-                    else "after_completion" if recurrence_code == 1 else "unknown"
-                )
-            elif item.recurrence_role == "template":
-                item.recurrence_role = "none"
-                item.recurrence_type = "none"
+            item.recurrence = item.recurrence.fold_rule(payload.get("rr"))
         if "rt" in payload:
-            links = payload.get("rt")
-            if isinstance(links, str) or (isinstance(links, list) and links):
-                item.recurrence_template_uuid = (
-                    links if isinstance(links, str) else str(links[0])
-                )
-                item.recurrence_role = "instance"
-            else:
-                item.recurrence_template_uuid = None
-                if item.recurrence_role == "instance":
-                    item.recurrence_role = "none"
-                    item.recurrence_type = "none"
+            item.recurrence = item.recurrence.fold_links(payload.get("rt"))
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -500,15 +522,21 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             library,
         )
     for item in library.records.values():
-        if item.recurrence_role == "instance" and item.recurrence_template_uuid:
-            template = library.records.get(item.recurrence_template_uuid)
-            item.recurrence_type = template.recurrence_type if template else "unknown"
+        if item.recurrence.role == "instance" and item.recurrence.template_uuid:
+            template = library.records.get(item.recurrence.template_uuid)
+            item.recurrence = item.recurrence.resolve_instance_type(
+                template.recurrence.repeat_type if template else None
+            )
 
 
-def _fold_checklist(uuid: str, action: object, payload: dict[str, Any], library: MemoryLibrary) -> None:
+def _fold_checklist(
+    uuid: str, action: object, payload: dict[str, Any], library: MemoryLibrary
+) -> None:
     if action == 2:
         for parent in library.records.values():
-            parent.checklists = [line for line in parent.checklists if line.uuid != uuid]
+            parent.checklists = [
+                line for line in parent.checklists if line.uuid != uuid
+            ]
         return
     existing: ChecklistLine | None = None
     host: Record | None = None
@@ -533,7 +561,9 @@ def _fold_checklist(uuid: str, action: object, payload: dict[str, Any], library:
     status: Status = existing.status if existing is not None else "open"
     if payload.get("ss") is not None:
         status_code = int(payload["ss"])
-        status = "done" if status_code == 3 else "dropped" if status_code == 2 else "open"
+        status = (
+            "done" if status_code == 3 else "dropped" if status_code == 2 else "open"
+        )
     index = existing.sort_index if existing is not None else 0
     if payload.get("ix") is not None:
         index = int(payload["ix"])
@@ -615,237 +645,17 @@ class CloudLibrary(MemoryLibrary):
                 "Things Cloud outcome is unknown; commit read-back failed"
             ) from error
         if not all(self._pulled_matches(item) for item in envelopes):
-            raise CloudError("Things Cloud read-back did not match the requested changes")
+            raise CloudError(
+                "Things Cloud read-back did not match the requested changes"
+            )
         verified = self._verified_titles(writes)
         return ApplyResult(verified=verified, created=self._created_from_pull(writes))
 
     def _plan(self, writes: list[Write]) -> tuple[list[Envelope], dict[str, str]]:
-        tag_map: dict[str, str] = {}
-        envelopes: list[Envelope] = []
-        created: dict[str, str] = {}
-        created_ix: dict[tuple[str, str | None, str | None], int] = {}
-        created_kinds = {
-            write.uuid: write.kind for write in writes if write.action == "create"
-        }
-        for write in writes:
-            current_record = self.records.get(write.uuid)
-            planned_kind = created_kinds.get(write.uuid)
-            if planned_kind is not None and write.action != "create" and write.kind != planned_kind:
-                write = replace(write, kind=planned_kind)
-            actual_kind = (
-                current_record.kind
-                if current_record is not None
-                else planned_kind or write.kind
-            )
-            if actual_kind == "project" and write.inbox:
-                raise CloudError("Projects cannot enter Inbox")
-            if write.heading_uuid is not None:
-                heading = self.records.get(write.heading_uuid)
-                project_uuid = write.into_uuid or (
-                    current_record.parent_uuid if current_record else None
-                )
-                if (
-                    heading is None
-                    or not heading.heading
-                    or not project_uuid
-                    or heading.parent_uuid != project_uuid
-                ):
-                    raise CloudError("The heading must belong to the destination Project")
-            if write.action == "ensure_tag":
-                title = write.title or ""
-                existing_tag = self.tag_uuid(title)
-                if existing_tag is None:
-                    envelopes.append(
-                        Envelope(
-                            uuid=write.uuid,
-                            action=0,
-                            kind="Tag4",
-                            payload={
-                                "tt": title,
-                                "ix": 0,
-                                "sh": None,
-                                "pn": [],
-                                "xx": {"sn": {}, "_t": "oo"},
-                            },
-                        )
-                    )
-                    tag_map[write.uuid] = write.uuid
-                    created[title or write.uuid] = write.uuid
-                else:
-                    tag_map[write.uuid] = existing_tag
-                    created[title or existing_tag] = existing_tag
-                continue
-            if write.tag_uuids:
-                write = replace(
-                    write,
-                    tag_uuids=[tag_map.get(tag, tag) for tag in write.tag_uuids],
-                )
-            if write.action == "create" and write.sort_index is None:
-                index = self.next_index(write)
-                key = (write.kind, write.into_uuid, write.into_kind)
-                previous = created_ix.get(key)
-                if previous is not None:
-                    index = previous + 1024
-                created_ix[key] = index
-                write = replace(write, sort_index=index)
-            if write.action == "checklist":
-                parent, line = self._find_checklist(write.uuid)
-                destination_uuid = write.checklist_parent_uuid or (parent.uuid if parent else None)
-                destination = self.records.get(destination_uuid or "")
-                destination_kind = destination.kind if destination else created_kinds.get(destination_uuid or "")
-                if not write.checklist_remove and destination_kind != "task":
-                    raise CloudError("A checklist row needs a task parent")
-                if not write.checklist_remove and write.checklist_index is None:
-                    siblings = destination.checklists if destination is not None else []
-                    next_index = max((item.sort_index for item in siblings), default=-1) + 1
-                    write = replace(write, checklist_index=next_index)
-            envelopes.append(self._envelope(write))
-            if write.action == "create" and write.title:
-                created[write.title] = f"{write.kind}:{write.uuid}"
-        coalesced = _coalesce_envelopes(envelopes)
-        uuids = [item.uuid for item in coalesced]
-        if len(uuids) != len(set(uuids)):
-            raise CloudError("planned envelope UUIDs must be unique")
-        return coalesced, created
+        return _CloudPlanHandler(self).plan(writes)
 
     def _envelope(self, write: Write) -> Envelope:
-        existing = self.records.get(write.uuid)
-        if existing is not None and existing.kind != write.kind:
-            write = replace(write, kind=existing.kind)
-        entity = (
-            (existing.entity if existing and existing.entity else "")
-            or ("Area3" if write.kind == "area" else "Task6")
-        )
-        if write.action == "create":
-            return Envelope(
-                uuid=write.uuid,
-                action=0,
-                kind="Area3" if write.kind == "area" else "Task6",
-                payload=_create_payload(write),
-            )
-        if write.action == "checklist":
-            parent, existing_line = self._find_checklist(write.uuid)
-            if write.checklist_remove:
-                return Envelope(uuid=write.uuid, action=2, kind="ChecklistItem3", payload={})
-            status = write.checklist_status or (existing_line.status if existing_line else "open")
-            status_code = _status_code(status)
-            index = (
-                write.checklist_index
-                if write.checklist_index is not None
-                else write.sort_index
-                if write.sort_index is not None
-                else existing_line.sort_index if existing_line else 0
-            )
-            parent_uuid = write.checklist_parent_uuid or (parent.uuid if parent else None)
-            now = _now()
-            if existing_line is None:
-                return Envelope(
-                    uuid=write.uuid,
-                    action=0,
-                    kind="ChecklistItem3",
-                    payload={
-                        "tt": write.title or "",
-                        "ss": status_code,
-                        "sp": now if status != "open" else None,
-                        "ts": [parent_uuid] if parent_uuid else [],
-                        "ix": index,
-                        "cd": now,
-                        "md": now,
-                        "lt": False,
-                        "xx": {"sn": {}, "_t": "oo"},
-                    },
-                )
-            checklist_payload: dict[str, Any] = {"md": now}
-            if write.title is not None:
-                checklist_payload["tt"] = write.title
-            if write.checklist_status is not None:
-                checklist_payload.update(
-                    {"ss": status_code, "sp": now if status != "open" else None}
-                )
-            if write.checklist_parent_uuid is not None:
-                checklist_payload["ts"] = [write.checklist_parent_uuid]
-            if write.checklist_index is not None or write.sort_index is not None:
-                checklist_payload["ix"] = index
-            return Envelope(
-                uuid=write.uuid,
-                action=1,
-                kind="ChecklistItem3",
-                payload=checklist_payload,
-            )
-        if write.action == "delete_area":
-            return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
-        if write.action == "rename_area":
-            return Envelope(
-                uuid=write.uuid,
-                action=1,
-                kind=entity,
-                payload={"tt": write.title, "md": _now()},
-            )
-        payload: dict[str, Any] = {"md": _now()}
-        if write.action == "complete":
-            payload.update({"ss": 3, "sp": _now()})
-        elif write.action == "cancel":
-            payload.update({"ss": 2, "sp": _now()})
-        elif write.action == "tags" and write.tag_uuids is not None:
-            payload["tg"] = write.tag_uuids
-        elif write.action == "move":
-            payload.update(_placement(write))
-        else:
-            if write.status is not None:
-                payload.update(
-                    {"ss": _status_code(write.status), "sp": _now() if write.status != "open" else None}
-                )
-            if write.title is not None:
-                payload["tt"] = write.title
-            if write.notes is not None:
-                payload["nt"] = _note(write.notes) if write.notes else _empty_note()
-            if write.tag_uuids is not None:
-                payload["tg"] = write.tag_uuids
-            if write.sort_index is not None:
-                payload["ix"] = write.sort_index
-            if write.today_index is not None:
-                payload["ti"] = write.today_index
-            if write.someday:
-                payload.update({"st": 2, "sr": None, "tir": None, "ato": None, "rmd": None, "sb": 0})
-            elif write.anytime:
-                payload.update({"st": 1, "sr": None, "tir": None, "ato": None, "rmd": None, "sb": 0})
-            elif write.tonight:
-                payload.update(
-                    _schedule(
-                        write.start
-                        or write.owner_today
-                        or datetime.now().astimezone().date(),
-                        write.remind,
-                        today=write.owner_today,
-                    )
-                )
-                payload["sb"] = 1
-            elif write.clear_start:
-                payload.update({"st": 1, "sr": None, "tir": None, "ato": None, "rmd": None, "sb": 0})
-            elif write.start is not None:
-                payload.update(
-                    _schedule(write.start, write.remind, today=write.owner_today)
-                )
-                payload["sb"] = 1 if write.tonight else 0
-            if write.clear_deadline:
-                payload["dd"] = None
-            elif write.deadline is not None:
-                payload["dd"] = day_ts(write.deadline)
-            if write.clear_remind:
-                payload.update({"ato": None, "rmd": None})
-            elif write.remind is not None and write.start is not None:
-                payload.update(
-                    _schedule(write.start, write.remind, today=write.owner_today)
-                )
-            if (
-                write.into_uuid is not None
-                or write.into_kind is not None
-                or write.inbox
-                or write.anytime
-                or write.heading_uuid is not None
-            ):
-                payload.update(_placement(write))
-        return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
+        return _compile_mutation(write).dispatch(_CloudEnvelopeHandler(self))
 
     def _pulled_matches(self, envelope: Envelope) -> bool:
         if envelope.kind in _CHECKLIST_KINDS:
@@ -857,7 +667,10 @@ class CloudLibrary(MemoryLibrary):
             payload = envelope.payload
             return (
                 ("tt" not in payload or line.title == payload["tt"])
-                and ("ss" not in payload or line.status == _status_from_code(payload["ss"]))
+                and (
+                    "ss" not in payload
+                    or line.status == _status_from_code(payload["ss"])
+                )
                 and ("ix" not in payload or line.sort_index == payload["ix"])
                 and ("ts" not in payload or [parent.uuid] == payload["ts"])
             )
@@ -865,11 +678,11 @@ class CloudLibrary(MemoryLibrary):
             if envelope.action == 2:
                 return envelope.uuid not in self.tags
             return (
-                self.tags.get(envelope.uuid) == envelope.payload.get("tt")
-                and (
-                    "pn" not in envelope.payload
-                    or self.tag_parents.get(envelope.uuid, []) == envelope.payload["pn"]
-                )
+                "tt" not in envelope.payload
+                or self.tags.get(envelope.uuid) == envelope.payload["tt"]
+            ) and (
+                "pn" not in envelope.payload
+                or self.tag_parents.get(envelope.uuid, []) == envelope.payload["pn"]
             )
         item = self.records.get(envelope.uuid)
         if envelope.action == 2:
@@ -903,7 +716,7 @@ class CloudLibrary(MemoryLibrary):
                 uuid = self.tag_uuid(title)
                 if uuid is not None:
                     created[title or uuid] = uuid
-            elif write.action == "create":
+            elif write.action in {"create", "create_heading"}:
                 item = self.records.get(write.uuid)
                 if item is not None:
                     created[item.title] = item.id
@@ -918,7 +731,10 @@ class CloudLibrary(MemoryLibrary):
                 return False
         except (OSError, json.JSONDecodeError):
             return False
-        if payload.get("version") != _CACHE_VERSION or payload.get("history_id") != history_id:
+        if (
+            payload.get("version") != _CACHE_VERSION
+            or payload.get("history_id") != history_id
+        ):
             return False
         try:
             raw_records = payload.get("records") or []
@@ -1012,8 +828,7 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         or (item.completed_at is not None) == (payload["sp"] is not None),
         "sr" not in payload or item.start == from_ts(payload["sr"]),
         "dd" not in payload or item.deadline == from_ts(payload["dd"]),
-        "ato" not in payload
-        or item.remind == remind_from_offset(payload["ato"]),
+        "ato" not in payload or item.remind == remind_from_offset(payload["ato"]),
         "sb" not in payload or item.tonight == (int(payload["sb"] or 0) == 1),
         "pr" not in payload
         or item.parent_uuid == (str(payload["pr"][0]) if payload["pr"] else None),
@@ -1024,16 +839,436 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "tg" not in payload or item.tag_uuids == [str(tag) for tag in payload["tg"]],
         "ix" not in payload or item.sort_index == int(payload["ix"] or 0),
         "ti" not in payload or item.today_index == int(payload["ti"] or 0),
+        "tr" not in payload or item.trashed == bool(payload["tr"]),
+        "rr" not in payload or item.recurrence.rule == payload["rr"],
+        "rt" not in payload
+        or list(item.recurrence.links) == [str(link) for link in payload["rt"]],
+        "lt" not in payload
+        or bool(payload["lt"]) == (item.recurrence.role == "instance"),
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
         checks.append(item.kind == expected_kind)
+        checks.append(item.heading == (payload["tp"] == 2))
     if "st" in payload:
         state = int(payload["st"])
         has_home = bool(payload.get("pr") or payload.get("ar"))
         checks.append(item.inbox == (state == 0 and not has_home))
         checks.append(item.someday == (state == 2 and item.start is None))
     return all(checks)
+
+
+class _CloudPlanHandler(_MutationHandler[None]):
+    def __init__(self, library: CloudLibrary) -> None:
+        self.library = library
+        self.tag_map: dict[str, str] = {}
+        self.envelopes: list[Envelope] = []
+        self.created: dict[str, str] = {}
+        self.created_ix: dict[tuple[str, str | None, str | None], int] = {}
+        self.created_kinds: dict[str, Kind] = {}
+        self.created_headings: dict[str, str | None] = {}
+
+    def plan(self, writes: list[Write]) -> tuple[list[Envelope], dict[str, str]]:
+        self.created_kinds = {
+            item.uuid: item.kind
+            for item in writes
+            if item.action in {"create", "create_heading"}
+        }
+        self.created_headings = {
+            item.uuid: item.into_uuid
+            for item in writes
+            if item.action == "create_heading"
+        }
+        for write in writes:
+            mutation = _compile_mutation(write)
+            mutation = self._prepare(mutation)
+            mutation.dispatch(self)
+        envelopes = _coalesce_envelopes(self.envelopes)
+        uuids = [item.uuid for item in envelopes]
+        if len(uuids) != len(set(uuids)):
+            raise CloudError("planned envelope UUIDs must be unique")
+        return envelopes, self.created
+
+    def _prepare(self, mutation: _Mutation) -> _Mutation:
+        write = mutation.write
+        current = self.library.records.get(write.uuid)
+        planned_kind = self.created_kinds.get(write.uuid)
+        if (
+            planned_kind is not None
+            and write.action not in {"create", "create_heading"}
+            and write.kind != planned_kind
+        ):
+            write = replace(write, kind=planned_kind)
+            mutation = replace(mutation, write=write)
+        actual_kind = (
+            current.kind if current is not None else planned_kind or write.kind
+        )
+        if actual_kind == "project" and write.inbox:
+            raise CloudError("Projects cannot enter Inbox")
+        if write.heading_uuid is not None:
+            heading = self.library.records.get(write.heading_uuid)
+            project_uuid = write.into_uuid or (current.parent_uuid if current else None)
+            existing = (
+                heading is not None
+                and heading.heading
+                and bool(project_uuid)
+                and heading.parent_uuid == project_uuid
+            )
+            planned = (
+                bool(project_uuid)
+                and self.created_headings.get(write.heading_uuid) == project_uuid
+            )
+            if not existing and not planned:
+                raise CloudError("The heading must belong to the destination Project")
+        return mutation
+
+    def _emit(self, write: Write) -> None:
+        self.envelopes.append(self.library._envelope(write))  # noqa: SLF001
+
+    def _normalize_item_tags(self, write: Write) -> Write:
+        if not write.tag_uuids:
+            return write
+        return replace(
+            write,
+            tag_uuids=[self.tag_map.get(tag, tag) for tag in write.tag_uuids],
+        )
+
+    def create(self, mutation: _CreateMutation) -> None:
+        write = mutation.write
+        write = self._normalize_item_tags(write)
+        if write.sort_index is None:
+            index = self.library.next_index(write)
+            key = (write.kind, write.into_uuid, write.into_kind)
+            if key in self.created_ix:
+                index = self.created_ix[key] + 1024
+            self.created_ix[key] = index
+            write = replace(write, sort_index=index)
+        self._emit(write)
+        if write.title:
+            self.created[write.title] = f"{write.kind}:{write.uuid}"
+
+    def edit(self, mutation: _EditMutation) -> None:
+        self._emit(self._normalize_item_tags(mutation.write))
+
+    def lifecycle(self, mutation: _LifecycleMutation) -> None:
+        self._emit(mutation.write)
+
+    def tag(self, mutation: _TagMutation) -> None:
+        write = mutation.write
+        if write.action == "ensure_tag":
+            title = write.title or ""
+            existing = self.library.tag_uuid(title)
+            parents = [
+                self.tag_map.get(parent, parent)
+                for parent in (write.tag_parent_uuids or [])
+            ]
+            if existing is None:
+                self.envelopes.append(
+                    Envelope(
+                        uuid=write.uuid,
+                        action=0,
+                        kind="Tag4",
+                        payload={
+                            "tt": title,
+                            "ix": 0,
+                            "sh": None,
+                            "pn": parents,
+                            "xx": {"sn": {}, "_t": "oo"},
+                        },
+                    )
+                )
+                self.tag_map[write.uuid] = write.uuid
+                self.created[title or write.uuid] = write.uuid
+            else:
+                self.tag_map[write.uuid] = existing
+                if write.tag_parent_uuids is not None:
+                    self.envelopes.append(
+                        Envelope(
+                            uuid=existing,
+                            action=1,
+                            kind="Tag4",
+                            payload={"pn": parents, "md": _now()},
+                        )
+                    )
+                self.created[title or existing] = existing
+            return
+        write = replace(
+            write,
+            uuid=self.tag_map.get(write.uuid, write.uuid),
+            tag_parent_uuids=(
+                [self.tag_map.get(parent, parent) for parent in write.tag_parent_uuids]
+                if write.tag_parent_uuids is not None
+                else None
+            ),
+        )
+        self._emit(write)
+
+    def checklist(self, mutation: _ChecklistMutation) -> None:
+        write = mutation.write
+        parent, _ = self.library._find_checklist(write.uuid)  # noqa: SLF001
+        destination_uuid = write.checklist_parent_uuid or (
+            parent.uuid if parent else None
+        )
+        destination = self.library.records.get(destination_uuid or "")
+        destination_kind = (
+            destination.kind
+            if destination
+            else self.created_kinds.get(destination_uuid or "")
+        )
+        if not write.checklist_remove and destination_kind != "task":
+            raise CloudError("A checklist row needs a task parent")
+        if not write.checklist_remove and write.checklist_index is None:
+            siblings = destination.checklists if destination is not None else []
+            write = replace(
+                write,
+                checklist_index=max((item.sort_index for item in siblings), default=-1)
+                + 1,
+            )
+        self._emit(write)
+
+    def recurrence(self, mutation: _RecurrenceMutation) -> None:
+        write = mutation.write
+        current = self.library.records.get(write.uuid)
+        if write.action == "repeat":
+            if current is None or write.recurrence_rule is None:
+                raise CloudError("Repeat changes need an exact repeating Task template")
+            try:
+                current.recurrence.validate_interval_template(kind=current.kind)
+            except ValueError as error:
+                raise CloudError(str(error)) from error
+        self._emit(write)
+
+
+class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
+    def __init__(self, library: CloudLibrary) -> None:
+        self.library = library
+
+    def _entity(self, write: Write) -> str:
+        existing = self.library.records.get(write.uuid)
+        return (existing.entity if existing and existing.entity else "") or (
+            "Area3" if write.kind == "area" else "Task6"
+        )
+
+    def create(self, mutation: _CreateMutation) -> Envelope:
+        write = mutation.write
+        payload = _create_payload(write)
+        if mutation.heading:
+            payload["tp"] = 2
+        return Envelope(
+            uuid=write.uuid,
+            action=0,
+            kind="Area3" if write.kind == "area" else "Task6",
+            payload=payload,
+        )
+
+    def checklist(self, mutation: _ChecklistMutation) -> Envelope:
+        write = mutation.write
+        parent, existing = self.library._find_checklist(write.uuid)  # noqa: SLF001
+        if write.checklist_remove:
+            return Envelope(
+                uuid=write.uuid, action=2, kind="ChecklistItem3", payload={}
+            )
+        status = write.checklist_status or (existing.status if existing else "open")
+        index = (
+            write.checklist_index
+            if write.checklist_index is not None
+            else write.sort_index
+            if write.sort_index is not None
+            else existing.sort_index
+            if existing
+            else 0
+        )
+        parent_uuid = write.checklist_parent_uuid or (parent.uuid if parent else None)
+        now = _now()
+        if existing is None:
+            return Envelope(
+                uuid=write.uuid,
+                action=0,
+                kind="ChecklistItem3",
+                payload={
+                    "tt": write.title or "",
+                    "ss": _status_code(status),
+                    "sp": now if status != "open" else None,
+                    "ts": [parent_uuid] if parent_uuid else [],
+                    "ix": index,
+                    "cd": now,
+                    "md": now,
+                    "lt": False,
+                    "xx": {"sn": {}, "_t": "oo"},
+                },
+            )
+        payload: dict[str, Any] = {"md": now}
+        if write.title is not None:
+            payload["tt"] = write.title
+        if write.checklist_status is not None:
+            payload.update(
+                {"ss": _status_code(status), "sp": now if status != "open" else None}
+            )
+        if write.checklist_parent_uuid is not None:
+            payload["ts"] = [write.checklist_parent_uuid]
+        if write.checklist_index is not None or write.sort_index is not None:
+            payload["ix"] = index
+        return Envelope(
+            uuid=write.uuid, action=1, kind="ChecklistItem3", payload=payload
+        )
+
+    def lifecycle(self, mutation: _LifecycleMutation) -> Envelope:
+        write = mutation.write
+        entity = self._entity(write)
+        if write.action in {"delete_area", "permanent_delete"}:
+            return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
+        if write.action in {"trash", "restore"}:
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"tr": write.action == "trash", "md": _now()},
+            )
+        payload = {
+            "md": _now(),
+            "ss": 3 if write.action == "complete" else 2,
+            "sp": _now(),
+        }
+        return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
+
+    def tag(self, mutation: _TagMutation) -> Envelope:
+        write = mutation.write
+        if write.action == "rename_tag":
+            if not write.title or not write.title.strip():
+                raise CloudError("Tag rename needs a title")
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind="Tag4",
+                payload={"tt": write.title.strip(), "md": _now()},
+            )
+        if write.action == "reparent_tag":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind="Tag4",
+                payload={"pn": list(write.tag_parent_uuids or []), "md": _now()},
+            )
+        if write.action == "delete_tag":
+            return Envelope(uuid=write.uuid, action=2, kind="Tag4", payload={})
+        raise CloudError("ensure_tag envelopes are planned by the tag handler")
+
+    def recurrence(self, mutation: _RecurrenceMutation) -> Envelope:
+        write = mutation.write
+        payload: dict[str, Any] = {"md": _now()}
+        payload["rr" if write.action == "repeat" else "rt"] = deepcopy(
+            write.recurrence_rule
+            if write.action == "repeat"
+            else list(write.recurrence_links or [])
+        )
+        if write.action == "repeat_link" and write.recurrence_generated:
+            payload["lt"] = True
+        return Envelope(
+            uuid=write.uuid, action=1, kind=self._entity(write), payload=payload
+        )
+
+    def edit(self, mutation: _EditMutation) -> Envelope:
+        write = mutation.write
+        entity = self._entity(write)
+        if write.action == "rename_area":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"tt": write.title, "md": _now()},
+            )
+        payload: dict[str, Any] = {"md": _now()}
+        if write.action == "tags" and write.tag_uuids is not None:
+            payload["tg"] = write.tag_uuids
+        elif write.action == "move":
+            payload.update(_placement(write))
+        else:
+            if write.status is not None:
+                payload.update(
+                    {
+                        "ss": _status_code(write.status),
+                        "sp": _now() if write.status != "open" else None,
+                    }
+                )
+            if write.title is not None:
+                payload["tt"] = write.title
+            if write.notes is not None:
+                payload["nt"] = _note(write.notes) if write.notes else _empty_note()
+            if write.tag_uuids is not None:
+                payload["tg"] = write.tag_uuids
+            if write.sort_index is not None:
+                payload["ix"] = write.sort_index
+            if write.today_index is not None:
+                payload["ti"] = write.today_index
+            if write.someday:
+                payload.update(
+                    {
+                        "st": 2,
+                        "sr": None,
+                        "tir": None,
+                        "ato": None,
+                        "rmd": None,
+                        "sb": 0,
+                    }
+                )
+            elif write.anytime:
+                payload.update(
+                    {
+                        "st": 1,
+                        "sr": None,
+                        "tir": None,
+                        "ato": None,
+                        "rmd": None,
+                        "sb": 0,
+                    }
+                )
+            elif write.tonight:
+                payload.update(
+                    _schedule(
+                        write.start
+                        or write.owner_today
+                        or datetime.now().astimezone().date(),
+                        write.remind,
+                        today=write.owner_today,
+                    )
+                )
+                payload["sb"] = 1
+            elif write.clear_start:
+                payload.update(
+                    {
+                        "st": 1,
+                        "sr": None,
+                        "tir": None,
+                        "ato": None,
+                        "rmd": None,
+                        "sb": 0,
+                    }
+                )
+            elif write.start is not None:
+                payload.update(
+                    _schedule(write.start, write.remind, today=write.owner_today)
+                )
+                payload["sb"] = 1 if write.tonight else 0
+            if write.clear_deadline:
+                payload["dd"] = None
+            elif write.deadline is not None:
+                payload["dd"] = day_ts(write.deadline)
+            if write.clear_remind:
+                payload.update({"ato": None, "rmd": None})
+            elif write.remind is not None and write.start is not None:
+                payload.update(
+                    _schedule(write.start, write.remind, today=write.owner_today)
+                )
+            if (
+                write.into_uuid is not None
+                or write.into_kind is not None
+                or write.inbox
+                or write.anytime
+                or write.heading_uuid is not None
+                or write.clear_heading
+            ):
+                payload.update(_placement(write))
+        return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
 
 
 def _placement(write: Write) -> dict[str, Any]:
@@ -1129,7 +1364,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "tp": 1 if write.kind == "project" else 0,
         "sr": sr,
         "dds": None,
-        "rt": [],
+        "rt": list(write.recurrence_links or []),
         "rmd": schedule.get("rmd"),
         "ss": _status_code(write.status or "open"),
         "tr": False,
@@ -1145,7 +1380,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "agr": [write.heading_uuid] if write.heading_uuid else [],
         "ix": write.sort_index or 0,
         "cd": now,
-        "lt": False,
+        "lt": write.recurrence_generated,
         "icc": 0,
         "md": now,
         "ti": write.today_index or 0,
@@ -1158,7 +1393,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "acrd": None,
         "sp": now if write.status in {"done", "dropped"} else None,
         "sb": 1 if write.tonight else 0,
-        "rr": None,
+        "rr": deepcopy(write.recurrence_rule),
         "xx": {"sn": {}, "_t": "oo"},
     }
     return payload
@@ -1204,10 +1439,11 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "area_uuid": item.area_uuid,
         "heading_uuid": item.heading_uuid,
         "tag_uuids": item.tag_uuids,
-        "recurring_template": item.recurring_template,
-        "recurrence_role": item.recurrence_role,
-        "recurrence_type": item.recurrence_type,
-        "recurrence_template_uuid": item.recurrence_template_uuid,
+        "recurrence_role": item.recurrence.role,
+        "recurrence_type": item.recurrence.repeat_type,
+        "recurrence_template_uuid": item.recurrence.template_uuid,
+        "recurrence_rule": item.recurrence.rule,
+        "recurrence_links": list(item.recurrence.links),
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
@@ -1227,9 +1463,29 @@ def _record_to_json(item: Record) -> dict[str, Any]:
 
 def _record_from_json(payload: dict[str, Any]) -> Record:
     kind_name = str(payload.get("kind") or "task")
-    kind: Kind = "project" if kind_name == "project" else "area" if kind_name == "area" else "task"
+    kind: Kind = (
+        "project"
+        if kind_name == "project"
+        else "area"
+        if kind_name == "area"
+        else "task"
+    )
     status_name = str(payload.get("status") or "open")
-    status: Status = "done" if status_name == "done" else "dropped" if status_name == "dropped" else "open"
+    status: Status = (
+        "done"
+        if status_name == "done"
+        else "dropped"
+        if status_name == "dropped"
+        else "open"
+    )
+    raw_rule = payload.get("recurrence_rule")
+    if raw_rule is not None and not isinstance(raw_rule, dict):
+        raise ValueError("invalid cached recurrence rule")
+    raw_links = payload.get("recurrence_links") or []
+    if not isinstance(raw_links, list) or any(
+        not isinstance(link, str) for link in raw_links
+    ):
+        raise ValueError("invalid cached recurrence links")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1246,7 +1502,9 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         trashed=bool(payload.get("trashed")),
         inbox=bool(payload.get("inbox")),
         start=date.fromisoformat(payload["start"]) if payload.get("start") else None,
-        deadline=date.fromisoformat(payload["deadline"]) if payload.get("deadline") else None,
+        deadline=date.fromisoformat(payload["deadline"])
+        if payload.get("deadline")
+        else None,
         remind=str(payload["remind"]) if payload.get("remind") else None,
         tonight=bool(payload.get("tonight")),
         someday=bool(payload.get("someday")),
@@ -1254,10 +1512,13 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         area_uuid=payload.get("area_uuid"),
         heading_uuid=payload.get("heading_uuid"),
         tag_uuids=list(payload.get("tag_uuids") or []),
-        recurring_template=bool(payload.get("recurring_template")),
-        recurrence_role=payload.get("recurrence_role", "none"),
-        recurrence_type=payload.get("recurrence_type", "none"),
-        recurrence_template_uuid=payload.get("recurrence_template_uuid"),
+        recurrence=RecurrenceState(
+            role=payload.get("recurrence_role", "none"),
+            repeat_type=payload.get("recurrence_type", "none"),
+            template_uuid=payload.get("recurrence_template_uuid"),
+            rule=raw_rule,
+            links=tuple(raw_links),
+        ),
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),
@@ -1314,15 +1575,18 @@ def save_credentials(
     path: Path | None = None,
 ) -> Path:
     target = path or credentials_path()
-    payload = json.dumps(
-        {
-            "email": email,
-            "password": password,
-            "mcp_token": mcp_token,
-            **({"timezone": timezone_name} if timezone_name else {}),
-        },
-        indent=2,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            {
+                "email": email,
+                "password": password,
+                "mcp_token": mcp_token,
+                **({"timezone": timezone_name} if timezone_name else {}),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     _atomic_write(target, payload)
     return target
 

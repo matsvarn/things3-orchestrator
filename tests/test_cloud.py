@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -15,6 +16,8 @@ from things_orchestrator.cloud import (
     HistoryPage,
     fold_events,
 )
+from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
+from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import (
     ChecklistLine,
     MemoryLibrary,
@@ -24,6 +27,8 @@ from things_orchestrator.library import (
     from_ts,
     new_uuid,
 )
+from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.workspace import ThingsWorkspace
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
@@ -89,7 +94,14 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
                 "uuid": "repeat",
                 "e": "Task6",
                 "t": 0,
-                "p": {"tt": "Weekly", "tp": 0, "ss": 0, "st": 1, "tr": False, "rr": {"tp": 0}},
+                "p": {
+                    "tt": "Weekly",
+                    "tp": 0,
+                    "ss": 0,
+                    "st": 1,
+                    "tr": False,
+                    "rr": {"tp": 0},
+                },
             },
         ],
         library=library,
@@ -97,14 +109,262 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["head"].heading is True
     assert library.records["head"].is_open() is False
     assert library.records["child"].heading_uuid == "head"
-    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].recurrence.role == "template"
     assert library.records["repeat"].is_open() is False
     fold_events(
         [{"uuid": "repeat", "e": "Task6", "t": 1, "p": {"tt": "Weekly still"}}],
         library=library,
     )
-    assert library.records["repeat"].recurring_template is True
+    assert library.records["repeat"].recurrence.role == "template"
     assert library.records["repeat"].is_open() is False
+
+
+def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
+    rule = {
+        "tp": 1,
+        "fu": 256,
+        "fa": 2,
+        "of": [{"wd": 3, "future_wire_key": {"nested": True}}],
+        "sr": 1_786_838_400,
+        "ia": 1_786_924_800,
+        "ed": 64_092_211_200,
+        "rc": 0,
+        "ts": 7,
+        "rrv": 99,
+        "future_rule_key": ["preserve", 4],
+    }
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Routine", "tp": 0, "rr": rule, "rt": []},
+            },
+            {
+                "uuid": "instance",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Routine copy", "tp": 0, "rt": ["template"]},
+            },
+        ],
+        library=library,
+    )
+
+    assert library.records["template"].recurrence.rule == rule
+    assert library.records["template"].recurrence.repeat_type == "after_completion"
+    assert library.records["instance"].recurrence.links == ("template",)
+
+    # A sparse event must not erase fields that were not present in the patch.
+    fold_events(
+        [{"uuid": "template", "e": "Task6", "t": 1, "p": {"tt": "Renamed"}}],
+        library=library,
+    )
+    assert library.records["template"].recurrence.rule == rule
+
+    fold_events(
+        [{"uuid": "template", "e": "Task6", "t": 1, "p": {"rr": None}}],
+        library=library,
+    )
+    assert library.records["template"].recurrence.rule is None
+    assert library.records["template"].recurrence.role == "none"
+
+
+def test_fold_sparse_placement_clears_incompatible_home_and_inbox() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "task",
+                "e": "Task6",
+                "t": 0,
+                "p": {"tt": "Task", "tp": 0, "ar": ["area"], "st": 1},
+            }
+        ],
+        library=library,
+    )
+
+    # Things sends only the new project relation when a task moves between homes.
+    fold_events(
+        [{"uuid": "task", "e": "Task6", "t": 1, "p": {"pr": ["project"]}}],
+        library=library,
+    )
+    task = library.records["task"]
+    assert task.parent_uuid == "project"
+    assert task.area_uuid is None
+    assert task.inbox is False
+
+    # The reverse move is also sparse and must clear the old project relation.
+    fold_events(
+        [{"uuid": "task", "e": "Task6", "t": 1, "p": {"ar": ["area"]}}],
+        library=library,
+    )
+    assert task.parent_uuid is None
+    assert task.area_uuid == "area"
+    assert task.inbox is False
+
+    # An Inbox state cannot override a project or area relation in a sparse patch.
+    fold_events(
+        [{"uuid": "task", "e": "Task6", "t": 1, "p": {"st": 0}}],
+        library=library,
+    )
+    assert task.inbox is False
+
+
+def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
+    library = MemoryLibrary(
+        [
+            Record(uuid="task", kind="task", title="Tagged", tag_uuids=["tag"]),
+            Record(
+                uuid="area", kind="area", title="Tagged area", tag_uuids=["tag", "keep"]
+            ),
+        ]
+    )
+    library.tags.update({"tag": "Removed", "keep": "Keep"})
+    library.tag_parents.update({"tag": ["root"], "keep": ["tag", "root"]})
+
+    fold_events(
+        [{"uuid": "tag", "e": "Tag4", "t": 2, "p": {}}],
+        library=library,
+    )
+
+    assert "tag" not in library.tags
+    assert "tag" not in library.tag_parents
+    assert library.records["task"].tag_uuids == []
+    assert library.records["area"].tag_uuids == ["keep"]
+    assert library.tag_parents["keep"] == ["root"]
+
+
+def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    rule = {"tp": 0, "fu": 16, "fa": 1, "of": [{"future": "value"}], "rrv": 42}
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Monthly",
+        entity="Task6",
+        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule=rule),
+    )
+
+    changed = {**rule, "fa": 3}
+    library.apply([Write(action="repeat", uuid="template", recurrence_rule=changed)])
+
+    assert len(client.committed) == 1
+    envelope = client.committed[0]
+    assert envelope.action == 1
+    assert envelope.kind == "Task6"
+    assert envelope.payload["rr"] == changed
+    assert set(envelope.payload) == {"rr", "md"}
+    assert library.records["template"].recurrence.rule == changed
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        Record(uuid="normal", kind="task", title="Normal"),
+        Record(
+            uuid="instance",
+            kind="task",
+            title="Generated",
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="after_completion",
+                template_uuid="template",
+                links=("template",),
+            ),
+        ),
+        Record(
+            uuid="unknown",
+            kind="task",
+            title="Unknown template",
+            recurrence=RecurrenceState(
+                role="template",
+                repeat_type="unknown",
+                rule={"tp": 99, "fu": 256, "fa": 1},
+            ),
+        ),
+        Record(
+            uuid="inconsistent",
+            kind="task",
+            title="Missing rule",
+            recurrence=RecurrenceState(role="template", repeat_type="fixed"),
+        ),
+    ],
+    ids=["normal", "instance", "unknown-template", "template-without-rule"],
+)
+def test_memory_repeat_rejects_non_template_or_inconsistent_records(
+    record: Record,
+) -> None:
+    library = MemoryLibrary([record])
+
+    with pytest.raises(ValueError, match="exact repeating Task template"):
+        library.apply(
+            [
+                Write(
+                    action="repeat",
+                    uuid=record.uuid,
+                    recurrence_rule={"tp": 0, "fu": 256, "fa": 2},
+                )
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        Record(uuid="normal", kind="task", title="Normal"),
+        Record(
+            uuid="instance",
+            kind="task",
+            title="Generated",
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="after_completion",
+                template_uuid="template",
+                links=("template",),
+            ),
+        ),
+        Record(
+            uuid="unknown",
+            kind="task",
+            title="Unknown template",
+            recurrence=RecurrenceState(
+                role="template",
+                repeat_type="unknown",
+                rule={"tp": 99, "fu": 256, "fa": 1},
+            ),
+        ),
+        Record(
+            uuid="inconsistent",
+            kind="task",
+            title="Missing rule",
+            recurrence=RecurrenceState(role="template", repeat_type="fixed"),
+        ),
+    ],
+    ids=["normal", "instance", "unknown-template", "template-without-rule"],
+)
+def test_cloud_repeat_rejects_non_template_or_inconsistent_records(
+    tmp_path: Path, record: Record
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records[record.uuid] = record
+
+    with pytest.raises(CloudError, match="exact repeating Task template"):
+        library.apply(
+            [
+                Write(
+                    action="repeat",
+                    uuid=record.uuid,
+                    recurrence_rule={"tp": 0, "fu": 256, "fa": 2},
+                )
+            ]
+        )
+    assert client.committed == []
 
 
 def test_fold_appends_checklist_lines() -> None:
@@ -215,7 +475,9 @@ def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
                     end_size=1,
                     latest_size=1,
                 )
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     first = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     first.refresh()
@@ -228,6 +490,60 @@ def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
     assert second.client.loaded_index >= 1
     assert second.client.pages == 1  # type: ignore[attr-defined]
     assert first_pages >= 1
+
+
+def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+    rule = {"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 0}], "rrv": 42}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.email = "a@b.c"
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.pages = 0
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.pages += 1
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "template",
+                            "e": "Task6",
+                            "t": 0,
+                            "p": {"tt": "Weekly", "tp": 0, "rr": rule, "rt": []},
+                        },
+                        {
+                            "uuid": "instance",
+                            "e": "Task6",
+                            "t": 0,
+                            "p": {"tt": "Weekly copy", "tp": 0, "rt": ["template"]},
+                        },
+                    ],
+                    current=2,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
+
+    first = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
+    first.refresh()
+    second = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
+    second.refresh()
+
+    assert second.records["template"].recurrence.rule == rule
+    assert second.records["instance"].recurrence.links == ("template",)
+    assert second.records["instance"].recurrence.template_uuid == "template"
+    assert second.client.pages == 1  # type: ignore[attr-defined]
 
 
 def test_malformed_cache_is_discarded_before_fresh_replay(tmp_path: Path) -> None:
@@ -285,6 +601,85 @@ def test_malformed_cache_is_discarded_before_fresh_replay(tmp_path: Path) -> Non
     assert list(library.records) == ["fresh"]
 
 
+@pytest.mark.parametrize(
+    "bad_field",
+    [
+        ("recurrence_rule", ["not", "an", "object"]),
+        ("recurrence_links", "template-id"),
+    ],
+)
+def test_malformed_cached_recurrence_is_discarded_before_replay(
+    tmp_path: Path, bad_field: tuple[str, object]
+) -> None:
+    cache = tmp_path / "state.json"
+    record = {
+        "uuid": "cached",
+        "kind": "task",
+        "title": "Bad cache",
+        "recurrence_rule": {"tp": 0, "fu": 256, "fa": 1},
+        "recurrence_links": [],
+    }
+    record[bad_field[0]] = bad_field[1]
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "history_id": "hist",
+                "loaded_index": 9,
+                "server_index": 9,
+                "records": [record],
+                "tags": {},
+                "tag_parents": {},
+            }
+        )
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.starts: list[int] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.starts.append(start_index)
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "fresh",
+                            "e": "Task6",
+                            "t": 0,
+                            "p": {
+                                "tt": "Fresh",
+                                "tp": 0,
+                                "ss": 0,
+                                "st": 0,
+                                "tr": False,
+                            },
+                        }
+                    ],
+                    current=1,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
+
+    client = FakeClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+    library.refresh()
+
+    assert client.starts == [0]
+    assert list(library.records) == ["fresh"]
+
+
 def test_create_ix_follows_siblings() -> None:
     library = MemoryLibrary(
         [Record(uuid="a", kind="task", title="First", inbox=True, sort_index=0)]
@@ -297,10 +692,14 @@ def test_new_area_ix_follows_areas_not_inbox() -> None:
     library = MemoryLibrary(
         [
             Record(uuid="work", kind="area", title="Work", sort_index=0),
-            Record(uuid="note", kind="task", title="Inbox note", inbox=True, sort_index=50),
+            Record(
+                uuid="note", kind="task", title="Inbox note", inbox=True, sort_index=50
+            ),
         ]
     )
-    index = library.next_index(Write(action="create", uuid="home", kind="area", title="Home"))
+    index = library.next_index(
+        Write(action="create", uuid="home", kind="area", title="Home")
+    )
     assert index == 1024
 
 
@@ -409,7 +808,9 @@ def test_today_clears_evening_and_inbox_clears_start(tmp_path: Path) -> None:
         tonight=True,
         entity="Task6",
     )
-    library.apply([Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))])
+    library.apply(
+        [Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))]
+    )
     payload = client.committed[0].payload
     assert payload["sb"] == 0
     library.apply([Write(action="update", uuid="abc", kind="task", inbox=True)])
@@ -571,7 +972,9 @@ def test_move_without_schedule_change_keeps_existing_schedule(tmp_path: Path) ->
 def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["a"] = Record(uuid="a", kind="task", title="First", inbox=True, sort_index=0, entity="Task6")
+    library.records["a"] = Record(
+        uuid="a", kind="task", title="First", inbox=True, sort_index=0, entity="Task6"
+    )
     library.apply(
         [
             Write(action="create", uuid="b", title="Second"),
@@ -585,8 +988,12 @@ def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
 def test_area_rename_keeps_stored_entity(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["work"] = Record(uuid="work", kind="area", title="Work", entity="Area2")
-    library.apply([Write(action="rename_area", uuid="work", kind="area", title="Office")])
+    library.records["work"] = Record(
+        uuid="work", kind="area", title="Work", entity="Area2"
+    )
+    library.apply(
+        [Write(action="rename_area", uuid="work", kind="area", title="Office")]
+    )
     assert client.committed[0].kind == "Area2"
 
 
@@ -599,7 +1006,13 @@ def test_timeout_scans_later_pages_instead_of_reposting() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -695,7 +1108,9 @@ def test_post_commit_pull_failure_is_an_unknown_outcome(tmp_path: Path) -> None:
         def items(self, _start_index: int) -> HistoryPage:
             self.pulls += 1
             if self.pulls == 1:
-                return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+                return HistoryPage(
+                    events=[], current=0, groups=0, end_size=0, latest_size=0
+                )
             raise CloudError("Things Cloud is unreachable")
 
         def commit(self, _envelopes: list[Envelope]) -> None:
@@ -719,7 +1134,13 @@ def test_timeout_partial_overlap_is_unknown_and_does_not_repost() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -753,7 +1174,13 @@ def test_timeout_ignores_older_event_for_the_same_uuid() -> None:
     client.loaded_index = 1
     posts = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts
         if method == "POST":
             posts += 1
@@ -791,7 +1218,13 @@ def test_timeout_never_reposts_when_first_pull_has_no_proof() -> None:
     posts = 0
     gets = 0
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         nonlocal posts, gets
         if method == "POST":
             posts += 1
@@ -829,7 +1262,9 @@ def test_empty_history_page_does_not_rewind_head(tmp_path: Path) -> None:
             return self.history_id
 
         def items(self, start_index: int) -> HistoryPage:
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records["t"] = Record(uuid="t", kind="task", title="Call")
@@ -845,7 +1280,13 @@ def test_stale_history_key_re_verifies() -> None:
     client.loaded_index = 4
     paths: list[str] = []
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         paths.append(path)
         if "account" in path:
             return {"history-key": "new"}
@@ -873,7 +1314,13 @@ def test_history_404_retries_the_requested_index_when_key_is_unchanged() -> None
     client.loaded_index = 1
     starts: list[int] = []
 
-    def request(method: str, path: str, query: dict[str, str] | None = None, body: bytes | None = None, retry: bool = True):
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
         if "account" in path:
             return {"history-key": "h"}
         start = int((query or {}).get("start-index") or 0)
@@ -911,7 +1358,9 @@ def test_invalid_json_is_cloud_error(monkeypatch: pytest.MonkeyPatch) -> None:
             return False
 
     client = CloudClient("a@b.c", "pw")
-    monkeypatch.setattr("things_orchestrator.cloud.urlopen", lambda *args, **kwargs: _Resp())
+    monkeypatch.setattr(
+        "things_orchestrator.cloud.urlopen", lambda *args, **kwargs: _Resp()
+    )
     try:
         client._request("GET", "/version/1/account/a")  # noqa: SLF001
     except CloudError as error:
@@ -934,7 +1383,9 @@ def test_apply_pulls_after_commit(tmp_path: Path) -> None:
 
     client.items = items  # type: ignore[method-assign]
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
     library._synced_at = time.monotonic()  # noqa: SLF001
     library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
     assert gets >= 1
@@ -955,7 +1406,9 @@ def test_empty_incremental_does_not_rewrite_cache(tmp_path: Path) -> None:
             return self.history_id
 
         def items(self, start_index: int) -> HistoryPage:
-            return HistoryPage(events=[], current=2, groups=0, end_size=1, latest_size=1)
+            return HistoryPage(
+                events=[], current=2, groups=0, end_size=1, latest_size=1
+            )
 
     library = CloudLibrary(FakeClient(), cache=cache)  # type: ignore[arg-type]
     library.records["t1"] = Record(uuid="t1", kind="task", title="Old")
@@ -1028,8 +1481,12 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
             if self.pending:
                 events = self.pending
                 self.pending = []
-                return HistoryPage(events=events, current=2, groups=1, end_size=2, latest_size=2)
-            return HistoryPage(events=[], current=1, groups=0, end_size=1, latest_size=1)
+                return HistoryPage(
+                    events=events, current=2, groups=1, end_size=2, latest_size=2
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
 
         def commit(self, envelopes: list[Envelope]) -> None:
             self.posts += 1
@@ -1042,9 +1499,13 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
 
     client = ConflictClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["abc"] = Record(uuid="abc", kind="task", title="Call", entity="Task6")
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
     with pytest.raises(CloudError, match="read fresh facts"):
-        library.apply([Write(action="update", uuid="abc", kind="task", title="Call bank")])
+        library.apply(
+            [Write(action="update", uuid="abc", kind="task", title="Call bank")]
+        )
     assert client.posts == 1
     assert library.records["abc"].title == "Call"
 
@@ -1123,7 +1584,9 @@ def test_empty_library_still_debounces(tmp_path: Path) -> None:
 
         def items(self, start_index: int) -> HistoryPage:
             self.pages += 1
-            return HistoryPage(events=[], current=0, groups=0, end_size=0, latest_size=0)
+            return HistoryPage(
+                events=[], current=0, groups=0, end_size=0, latest_size=0
+            )
 
     library = CloudLibrary(FakeClient(), cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.refresh()
@@ -1140,7 +1603,12 @@ def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
     result = library.apply(
         [
             Write(action="ensure_tag", uuid="waiting", title="Waiting"),
-            Write(action="create", uuid="task", title="Wait for refund", notes="## Next\nEmail support"),
+            Write(
+                action="create",
+                uuid="task",
+                title="Wait for refund",
+                notes="## Next\nEmail support",
+            ),
             Write(action="tags", uuid="task", tag_uuids=["waiting"]),
         ]
     )
@@ -1158,7 +1626,9 @@ def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
 def test_existing_update_and_waiting_tag_share_one_envelope(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["task"] = Record(uuid="task", kind="task", title="Refund", entity="Task6")
+    library.records["task"] = Record(
+        uuid="task", kind="task", title="Refund", entity="Task6"
+    )
 
     library.apply(
         [
@@ -1172,10 +1642,515 @@ def test_existing_update_and_waiting_tag_share_one_envelope(tmp_path: Path) -> N
     assert client.committed[0].payload["tg"] == ["waiting"]
 
 
+def test_trash_is_a_recoverable_task_patch(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["task"] = Record(
+        uuid="task", kind="task", title="Remove me", entity="Task6"
+    )
+
+    library.apply([Write(action="trash", uuid="task")])
+
+    assert client.committed[0].action == 1
+    assert client.committed[0].kind == "Task6"
+    assert client.committed[0].payload["tr"] is True
+    assert library.records["task"].trashed is True
+
+
+def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    rule = {
+        "tp": 0,
+        "fu": 256,
+        "fa": 2,
+        "of": [{"wd": 0}, {"wd": 4}],
+        "sr": 1_775_232_000,
+        "ia": 1_775_232_000,
+        "ed": 64_092_211_200,
+        "rc": 0,
+        "ts": 0,
+        "rrv": 4,
+    }
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="template-new",
+                title="Routine",
+                recurrence_rule=rule,
+            ),
+            Write(
+                action="create",
+                uuid="instance-new",
+                title="Routine",
+                recurrence_links=["template-new"],
+                recurrence_generated=True,
+            ),
+        ]
+    )
+
+    assert len(client.committed) == 2
+    template = next(item for item in client.committed if item.uuid == "template-new")
+    instance = next(item for item in client.committed if item.uuid == "instance-new")
+    assert template.payload["rr"] == rule
+    assert template.payload["rt"] == []
+    assert instance.payload["rr"] is None
+    assert instance.payload["rt"] == ["template-new"]
+    assert instance.payload["lt"] is True
+    assert library.records["template-new"].recurrence.role == "template"
+    assert library.records["instance-new"].recurrence.template_uuid == "template-new"
+
+
+def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template": Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 8, "fa": 1},
+                ),
+            ),
+            "instance": Record(
+                uuid="instance",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="instance",
+                    repeat_type="fixed",
+                    template_uuid="template",
+                    links=("template",),
+                ),
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(action="repeat_link", uuid="instance", recurrence_links=[]),
+            Write(action="permanent_delete", uuid="template"),
+        ]
+    )
+
+    assert {item.uuid for item in client.committed} == {"instance", "template"}
+    link = next(item for item in client.committed if item.uuid == "instance")
+    assert link.payload["rt"] == []
+    assert library.records["instance"].recurrence.role == "none"
+    assert "template" not in library.records
+
+
+def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template": Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 8, "fa": 1},
+                ),
+            ),
+            "existing": Record(
+                uuid="existing", kind="task", title="Routine", entity="Task6"
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat_link",
+                uuid="existing",
+                recurrence_links=["template"],
+                recurrence_generated=True,
+            )
+        ]
+    )
+
+    assert client.committed[0].payload["rt"] == ["template"]
+    assert client.committed[0].payload["lt"] is True
+    assert library.records["existing"].recurrence.role == "instance"
+    assert library.records["existing"].recurrence.template_uuid == "template"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_inbox", "expected_someday"),
+    [
+        ({"into": "anytime"}, False, False),
+        ({"into": "inbox"}, True, False),
+        ({"start": "someday"}, False, True),
+        ({"start": None}, False, False),
+    ],
+)
+def test_cloud_repeat_conversion_reads_back_final_schedule_semantics(
+    tmp_path: Path,
+    fields: dict[str, object],
+    expected_inbox: bool,
+    expected_someday: bool,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    task = Record(
+        uuid="cloud-scheduled-repeat",
+        kind="task",
+        title="Routine",
+        start=date(2026, 8, 15),
+        remind="09:30",
+        entity="Task6",
+    )
+    library.records[task.uuid] = task
+    module = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+    )
+    current = module.read(ReadCall(id=task.id)).items[0]
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"cloud-repeat-schedule-{next(iter(fields))}-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "repeat": {"unit": "week"},
+                        **fields,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    template = next(
+        item for item in library.records.values() if item.recurrence.role == "template"
+    )
+    for record in (task, template):
+        assert record.start is None
+        assert record.remind is None
+        assert record.inbox is expected_inbox
+        assert record.someday is expected_someday
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_cloud_repeat_conversion_projects_heading_and_chained_checklist_order(
+    tmp_path: Path, replacement: bool
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    old_project = Record(
+        uuid="cloud-old-project", kind="project", title="Old", entity="Task6"
+    )
+    new_project = Record(
+        uuid="cloud-new-project", kind="project", title="New", entity="Task6"
+    )
+    old_heading = Record(
+        uuid="cloud-old-heading",
+        kind="task",
+        title="Old section",
+        parent_uuid=old_project.uuid,
+        heading=True,
+        entity="Task6",
+    )
+    new_heading = Record(
+        uuid="cloud-new-heading",
+        kind="task",
+        title="New section",
+        parent_uuid=new_project.uuid,
+        heading=True,
+        entity="Task6",
+    )
+    task = Record(
+        uuid="cloud-heading-repeat",
+        kind="task",
+        title="Routine",
+        parent_uuid=old_project.uuid,
+        heading_uuid=old_heading.uuid,
+        entity="Task6",
+        checklists=[
+            ChecklistLine("cloud-after-a", "A", sort_index=0),
+            ChecklistLine("cloud-after-b", "B", sort_index=1024),
+            ChecklistLine("cloud-after-c", "C", sort_index=2048),
+        ],
+    )
+    library.records.update(
+        {
+            item.uuid: item
+            for item in [old_project, new_project, old_heading, new_heading, task]
+        }
+    )
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    current = module.read(ReadCall(id=task.id)).items[0]
+    change: dict[str, object] = {
+        "id": task.id,
+        "if_revision": current.revision,
+        "repeat": {"unit": "week"},
+        "into": new_project.id,
+        "checklist_change": [
+            {"id": "check:cloud-after-b", "after": "check:cloud-after-c"},
+            {"id": "check:cloud-after-a", "after": "check:cloud-after-b"},
+        ],
+    }
+    if replacement:
+        change["heading_id"] = new_heading.id
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"cloud-repeat-heading-{replacement}-001",
+                "change": [change],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item for item in library.records.values() if item.recurrence.role == "template"
+    )
+    expected_heading = new_heading.uuid if replacement else None
+    for record in (task, template):
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == expected_heading
+        assert [row.title for row in record.checklists] == ["C", "B", "A"]
+
+
+def test_memory_lifecycle_and_tag_admin_actions_are_reversible_until_delete() -> None:
+    library = MemoryLibrary(
+        [
+            Record(uuid="heading", kind="task", title="Next", heading=True),
+            Record(
+                uuid="task",
+                kind="task",
+                title="Call",
+                trashed=True,
+                heading_uuid="heading",
+                tag_uuids=["old"],
+            ),
+        ]
+    )
+    library.tags.update({"old": "Old", "parent": "Parent"})
+    library.tag_parents["old"] = []
+
+    library.apply(
+        [
+            Write(action="restore", uuid="task"),
+            Write(action="rename_tag", uuid="old", title="New"),
+            Write(action="reparent_tag", uuid="old", tag_parent_uuids=["parent"]),
+        ]
+    )
+
+    assert library.records["task"].trashed is False
+    assert library.tags["old"] == "New"
+    assert library.tag_parents["old"] == ["parent"]
+
+    library.apply([Write(action="permanent_delete", uuid="heading")])
+    library.apply([Write(action="delete_tag", uuid="old")])
+    assert "heading" not in library.records
+    assert library.records["task"].heading_uuid is None
+    assert library.records["task"].tag_uuids == []
+    assert "old" not in library.tags
+
+
+def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "task": Record(
+                uuid="task",
+                kind="task",
+                title="Call",
+                trashed=True,
+                entity="Task6",
+            ),
+            "heading": Record(
+                uuid="heading",
+                kind="task",
+                title="Next",
+                heading=True,
+                entity="Task6",
+            ),
+            "child": Record(
+                uuid="child",
+                kind="task",
+                title="Ship",
+                heading_uuid="heading",
+                entity="Task6",
+            ),
+        }
+    )
+    library.tags.update({"old": "Old", "parent": "Parent"})
+    library.tag_parents["old"] = []
+
+    result = library.apply(
+        [
+            Write(action="restore", uuid="task"),
+            Write(action="rename_tag", uuid="old", title="New"),
+            Write(action="reparent_tag", uuid="old", tag_parent_uuids=["parent"]),
+            Write(action="permanent_delete", uuid="heading", title="Next"),
+        ]
+    )
+
+    assert len(client.committed) == 3
+    restore = next(item for item in client.committed if item.uuid == "task")
+    assert restore.action == 1
+    assert restore.kind == "Task6"
+    assert restore.payload["tr"] is False
+    assert set(restore.payload) == {"tr", "md"}
+    tag = next(item for item in client.committed if item.uuid == "old")
+    assert tag.action == 1
+    assert tag.kind == "Tag4"
+    assert tag.payload["tt"] == "New"
+    assert tag.payload["pn"] == ["parent"]
+    assert set(tag.payload) == {"tt", "pn", "md"}
+    heading = next(item for item in client.committed if item.uuid == "heading")
+    assert heading.action == 2
+    assert heading.kind == "Task6"
+    assert heading.payload == {}
+    assert result.verified == ["Call", "New", "Next"]
+    assert library.records["task"].trashed is False
+    assert library.tags["old"] == "New"
+    assert library.tag_parents["old"] == ["parent"]
+    assert "heading" not in library.records
+    assert library.records["child"].heading_uuid is None
+
+    library.apply([Write(action="delete_tag", uuid="old", title="New")])
+    assert client.committed[0].action == 2
+    assert client.committed[0].kind == "Tag4"
+    assert client.committed[0].payload == {}
+    assert "old" not in library.tags
+
+
+def test_ensure_tag_preserves_parent_aliases_for_memory_and_cloud(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryLibrary()
+    memory.tags["parent"] = "Parent"
+    memory.apply(
+        [
+            Write(action="ensure_tag", uuid="$parent", title="Parent"),
+            Write(
+                action="ensure_tag",
+                uuid="child",
+                title="Child",
+                tag_parent_uuids=["$parent"],
+            ),
+        ]
+    )
+    assert memory.tag_parents["child"] == ["parent"]
+
+    client = _CaptureClient()
+    cloud = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    cloud.tags["parent"] = "Parent"
+    cloud.apply(
+        [
+            Write(action="ensure_tag", uuid="$parent", title="Parent"),
+            Write(
+                action="ensure_tag",
+                uuid="child",
+                title="Child",
+                tag_parent_uuids=["$parent"],
+            ),
+        ]
+    )
+    child = next(item for item in client.committed if item.uuid == "child")
+    assert child.kind == "Tag4"
+    assert child.payload["pn"] == ["parent"]
+    assert cloud.tag_parents["child"] == ["parent"]
+
+
+def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["project"] = Record(
+        uuid="project", kind="project", title="Launch", entity="Task6"
+    )
+
+    library.apply(
+        [
+            Write(
+                action="create_heading",
+                uuid="heading",
+                title="Next",
+                into_uuid="project",
+                into_kind="project",
+                anytime=True,
+                sort_index=0,
+            )
+        ]
+    )
+
+    assert client.committed[0].action == 0
+    assert client.committed[0].payload["tp"] == 2
+    assert client.committed[0].payload["pr"] == ["project"]
+    assert library.records["heading"].heading is True
+
+    library.records["task"] = Record(
+        uuid="task",
+        kind="task",
+        title="Ship",
+        parent_uuid="project",
+        entity="Task6",
+    )
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid="task",
+                into_uuid="project",
+                into_kind="project",
+                heading_uuid="heading",
+            )
+        ]
+    )
+    assert client.committed[0].payload["agr"] == ["heading"]
+    assert library.records["task"].heading_uuid == "heading"
+
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid="task",
+                into_uuid="project",
+                into_kind="project",
+                clear_heading=True,
+            )
+        ]
+    )
+    assert client.committed[0].payload["agr"] == []
+    assert library.records["task"].heading_uuid is None
+
+
 def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["area"] = Record(uuid="area", kind="area", title="Work", entity="Area3")
+    library.records["area"] = Record(
+        uuid="area", kind="area", title="Work", entity="Area3"
+    )
 
     library.apply(
         [
@@ -1201,7 +2176,9 @@ def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None
 def test_checklist_create_update_delete_round_trip(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.records["task"] = Record(uuid="task", kind="task", title="Pack", entity="Task6")
+    library.records["task"] = Record(
+        uuid="task", kind="task", title="Pack", entity="Task6"
+    )
 
     library.apply(
         [
@@ -1249,8 +2226,18 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
     library = MemoryLibrary()
     fold_events(
         [
-            {"uuid": "group", "e": "Tag4", "t": 0, "p": {"tt": "People", "pn": ["root"]}},
-            {"uuid": "area", "e": "Area3", "t": 0, "p": {"tt": "Work", "tg": ["group"], "ix": 40}},
+            {
+                "uuid": "group",
+                "e": "Tag4",
+                "t": 0,
+                "p": {"tt": "People", "pn": ["root"]},
+            },
+            {
+                "uuid": "area",
+                "e": "Area3",
+                "t": 0,
+                "p": {"tt": "Work", "tg": ["group"], "ix": 40},
+            },
             {
                 "uuid": "template",
                 "e": "Task6",
@@ -1282,23 +2269,23 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
     assert instance.completed_at is not None
     assert instance.notes_source == "structured"
     assert instance.notes_format == "rich"
-    assert instance.recurrence_role == "instance"
-    assert instance.recurrence_template_uuid == "template"
-    assert instance.recurrence_type == "after_completion"
+    assert instance.recurrence.role == "instance"
+    assert instance.recurrence.template_uuid == "template"
+    assert instance.recurrence.repeat_type == "after_completion"
     assert instance.sort_index == 80
 
 
 def test_projects_default_to_anytime_and_cannot_enter_inbox(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
-    library.apply([Write(action="create", uuid="project", kind="project", title="Launch")])
+    library.apply(
+        [Write(action="create", uuid="project", kind="project", title="Launch")]
+    )
     assert client.committed[0].payload["st"] == 1
     assert library.records["project"].inbox is False
 
     with pytest.raises(CloudError, match="Projects cannot enter Inbox"):
-        library.apply(
-            [Write(action="update", uuid="project", inbox=True)]
-        )
+        library.apply([Write(action="update", uuid="project", inbox=True)])
 
 
 def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
@@ -1306,7 +2293,9 @@ def test_heading_placement_keeps_exact_heading_identity(tmp_path: Path) -> None:
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records.update(
         {
-            "project": Record(uuid="project", kind="project", title="Launch", entity="Task6"),
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
             "heading": Record(
                 uuid="heading",
                 kind="task",

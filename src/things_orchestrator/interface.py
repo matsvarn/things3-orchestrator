@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any, Literal, Self
 
@@ -15,7 +16,7 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-Kind = Literal["task", "project", "area"]
+Kind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "completed", "canceled"]
 Next = Literal["done", "ask", "approve", "read", "retry_same", "stop"]
 ResultStatus = Literal[
@@ -32,31 +33,31 @@ ResultStatus = Literal[
     "unavailable",
     "internal_error",
 ]
-View = Literal["today", "inbox", "week", "system", "project", "logbook", "tags"]
+View = Literal[
+    "today", "inbox", "week", "system", "project", "logbook", "trash", "tags"
+]
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
 
-_ITEM_ID = r"^(?:task|project|area):[^\s:][^\s]*$"
+_ITEM_ID = r"^(?:task|project|area|heading):[^\s:][^\s]*$"
 _CONTAINER_ID = r"^(?:project|area):[^\s:][^\s]*$"
 _CHECK_ID = r"^check:[^\s:][^\s]*$"
 _TAG_ID = r"^tag:[^\s:][^\s]*$"
 _LOCAL_KEY = r"^\$[A-Za-z][A-Za-z0-9_-]{0,79}$"
-_TAG_REFERENCE = (
-    r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|tag:[^\s:][^\s]*)$"
-)
+_TAG_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|tag:[^\s:][^\s]*)$"
 _HOME_REFERENCE = (
     r"^(?:inbox|anytime|\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
     r"(?:project|area):[^\s:][^\s]*)$"
 )
 _AFTER_REFERENCE = (
     r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
-    r"(?:task|project|area):[^\s:][^\s]*)$"
+    r"(?:task|project|area|heading):[^\s:][^\s]*)$"
 )
-_CHECK_REFERENCE = (
-    r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|check:[^\s:][^\s]*)$"
-)
+_CHECK_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|check:[^\s:][^\s]*)$"
 _AREA_ID = r"^area:[^\s:][^\s]*$"
+_HEADING_ID = r"^heading:[^\s:][^\s]*$"
+_HEADING_REFERENCE = r"^(?:\$[A-Za-z][A-Za-z0-9_-]{0,79}|heading:[^\s:][^\s]*)$"
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 
@@ -89,7 +90,7 @@ def _validate_reminder(value: str | None) -> str | None:
     return value
 
 
-def _duplicates(values: list[str]) -> bool:
+def _duplicates(values: Sequence[str]) -> bool:
     return len(values) != len(set(values))
 
 
@@ -155,6 +156,41 @@ class ReadCall(StrictModel):
         return self
 
 
+Weekday = Literal[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+
+
+class RepeatCreate(StrictModel):
+    """A complete semantic repeat rule for a new Task."""
+
+    unit: Literal["day", "week", "month", "year"]
+    mode: Literal["fixed", "after_completion"] = "fixed"
+    interval: int = Field(default=1, ge=1, le=366)
+    weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
+
+    @field_validator("weekdays")
+    @classmethod
+    def valid_weekdays(cls, value: list[Weekday]) -> list[Weekday]:
+        if _duplicates(value):
+            raise ValueError("weekdays cannot contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def valid_pattern(self) -> Self:
+        if self.weekdays and self.unit != "week":
+            raise ValueError("weekdays need a weekly repeat rule")
+        if self.weekdays and self.mode != "fixed":
+            raise ValueError("weekdays need fixed repeat mode")
+        return self
+
+
 class CreateEntry(StrictModel):
     key: str | None = Field(default=None, pattern=_LOCAL_KEY)
     kind: Kind = "task"
@@ -172,6 +208,10 @@ class CreateEntry(StrictModel):
     today_after: str | None = Field(
         default=None, pattern=_AFTER_REFERENCE, max_length=512
     )
+    heading_id: str | None = Field(
+        default=None, pattern=_HEADING_REFERENCE, max_length=512
+    )
+    repeat: RepeatCreate | None = None
 
     @field_validator("title")
     @classmethod
@@ -213,10 +253,23 @@ class CreateEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_kind_fields(self) -> Self:
+        if self.kind == "heading":
+            allowed = {"key", "kind", "title", "into"}
+            if self.into is None:
+                raise ValueError("a heading needs a Project")
+            if not self.into.startswith(("project:", "$")):
+                raise ValueError("a heading needs a Project")
+            if self.model_fields_set - allowed:
+                raise ValueError("a heading accepts only key, kind, title, and into")
+            return self
         if self.checklist and self.kind != "task":
             raise ValueError("only a task can have a checklist")
         if self.next_actions and self.kind != "project":
             raise ValueError("only a Project can have next_actions")
+        if self.heading_id is not None and self.kind != "task":
+            raise ValueError("only a Task can use a heading")
+        if self.repeat is not None and self.kind != "task":
+            raise ValueError("only a Task can repeat")
         if self.into in {"inbox", "anytime"} and (
             self.start is not None or self.remind_at is not None
         ):
@@ -256,6 +309,36 @@ class ChecklistChange(StrictModel):
         return self
 
 
+class RepeatEdit(StrictModel):
+    """Start repetition or change one existing repeat template.
+
+    ``unit`` is required when the target is an ordinary Task. Existing
+    templates can change only the fields that are present.
+    """
+
+    mode: Literal["fixed", "after_completion"] | None = None
+    unit: Literal["day", "week", "month", "year"] | None = None
+    interval: int | None = Field(default=None, ge=1, le=366)
+    weekdays: list[Weekday] | None = Field(default=None, max_length=7)
+    remove: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def valid_edit(self) -> Self:
+        if self.remove:
+            if self.model_fields_set != {"remove"}:
+                raise ValueError("repeat removal cannot combine with rule fields")
+            return self
+        if not self.model_fields_set:
+            raise ValueError("repeat needs a mode, unit, interval, or remove")
+        if self.weekdays is not None and _duplicates(self.weekdays):
+            raise ValueError("weekdays cannot contain duplicates")
+        if self.unit is not None and self.unit != "week" and self.weekdays:
+            raise ValueError("weekdays need a weekly repeat rule")
+        if self.mode == "after_completion" and self.weekdays:
+            raise ValueError("weekdays need fixed repeat mode")
+        return self
+
+
 class ChangeEntry(StrictModel):
     id: str = Field(pattern=_ITEM_ID, max_length=512)
     if_revision: str = Field(min_length=1, max_length=512)
@@ -263,7 +346,9 @@ class ChangeEntry(StrictModel):
     status: Status | None = None
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist_add: list[ChecklistAdd] = Field(default_factory=list, max_length=500)
-    checklist_change: list[ChecklistChange] = Field(default_factory=list, max_length=500)
+    checklist_change: list[ChecklistChange] = Field(
+        default_factory=list, max_length=500
+    )
     checklist_remove: list[str] = Field(default_factory=list, max_length=500)
     checklist_order: list[str] | None = Field(default=None, max_length=500)
     into: str | None = Field(default=None, pattern=_HOME_REFERENCE, max_length=512)
@@ -279,6 +364,13 @@ class ChangeEntry(StrictModel):
     )
     move_contents_to: str | None = Field(default=None, pattern=_AREA_ID, max_length=512)
     remove_if_empty: Literal[True] | None = None
+    trash: Literal[True] | None = None
+    lifecycle: Literal["trash", "restore", "delete_permanently"] | None = None
+    delete_contents: Literal[True] | None = None
+    heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
+    repeat_interval: int | None = Field(default=None, ge=1, le=366)
+    repeat: RepeatEdit | None = None
+    replace_rich_note: Literal[True] | None = None
 
     @field_validator("title")
     @classmethod
@@ -362,6 +454,13 @@ class ChangeEntry(StrictModel):
                 "today_after" in self.model_fields_set,
                 self.move_contents_to is not None,
                 self.remove_if_empty is True,
+                self.trash is True,
+                self.lifecycle is not None,
+                self.delete_contents is True,
+                "heading_id" in self.model_fields_set,
+                self.repeat_interval is not None,
+                self.repeat is not None,
+                self.replace_rich_note is True,
             )
         )
         if not meaningful:
@@ -372,7 +471,9 @@ class ChangeEntry(StrictModel):
         removed = set(self.checklist_remove)
         if removed.intersection(changed_rows):
             raise ValueError("a checklist row cannot change and be removed")
-        if self.checklist_order is not None and removed.intersection(self.checklist_order):
+        if self.checklist_order is not None and removed.intersection(
+            self.checklist_order
+        ):
             raise ValueError("checklist_order cannot contain a removed row")
         if self.checklist_order is not None and any(
             "after" in row.model_fields_set for row in self.checklist_change
@@ -395,12 +496,62 @@ class ChangeEntry(StrictModel):
                 raise ValueError(
                     "an Area removal cannot combine with source-item changes"
                 )
+        if self.trash:
+            allowed = {"id", "if_revision", "trash"}
+            if self.model_fields_set - allowed:
+                raise ValueError("Trash cannot combine with other changes")
+        if self.lifecycle is not None:
+            allowed = {"id", "if_revision", "lifecycle", "delete_contents"}
+            if self.model_fields_set - allowed:
+                raise ValueError("a lifecycle change cannot combine with other changes")
+        if self.delete_contents and self.lifecycle != "delete_permanently":
+            raise ValueError("delete_contents needs permanent deletion")
+        if self.id.startswith("heading:"):
+            allowed = {"id", "if_revision", "title", "after", "lifecycle"}
+            if self.model_fields_set - allowed:
+                raise ValueError("a heading can only rename, reorder, or delete")
+            if self.lifecycle not in {None, "delete_permanently"}:
+                raise ValueError("a heading supports only permanent deletion")
+        if self.repeat_interval is not None:
+            allowed = {"id", "if_revision", "repeat_interval"}
+            if self.model_fields_set - allowed:
+                raise ValueError("a repeat interval cannot combine with other changes")
+        if self.repeat is not None:
+            allowed = {
+                "id",
+                "if_revision",
+                "repeat",
+                "title",
+                "notes_markdown",
+                "replace_rich_note",
+                "waiting",
+                "tags_add",
+                "tags_remove",
+                "checklist_add",
+                "checklist_change",
+                "checklist_remove",
+                "checklist_order",
+                "into",
+                "start",
+                "deadline",
+                "remind_at",
+                "after",
+                "today_after",
+                "heading_id",
+            }
+            if self.repeat.remove:
+                allowed = {"id", "if_revision", "repeat"}
+            if self.model_fields_set - allowed:
+                raise ValueError("a repeat change cannot combine with that item change")
+        if self.replace_rich_note and "notes_markdown" not in self.model_fields_set:
+            raise ValueError("replace_rich_note needs notes_markdown")
         return self
 
 
 class EnsureTag(StrictModel):
     key: str = Field(pattern=_LOCAL_KEY)
     title: str = Field(min_length=1, max_length=1000)
+    parent_id: str | None = Field(default=None, pattern=_TAG_REFERENCE, max_length=512)
 
     @field_validator("title")
     @classmethod
@@ -410,10 +561,38 @@ class EnsureTag(StrictModel):
         return value.strip()
 
 
+class ChangeTag(StrictModel):
+    id: str = Field(pattern=_TAG_ID, max_length=512)
+    title: str | None = Field(default=None, min_length=1, max_length=1000)
+    parent_id: str | None = Field(default=None, pattern=_TAG_ID, max_length=512)
+    delete_permanently: Literal[True] | None = None
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("tag title cannot be blank")
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def valid_change(self) -> Self:
+        if self.delete_permanently:
+            if self.model_fields_set != {"id", "delete_permanently"}:
+                raise ValueError("tag deletion cannot combine with other changes")
+            return self
+        if self.model_fields_set == {"id"}:
+            raise ValueError("a tag needs a change")
+        if self.parent_id == self.id:
+            raise ValueError("a tag cannot reference itself")
+        return self
+
+
 class CommitCall(StrictModel):
     intent_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,120}$")
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
+    tags_revision: str | None = Field(default=None, min_length=1, max_length=512)
     ensure_tags: list[EnsureTag] = Field(default_factory=list, max_length=20)
+    change_tags: list[ChangeTag] = Field(default_factory=list, max_length=40)
     create: list[CreateEntry] = Field(default_factory=list, max_length=40)
     change: list[ChangeEntry] = Field(default_factory=list, max_length=100)
 
@@ -428,6 +607,11 @@ class CommitCall(StrictModel):
         )
         if changes_areas and self.scope_revision is None:
             raise ValueError("Area changes need a system scope_revision")
+        if self.change_tags and self.tags_revision is None:
+            raise ValueError("tag changes need a tags_revision from a tags read")
+        tag_change_ids = [entry.id for entry in self.change_tags]
+        if _duplicates(tag_change_ids):
+            raise ValueError("each existing tag can change once")
 
         keys = [entry.key for entry in self.ensure_tags]
         keys.extend(entry.key for entry in self.create if entry.key is not None)
@@ -447,7 +631,9 @@ class CommitCall(StrictModel):
         known = set(keys)
         refs: list[str | None] = []
         for created in self.create:
-            refs.extend((created.into, created.after, created.today_after))
+            refs.extend(
+                (created.into, created.after, created.today_after, created.heading_id)
+            )
         for changed in self.change:
             refs.extend(
                 (
@@ -465,6 +651,15 @@ class CommitCall(StrictModel):
             raise ValueError(f"unknown local keys: {', '.join(unknown)}")
 
         tag_keys = {entry.key for entry in self.ensure_tags}
+        seen_tag_keys: set[str] = set()
+        for entry in self.ensure_tags:
+            if (
+                entry.parent_id is not None
+                and entry.parent_id.startswith("$")
+                and entry.parent_id not in seen_tag_keys
+            ):
+                raise ValueError("a local tag parent must be an earlier ensured tag")
+            seen_tag_keys.add(entry.key)
         tag_refs = [
             reference
             for entry in self.create
@@ -510,41 +705,69 @@ class CommitCall(StrictModel):
             return ("root", None) if home == "anytime" else ("inbox", None)
 
         seen_create: set[str] = set()
-        for entry in self.create:
-            for anchor in (entry.after, entry.today_after):
-                if anchor is not None and anchor.startswith("$") and anchor not in seen_create:
-                    raise ValueError("local after anchors must be earlier create entries")
-            if entry.into is not None and entry.into.startswith("$"):
-                target = create_by_key.get(entry.into)
+        for create_entry in self.create:
+            for anchor in (create_entry.after, create_entry.today_after):
+                if (
+                    anchor is not None
+                    and anchor.startswith("$")
+                    and anchor not in seen_create
+                ):
+                    raise ValueError(
+                        "local after anchors must be earlier create entries"
+                    )
+            if create_entry.into is not None and create_entry.into.startswith("$"):
+                target = create_by_key.get(create_entry.into)
                 if target is None or target.kind not in {"area", "project"}:
                     raise ValueError("a local home must be an Area or Project")
-                if entry.kind == "project" and target.kind != "area":
+                if create_entry.kind == "project" and target.kind != "area":
                     raise ValueError("a Project local home must be an Area")
-            if entry.after is not None and entry.after.startswith("$"):
-                anchor_entry = create_by_key[entry.after]
+                if create_entry.kind == "heading" and target.kind != "project":
+                    raise ValueError("a heading local home must be a Project")
+            if (
+                create_entry.heading_id is not None
+                and create_entry.heading_id.startswith("$")
+            ):
+                target = create_by_key.get(create_entry.heading_id)
                 if (
-                    anchor_entry.kind != entry.kind
-                    or create_scope(anchor_entry) != create_scope(entry)
+                    target is None
+                    or target.kind != "heading"
+                    or create_entry.heading_id not in seen_create
                 ):
+                    raise ValueError(
+                        "a local heading must be an earlier heading create entry"
+                    )
+            if create_entry.after is not None and create_entry.after.startswith("$"):
+                anchor_entry = create_by_key[create_entry.after]
+                if anchor_entry.kind != create_entry.kind or create_scope(
+                    anchor_entry
+                ) != create_scope(create_entry):
                     raise ValueError("a local after anchor must be in the same list")
-            if entry.key is not None:
-                seen_create.add(entry.key)
+            if create_entry.key is not None:
+                seen_create.add(create_entry.key)
 
         for changed in self.change:
             for anchor in (changed.after, changed.today_after):
-                if anchor is not None and anchor.startswith("$") and anchor not in create_keys:
+                if (
+                    anchor is not None
+                    and anchor.startswith("$")
+                    and anchor not in create_keys
+                ):
                     raise ValueError("an item after anchor must be a created item")
             if changed.into is not None and changed.into.startswith("$"):
                 target = create_by_key.get(changed.into)
                 if target is None or target.kind not in {"area", "project"}:
                     raise ValueError("a local home must be a created Area or Project")
-            row_keys = {
-                row.key for row in changed.checklist_add if row.key is not None
-            }
+            row_keys = {row.key for row in changed.checklist_add if row.key is not None}
             seen_rows: set[str] = set()
             for row in changed.checklist_add:
-                if row.after is not None and row.after.startswith("$") and row.after not in seen_rows:
-                    raise ValueError("local checklist after anchors must be earlier rows")
+                if (
+                    row.after is not None
+                    and row.after.startswith("$")
+                    and row.after not in seen_rows
+                ):
+                    raise ValueError(
+                        "local checklist after anchors must be earlier rows"
+                    )
                 if row.key is not None:
                     seen_rows.add(row.key)
             row_refs = [row.after for row in changed.checklist_change]
@@ -553,7 +776,9 @@ class CommitCall(StrictModel):
                 ref is not None and ref.startswith("$") and ref not in row_keys
                 for ref in row_refs
             ):
-                raise ValueError("local checklist references must belong to the same item")
+                raise ValueError(
+                    "local checklist references must belong to the same item"
+                )
         return self
 
 
@@ -564,7 +789,18 @@ class ApproveCall(StrictModel):
 class TagFact(StrictModel):
     id: str = Field(pattern=_TAG_ID, max_length=512)
     title: str = Field(min_length=1, max_length=1000)
+    parent_ids: list[str] = Field(default_factory=list, max_length=20)
+    parents_truncated: bool = False
     from_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+
+    @field_validator("parent_ids")
+    @classmethod
+    def valid_parent_ids(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_TAG_ID, item) is None for item in value
+        ):
+            raise ValueError("parent_ids need unique exact tag IDs")
+        return value
 
 
 class ChecklistFact(StrictModel):
@@ -578,7 +814,27 @@ class ChecklistFact(StrictModel):
 class RecurrenceFact(StrictModel):
     kind: RecurrenceKind
     template_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
-    rule: str | None = Field(default=None, max_length=2000)
+    mode: Literal["fixed", "after_completion"] | None = None
+    unit: Literal["day", "week", "month", "year"] | None = None
+    interval: int | None = Field(default=None, ge=1, le=366)
+    weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
+    linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
+
+    @field_validator("weekdays")
+    @classmethod
+    def unique_weekdays(cls, value: list[Weekday]) -> list[Weekday]:
+        if _duplicates(value):
+            raise ValueError("weekdays cannot contain duplicates")
+        return value
+
+    @field_validator("linked_item_ids")
+    @classmethod
+    def valid_linked_items(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_ITEM_ID, item) is None for item in value
+        ):
+            raise ValueError("linked_item_ids need unique exact item IDs")
+        return value
 
 
 class ItemFact(StrictModel):
@@ -588,6 +844,7 @@ class ItemFact(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     status: Status
     into_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[ChecklistFact] = Field(default_factory=list, max_length=100)
     direct_tags: list[TagFact] = Field(default_factory=list, max_length=40)
@@ -654,6 +911,8 @@ class Result(StrictModel):
     truncated: bool = False
 
 
+# MCP discovery needs flat schemas without refs or unions. The contract-parity test
+# compares every mirrored model, property, required field, and scalar constraint.
 _STRING: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": 512}
 _NULLABLE_STRING: dict[str, Any] = {"type": ["string", "null"], "maxLength": 512}
 _EXACT_ITEM: dict[str, Any] = {**_STRING, "pattern": _ITEM_ID}
@@ -670,19 +929,54 @@ _CHECK_REFERENCE_SCHEMA: dict[str, Any] = {
     "pattern": _CHECK_REFERENCE,
 }
 _AREA_SCHEMA: dict[str, Any] = {**_STRING, "pattern": _AREA_ID}
-_DATE: dict[str, Any] = {"type": ["string", "null"], "format": "date"}
-_DATE_TIME: dict[str, Any] = {"type": ["string", "null"], "format": "date-time"}
+_DATE: dict[str, Any] = {
+    "type": ["string", "null"],
+    "format": "date",
+    "maxLength": 10,
+}
+_DATE_TIME: dict[str, Any] = {
+    "type": ["string", "null"],
+    "format": "date-time",
+    "maxLength": 40,
+}
+_WEEKDAYS: dict[str, Any] = {
+    "type": "array",
+    "maxItems": 7,
+    "uniqueItems": True,
+    "items": {
+        "enum": [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+    },
+}
 
 READ_IN: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "view": {"enum": ["today", "inbox", "week", "system", "project", "logbook", "tags"]},
+        "view": {
+            "enum": [
+                "today",
+                "inbox",
+                "week",
+                "system",
+                "project",
+                "logbook",
+                "trash",
+                "tags",
+            ]
+        },
         "id": _EXACT_ITEM,
         "find": {"type": "string", "minLength": 1, "maxLength": 500},
         "within": {**_STRING, "pattern": _CONTAINER_ID},
-        "from": {"type": "string", "format": "date"},
-        "to": {"type": "string", "format": "date"},
+        "from": {"type": "string", "format": "date", "maxLength": 10},
+        "to": {"type": "string", "format": "date", "maxLength": 10},
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
     },
@@ -694,7 +988,7 @@ _CHECKLIST_ADD: dict[str, Any] = {
     "required": ["title"],
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
-        "title": {"type": "string"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "after": _CHECK_REFERENCE_SCHEMA,
     },
 }
@@ -705,7 +999,7 @@ _CHECKLIST_CHANGE: dict[str, Any] = {
     "required": ["id"],
     "properties": {
         "id": _EXACT_CHECK,
-        "title": {"type": "string"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "after": _CHECK_REFERENCE_SCHEMA,
     },
@@ -717,7 +1011,7 @@ _CREATE: dict[str, Any] = {
     "required": ["title"],
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
-        "kind": {"enum": ["task", "project", "area"], "default": "task"},
+        "kind": {"enum": ["task", "project", "area", "heading"], "default": "task"},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {
@@ -743,6 +1037,30 @@ _CREATE: dict[str, Any] = {
         },
         "after": _AFTER_SCHEMA,
         "today_after": _AFTER_SCHEMA,
+        "heading_id": {
+            "type": "string",
+            "pattern": _HEADING_REFERENCE,
+            "maxLength": 512,
+        },
+        "repeat": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["unit"],
+            "properties": {
+                "unit": {"enum": ["day", "week", "month", "year"]},
+                "mode": {
+                    "enum": ["fixed", "after_completion"],
+                    "default": "fixed",
+                },
+                "interval": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 366,
+                    "default": 1,
+                },
+                "weekdays": _WEEKDAYS,
+            },
+        },
     },
 }
 
@@ -756,9 +1074,24 @@ _CHANGE: dict[str, Any] = {
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
-        "checklist_add": {"type": "array", "minItems": 1, "maxItems": 500, "items": _CHECKLIST_ADD},
-        "checklist_change": {"type": "array", "minItems": 1, "maxItems": 500, "items": _CHECKLIST_CHANGE},
-        "checklist_remove": {"type": "array", "minItems": 1, "maxItems": 500, "items": _EXACT_CHECK},
+        "checklist_add": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": _CHECKLIST_ADD,
+        },
+        "checklist_change": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": _CHECKLIST_CHANGE,
+        },
+        "checklist_remove": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": _EXACT_CHECK,
+        },
         "checklist_order": {
             "type": ["array", "null"],
             "minItems": 1,
@@ -788,6 +1121,27 @@ _CHANGE: dict[str, Any] = {
         "today_after": _AFTER_SCHEMA,
         "move_contents_to": _AREA_SCHEMA,
         "remove_if_empty": {"const": True},
+        "trash": {"const": True},
+        "lifecycle": {"enum": ["trash", "restore", "delete_permanently"]},
+        "delete_contents": {"const": True},
+        "heading_id": {
+            "type": ["string", "null"],
+            "pattern": _HEADING_ID,
+            "maxLength": 512,
+        },
+        "repeat_interval": {"type": "integer", "minimum": 1, "maximum": 366},
+        "repeat": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mode": {"enum": ["fixed", "after_completion"]},
+                "unit": {"enum": ["day", "week", "month", "year"]},
+                "interval": {"type": "integer", "minimum": 1, "maximum": 366},
+                "weekdays": _WEEKDAYS,
+                "remove": {"const": True},
+            },
+        },
+        "replace_rich_note": {"const": True},
     },
 }
 
@@ -798,6 +1152,19 @@ _ENSURE_TAG: dict[str, Any] = {
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "parent_id": {**_NULLABLE_STRING, "pattern": _TAG_REFERENCE},
+    },
+}
+
+_CHANGE_TAG: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id"],
+    "properties": {
+        "id": _EXACT_TAG,
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "parent_id": {**_NULLABLE_STRING, "pattern": _TAG_ID},
+        "delete_permanently": {"const": True},
     },
 }
 
@@ -808,7 +1175,9 @@ COMMIT_IN: dict[str, Any] = {
     "properties": {
         "intent_id": {"type": "string", "pattern": r"^[A-Za-z0-9._:-]{8,120}$"},
         "scope_revision": _STRING,
+        "tags_revision": _STRING,
         "ensure_tags": {"type": "array", "maxItems": 20, "items": _ENSURE_TAG},
+        "change_tags": {"type": "array", "maxItems": 40, "items": _CHANGE_TAG},
         "create": {"type": "array", "maxItems": 40, "items": _CREATE},
         "change": {"type": "array", "maxItems": 100, "items": _CHANGE},
     },
@@ -830,6 +1199,13 @@ _TAG_FACT: dict[str, Any] = {
     "properties": {
         "id": _EXACT_TAG,
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "parent_ids": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
+        "parents_truncated": {"type": "boolean", "default": False},
         "from_id": _EXACT_ITEM,
     },
 }
@@ -843,7 +1219,7 @@ _CHECKLIST_FACT: dict[str, Any] = {
         "revision": _STRING,
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
-        "order": {"type": "integer"},
+        "order": {"type": "integer", "minimum": _ORDER_MIN, "maximum": _ORDER_MAX},
     },
 }
 
@@ -853,37 +1229,72 @@ _RECURRENCE: dict[str, Any] = {
     "required": ["kind"],
     "properties": {
         "kind": {
-            "enum": ["none", "fixed_instance", "after_completion_instance", "template", "unknown"]
+            "enum": [
+                "none",
+                "fixed_instance",
+                "after_completion_instance",
+                "template",
+                "unknown",
+            ]
         },
         "template_id": _EXACT_ITEM,
-        "rule": {"type": "string"},
+        "mode": {"enum": ["fixed", "after_completion"]},
+        "unit": {"enum": ["day", "week", "month", "year"]},
+        "interval": {"type": "integer", "minimum": 1, "maximum": 366},
+        "weekdays": {
+            "type": "array",
+            "maxItems": 7,
+            "uniqueItems": True,
+            "items": {
+                "enum": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday",
+                ]
+            },
+        },
+        "linked_item_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_ITEM,
+        },
     },
 }
 
 _ITEM_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "revision", "kind", "title", "status"],
+    "required": ["id", "revision", "kind", "title", "status", "order"],
     "properties": {
         "id": _EXACT_ITEM,
         "revision": _STRING,
-        "kind": {"enum": ["task", "project", "area"]},
+        "kind": {"enum": ["task", "project", "area", "heading"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "into_id": _EXACT_ITEM,
-        "notes_markdown": {"type": ["string", "null"]},
+        "heading_id": {**_STRING, "pattern": _HEADING_ID},
+        "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {"type": "array", "maxItems": 100, "items": _CHECKLIST_FACT},
         "direct_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
         "inherited_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
-        "start": {"type": ["string", "null"]},
+        "start": {"type": ["string", "null"], "maxLength": 32},
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
         "recurrence": _RECURRENCE,
-        "order": {"type": "integer"},
-        "today_order": {"type": "integer"},
+        "order": {"type": "integer", "minimum": _ORDER_MIN, "maximum": _ORDER_MAX},
+        "today_order": {
+            "type": "integer",
+            "minimum": _ORDER_MIN,
+            "maximum": _ORDER_MAX,
+        },
         "signals": {
             "type": "array",
-            "maxItems": 40,
+            "maxItems": 20,
             "items": {"type": "string", "maxLength": 1600},
         },
     },
@@ -894,15 +1305,15 @@ _SECTION: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["key", "title"],
     "properties": {
-        "key": {"type": "string"},
-        "title": {"type": "string"},
+        "key": {"type": "string", "minLength": 1, "maxLength": 80},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
         "item_ids": {
             "type": "array",
             "maxItems": 40,
             "uniqueItems": True,
             "items": _EXACT_ITEM,
         },
-        "signals": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+        "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
     },
 }
 
@@ -912,8 +1323,17 @@ _PLAN: dict[str, Any] = {
     "required": ["id", "expires_at", "summary"],
     "properties": {
         "id": APPROVE_IN["properties"]["plan_id"],
-        "expires_at": {"type": "string", "format": "date-time"},
-        "summary": {"type": "array", "minItems": 1, "maxItems": 40, "items": {"type": "string"}},
+        "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40,
+        },
+        "summary": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {"type": "string"},
+        },
         "preserves": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
         "warnings": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
     },
@@ -950,7 +1370,7 @@ RESULT_OUT: dict[str, Any] = {
         "receipt": _STRING,
         "scope_revision": _STRING,
         "cursor": _STRING,
-        "truncated": {"type": "boolean"},
+        "truncated": {"type": "boolean", "default": False},
     },
 }
 
@@ -961,7 +1381,7 @@ _ITEM_SUMMARY: dict[str, Any] = {
     "properties": {
         "id": _EXACT_ITEM,
         "revision": _STRING,
-        "kind": {"enum": ["task", "project", "area"]},
+        "kind": {"enum": ["task", "project", "area", "heading"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
     },
@@ -1031,16 +1451,20 @@ APPROVE_OUT: dict[str, Any] = {
 
 READ_DESC = (
     "Read Things. Empty input reads Today. Select one view, exact id, or find query. "
-    "Project needs within. Logbook needs from and to. Send a cursor without selectors. "
+    "Project needs within. Logbook needs from and to. Trash returns recoverable items. Send a cursor without selectors. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
     "remind_at, recurrence, order, today_order, and signals. "
     "Use returned IDs and revisions for changes. Follow next and instruction."
 )
 COMMIT_DESC = (
-    "Commit decided work with a durable intent_id, optional ensure_tags, and create or change rows. "
+    "Commit decided work with a durable intent_id and one coherent batch. "
+    "It supports repeat rules, headings, tag structure, rich-note replacement, Trash, restore, and permanent deletion. "
+    "A complete repeat rule on an exact ordinary Task keeps it as the current copy and creates its future template. "
+    "Batch requested metadata, schedule, placement, order, and checklist changes into that conversion; both copies get the desired future content. "
     "An ensured tag key can be used in tag_ids or tags_add in the same commit. "
     "Changes need an exact id and if_revision. After pending, retry the exact payload. "
-    "High-impact work returns a plan without writes. Ask one natural confirmation and keep its "
+    "Moving a Task or Project to Trash and other high-impact work returns a plan without writes. "
+    "Ask one natural confirmation and keep its "
     "control fields private. Follow next and instruction."
 )
 APPROVE_DESC = (

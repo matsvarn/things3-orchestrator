@@ -102,7 +102,8 @@ def test_main_skill_preserves_owner_control_and_natural_language() -> None:
     assert "do not infer urgency" in lower
     assert "time-specific start cue" in lower
     assert "repeating template" in lower
-    assert "generated copies unchanged" in lower
+    assert "generated copy for current work" in lower
+    assert "stopping repetition" in lower
     assert "ask one short question" in lower
     assert "preserve anything the owner did not ask to change" in lower
     assert "ask one short question in the owner's words" in lower
@@ -168,15 +169,21 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     assert "every accepted things change" in research
 
 
-def test_skill_does_not_claim_unavailable_write_forms() -> None:
+def test_skill_teaches_the_proven_write_forms() -> None:
     lower = _skill_text().lower()
 
-    unavailable_claims = (
-        r"create\w*\s+(?:a\s+)?heading",
-        r"change\w*\s+(?:a\s+)?repeat rule",
-        r"delete\w*\s+(?:a\s+)?(?:task|project)",
-    )
-    assert not any(re.search(pattern, lower) for pattern in unavailable_claims)
+    for capability in (
+        "rename or reorder a heading",
+        "repeating template for future copies",
+        "generated copy for the current cycle",
+        "complete repeat rule",
+        "batch both changes",
+        "repair tag names and parent relationships",
+        "restore accidental cleanup",
+        "permanently delete",
+        "rich notes",
+    ):
+        assert capability in lower
 
 
 def test_main_and_reference_files_stay_lean() -> None:

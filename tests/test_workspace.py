@@ -13,6 +13,7 @@ from things_orchestrator.library import (
     MemoryLibrary,
     Record,
 )
+from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.workspace import ThingsWorkspace
 
 NOW = datetime(2026, 8, 15, 12, tzinfo=timezone.utc)
@@ -83,6 +84,60 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     assert item.revision.startswith("r_")
 
 
+def test_exact_read_exposes_heading_repeat_pattern_and_linked_copy() -> None:
+    project = Record(uuid="facts-project", kind="project", title="Plan")
+    heading = Record(
+        uuid="facts-heading",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    template = Record(
+        uuid="facts-template",
+        kind="task",
+        title="Review",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}, {"wd": 5}]},
+        ),
+    )
+    copy = Record(
+        uuid="facts-copy",
+        kind="task",
+        title="Review",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([project, heading, template, copy])
+
+    item = detail(module, template.id)
+
+    assert item.heading_id == heading.id
+    assert item.recurrence is not None
+    assert item.recurrence.mode == "fixed"
+    assert item.recurrence.weekdays == ["monday", "friday"]
+    assert item.recurrence.linked_item_ids == [copy.id]
+
+
+def test_trash_view_returns_recoverable_exact_items() -> None:
+    trashed = Record(uuid="trash-view", kind="task", title="Recover", trashed=True)
+    active = Record(uuid="active-view", kind="task", title="Keep")
+    module = workspace([trashed, active])
+
+    result = module.read(ReadCall(view="trash"))
+
+    assert [item.id for item in result.items] == [trashed.id]
+    assert "trashed" in result.items[0].signals
+
+
 def test_exact_read_bounds_external_text_and_order_facts() -> None:
     long_text = "x" * 100_005
     area = Record(uuid="area", kind="area", title=long_text, tag_uuids=["area-tag"])
@@ -130,8 +185,7 @@ def test_exact_read_bounds_external_text_and_order_facts() -> None:
     assert len(item.notes_markdown or "") == 50_000
     assert len(item.checklist[0].title) == 1000
     assert all(
-        len(tag.title) == 1000
-        for tag in [*item.direct_tags, *item.inherited_tags]
+        len(tag.title) == 1000 for tag in [*item.direct_tags, *item.inherited_tags]
     )
     assert item.order == -(2**63)
     assert item.today_order == 2**63 - 1
@@ -325,10 +379,7 @@ def test_long_notes_and_detail_rows_advance_together_to_one_final_page() -> None
     )
     task.parent_uuid = parent.uuid
     library = MemoryLibrary([parent, task])
-    library.tags = {
-        uuid: uuid
-        for uuid in [*task.tag_uuids, *parent.tag_uuids]
-    }
+    library.tags = {uuid: uuid for uuid in [*task.tag_uuids, *parent.tag_uuids]}
     module = ThingsWorkspace(library, clock=lambda: NOW)
 
     result = module.read(ReadCall(id=task.id, limit=20))
@@ -376,7 +427,10 @@ def test_long_note_cursor_stales_after_the_note_changes() -> None:
 
 
 def test_cursor_is_short_and_rejects_changed_snapshot() -> None:
-    records = [Record(uuid=f"t{index}", kind="task", title=f"Task {index}", inbox=True) for index in range(45)]
+    records = [
+        Record(uuid=f"t{index}", kind="task", title=f"Task {index}", inbox=True)
+        for index in range(45)
+    ]
     module = workspace(records)
 
     first = module.read(ReadCall(view="inbox", limit=40))
@@ -397,9 +451,7 @@ def test_tag_catalog_pages_with_stable_opaque_cursors() -> None:
     first = module.read(ReadCall(view="tags"))
     second = module.read(ReadCall(cursor=first.cursor)) if first.cursor else None
 
-    assert [tag.id for tag in first.tags] == [
-        f"tag:tag{index}" for index in range(20)
-    ]
+    assert [tag.id for tag in first.tags] == [f"tag:tag{index}" for index in range(20)]
     assert first.truncated is True
     assert second is not None
     assert [tag.id for tag in second.tags] == [
@@ -441,9 +493,7 @@ def test_ensure_tag_reuses_existing_identity_and_can_assign_it() -> None:
 
     task = next(iter(library.records.values()))
     assert result.status == "applied"
-    assert [(tag.id, tag.title) for tag in result.tags] == [
-        ("tag:existing", "Focus")
-    ]
+    assert [(tag.id, tag.title) for tag in result.tags] == [("tag:existing", "Focus")]
     assert task.tag_uuids == ["existing"]
     assert library.tags == {"existing": "Focus"}
 
@@ -592,9 +642,7 @@ def test_existing_ensure_tag_is_unchanged_and_returns_the_exact_fact() -> None:
 
     assert first.status == "unchanged"
     assert repeated == first
-    assert [(tag.id, tag.title) for tag in first.tags] == [
-        ("tag:focus", "Focus")
-    ]
+    assert [(tag.id, tag.title) for tag in first.tags] == [("tag:focus", "Focus")]
 
 
 def test_tag_retry_settles_without_a_second_apply() -> None:
@@ -648,8 +696,12 @@ def test_commit_creates_structured_project_in_one_transaction() -> None:
     result = module.commit(call)
 
     assert result.status == "applied"
-    project = next(item for item in module._library.records.values() if item.kind == "project")  # noqa: SLF001
-    task = next(item for item in module._library.records.values() if item.kind == "task")  # noqa: SLF001
+    project = next(
+        item for item in module._library.records.values() if item.kind == "project"
+    )  # noqa: SLF001
+    task = next(
+        item for item in module._library.records.values() if item.kind == "task"
+    )  # noqa: SLF001
     assert project.inbox is False
     assert task.parent_uuid == project.uuid
     assert task.notes == "Use **release** checks."
@@ -676,7 +728,9 @@ def test_project_next_actions_use_the_compact_create_shape() -> None:
     )
 
     assert result.status == "applied"
-    project = next(item for item in module._library.records.values() if item.kind == "project")  # noqa: SLF001
+    project = next(
+        item for item in module._library.records.values() if item.kind == "project"
+    )  # noqa: SLF001
     actions = [item for item in module._library.records.values() if item.kind == "task"]  # noqa: SLF001
     assert [item.title for item in actions] == ["Call mover", "Book van"]
     assert all(item.parent_uuid == project.uuid for item in actions)
@@ -716,9 +770,7 @@ def test_scheduled_project_does_not_keep_anytime_state() -> None:
         CommitCall.model_validate(
             {
                 "intent_id": "scheduled-project-001",
-                "create": [
-                    {"kind": "project", "title": "Launch", "start": "today"}
-                ],
+                "create": [{"kind": "project", "title": "Launch", "start": "today"}],
             }
         )
     )
@@ -803,9 +855,7 @@ def test_mismatched_explicit_start_and_reminder_are_rejected(start: str) -> None
         CommitCall.model_validate(
             {
                 "intent_id": f"mismatched-reminder-{start}",
-                "create": [
-                    {"title": "Call", "start": start, "remind_at": reminder}
-                ],
+                "create": [{"title": "Call", "start": start, "remind_at": reminder}],
             }
         )
     )
@@ -1004,15 +1054,15 @@ def test_today_after_rebalances_dense_native_indexes() -> None:
         CommitCall.model_validate(
             {
                 "intent_id": "dense-today-001",
-                "create": [
-                    {"title": "X", "start": "today", "today_after": "task:a"}
-                ],
+                "create": [{"title": "X", "start": "today", "today_after": "task:a"}],
             }
         )
     )
 
     assert result.status == "applied"
-    ordered = sorted(module._library.records.values(), key=lambda item: item.today_index)  # noqa: SLF001
+    ordered = sorted(
+        module._library.records.values(), key=lambda item: item.today_index
+    )  # noqa: SLF001
     assert [item.title for item in ordered] == ["A", "X", "B"]
 
 
@@ -1056,7 +1106,11 @@ def test_existing_change_needs_current_revision() -> None:
             {
                 "intent_id": "rename-001",
                 "change": [
-                    {"id": "task:one", "if_revision": current.revision, "title": "AI edit"}
+                    {
+                        "id": "task:one",
+                        "if_revision": current.revision,
+                        "title": "AI edit",
+                    }
                 ],
             }
         )
@@ -1176,7 +1230,11 @@ def test_risky_area_change_needs_approval_and_is_revision_bound() -> None:
                 "intent_id": "area-rename-001",
                 "scope_revision": scope_revision,
                 "change": [
-                    {"id": "area:work", "if_revision": current.revision, "title": "Office"}
+                    {
+                        "id": "area:work",
+                        "if_revision": current.revision,
+                        "title": "Office",
+                    }
                 ],
             }
         )
@@ -1275,6 +1333,345 @@ def test_area_removal_needs_system_scope_revision() -> None:
     assert module._library.records["task"].area_uuid == "new"  # noqa: SLF001
 
 
+def test_trash_needs_approval_and_keeps_project_children() -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    child = Record(uuid="child", kind="task", title="Ship", parent_uuid="project")
+    module = workspace([project, child])
+    current = detail(module, project.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-project-001",
+                "change": [
+                    {"id": project.id, "if_revision": current.revision, "trash": True}
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert "Trash project: Launch" in prepared.plan.summary
+    assert project.trashed is False
+
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    assert project.trashed is True
+    assert child.parent_uuid == project.uuid
+
+
+def test_trash_rejects_areas() -> None:
+    area = Record(uuid="area", kind="area", title="Work")
+    module = workspace([area])
+    current = detail(module, area.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-area-001",
+                "scope_revision": system_scope(module),
+                "change": [
+                    {"id": area.id, "if_revision": current.revision, "trash": True}
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert area.trashed is False
+
+
+def test_heading_create_rename_assignment_and_clear() -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    task = Record(uuid="task", kind="task", title="Ship", parent_uuid=project.uuid)
+    module = workspace([project, task])
+    created = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-create-001",
+                "create": [{"kind": "heading", "title": "Next", "into": project.id}],
+            }
+        )
+    )
+
+    assert created.status == "applied"
+    heading = next(item for item in module._library.records.values() if item.heading)  # noqa: SLF001
+    assert heading.parent_uuid == project.uuid
+    assert created.items[0].id == heading.id
+    assert created.items[0].kind == "heading"
+    task_fact = detail(module, task.id)
+    assigned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-assign-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": task_fact.revision,
+                        "heading_id": heading.id,
+                    }
+                ],
+            }
+        )
+    )
+    assert assigned.status == "applied"
+    assert task.heading_uuid == heading.uuid
+
+    heading_fact = detail(module, heading.id)
+    renamed = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-rename-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": heading_fact.revision,
+                        "title": "Later",
+                    }
+                ],
+            }
+        )
+    )
+    assert renamed.status == "applied"
+    assert heading.title == "Later"
+
+    task_fact = detail(module, task.id)
+    cleared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-clear-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": task_fact.revision,
+                        "heading_id": None,
+                    }
+                ],
+            }
+        )
+    )
+    assert cleared.status == "applied"
+    assert task.heading_uuid is None
+    project_items = module.read(ReadCall(view="project", within=project.id)).items
+    assert any(
+        item.kind == "heading" and item.title == "Later" for item in project_items
+    )
+
+
+def test_task_create_under_existing_exact_heading() -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    heading = Record(
+        uuid="heading",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    module = workspace([project, heading])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "task-existing-heading-001",
+                "create": [
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": project.id,
+                        "heading_id": heading.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Ship"
+    )
+    assert task.parent_uuid == project.uuid
+    assert task.heading_uuid == heading.uuid
+
+
+def test_task_moves_and_uses_destination_heading_in_one_change() -> None:
+    source = Record(uuid="move-source", kind="project", title="Source")
+    destination = Record(uuid="move-destination", kind="project", title="Destination")
+    heading = Record(
+        uuid="move-heading",
+        kind="task",
+        title="Next",
+        parent_uuid=destination.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="move-task",
+        kind="task",
+        title="Ship",
+        parent_uuid=source.uuid,
+    )
+    module = workspace([source, destination, heading, task])
+    current = detail(module, task.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "move-and-heading-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "into": destination.id,
+                        "heading_id": heading.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert task.parent_uuid == destination.uuid
+    assert task.heading_uuid == heading.uuid
+
+
+def test_heading_delete_clears_trashed_assigned_tasks_in_one_plan() -> None:
+    project = Record(uuid="heading-project", kind="project", title="Plan")
+    heading = Record(
+        uuid="heading-used",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="heading-trashed-task",
+        kind="task",
+        title="Hidden",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    module = workspace([project, heading, task])
+    current = detail(module, heading.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-delete-used-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": current.revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in module._library.records  # noqa: SLF001
+    assert task.heading_uuid is None
+
+
+def test_project_heading_and_task_create_together_with_local_heading() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "task-local-heading-001",
+                "create": [
+                    {"key": "$project", "kind": "project", "title": "Launch"},
+                    {
+                        "key": "$section",
+                        "kind": "heading",
+                        "title": "Next",
+                        "into": "$project",
+                    },
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": "$project",
+                        "heading_id": "$section",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    records = {item.title: item for item in module._library.records.values()}  # noqa: SLF001
+    assert records["Next"].parent_uuid == records["Launch"].uuid
+    assert records["Ship"].parent_uuid == records["Launch"].uuid
+    assert records["Ship"].heading_uuid == records["Next"].uuid
+
+
+@pytest.mark.parametrize(
+    "heading_uuid, expected_status, instruction",
+    [
+        (
+            "other-heading",
+            "rejected",
+            "The heading must belong to the Task's Project.",
+        ),
+        (
+            "not-heading",
+            "needs_input",
+            "I could not find exact item heading:not-heading.",
+        ),
+    ],
+)
+def test_task_create_rejects_heading_outside_project_or_non_heading(
+    heading_uuid: str, expected_status: str, instruction: str
+) -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    other_project = Record(uuid="other-project", kind="project", title="Other")
+    other_heading = Record(
+        uuid="other-heading",
+        kind="task",
+        title="Other section",
+        parent_uuid=other_project.uuid,
+        heading=True,
+    )
+    not_heading = Record(
+        uuid="not-heading",
+        kind="task",
+        title="Ordinary Task",
+        parent_uuid=project.uuid,
+    )
+    module = workspace([project, other_project, other_heading, not_heading])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"task-invalid-heading-{heading_uuid}",
+                "create": [
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": project.id,
+                        "heading_id": f"heading:{heading_uuid}",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == expected_status
+    assert result.instruction == instruction
+    assert all(
+        item.title != "Ship"
+        for item in module._library.records.values()  # noqa: SLF001
+    )
+
+
 def test_area_plan_stales_when_a_new_child_appears() -> None:
     module = workspace(
         [
@@ -1369,15 +1766,17 @@ def test_unknown_cloud_outcome_never_reposts_after_state_appears() -> None:
         ("instance", "unknown"),
     ],
 )
-def test_recurring_items_are_read_only_until_mutations_are_proven_safe(
+def test_repeat_templates_allow_future_metadata_but_unknown_instances_are_read_only(
     role: str, recurrence_type: str
 ) -> None:
     recurring = Record(
         uuid="repeat",
         kind="task",
         title="Routine",
-        recurrence_role=role,  # type: ignore[arg-type]
-        recurrence_type=recurrence_type,  # type: ignore[arg-type]
+        recurrence=RecurrenceState(
+            role=role,  # type: ignore[arg-type]
+            repeat_type=recurrence_type,  # type: ignore[arg-type]
+        ),
     )
     module = workspace([recurring])
     repeated = detail(module, "task:repeat")
@@ -1398,8 +1797,147 @@ def test_recurring_items_are_read_only_until_mutations_are_proven_safe(
     )
 
     assert repeated.recurrence is not None
-    assert result.status == "unsupported"
-    assert recurring.title == "Routine"
+    if role == "template":
+        assert result.status == "needs_approval"
+        assert result.plan is not None
+        applied = module.approve(ApproveCall(plan_id=result.plan.id))
+        assert applied.status == "applied"
+        assert recurring.title == "Changed"
+    elif recurrence_type in {"fixed", "after_completion"}:
+        assert result.status == "applied"
+        assert recurring.title == "Changed"
+    else:
+        assert result.status == "unsupported"
+        assert recurring.title == "Routine"
+
+
+def test_template_repeat_interval_needs_approval_and_preserves_rule() -> None:
+    rule = {
+        "tp": 1,
+        "fu": 256,
+        "fa": 1,
+        "of": [{"wd": 2, "future": {"keep": True}}],
+        "rrv": 42,
+    }
+    template = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template", repeat_type="after_completion", rule=rule
+        ),
+    )
+    module = workspace([template])
+    current = detail(module, template.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-interval-approval-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "repeat_interval": 3,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert template.recurrence.rule == rule
+
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert applied.status == "applied"
+    assert template.recurrence.rule == {**rule, "fa": 3}
+    assert template.recurrence.rule is not None
+    assert template.recurrence.rule["of"] == rule["of"]
+
+
+def test_template_repeat_interval_plan_stales_when_instance_changes() -> None:
+    template = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 16, "fa": 1},
+        ),
+    )
+    instance = Record(
+        uuid="instance",
+        kind="task",
+        title="Routine copy",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid="template",
+            links=("template",),
+        ),
+    )
+    module = workspace([template, instance])
+    current = detail(module, template.id)
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-interval-stale-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "repeat_interval": 2,
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    instance.title = "Owner changed copy"
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "stale"
+    assert template.recurrence.rule == {"tp": 0, "fu": 16, "fa": 1}
+
+
+def test_repeat_interval_rejects_normal_tasks_and_generated_instances() -> None:
+    normal = Record(uuid="normal", kind="task", title="Normal")
+    instance = Record(
+        uuid="instance",
+        kind="task",
+        title="Generated",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="after_completion",
+            template_uuid="template",
+            links=("template",),
+        ),
+    )
+    module = workspace([normal, instance])
+
+    for item in (normal, instance):
+        current = detail(module, item.id)
+        result = module.commit(
+            CommitCall.model_validate(
+                {
+                    "intent_id": f"repeat-interval-reject-{item.uuid}",
+                    "change": [
+                        {
+                            "id": item.id,
+                            "if_revision": current.revision,
+                            "repeat_interval": 2,
+                        }
+                    ],
+                }
+            )
+        )
+        assert result.status == "unsupported"
+        assert item.recurrence.rule is None
 
 
 def test_rich_note_changes_stop_safely() -> None:
@@ -1418,13 +1956,944 @@ def test_rich_note_changes_stop_safely() -> None:
             {
                 "intent_id": "richnote-001",
                 "change": [
-                    {"id": "task:rich", "if_revision": styled.revision, "notes_markdown": "new"}
+                    {
+                        "id": "task:rich",
+                        "if_revision": styled.revision,
+                        "notes_markdown": "new",
+                    }
                 ],
             }
         )
     )
 
     assert note_result.status == "unsupported"
+
+
+def test_rich_note_can_be_explicitly_replaced_after_one_approval() -> None:
+    rich = Record(
+        uuid="rich-replace",
+        kind="task",
+        title="Rich",
+        notes="styled",
+        notes_format="rich",
+    )
+    module = workspace([rich])
+    current = detail(module, rich.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "richnote-replace-001",
+                "change": [
+                    {
+                        "id": rich.id,
+                        "if_revision": current.revision,
+                        "notes_markdown": "## Plain replacement",
+                        "replace_rich_note": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert rich.notes == "## Plain replacement"
+    assert rich.notes_format == "markdown"
+
+
+def test_repeat_mode_unit_and_interval_change_in_one_approved_plan() -> None:
+    template = Record(
+        uuid="repeat-full",
+        kind="task",
+        title="Review",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={
+                "tp": 0,
+                "fu": 8,
+                "fa": 1,
+                "of": [{"opaque": "keep"}],
+                "sr": 1_775_232_000,
+                "rrv": 99,
+            },
+        ),
+    )
+    module = workspace([template])
+    current = detail(module, template.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-full-rule-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "repeat": {
+                            "mode": "after_completion",
+                            "unit": "week",
+                            "interval": 2,
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert template.recurrence.rule == {
+        "tp": 1,
+        "fu": 256,
+        "fa": 2,
+        "of": [],
+        "sr": 1_775_232_000,
+        "ts": 0,
+        "rrv": 99,
+    }
+
+
+def test_restore_and_permanent_delete_use_explicit_lifecycle_steps() -> None:
+    task = Record(uuid="lifecycle", kind="task", title="Old", trashed=True)
+    module = workspace([task])
+    trashed = detail(module, task.id)
+    assert "trashed" in trashed.signals
+
+    restore_plan = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "restore-task-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": trashed.revision,
+                        "lifecycle": "restore",
+                    }
+                ],
+            }
+        )
+    )
+    assert restore_plan.plan is not None
+    restored = module.approve(ApproveCall(plan_id=restore_plan.plan.id))
+    assert restored.status == "applied"
+    assert task.trashed is False
+
+    active = detail(module, task.id)
+    trash_plan = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-before-delete-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": active.revision,
+                        "lifecycle": "trash",
+                    }
+                ],
+            }
+        )
+    )
+    assert trash_plan.plan is not None
+    module.approve(ApproveCall(plan_id=trash_plan.plan.id))
+
+    ready = detail(module, task.id)
+    delete_plan = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "delete-task-permanently-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": ready.revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+    assert delete_plan.plan is not None
+    deleted = module.approve(ApproveCall(plan_id=delete_plan.plan.id))
+    assert deleted.status == "applied"
+    assert "lifecycle" not in module._library.records  # noqa: SLF001
+
+
+def test_heading_reorder_and_empty_delete_are_first_class_changes() -> None:
+    project = Record(uuid="head-project", kind="project", title="Launch")
+    first = Record(
+        uuid="head-first",
+        kind="task",
+        title="First",
+        heading=True,
+        parent_uuid=project.uuid,
+        sort_index=0,
+    )
+    second = Record(
+        uuid="head-second",
+        kind="task",
+        title="Second",
+        heading=True,
+        parent_uuid=project.uuid,
+        sort_index=1024,
+    )
+    module = workspace([project, first, second])
+    current = detail(module, second.id)
+
+    moved = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-reorder-001",
+                "change": [
+                    {"id": second.id, "if_revision": current.revision, "after": None}
+                ],
+            }
+        )
+    )
+    assert moved.status == "applied"
+    assert second.sort_index < first.sort_index
+
+    fresh = detail(module, second.id)
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-delete-001",
+                "change": [
+                    {
+                        "id": second.id,
+                        "if_revision": fresh.revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.plan is not None
+    deleted = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert deleted.status == "applied"
+    assert second.uuid not in module._library.records  # noqa: SLF001
+
+
+def test_tag_registry_changes_batch_with_reference_cleanup() -> None:
+    task = Record(uuid="tag-task", kind="task", title="Tagged", tag_uuids=["old"])
+    library = MemoryLibrary([task])
+    library.tags = {"old": "Old", "child": "Child", "parent": "Parent"}
+    library.tag_parents = {"child": ["old"]}
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    tag_read = module.read(ReadCall(view="tags"))
+    assert tag_read.scope_revision is not None
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-admin-delete-001",
+                "tags_revision": tag_read.scope_revision,
+                "change_tags": [
+                    {"id": "tag:parent", "title": "People"},
+                    {"id": "tag:old", "delete_permanently": True},
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert library.tags == {"child": "Child", "parent": "People"}
+    assert library.tag_parents["child"] == []
+    assert task.tag_uuids == []
+
+
+def test_nested_tags_can_be_ensured_and_assigned_in_one_commit() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-nested-create-001",
+                "ensure_tags": [
+                    {"key": "$people", "title": "People"},
+                    {"key": "$alex", "title": "Alex", "parent_id": "$people"},
+                ],
+                "create": [{"title": "Call Alex", "tag_ids": ["$alex"]}],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    people = module._library.tag_uuid("People")  # noqa: SLF001
+    alex = module._library.tag_uuid("Alex")  # noqa: SLF001
+    assert people is not None and alex is not None
+    assert module._library.tag_parents[alex] == [people]  # noqa: SLF001
+    created = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Call Alex"
+    )
+    assert created.tag_uuids == [alex]
+
+
+def test_ensure_existing_tag_rejects_an_indirect_parent_cycle() -> None:
+    library = MemoryLibrary()
+    library.tags = {"parent": "Parent", "child": "Child"}
+    library.tag_parents = {"parent": [], "child": ["parent"]}
+    module = ThingsWorkspace(library, clock=lambda: NOW)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-ensure-cycle-001",
+                "ensure_tags": [
+                    {
+                        "key": "$parent",
+                        "title": "Parent",
+                        "parent_id": "tag:child",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert library.tag_parents["parent"] == []
+
+
+def test_repeat_create_and_stop_use_one_plan_each() -> None:
+    module = workspace()
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-create-atomic-001",
+                "create": [
+                    {
+                        "title": "Review metrics",
+                        "checklist": ["Open dashboard"],
+                        "repeat": {
+                            "unit": "week",
+                            "interval": 2,
+                            "weekdays": ["monday", "friday"],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    instance = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "instance"
+    )
+    assert instance.recurrence.template_uuid == template.uuid
+    assert template.recurrence.rule is not None
+    assert template.recurrence.rule["of"] == [{"wd": 1}, {"wd": 5}]
+    assert [row.title for row in template.checklists] == ["Open dashboard"]
+    assert [row.title for row in instance.checklists] == ["Open dashboard"]
+
+    current = detail(module, template.id)
+    stop_plan = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-stop-atomic-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+    assert stop_plan.status == "needs_approval"
+    assert stop_plan.plan is not None
+    stopped = module.approve(ApproveCall(plan_id=stop_plan.plan.id))
+    assert stopped.status == "applied"
+    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert instance.recurrence.role == "none"
+
+
+def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> None:
+    project = Record(uuid="repeat-project", kind="project", title="Routines")
+    heading = Record(
+        uuid="repeat-heading",
+        kind="task",
+        title="Weekly",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="repeat-existing",
+        kind="task",
+        title="Review metrics",
+        notes="Keep the decision log current.",
+        start=NOW.date(),
+        deadline=NOW.date() + timedelta(days=2),
+        remind="09:30",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        tag_uuids=["focus"],
+        sort_index=2048,
+        checklists=[
+            ChecklistLine("repeat-row", "Open dashboard", status="done", sort_index=7)
+        ],
+    )
+    library = MemoryLibrary([project, heading, task])
+    library.tags["focus"] = "Focus"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    current = detail(module, task.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-existing-task-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "repeat": {
+                            "unit": "week",
+                            "interval": 2,
+                            "weekdays": ["monday", "friday"],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+
+    template = next(
+        item for item in library.records.values() if item.recurrence.role == "template"
+    )
+    assert {item.id for item in applied.items} == {task.id, template.id}
+    assert task.uuid == "repeat-existing"
+    assert task.recurrence.role == "instance"
+    assert task.recurrence.template_uuid == template.uuid
+    assert template.title == task.title
+    assert template.notes == task.notes
+    assert template.start == task.start
+    assert template.deadline == task.deadline
+    assert template.remind == task.remind
+    assert template.parent_uuid == task.parent_uuid
+    assert template.heading_uuid == task.heading_uuid
+    assert template.tag_uuids == task.tag_uuids
+    assert template.sort_index == task.sort_index
+    assert [(row.title, row.status, row.sort_index) for row in template.checklists] == [
+        ("Open dashboard", "open", 7)
+    ]
+    assert template.recurrence.interval == 2
+    assert template.recurrence.weekday_codes == (1, 5)
+
+
+def test_repeat_conversion_projects_one_desired_state_to_copy_and_template() -> None:
+    old_project = Record(uuid="old-project", kind="project", title="Old")
+    new_project = Record(uuid="new-project", kind="project", title="New")
+    heading = Record(
+        uuid="new-heading",
+        kind="task",
+        title="Cadence",
+        parent_uuid=new_project.uuid,
+        heading=True,
+    )
+    list_anchor = Record(
+        uuid="list-anchor",
+        kind="task",
+        title="First in project",
+        parent_uuid=new_project.uuid,
+        sort_index=1024,
+    )
+    today_anchor = Record(
+        uuid="today-anchor",
+        kind="task",
+        title="First today",
+        start=NOW.date(),
+        today_index=1024,
+    )
+    task = Record(
+        uuid="repeat-batched",
+        kind="task",
+        title="Old routine",
+        parent_uuid=old_project.uuid,
+        checklists=[
+            ChecklistLine("row-a", "Remove", status="done", sort_index=0),
+            ChecklistLine("row-b", "Rename", sort_index=1024),
+            ChecklistLine("row-c", "Keep", status="done", sort_index=2048),
+        ],
+    )
+    module = workspace(
+        [old_project, new_project, heading, list_anchor, today_anchor, task]
+    )
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-desired-state-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "title": "New routine",
+                        "into": new_project.id,
+                        "heading_id": heading.id,
+                        "start": "today",
+                        "deadline": (NOW.date() + timedelta(days=3)).isoformat(),
+                        "remind_at": "2026-08-15T09:30:00+00:00",
+                        "after": list_anchor.id,
+                        "today_after": today_anchor.id,
+                        "repeat": {"unit": "week"},
+                        "checklist_add": [{"key": "$new", "title": "Added"}],
+                        "checklist_change": [
+                            {
+                                "id": "check:row-b",
+                                "title": "Renamed",
+                                "status": "completed",
+                            }
+                        ],
+                        "checklist_remove": ["check:row-a"],
+                        "checklist_order": [
+                            "check:row-c",
+                            "$new",
+                            "check:row-b",
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    assert {item.id for item in applied.items} == {task.id, template.id}
+    assert task.uuid == "repeat-batched"
+    for record in (task, template):
+        assert record.title == "New routine"
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == heading.uuid
+        assert record.start == NOW.date()
+        assert record.deadline == NOW.date() + timedelta(days=3)
+        assert record.remind == "09:30"
+        assert record.sort_index > list_anchor.sort_index
+        assert record.today_index > today_anchor.today_index
+    assert [(row.uuid, row.title, row.status) for row in task.checklists] == [
+        ("row-c", "Keep", "done"),
+        (task.checklists[1].uuid, "Added", "open"),
+        ("row-b", "Renamed", "done"),
+    ]
+    assert [row.title for row in template.checklists] == [
+        "Keep",
+        "Added",
+        "Renamed",
+    ]
+    assert [row.status for row in template.checklists] == ["open", "open", "open"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_inbox", "expected_someday"),
+    [
+        ({"into": "anytime"}, False, False),
+        ({"into": "inbox"}, True, False),
+        ({"start": "someday"}, False, True),
+        ({"start": None}, False, False),
+    ],
+)
+def test_repeat_conversion_projects_schedule_clearing_semantics(
+    fields: dict[str, object], expected_inbox: bool, expected_someday: bool
+) -> None:
+    task = Record(
+        uuid="scheduled-repeat",
+        kind="task",
+        title="Scheduled routine",
+        start=NOW.date(),
+        remind="09:30",
+    )
+    module = workspace([task])
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"repeat-schedule-{next(iter(fields))}-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "repeat": {"unit": "week"},
+                        **fields,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    for record in (task, template):
+        assert record.start is None
+        assert record.remind is None
+        assert record.inbox is expected_inbox
+        assert record.someday is expected_someday
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_repeat_conversion_resolves_heading_when_moving_projects(
+    replacement: bool,
+) -> None:
+    old_project = Record(uuid="heading-old-project", kind="project", title="Old")
+    new_project = Record(uuid="heading-new-project", kind="project", title="New")
+    old_heading = Record(
+        uuid="heading-old",
+        kind="task",
+        title="Old section",
+        parent_uuid=old_project.uuid,
+        heading=True,
+    )
+    new_heading = Record(
+        uuid="heading-new",
+        kind="task",
+        title="New section",
+        parent_uuid=new_project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="heading-move-task",
+        kind="task",
+        title="Move routine",
+        parent_uuid=old_project.uuid,
+        heading_uuid=old_heading.uuid,
+    )
+    module = workspace([old_project, new_project, old_heading, new_heading, task])
+    change: dict[str, object] = {
+        "id": task.id,
+        "if_revision": detail(module, task.id).revision,
+        "repeat": {"unit": "week"},
+        "into": new_project.id,
+    }
+    if replacement:
+        change["heading_id"] = new_heading.id
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"repeat-heading-move-{replacement}-001",
+                "change": [change],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    expected_heading = new_heading.uuid if replacement else None
+    for record in (task, template):
+        assert record.parent_uuid == new_project.uuid
+        assert record.heading_uuid == expected_heading
+
+
+def test_repeat_conversion_chains_checklist_after_edits_for_both_copies() -> None:
+    task = Record(
+        uuid="repeat-check-after",
+        kind="task",
+        title="Routine",
+        checklists=[
+            ChecklistLine("after-a", "A", sort_index=0),
+            ChecklistLine("after-b", "B", sort_index=1024),
+            ChecklistLine("after-c", "C", sort_index=2048),
+        ],
+    )
+    module = workspace([task])
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-check-after-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "repeat": {"unit": "week"},
+                        "checklist_change": [
+                            {"id": "check:after-b", "after": "check:after-c"},
+                            {"id": "check:after-a", "after": "check:after-b"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert module.approve(ApproveCall(plan_id=prepared.plan.id)).status == "applied"
+    template = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.recurrence.role == "template"
+    )
+    assert [row.title for row in task.checklists] == ["C", "B", "A"]
+    assert [row.uuid for row in task.checklists] == ["after-c", "after-b", "after-a"]
+    assert [row.title for row in template.checklists] == ["C", "B", "A"]
+
+
+def test_template_and_current_copy_metadata_change_in_one_approved_batch() -> None:
+    template = Record(
+        uuid="future-template",
+        kind="task",
+        title="Old routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
+        ),
+    )
+    current_copy = Record(
+        uuid="current-copy",
+        kind="task",
+        title="Old routine",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, current_copy])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-future-and-current-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": detail(module, template.id).revision,
+                        "title": "Future routine",
+                        "notes_markdown": "Use for later cycles.",
+                    },
+                    {
+                        "id": current_copy.id,
+                        "if_revision": detail(module, current_copy.id).revision,
+                        "title": "Current routine",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert template.title == "Future routine"
+    assert template.notes == "Use for later cycles."
+    assert current_copy.title == "Current routine"
+    assert template.recurrence.interval == 1
+
+
+def test_repeat_rule_and_template_metadata_change_in_one_plan() -> None:
+    template = Record(
+        uuid="repeat-metadata-template",
+        kind="task",
+        title="Old routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
+        ),
+    )
+    module = workspace([template])
+    current = detail(module, template.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-metadata-change-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "title": "New routine",
+                        "notes_markdown": "Use the new checklist.",
+                        "repeat": {"interval": 2},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert template.title == "New routine"
+    assert template.notes == "Use the new checklist."
+    assert template.recurrence.interval == 2
+
+
+def test_generated_task_completion_is_an_ordinary_exact_change() -> None:
+    template = Record(
+        uuid="completion-template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 8, "fa": 1},
+        ),
+    )
+    instance = Record(
+        uuid="completion-instance",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="after_completion",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, instance])
+    current = detail(module, instance.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-instance-complete-001",
+                "change": [
+                    {
+                        "id": instance.id,
+                        "if_revision": current.revision,
+                        "status": "completed",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert instance.status == "done"
+
+
+def test_trashed_project_can_purge_its_tree_in_one_approved_plan() -> None:
+    project = Record(
+        uuid="purge-project",
+        kind="project",
+        title="Old launch",
+        trashed=True,
+    )
+    heading = Record(
+        uuid="purge-heading",
+        kind="task",
+        title="Old group",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="purge-child",
+        kind="task",
+        title="Old action",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        checklists=[ChecklistLine("purge-row", "Old row")],
+    )
+    module = workspace([project, heading, task])
+    current = detail(module, project.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-tree-purge-001",
+                "change": [
+                    {
+                        "id": project.id,
+                        "if_revision": current.revision,
+                        "lifecycle": "delete_permanently",
+                        "delete_contents": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert any("2 contained records" in warning for warning in prepared.plan.warnings)
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_project_purge_walks_nested_imported_descendants_deepest_first() -> None:
+    project = Record(uuid="tree-root", kind="project", title="Root", trashed=True)
+    nested = Record(
+        uuid="tree-nested",
+        kind="project",
+        title="Nested",
+        parent_uuid=project.uuid,
+    )
+    task = Record(
+        uuid="tree-leaf",
+        kind="task",
+        title="Leaf",
+        parent_uuid=nested.uuid,
+        checklists=[ChecklistLine("tree-row", "Leaf row")],
+    )
+    module = workspace([project, nested, task])
+    current = detail(module, project.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-nested-purge-001",
+                "change": [
+                    {
+                        "id": project.id,
+                        "if_revision": current.revision,
+                        "lifecycle": "delete_permanently",
+                        "delete_contents": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert module._library.records == {}  # noqa: SLF001
 
 
 def test_risky_intent_is_reserved_only_as_needing_approval() -> None:
@@ -1519,9 +2988,7 @@ def test_risky_plan_stales_when_the_tag_catalog_changes() -> None:
                 "intent_id": "area-tag-race-001",
                 "scope_revision": system_scope(module),
                 "ensure_tags": [{"key": "$focus", "title": "Focus"}],
-                "create": [
-                    {"kind": "area", "title": "Health", "tag_ids": ["$focus"]}
-                ],
+                "create": [{"kind": "area", "title": "Health", "tag_ids": ["$focus"]}],
             }
         )
     )
@@ -1538,9 +3005,7 @@ def test_risky_reorder_plan_stales_when_an_unmentioned_sibling_changes() -> None
     anchor = Record(uuid="anchor", kind="project", title="Anchor", sort_index=0)
     target = Record(uuid="target", kind="project", title="Target", sort_index=1024)
     sibling = Record(uuid="sibling", kind="project", title="Sibling", sort_index=2048)
-    child = Record(
-        uuid="child", kind="task", title="Open", parent_uuid=target.uuid
-    )
+    child = Record(uuid="child", kind="task", title="Open", parent_uuid=target.uuid)
     module = workspace([anchor, target, sibling, child])
     current = detail(module, target.id)
     prepared = module.commit(

@@ -17,9 +17,23 @@ from things_orchestrator.interface import (
     READ_OUT,
     RESULT_OUT,
     ApproveCall,
+    ChangeEntry,
+    ChangeTag,
+    ChecklistAdd,
+    ChecklistChange,
+    ChecklistFact,
     CommitCall,
+    CreateEntry,
+    EnsureTag,
+    ItemFact,
+    PlanFact,
     ReadCall,
+    RecurrenceFact,
+    RepeatCreate,
+    RepeatEdit,
     Result,
+    ReviewSection,
+    TagFact,
 )
 
 
@@ -146,6 +160,154 @@ def test_commit_accepts_special_homes() -> None:
         }
     )
     assert [entry.into for entry in call.create] == ["inbox", "anytime"]
+
+
+def test_trash_is_explicit_and_cannot_combine_with_other_changes() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "trash-task-001",
+            "change": [{"id": "task:one", "if_revision": "r_1", "trash": True}],
+        }
+    )
+    assert call.change[0].trash is True
+    assert COMMIT_IN["properties"]["change"]["items"]["properties"]["trash"] == {
+        "const": True
+    }
+
+    with pytest.raises(ValidationError, match="Trash cannot combine"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-task-mixed-001",
+                "change": [
+                    {
+                        "id": "task:one",
+                        "if_revision": "r_1",
+                        "trash": True,
+                        "title": "Changed",
+                    }
+                ],
+            }
+        )
+
+
+def test_heading_create_rename_assignment_and_clear_are_explicit() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "heading-operations-001",
+            "create": [
+                {"key": "$section", "kind": "heading", "title": "Next", "into": "project:p"}
+            ],
+            "change": [
+                {"id": "heading:h", "if_revision": "r_h", "title": "Later"},
+                {"id": "task:t", "if_revision": "r_t", "heading_id": None},
+            ],
+        }
+    )
+
+    assert call.create[0].kind == "heading"
+    assert call.change[0].id == "heading:h"
+    assert "heading_id" in call.change[1].model_fields_set
+
+    with pytest.raises(ValidationError, match="accepts only"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-invalid-001",
+                "create": [
+                    {
+                        "kind": "heading",
+                        "title": "Next",
+                        "into": "project:p",
+                        "notes_markdown": "No",
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "create, message",
+    [
+        (
+            [
+                {
+                    "key": "$task",
+                    "kind": "task",
+                    "title": "Ship",
+                    "into": "project:p",
+                    "heading_id": "$section",
+                },
+                {
+                    "key": "$section",
+                    "kind": "heading",
+                    "title": "Next",
+                    "into": "project:p",
+                },
+            ],
+            "earlier heading create entry",
+        ),
+        (
+            [
+                {
+                    "key": "$other",
+                    "kind": "task",
+                    "title": "Other",
+                    "into": "project:p",
+                },
+                {
+                    "kind": "task",
+                    "title": "Ship",
+                    "into": "project:p",
+                    "heading_id": "$other",
+                },
+            ],
+            "earlier heading create entry",
+        ),
+    ],
+    ids=["forward-heading", "non-heading"],
+)
+def test_task_create_rejects_invalid_local_heading_references(
+    create: list[dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        CommitCall.model_validate(
+            {"intent_id": "heading-local-invalid-001", "create": create}
+        )
+
+
+def test_repeat_interval_change_is_explicit_and_isolated() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "repeat-interval-001",
+            "change": [
+                {
+                    "id": "task:template",
+                    "if_revision": "r_template",
+                    "repeat_interval": 3,
+                }
+            ],
+        }
+    )
+
+    assert call.change[0].repeat_interval == 3
+
+    for invalid in (
+        {"repeat_interval": 0},
+        {"repeat_interval": 367},
+        {"repeat_interval": 2, "title": "Also rename"},
+    ):
+        with pytest.raises(ValidationError):
+            CommitCall.model_validate(
+                {
+                    "intent_id": "repeat-interval-invalid-001",
+                    "change": [
+                        {
+                            "id": "task:template",
+                            "if_revision": "r_template",
+                            **invalid,
+                        }
+                    ],
+                }
+            )
 
 
 def test_commit_rejects_forward_local_order_anchors() -> None:
@@ -418,6 +580,85 @@ def test_tag_schema_matches_runtime_local_reference_rules() -> None:
     assert "tags" in APPROVE_OUT["properties"]
 
 
+def test_advanced_mutations_stay_in_one_commit_shape() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "advanced-mutation-shape-001",
+            "tags_revision": "s_tags",
+            "ensure_tags": [
+                {"key": "$people", "title": "People"},
+                {"key": "$alex", "title": "Alex", "parent_id": "$people"},
+            ],
+            "change_tags": [{"id": "tag:old", "title": "Archive"}],
+            "change": [
+                {
+                    "id": "task:template",
+                    "if_revision": "r_repeat",
+                    "repeat": {
+                        "mode": "after_completion",
+                        "unit": "week",
+                        "interval": 2,
+                    },
+                },
+                {
+                    "id": "heading:next",
+                    "if_revision": "r_heading",
+                    "after": None,
+                },
+                {
+                    "id": "task:rich",
+                    "if_revision": "r_rich",
+                    "notes_markdown": "Replacement",
+                    "replace_rich_note": True,
+                },
+            ],
+        }
+    )
+
+    assert call.ensure_tags[1].parent_id == "$people"
+    assert call.change_tags[0].title == "Archive"
+    assert call.change[0].repeat is not None
+    assert call.change[1].model_fields_set == {"id", "if_revision", "after"}
+    change_schema = COMMIT_IN["properties"]["change"]["items"]["properties"]
+    assert change_schema["lifecycle"]["enum"] == [
+        "trash",
+        "restore",
+        "delete_permanently",
+    ]
+
+
+def test_irreversible_mutations_cannot_hide_other_edits() -> None:
+    with pytest.raises(ValueError, match="lifecycle change"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "permanent-delete-mixed-001",
+                "change": [
+                    {
+                        "id": "task:old",
+                        "if_revision": "r_old",
+                        "lifecycle": "delete_permanently",
+                        "title": "Hidden edit",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValueError, match="tag deletion"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-delete-mixed-001",
+                "tags_revision": "s_tags",
+                "change_tags": [
+                    {
+                        "id": "tag:old",
+                        "title": "Hidden edit",
+                        "delete_permanently": True,
+                    }
+                ],
+            }
+        )
+
+
 def test_manual_schemas_are_flat_and_compact() -> None:
     schemas = (READ_IN, COMMIT_IN, APPROVE_IN, RESULT_OUT)
     for schema in schemas:
@@ -437,13 +678,108 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    assert discovery_chars < 9_800
+    assert discovery_chars < 13_500
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 10_600
+    assert wire_chars < 13_400
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
+    assert "exact ordinary Task" in COMMIT_DESC
+    assert "future template" in COMMIT_DESC
     assert "private" in APPROVE_DESC
+
+
+def test_manual_schema_contracts_match_the_runtime_models() -> None:
+    pairs = (
+        (ReadCall, READ_IN),
+        (CommitCall, COMMIT_IN),
+        (ApproveCall, APPROVE_IN),
+        (CreateEntry, COMMIT_IN["properties"]["create"]["items"]),
+        (ChangeEntry, COMMIT_IN["properties"]["change"]["items"]),
+        (EnsureTag, COMMIT_IN["properties"]["ensure_tags"]["items"]),
+        (ChangeTag, COMMIT_IN["properties"]["change_tags"]["items"]),
+        (
+            RepeatCreate,
+            COMMIT_IN["properties"]["create"]["items"]["properties"]["repeat"],
+        ),
+        (
+            RepeatEdit,
+            COMMIT_IN["properties"]["change"]["items"]["properties"]["repeat"],
+        ),
+        (
+            ChecklistAdd,
+            COMMIT_IN["properties"]["change"]["items"]["properties"][
+                "checklist_add"
+            ]["items"],
+        ),
+        (
+            ChecklistChange,
+            COMMIT_IN["properties"]["change"]["items"]["properties"][
+                "checklist_change"
+            ]["items"],
+        ),
+        (Result, RESULT_OUT),
+        (ItemFact, RESULT_OUT["properties"]["items"]["items"]),
+        (TagFact, RESULT_OUT["properties"]["tags"]["items"]),
+        (
+            ReviewSection,
+            RESULT_OUT["properties"]["sections"]["items"],
+        ),
+        (PlanFact, RESULT_OUT["properties"]["plan"]),
+        (
+            ChecklistFact,
+            RESULT_OUT["properties"]["items"]["items"]["properties"][
+                "checklist"
+            ]["items"],
+        ),
+        (
+            RecurrenceFact,
+            RESULT_OUT["properties"]["items"]["items"]["properties"][
+                "recurrence"
+            ],
+        ),
+    )
+    constraints = {
+        "const",
+        "default",
+        "enum",
+        "format",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "pattern",
+    }
+
+    for model, manual in pairs:
+        runtime = model.model_json_schema(by_alias=True)
+        assert set(manual.get("properties", {})) == set(runtime.get("properties", {}))
+        assert set(manual.get("required", [])) == set(runtime.get("required", []))
+        for name, runtime_property in runtime.get("properties", {}).items():
+            while "$ref" in runtime_property:
+                target = runtime
+                for part in runtime_property["$ref"].removeprefix("#/").split("/"):
+                    target = target[part]
+                runtime_property = target
+            if "anyOf" in runtime_property:
+                non_null = [
+                    branch
+                    for branch in runtime_property["anyOf"]
+                    if branch.get("type") != "null"
+                ]
+                if len(non_null) == 1:
+                    runtime_property = non_null[0]
+            manual_property = manual["properties"][name]
+            for key in constraints & runtime_property.keys():
+                if key == "default" and runtime_property[key] is None:
+                    continue
+                assert manual_property.get(key) == runtime_property[key], (
+                    model.__name__,
+                    name,
+                    key,
+                )

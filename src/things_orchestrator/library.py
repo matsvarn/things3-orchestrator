@@ -5,22 +5,23 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
+from .recurrence import JsonValue, RecurrenceState
+
 Kind = Literal["task", "project", "area"]
+PublicKind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "done", "dropped"]
-RecurrenceRole = Literal["none", "template", "instance"]
-RecurrenceType = Literal["none", "fixed", "after_completion", "unknown"]
 
 
-def public_id(kind: Kind, uuid: str) -> str:
+def public_id(kind: PublicKind, uuid: str) -> str:
     return f"{kind}:{uuid}"
 
 
-def parse_id(value: str) -> tuple[Kind | None, str]:
+def parse_id(value: str) -> tuple[PublicKind | None, str]:
     prefix, _, rest = value.partition(":")
-    if rest and prefix in {"task", "project", "area"}:
+    if rest and prefix in {"task", "project", "area", "heading"}:
         return prefix, rest  # type: ignore[return-value]
     return None, value
 
@@ -93,10 +94,7 @@ class Record:
     parent_uuid: str | None = None
     area_uuid: str | None = None
     tag_uuids: list[str] = field(default_factory=list)
-    recurring_template: bool = False
-    recurrence_role: RecurrenceRole = "none"
-    recurrence_type: RecurrenceType = "none"
-    recurrence_template_uuid: str | None = None
+    recurrence: RecurrenceState = field(default_factory=RecurrenceState)
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
@@ -107,23 +105,33 @@ class Record:
 
     @property
     def id(self) -> str:
-        return public_id(self.kind, self.uuid)
+        return public_id(self.public_kind, self.uuid)
+
+    @property
+    def public_kind(self) -> PublicKind:
+        return "heading" if self.heading else self.kind
 
     def is_open(self) -> bool:
         return (
             self.status == "open"
             and not self.trashed
-            and not self.recurring_template
+            and self.recurrence.role != "template"
             and not self.heading
         )
 
 
 @dataclass(frozen=True)
 class Write:
-    """One library mutation. Cloud batches these into a single commit."""
+    """Stable journal form for one mutation.
+
+    Adapters compile this compatibility record to a typed mutation family
+    before they execute it. Old pending journal entries therefore keep their
+    wire shape while adapter code does not depend on one flat action union.
+    """
 
     action: Literal[
         "create",
+        "create_heading",
         "update",
         "complete",
         "cancel",
@@ -131,8 +139,16 @@ class Write:
         "tags",
         "rename_area",
         "delete_area",
+        "trash",
+        "restore",
+        "permanent_delete",
         "ensure_tag",
+        "rename_tag",
+        "reparent_tag",
+        "delete_tag",
         "checklist",
+        "repeat",
+        "repeat_link",
     ]
     uuid: str
     kind: Kind = "task"
@@ -153,6 +169,7 @@ class Write:
     inbox: bool = False
     anytime: bool = False
     heading_uuid: str | None = None
+    clear_heading: bool = False
     sort_index: int | None = None
     today_index: int | None = None
     owner_today: date | None = None
@@ -160,6 +177,136 @@ class Write:
     checklist_status: Status | None = None
     checklist_index: int | None = None
     checklist_remove: bool = False
+    recurrence_rule: dict[str, JsonValue] | None = None
+    recurrence_links: list[str] | None = None
+    recurrence_generated: bool = False
+    tag_parent_uuids: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class _CreateMutation:
+    write: Write
+    heading: bool
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.create(self)
+
+
+@dataclass(frozen=True)
+class _EditMutation:
+    write: Write
+    action: Literal["update", "move", "tags", "rename_area"]
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.edit(self)
+
+
+@dataclass(frozen=True)
+class _LifecycleMutation:
+    write: Write
+    action: Literal[
+        "complete", "cancel", "delete_area", "trash", "restore", "permanent_delete"
+    ]
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.lifecycle(self)
+
+
+@dataclass(frozen=True)
+class _TagMutation:
+    write: Write
+    action: Literal["ensure_tag", "rename_tag", "reparent_tag", "delete_tag"]
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.tag(self)
+
+
+@dataclass(frozen=True)
+class _ChecklistMutation:
+    write: Write
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.checklist(self)
+
+
+@dataclass(frozen=True)
+class _RecurrenceMutation:
+    write: Write
+    action: Literal["repeat", "repeat_link"]
+
+    def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
+        return handler.recurrence(self)
+
+
+_Mutation = (
+    _CreateMutation
+    | _EditMutation
+    | _LifecycleMutation
+    | _TagMutation
+    | _ChecklistMutation
+    | _RecurrenceMutation
+)
+
+_Result = TypeVar("_Result", covariant=True)
+
+
+class _MutationHandler(Protocol[_Result]):
+    """Visitor interface implemented by each mutation adapter."""
+
+    def create(self, mutation: _CreateMutation) -> _Result: ...
+    def edit(self, mutation: _EditMutation) -> _Result: ...
+    def lifecycle(self, mutation: _LifecycleMutation) -> _Result: ...
+    def tag(self, mutation: _TagMutation) -> _Result: ...
+    def checklist(self, mutation: _ChecklistMutation) -> _Result: ...
+    def recurrence(self, mutation: _RecurrenceMutation) -> _Result: ...
+
+
+def _compile_mutation(write: Write) -> _Mutation:
+    """Compile the journal form to the small internal mutation interface."""
+    action = write.action
+    if action in {"create", "create_heading"}:
+        return _CreateMutation(write, heading=action == "create_heading")
+    if action in {"update", "move", "tags", "rename_area"}:
+        return _EditMutation(
+            write, cast(Literal["update", "move", "tags", "rename_area"], action)
+        )
+    if action in {
+        "complete",
+        "cancel",
+        "delete_area",
+        "trash",
+        "restore",
+        "permanent_delete",
+    }:
+        return _LifecycleMutation(
+            write,
+            cast(
+                Literal[
+                    "complete",
+                    "cancel",
+                    "delete_area",
+                    "trash",
+                    "restore",
+                    "permanent_delete",
+                ],
+                action,
+            ),
+        )
+    if action in {"ensure_tag", "rename_tag", "reparent_tag", "delete_tag"}:
+        return _TagMutation(
+            write,
+            cast(
+                Literal["ensure_tag", "rename_tag", "reparent_tag", "delete_tag"],
+                action,
+            ),
+        )
+    if action == "checklist":
+        return _ChecklistMutation(write)
+    if action in {"repeat", "repeat_link"}:
+        return _RecurrenceMutation(
+            write, cast(Literal["repeat", "repeat_link"], action)
+        )
+    raise ValueError(f"Unknown mutation action: {action}")
 
 
 @dataclass
@@ -171,10 +318,13 @@ class ApplyResult:
 class Library(Protocol):
     def refresh(self, *, force: bool = False) -> None: ...
     def get(self, value: str) -> Record | None: ...
-    def find(self, text: str, limit: int = 10, into: str | None = None) -> list[Record]: ...
+    def find(
+        self, text: str, limit: int = 10, into: str | None = None
+    ) -> list[Record]: ...
     def today(self, *, waiting_tag: str, today: date) -> list[Record]: ...
     def inbox(self, limit: int = 15) -> list[Record]: ...
     def week(self, *, today: date, limit: int = 15) -> list[Record]: ...
+    def trash(self) -> list[Record]: ...
     def project(self, value: str) -> list[Record]: ...
     def heading_title(self, item: Record) -> str | None: ...
     def next_index(self, write: Write) -> int: ...
@@ -186,6 +336,7 @@ class Library(Protocol):
     def tag_uuid(self, title: str) -> str | None: ...
     def waiting_tag(self) -> str: ...
     def apply(self, writes: list[Write]) -> ApplyResult: ...
+    def matches(self, writes: list[Write]) -> bool: ...
 
 
 class MemoryLibrary:
@@ -210,7 +361,7 @@ class MemoryLibrary:
                 if candidate.uuid.startswith(value) or candidate.id == value
             ]
             return matches[0] if len(matches) == 1 else None
-        if kind is not None and item.kind != kind:
+        if kind is not None and item.public_kind != kind:
             return None
         return item
 
@@ -228,7 +379,11 @@ class MemoryLibrary:
             if isinstance(home, list) or home is None:
                 return []
             if home.kind == "area":
-                hits = [item for item in hits if item.area_uuid == home.uuid or item.uuid == home.uuid]
+                hits = [
+                    item
+                    for item in hits
+                    if item.area_uuid == home.uuid or item.uuid == home.uuid
+                ]
             else:
                 hits = [
                     item
@@ -285,8 +440,14 @@ class MemoryLibrary:
                 or (item.start is not None and today < item.start <= end)
             )
         ]
-        hits.sort(key=lambda item: (item.deadline or item.start or date.max, item.sort_index))
+        hits.sort(
+            key=lambda item: (item.deadline or item.start or date.max, item.sort_index)
+        )
         return hits[:limit]
+
+    def trash(self) -> list[Record]:
+        hits = [item for item in self.records.values() if item.trashed]
+        return sorted(hits, key=lambda item: (item.kind, item.sort_index, item.title))
 
     def project(self, value: str) -> list[Record]:
         root = self.get(value)
@@ -294,14 +455,20 @@ class MemoryLibrary:
             return []
         children = [
             item
-            for item in self._open()
+            for item in self.records.values()
             if item.parent_uuid == root.uuid
+            and not item.trashed
+            and item.status == "open"
+            and item.recurrence.role != "template"
         ]
         children.sort(
             key=lambda item: (
                 self.records[item.heading_uuid].sort_index
                 if item.heading_uuid and item.heading_uuid in self.records
+                else item.sort_index
+                if item.heading
                 else -1,
+                0 if item.heading else 1,
                 item.sort_index,
                 item.title,
             )
@@ -316,15 +483,27 @@ class MemoryLibrary:
     def next_index(self, write: Write) -> int:
         siblings: list[Record] = []
         for item in self.records.values():
-            if item.heading or item.recurring_template or item.uuid == write.uuid:
+            if (
+                item.heading
+                or item.recurrence.role == "template"
+                or item.uuid == write.uuid
+            ):
                 continue
             if write.into_kind == "project" and item.parent_uuid == write.into_uuid:
                 siblings.append(item)
             elif write.kind == "area" and item.kind == "area":
                 siblings.append(item)
-            elif write.into_kind == "area" and item.area_uuid == write.into_uuid and not item.parent_uuid:
+            elif (
+                write.into_kind == "area"
+                and item.area_uuid == write.into_uuid
+                and not item.parent_uuid
+            ):
                 siblings.append(item)
-            elif write.kind == "project" and write.into_uuid is None and write.into_kind is None:
+            elif (
+                write.kind == "project"
+                and write.into_uuid is None
+                and write.into_kind is None
+            ):
                 if (
                     item.kind == "project"
                     and not item.parent_uuid
@@ -333,7 +512,11 @@ class MemoryLibrary:
                     and not item.someday
                 ):
                     siblings.append(item)
-            elif write.kind == "task" and write.into_uuid is None and write.into_kind is None:
+            elif (
+                write.kind == "task"
+                and write.into_uuid is None
+                and write.into_kind is None
+            ):
                 if write.anytime:
                     if (
                         item.kind == "task"
@@ -351,11 +534,7 @@ class MemoryLibrary:
 
     def system(self) -> list[Record]:
         areas = self.areas()
-        projects = [
-            item
-            for item in self._open()
-            if item.kind == "project"
-        ]
+        projects = [item for item in self._open() if item.kind == "project"]
         projects.sort(key=lambda item: (item.sort_index, item.title))
         return [*areas, *projects]
 
@@ -366,16 +545,19 @@ class MemoryLibrary:
         )
 
     def children_in_area(self, uuid: str) -> list[Record]:
-        return sorted([
-            item
-            for item in self.records.values()
-            if item.kind != "area"
-            and item.area_uuid == uuid
-            and not item.parent_uuid
-            and not item.trashed
-            and item.status == "open"
-            and not item.heading
-        ], key=lambda item: (item.sort_index, item.title))
+        return sorted(
+            [
+                item
+                for item in self.records.values()
+                if item.kind != "area"
+                and item.area_uuid == uuid
+                and not item.parent_uuid
+                and not item.trashed
+                and item.status == "open"
+                and not item.heading
+            ],
+            key=lambda item: (item.sort_index, item.title),
+        )
 
     def resolve_into(self, value: str) -> Record | None | list[Record]:
         exact = self.get(value)
@@ -419,253 +601,69 @@ class MemoryLibrary:
             self.records, self.tags, self.tag_parents = snapshot
             raise
 
+    def matches(self, writes: list[Write]) -> bool:
+        """Verify a mutation batch against the current materialized state.
+
+        This is the shared read-back seam for both library adapters. It keeps
+        journal recovery independent from adapter storage details.
+        """
+        tag_aliases = {
+            write.uuid: actual
+            for write in writes
+            if write.action == "ensure_tag"
+            and (actual := self.tag_uuid(write.title or "")) is not None
+        }
+        normalized = [
+            replace(
+                write,
+                tag_uuids=[tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids],
+            )
+            if write.tag_uuids is not None
+            else write
+            for write in writes
+        ]
+        return all(self._write_matches(write) for write in normalized)
+
+    def _write_matches(self, write: Write) -> bool:
+        return _compile_mutation(write).dispatch(_MutationVerifier(self))
+
+    @staticmethod
+    def _placement_matches(item: Record, write: Write) -> bool:
+        if write.kind == "area":
+            return (
+                not item.inbox and item.parent_uuid is None and item.area_uuid is None
+            )
+        if write.into_kind == "project":
+            return (
+                item.parent_uuid == write.into_uuid
+                and item.area_uuid is None
+                and not item.inbox
+                and item.heading_uuid == write.heading_uuid
+            )
+        if write.into_kind == "area":
+            return (
+                item.area_uuid == write.into_uuid
+                and item.parent_uuid is None
+                and not item.inbox
+            )
+        if (
+            write.kind == "project"
+            or write.anytime
+            or write.start is not None
+            or write.someday
+            or write.tonight
+        ):
+            return (
+                not item.inbox and item.parent_uuid is None and item.area_uuid is None
+            )
+        return item.inbox and item.parent_uuid is None and item.area_uuid is None
+
     def _apply_unchecked(self, writes: list[Write]) -> ApplyResult:
-        created: dict[str, str] = {}
-        verified: list[str] = []
-        tag_aliases: dict[str, str] = {}
+        handler = _MemoryApplyHandler(self)
         for write in writes:
-            if write.tag_uuids is not None:
-                write = replace(
-                    write,
-                    tag_uuids=[tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids],
-                )
-            if write.heading_uuid is not None:
-                current = self.records.get(write.uuid)
-                project_uuid = write.into_uuid or (current.parent_uuid if current else None)
-                heading = self.records.get(write.heading_uuid)
-                if (
-                    heading is None
-                    or not heading.heading
-                    or not project_uuid
-                    or heading.parent_uuid != project_uuid
-                ):
-                    raise ValueError("The heading must belong to the destination Project")
-            if write.action == "ensure_tag":
-                existing = self.tag_uuid(write.title or "")
-                if existing is None:
-                    uuid = write.uuid
-                    self.tags[uuid] = write.title or ""
-                    tag_aliases[write.uuid] = uuid
-                    created[write.title or uuid] = uuid
-                else:
-                    tag_aliases[write.uuid] = existing
-                    created[write.title or existing] = existing
-                continue
-            if write.action == "checklist":
-                parent, line = self._find_checklist(write.uuid)
-                if write.checklist_remove:
-                    if parent is not None:
-                        parent.checklists = [item for item in parent.checklists if item.uuid != write.uuid]
-                    verified.append(write.title or (line.title if line else write.uuid))
-                    continue
-                destination = self.records.get(write.checklist_parent_uuid or "") or parent
-                if destination is None or destination.kind != "task":
-                    raise ValueError("A checklist row needs a task parent")
-                status = write.checklist_status or (line.status if line else "open")
-                index = write.checklist_index if write.checklist_index is not None else write.sort_index
-                if index is None:
-                    index = (
-                        line.sort_index
-                        if line
-                        else max(
-                            (item.sort_index for item in destination.checklists),
-                            default=-1,
-                        )
-                        + 1
-                    )
-                replacement = ChecklistLine(
-                    uuid=write.uuid,
-                    title=write.title if write.title is not None else (line.title if line else ""),
-                    status=status,
-                    sort_index=index,
-                )
-                if parent is not None and parent is not destination:
-                    parent.checklists = [item for item in parent.checklists if item.uuid != write.uuid]
-                destination.checklists = [item for item in destination.checklists if item.uuid != write.uuid]
-                destination.checklists.append(replacement)
-                destination.checklists.sort(key=lambda item: (item.sort_index, item.uuid))
-                verified.append(replacement.title)
-                continue
-            if write.action == "create":
-                parent_uuid: str | None = None
-                area_uuid: str | None = None
-                inbox = (
-                    write.into_uuid is None
-                    and write.kind == "task"
-                    and not write.someday
-                    and not write.tonight
-                    and write.start is None
-                    and not write.anytime
-                    and not write.inbox
-                )
-                if write.kind == "area":
-                    inbox = False
-                    parent_uuid = None
-                    area_uuid = None
-                elif write.inbox:
-                    if write.kind == "project":
-                        raise ValueError("Projects cannot enter Inbox")
-                    inbox = True
-                    parent_uuid = None
-                    area_uuid = None
-                elif write.into_kind == "project":
-                    parent_uuid = write.into_uuid
-                    inbox = False
-                elif write.into_kind == "area":
-                    area_uuid = write.into_uuid
-                    inbox = False
-                record = Record(
-                    uuid=write.uuid,
-                    kind=write.kind,
-                    title=write.title or "",
-                    notes=write.notes or "",
-                    notes_source="structured" if write.notes is not None else "none",
-                    notes_format="markdown",
-                    status=write.status or "open",
-                    completed_at=(
-                        datetime.now(timezone.utc)
-                        if write.status in {"done", "dropped"}
-                        else None
-                    ),
-                    start=write.start,
-                    deadline=write.deadline,
-                    remind=write.remind,
-                    tonight=write.tonight,
-                    someday=write.someday,
-                    parent_uuid=parent_uuid,
-                    area_uuid=area_uuid,
-                    inbox=inbox and not write.someday and not write.tonight,
-                    tag_uuids=list(write.tag_uuids or []),
-                    heading_uuid=write.heading_uuid,
-                    sort_index=(
-                        write.sort_index
-                        if write.sort_index is not None
-                        else self.next_index(write)
-                    ),
-                    today_index=write.today_index or 0,
-                )
-                self.records[record.uuid] = record
-                created[record.title] = record.id
-                verified.append(record.title)
-                continue
-            item = self.records.get(write.uuid)
-            if item is None:
-                continue
-            if write.action == "complete":
-                item.status = "done"
-                item.completed_at = datetime.now(timezone.utc)
-            elif write.action == "cancel":
-                item.status = "dropped"
-                item.completed_at = datetime.now(timezone.utc)
-            elif write.action == "delete_area":
-                item.trashed = True
-                del self.records[item.uuid]
-            elif write.action == "rename_area" and write.title:
-                item.title = write.title
-            elif write.action == "move":
-                item.heading_uuid = write.heading_uuid
-                if write.into_kind == "project":
-                    item.parent_uuid = write.into_uuid
-                    item.area_uuid = None
-                    item.inbox = False
-                elif write.into_kind == "area":
-                    item.area_uuid = write.into_uuid
-                    item.parent_uuid = None
-                    item.inbox = False
-                else:
-                    if item.kind == "project":
-                        if write.inbox:
-                            raise ValueError("Projects cannot enter Inbox")
-                        item.inbox = False
-                        item.someday = False
-                        item.parent_uuid = None
-                        item.area_uuid = None
-                    else:
-                        item.parent_uuid = None
-                        item.area_uuid = None
-                        item.inbox = not write.anytime
-                        item.someday = False
-                        item.tonight = False
-                        item.start = None
-                        item.remind = None
-            elif write.action == "tags" and write.tag_uuids is not None:
-                item.tag_uuids = list(write.tag_uuids)
-            elif write.action == "update":
-                if write.status is not None:
-                    item.status = write.status
-                    item.completed_at = (
-                        datetime.now(timezone.utc)
-                        if write.status in {"done", "dropped"}
-                        else None
-                    )
-                if write.title is not None:
-                    item.title = write.title
-                if write.notes is not None:
-                    item.notes = write.notes
-                    item.notes_source = "structured"
-                    item.notes_format = "markdown"
-                if write.tag_uuids is not None:
-                    item.tag_uuids = list(write.tag_uuids)
-                if write.sort_index is not None:
-                    item.sort_index = write.sort_index
-                if write.today_index is not None:
-                    item.today_index = write.today_index
-                if write.clear_start:
-                    item.start = None
-                    item.remind = None
-                    item.tonight = False
-                    item.someday = False
-                elif write.someday:
-                    item.start = None
-                    item.remind = None
-                    item.someday = True
-                    item.tonight = False
-                    item.inbox = False
-                elif write.start is not None:
-                    item.start = write.start
-                    item.someday = False
-                    item.inbox = False
-                    item.tonight = write.tonight
-                if write.tonight and not write.someday:
-                    item.tonight = True
-                    item.inbox = False
-                if write.anytime:
-                    item.start = None
-                    item.remind = None
-                    item.someday = False
-                    item.tonight = False
-                    item.inbox = False
-                if write.clear_deadline:
-                    item.deadline = None
-                elif write.deadline is not None:
-                    item.deadline = write.deadline
-                if write.clear_remind:
-                    item.remind = None
-                elif write.remind is not None:
-                    item.remind = write.remind
-                if (
-                    write.into_uuid is not None
-                    or write.into_kind is not None
-                    or write.inbox
-                    or write.anytime
-                    or write.heading_uuid is not None
-                ):
-                    self._apply_unchecked(
-                        [
-                            Write(
-                                action="move",
-                                uuid=item.uuid,
-                                kind=item.kind,
-                                into_uuid=write.into_uuid,
-                                into_kind=write.into_kind,
-                                inbox=write.inbox,
-                                anytime=write.anytime,
-                                heading_uuid=write.heading_uuid,
-                            )
-                        ]
-                    )
-            verified.append(item.title)
-        return ApplyResult(verified=list(dict.fromkeys(verified)), created=created)
+            handler.apply(write)
+        handler.finish()
+        return handler.result()
 
     def _find_checklist(self, uuid: str) -> tuple[Record | None, ChecklistLine | None]:
         for parent in self.records.values():
@@ -682,3 +680,511 @@ class MemoryLibrary:
         if item.inbox:
             return "Inbox"
         return None
+
+
+class _MemoryApplyHandler(_MutationHandler[None]):
+    """Apply each typed mutation family to one in-memory library."""
+
+    def __init__(self, library: MemoryLibrary) -> None:
+        self.library = library
+        self.created: dict[str, str] = {}
+        self.verified: list[str] = []
+        self.tag_aliases: dict[str, str] = {}
+
+    def result(self) -> ApplyResult:
+        return ApplyResult(
+            verified=list(dict.fromkeys(self.verified)),
+            created=self.created,
+        )
+
+    def apply(self, write: Write) -> None:
+        mutation = _compile_mutation(write)
+        if write.tag_uuids is not None:
+            write = replace(
+                write,
+                tag_uuids=[
+                    self.tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids
+                ],
+            )
+            mutation = _compile_mutation(write)
+        self._validate_heading(write)
+        mutation.dispatch(self)
+
+    def _validate_heading(self, write: Write) -> None:
+        if write.heading_uuid is None:
+            return
+        current = self.library.records.get(write.uuid)
+        project_uuid = write.into_uuid or (current.parent_uuid if current else None)
+        heading = self.library.records.get(write.heading_uuid)
+        if (
+            heading is None
+            or not heading.heading
+            or not project_uuid
+            or heading.parent_uuid != project_uuid
+        ):
+            raise ValueError("The heading must belong to the destination Project")
+
+    def create(self, mutation: _CreateMutation) -> None:
+        write = mutation.write
+        parent_uuid: str | None = None
+        area_uuid: str | None = None
+        inbox = (
+            write.into_uuid is None
+            and write.kind == "task"
+            and not write.someday
+            and not write.tonight
+            and write.start is None
+            and not write.anytime
+            and not write.inbox
+        )
+        if write.kind == "area":
+            inbox = False
+        elif write.inbox:
+            if write.kind == "project":
+                raise ValueError("Projects cannot enter Inbox")
+            inbox = True
+        elif write.into_kind == "project":
+            parent_uuid = write.into_uuid
+            inbox = False
+        elif write.into_kind == "area":
+            area_uuid = write.into_uuid
+            inbox = False
+        record = Record(
+            uuid=write.uuid,
+            kind=write.kind,
+            title=write.title or "",
+            notes=write.notes or "",
+            notes_source="structured" if write.notes is not None else "none",
+            notes_format="markdown",
+            status=write.status or "open",
+            completed_at=(
+                datetime.now(timezone.utc)
+                if write.status in {"done", "dropped"}
+                else None
+            ),
+            start=write.start,
+            deadline=write.deadline,
+            remind=write.remind,
+            tonight=write.tonight,
+            someday=write.someday,
+            parent_uuid=parent_uuid,
+            area_uuid=area_uuid,
+            inbox=inbox and not write.someday and not write.tonight,
+            tag_uuids=list(write.tag_uuids or []),
+            heading_uuid=write.heading_uuid,
+            sort_index=(
+                write.sort_index
+                if write.sort_index is not None
+                else self.library.next_index(write)
+            ),
+            today_index=write.today_index or 0,
+            heading=mutation.heading,
+            recurrence=(
+                RecurrenceState()
+                .fold_rule(write.recurrence_rule)
+                .fold_links(write.recurrence_links)
+                if write.recurrence_links
+                else RecurrenceState().fold_rule(write.recurrence_rule)
+            ),
+        )
+        self.library.records[record.uuid] = record
+        self.created[record.title] = record.id
+        self.verified.append(record.title)
+
+    def edit(self, mutation: _EditMutation) -> None:
+        write = mutation.write
+        item = self.library.records.get(write.uuid)
+        if item is None:
+            return
+        if mutation.action == "rename_area":
+            if write.title:
+                item.title = write.title
+        elif mutation.action == "move":
+            item.heading_uuid = write.heading_uuid
+            if write.into_kind == "project":
+                item.parent_uuid = write.into_uuid
+                item.area_uuid = None
+                item.inbox = False
+            elif write.into_kind == "area":
+                item.area_uuid = write.into_uuid
+                item.parent_uuid = None
+                item.inbox = False
+            elif item.kind == "project":
+                if write.inbox:
+                    raise ValueError("Projects cannot enter Inbox")
+                item.inbox = False
+                item.someday = False
+                item.parent_uuid = None
+                item.area_uuid = None
+            else:
+                item.parent_uuid = None
+                item.area_uuid = None
+                item.inbox = not write.anytime
+                item.someday = False
+                item.tonight = False
+                item.start = None
+                item.remind = None
+        elif mutation.action == "tags":
+            if write.tag_uuids is not None:
+                item.tag_uuids = list(write.tag_uuids)
+        else:
+            if write.clear_heading:
+                item.heading_uuid = None
+            if write.status is not None:
+                item.status = write.status
+                item.completed_at = (
+                    datetime.now(timezone.utc)
+                    if write.status in {"done", "dropped"}
+                    else None
+                )
+            if write.title is not None:
+                item.title = write.title
+            if write.notes is not None:
+                item.notes = write.notes
+                item.notes_source = "structured"
+                item.notes_format = "markdown"
+            if write.tag_uuids is not None:
+                item.tag_uuids = list(write.tag_uuids)
+            if write.sort_index is not None:
+                item.sort_index = write.sort_index
+            if write.today_index is not None:
+                item.today_index = write.today_index
+            if write.clear_start:
+                item.start = None
+                item.remind = None
+                item.tonight = False
+                item.someday = False
+            elif write.someday:
+                item.start = None
+                item.remind = None
+                item.someday = True
+                item.tonight = False
+                item.inbox = False
+            elif write.start is not None:
+                item.start = write.start
+                item.someday = False
+                item.inbox = False
+                item.tonight = write.tonight
+            if write.tonight and not write.someday:
+                item.tonight = True
+                item.inbox = False
+            if write.anytime:
+                item.start = None
+                item.remind = None
+                item.someday = False
+                item.tonight = False
+                item.inbox = False
+            if write.clear_deadline:
+                item.deadline = None
+            elif write.deadline is not None:
+                item.deadline = write.deadline
+            if write.clear_remind:
+                item.remind = None
+            elif write.remind is not None:
+                item.remind = write.remind
+            if (
+                write.into_uuid is not None
+                or write.into_kind is not None
+                or write.inbox
+                or write.anytime
+                or write.heading_uuid is not None
+            ):
+                self.edit(
+                    _EditMutation(
+                        Write(
+                            action="move",
+                            uuid=item.uuid,
+                            kind=item.kind,
+                            into_uuid=write.into_uuid,
+                            into_kind=write.into_kind,
+                            inbox=write.inbox,
+                            anytime=write.anytime,
+                            heading_uuid=write.heading_uuid,
+                        ),
+                        action="move",
+                    )
+                )
+        self.verified.append(item.title)
+
+    def lifecycle(self, mutation: _LifecycleMutation) -> None:
+        write = mutation.write
+        item = self.library.records.get(write.uuid)
+        if item is None:
+            return
+        if mutation.action == "complete":
+            item.status = "done"
+            item.completed_at = datetime.now(timezone.utc)
+        elif mutation.action == "cancel":
+            item.status = "dropped"
+            item.completed_at = datetime.now(timezone.utc)
+        elif mutation.action == "delete_area":
+            item.trashed = True
+            del self.library.records[item.uuid]
+        elif mutation.action == "trash":
+            item.trashed = True
+        elif mutation.action == "restore":
+            item.trashed = False
+        else:
+            for child in self.library.records.values():
+                if child.parent_uuid == item.uuid:
+                    child.parent_uuid = None
+                if child.area_uuid == item.uuid:
+                    child.area_uuid = None
+                if child.heading_uuid == item.uuid:
+                    child.heading_uuid = None
+            del self.library.records[item.uuid]
+        self.verified.append(item.title)
+
+    def tag(self, mutation: _TagMutation) -> None:
+        write = mutation.write
+        if mutation.action == "ensure_tag":
+            existing = self.library.tag_uuid(write.title or "")
+            parents = [
+                self.tag_aliases.get(parent, parent)
+                for parent in (write.tag_parent_uuids or [])
+            ]
+            if existing is None:
+                self.library.tags[write.uuid] = write.title or ""
+                self.library.tag_parents[write.uuid] = parents
+                self.tag_aliases[write.uuid] = write.uuid
+                self.created[write.title or write.uuid] = write.uuid
+            else:
+                self.tag_aliases[write.uuid] = existing
+                if write.tag_parent_uuids is not None:
+                    self.library.tag_parents[existing] = parents
+                self.created[write.title or existing] = existing
+            return
+        tag_uuid = self.tag_aliases.get(write.uuid, write.uuid)
+        if mutation.action == "rename_tag":
+            if tag_uuid not in self.library.tags:
+                raise ValueError("Tag does not exist")
+            if not write.title or not write.title.strip():
+                raise ValueError("Tag rename needs a title")
+            self.library.tags[tag_uuid] = write.title.strip()
+            self.verified.append(self.library.tags[tag_uuid])
+            return
+        if mutation.action == "reparent_tag":
+            if tag_uuid not in self.library.tags:
+                raise ValueError("Tag does not exist")
+            parents = [
+                self.tag_aliases.get(parent, parent)
+                for parent in (write.tag_parent_uuids or [])
+            ]
+            if tag_uuid in parents:
+                raise ValueError("A tag cannot be its own parent")
+            if any(parent not in self.library.tags for parent in parents):
+                raise ValueError("Tag parent does not exist")
+            self.library.tag_parents[tag_uuid] = parents
+            self.verified.append(self.library.tags[tag_uuid])
+            return
+        title = self.library.tags.pop(tag_uuid, write.title or tag_uuid)
+        self.library.tag_parents.pop(tag_uuid, None)
+        for item in self.library.records.values():
+            item.tag_uuids = [tag for tag in item.tag_uuids if tag != tag_uuid]
+        for tag, parents in self.library.tag_parents.items():
+            self.library.tag_parents[tag] = [
+                parent for parent in parents if parent != tag_uuid
+            ]
+        self.verified.append(title)
+
+    def checklist(self, mutation: _ChecklistMutation) -> None:
+        write = mutation.write
+        parent, line = self.library._find_checklist(write.uuid)
+        if write.checklist_remove:
+            if parent is not None:
+                parent.checklists = [
+                    item for item in parent.checklists if item.uuid != write.uuid
+                ]
+            self.verified.append(write.title or (line.title if line else write.uuid))
+            return
+        destination = (
+            self.library.records.get(write.checklist_parent_uuid or "") or parent
+        )
+        if destination is None or destination.kind != "task":
+            raise ValueError("A checklist row needs a task parent")
+        status = write.checklist_status or (line.status if line else "open")
+        index = (
+            write.checklist_index
+            if write.checklist_index is not None
+            else write.sort_index
+        )
+        if index is None:
+            index = (
+                line.sort_index
+                if line
+                else max(
+                    (item.sort_index for item in destination.checklists), default=-1
+                )
+                + 1
+            )
+        replacement = ChecklistLine(
+            uuid=write.uuid,
+            title=write.title
+            if write.title is not None
+            else (line.title if line else ""),
+            status=status,
+            sort_index=index,
+        )
+        if parent is not None and parent is not destination:
+            parent.checklists = [
+                item for item in parent.checklists if item.uuid != write.uuid
+            ]
+        destination.checklists = [
+            item for item in destination.checklists if item.uuid != write.uuid
+        ]
+        destination.checklists.append(replacement)
+        destination.checklists.sort(key=lambda item: (item.sort_index, item.uuid))
+        self.verified.append(replacement.title)
+
+    def recurrence(self, mutation: _RecurrenceMutation) -> None:
+        item = self.library.records.get(mutation.write.uuid)
+        if mutation.action == "repeat" and (
+            item is None or mutation.write.recurrence_rule is None
+        ):
+            raise ValueError("Repeat changes need an exact repeating Task template")
+        if item is None:
+            return
+        if mutation.action == "repeat":
+            item.recurrence.validate_interval_template(kind=item.kind)
+            assert mutation.write.recurrence_rule is not None
+            item.recurrence = item.recurrence.fold_rule(mutation.write.recurrence_rule)
+        else:
+            item.recurrence = item.recurrence.fold_links(
+                mutation.write.recurrence_links or []
+            )
+        self.verified.append(item.title)
+
+    def finish(self) -> None:
+        for record in self.library.records.values():
+            if (
+                record.recurrence.role != "instance"
+                or not record.recurrence.template_uuid
+            ):
+                continue
+            template = self.library.records.get(record.recurrence.template_uuid)
+            record.recurrence = record.recurrence.resolve_instance_type(
+                template.recurrence.repeat_type if template else None
+            )
+
+
+class _MutationVerifier(_MutationHandler[bool]):
+    """Verify semantic mutations against one materialized library."""
+
+    def __init__(self, library: MemoryLibrary) -> None:
+        self.library = library
+
+    def create(self, mutation: _CreateMutation) -> bool:
+        item = self.library.records.get(mutation.write.uuid)
+        return (
+            item is not None
+            and item.kind == mutation.write.kind
+            and (not mutation.heading or item.heading)
+            and self._patch(item, mutation.write, placement=True)
+        )
+
+    def edit(self, mutation: _EditMutation) -> bool:
+        write = mutation.write
+        item = self.library.records.get(write.uuid)
+        if item is None:
+            return False
+        if mutation.action == "move":
+            return self.library._placement_matches(item, write)
+        if mutation.action == "tags":
+            return item.tag_uuids == (write.tag_uuids or [])
+        if mutation.action == "rename_area":
+            return item.title == write.title
+        return self._patch(item, write)
+
+    def lifecycle(self, mutation: _LifecycleMutation) -> bool:
+        item = self.library.records.get(mutation.write.uuid)
+        checks: dict[str, bool] = {
+            "delete_area": item is None,
+            "permanent_delete": item is None,
+            "trash": item is not None and item.trashed,
+            "restore": item is not None and not item.trashed,
+            "complete": item is not None and item.status == "done",
+            "cancel": item is not None and item.status == "dropped",
+        }
+        return checks[mutation.action]
+
+    def tag(self, mutation: _TagMutation) -> bool:
+        write = mutation.write
+        if mutation.action == "ensure_tag":
+            return (
+                self.library.tags.get(write.uuid) == (write.title or "")
+                or self.library.tag_uuid(write.title or "") is not None
+            )
+        if mutation.action == "rename_tag":
+            return self.library.tags.get(write.uuid) == (write.title or "")
+        if mutation.action == "reparent_tag":
+            return self.library.tag_parents.get(write.uuid, []) == (
+                write.tag_parent_uuids or []
+            )
+        return write.uuid not in self.library.tags
+
+    def checklist(self, mutation: _ChecklistMutation) -> bool:
+        write = mutation.write
+        parent, row = self.library._find_checklist(write.uuid)
+        if write.checklist_remove:
+            return row is None
+        return (
+            row is not None
+            and parent is not None
+            and all(
+                (
+                    write.title is None or row.title == write.title,
+                    write.checklist_status is None
+                    or row.status == write.checklist_status,
+                    write.checklist_parent_uuid is None
+                    or parent.uuid == write.checklist_parent_uuid,
+                    write.checklist_index is None
+                    or row.sort_index == write.checklist_index,
+                )
+            )
+        )
+
+    def recurrence(self, mutation: _RecurrenceMutation) -> bool:
+        write = mutation.write
+        item = self.library.records.get(write.uuid)
+        if item is None:
+            return False
+        if mutation.action == "repeat":
+            return item.recurrence.rule == write.recurrence_rule
+        return list(item.recurrence.links) == (write.recurrence_links or [])
+
+    def _patch(self, item: Record, write: Write, *, placement: bool = False) -> bool:
+        checks = [
+            write.title is None or item.title == write.title,
+            write.notes is None or item.notes == write.notes,
+            write.status is None or item.status == write.status,
+            write.tag_uuids is None or item.tag_uuids == write.tag_uuids,
+            write.deadline is None or item.deadline == write.deadline,
+            not write.clear_deadline or item.deadline is None,
+            write.start is None or item.start == write.start,
+            not write.clear_start or item.start is None,
+            write.start is None or item.tonight == write.tonight,
+            not write.clear_start or not item.tonight,
+            write.remind is None or item.remind == write.remind,
+            not write.clear_remind or item.remind is None,
+            not write.someday or (item.someday and not item.tonight),
+            not write.tonight or item.tonight,
+            not write.anytime
+            or (
+                not item.inbox
+                and not item.someday
+                and not item.tonight
+                and item.start is None
+            ),
+            write.sort_index is None or item.sort_index == write.sort_index,
+            write.today_index is None or item.today_index == write.today_index,
+        ]
+        if placement or any(
+            (
+                write.into_uuid is not None,
+                write.into_kind is not None,
+                write.inbox,
+                write.anytime,
+            )
+        ):
+            checks.append(self.library._placement_matches(item, write))
+        return all(checks)

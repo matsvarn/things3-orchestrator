@@ -12,6 +12,7 @@ from typing import Callable, cast
 from .cloud import CloudError
 from .interface import (
     ApproveCall,
+    ChangeEntry,
     ChecklistFact,
     CommitCall,
     ItemFact,
@@ -22,6 +23,7 @@ from .interface import (
     Result,
     ReviewSection,
     TagFact,
+    Weekday,
 )
 from .interface import (
     Status as PublicStatus,
@@ -37,6 +39,7 @@ from .library import (
     new_uuid,
     parse_id,
 )
+from .recurrence import RepeatMode, new_rule
 
 _READ_LIMIT = 40
 _NOTES_LIMIT = 50_000
@@ -44,6 +47,16 @@ _TITLE_LIMIT = 1000
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 _PLAN_MINUTES = 30
+_WEEKDAY_CODES = {
+    "sunday": 0,
+    "monday": 1,
+    "tuesday": 2,
+    "wednesday": 3,
+    "thursday": 4,
+    "friday": 5,
+    "saturday": 6,
+}
+_WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,61 @@ class _Prepared:
     summary: list[str]
     warnings: list[str]
     risky: bool
+
+
+@dataclass
+class _PreparationContext:
+    """Mutable planning state shared by cohesive preparation branches."""
+
+    local: dict[str, tuple[str, Kind | str]]
+    writes: list[Write]
+    preconditions: dict[str, str]
+    summary: list[str]
+    warnings: list[str]
+    risky: bool = False
+
+    def result(self) -> _Prepared:
+        return _Prepared(
+            writes=self.writes,
+            preconditions=self.preconditions,
+            summary=list(dict.fromkeys(self.summary))[:40],
+            warnings=list(dict.fromkeys(self.warnings))[:40],
+            risky=self.risky,
+        )
+
+
+@dataclass(frozen=True)
+class _DesiredItemChange:
+    """One projected item state and the write that moves the current item to it."""
+
+    update: Write
+    home: tuple[str | None, Kind | None, bool, bool]
+    title: str
+    notes: str
+    start: date | None
+    deadline: date | None
+    remind: str | None
+    tonight: bool
+    someday: bool
+    tag_uuids: list[str]
+    heading_uuid: str | None
+    sort_index: int
+    today_index: int
+    checklist: _ChecklistProjection
+
+
+@dataclass(frozen=True)
+class _ProjectedChecklistRow:
+    uuid: str
+    title: str
+    status: Status
+    sort_index: int
+
+
+@dataclass(frozen=True)
+class _ChecklistProjection:
+    rows: tuple[_ProjectedChecklistRow, ...]
+    removed_uuids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -117,7 +185,9 @@ class ThingsWorkspace:
         if call.id is not None:
             item = self._exact_item(call.id)
             if item is None:
-                return self._needs_input("I could not find that exact item. Read or search again.")
+                return self._needs_input(
+                    "I could not find that exact item. Read or search again."
+                )
             return self._detail_page(
                 item,
                 row_offset=0,
@@ -141,7 +211,7 @@ class ThingsWorkspace:
 
         if view == "tags":
             rows = [
-                TagFact(id=f"tag:{uuid}", title=_bounded_tag_title(title))
+                self._tag_fact(uuid)
                 for uuid, title in sorted(
                     self._library.tags.items(), key=lambda row: row[1].casefold()
                 )
@@ -166,7 +236,9 @@ class ThingsWorkspace:
         stored = self._journal.get(call.intent_id)
         if stored is not None:
             if stored.fingerprint != fingerprint:
-                return self._rejected("That intent_id already belongs to different work.")
+                return self._rejected(
+                    "That intent_id already belongs to different work."
+                )
             return self._resume(stored, allow_apply=stored.state == "prepared")
 
         failed = self._refresh(force=True)
@@ -199,21 +271,31 @@ class ThingsWorkspace:
         stored = self._journal.get_by_plan_id(call.plan_id)
         if stored is None:
             return self._rejected("That plan does not exist or is no longer available.")
-        if stored.state in {"applied", "unchanged", "stale"} and stored.result is not None:
+        if (
+            stored.state in {"applied", "unchanged", "stale"}
+            and stored.result is not None
+        ):
             return Result.model_validate(stored.result)
         if stored.state == "pending":
             return self._resume(stored, allow_apply=False)
         if stored.state != "needs_approval":
             return self._rejected("That plan cannot be approved.")
-        if stored.expires_at is None or datetime.fromisoformat(stored.expires_at) <= self._clock():
-            result = self._stale("That plan expired. Read current facts and prepare it again.")
+        if (
+            stored.expires_at is None
+            or datetime.fromisoformat(stored.expires_at) <= self._clock()
+        ):
+            result = self._stale(
+                "That plan expired. Read current facts and prepare it again."
+            )
             self._save_result(stored, "stale", result)
             return result
         failed = self._refresh(force=True)
         if failed is not None:
             return failed
         if self._preconditions_changed(stored.plan):
-            result = self._stale("Relevant Things data changed. Read it and prepare a new plan.")
+            result = self._stale(
+                "Relevant Things data changed. Read it and prepare a new plan."
+            )
             self._save_result(stored, "stale", result)
             return result
         return self._apply(stored)
@@ -222,11 +304,15 @@ class ThingsWorkspace:
         view = call.view or "today"
         today = self._clock().date()
         if view == "today":
-            return self._library.today(waiting_tag=self._library.waiting_tag(), today=today)
+            return self._library.today(
+                waiting_tag=self._library.waiting_tag(), today=today
+            )
         if view == "inbox":
             return self._library.inbox(limit=10_000)
         if view == "week":
             return self._library.week(today=today, limit=10_000)
+        if view == "trash":
+            return self._library.trash()
         if view == "system":
             return self._library.system()
         if view == "project":
@@ -282,7 +368,11 @@ class ThingsWorkspace:
                     or item.parent_uuid in projects
                 ]
             elif within.kind == "project":
-                items = [item for item in items if item.uuid == within.uuid or item.parent_uuid == within.uuid]
+                items = [
+                    item
+                    for item in items
+                    if item.uuid == within.uuid or item.parent_uuid == within.uuid
+                ]
         return sorted(items, key=lambda item: (item.sort_index, item.title))
 
     def _page(
@@ -345,18 +435,14 @@ class ThingsWorkspace:
                 or self._tag_revision() != tag_saved.revision
             ):
                 return self._stale("That tag result changed. Start the read again.")
-            return self._tag_page(
-                tag_saved.rows, offset=tag_saved.offset, limit=limit
-            )
+            return self._tag_page(tag_saved.rows, offset=tag_saved.offset, limit=limit)
         saved = self._cursors.get(cursor)
         if saved is None:
             return self._stale("That cursor is invalid. Start the read again.")
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
         items = [
-            item
-            for value in saved.ids
-            if (item := self._exact_item(value)) is not None
+            item for value in saved.ids if (item := self._exact_item(value)) is not None
         ]
         if (
             len(items) != len(saved.ids)
@@ -475,11 +561,7 @@ class ThingsWorkspace:
             note_offset == 0 and not item.notes
         )
         next_note_offset = (
-            (
-                min(note_offset + _NOTES_LIMIT, len(item.notes))
-                if item.notes
-                else 1
-            )
+            (min(note_offset + _NOTES_LIMIT, len(item.notes)) if item.notes else 1)
             if include_notes
             else note_offset
         )
@@ -529,9 +611,7 @@ class ThingsWorkspace:
     def _prune_cursors(self) -> None:
         now = self._clock()
         self._cursors = {
-            key: value
-            for key, value in self._cursors.items()
-            if value.expires_at > now
+            key: value for key, value in self._cursors.items() if value.expires_at > now
         }
         self._tag_cursors = {
             key: value
@@ -568,7 +648,11 @@ class ThingsWorkspace:
             sections = []
             used: set[str] = set()
             for signal, title in groups:
-                selected = [item for item in items if signal in item.signals and item.id not in used]
+                selected = [
+                    item
+                    for item in items
+                    if signal in item.signals and item.id not in used
+                ]
                 if selected:
                     sections.append(
                         ReviewSection(
@@ -611,10 +695,7 @@ class ThingsWorkspace:
             )
         ]
         direct = [
-            TagFact(
-                id=f"tag:{uuid}",
-                title=_bounded_tag_title(self._library.tags[uuid]),
-            )
+            self._tag_fact(uuid)
             for uuid in item.tag_uuids
             if uuid in self._library.tags
         ]
@@ -624,14 +705,20 @@ class ThingsWorkspace:
                 if uuid in self._library.tags and all(
                     tag.id != f"tag:{uuid}" for tag in inherited
                 ):
-                    inherited.append(
-                        TagFact(
-                            id=f"tag:{uuid}",
-                            title=_bounded_tag_title(self._library.tags[uuid]),
-                            from_id=source.id,
-                        )
-                    )
+                    inherited.append(self._tag_fact(uuid, from_id=source.id))
         return checklist, direct, inherited
+
+    def _tag_fact(self, uuid: str, *, from_id: str | None = None) -> TagFact:
+        return TagFact(
+            id=f"tag:{uuid}",
+            title=_bounded_tag_title(self._library.tags[uuid]),
+            parent_ids=[
+                f"tag:{parent}"
+                for parent in self._library.tag_parents.get(uuid, [])[:20]
+            ],
+            parents_truncated=len(self._library.tag_parents.get(uuid, [])) > 20,
+            from_id=from_id,
+        )
 
     def _fact(
         self,
@@ -654,26 +741,49 @@ class ThingsWorkspace:
         checklist = checklist or []
         direct_tags = direct_tags or []
         inherited_tags = inherited_tags or []
+        linked_ids = (
+            [
+                candidate.id
+                for candidate in self._library.records.values()
+                if item.uuid in candidate.recurrence.links
+            ]
+            if full and item.recurrence.role == "template"
+            else []
+        )
         recurrence = RecurrenceFact(
             kind=self._recurrence_kind(item),
             template_id=(
-                f"task:{item.recurrence_template_uuid}"
-                if item.recurrence_template_uuid
+                f"task:{item.recurrence.template_uuid}"
+                if item.recurrence.template_uuid
                 else None
             ),
-            rule=item.recurrence_type if item.recurrence_type != "none" else None,
+            mode=(
+                cast(RepeatMode, item.recurrence.repeat_type)
+                if item.recurrence.repeat_type in {"fixed", "after_completion"}
+                else None
+            ),
+            unit=item.recurrence.unit,
+            interval=item.recurrence.interval,
+            weekdays=[
+                cast(Weekday, _WEEKDAY_NAMES[code])
+                for code in item.recurrence.weekday_codes
+            ],
+            linked_item_ids=linked_ids[:40],
         )
         return ItemFact(
             id=item.id,
             revision=self._revision(item),
-            kind=item.kind,
+            kind=item.public_kind,
             title=_bounded_title(item.title),
             status=_public_status(item.status),
             into_id=(
                 f"project:{item.parent_uuid}"
                 if item.parent_uuid
-                else f"area:{item.area_uuid}" if item.area_uuid else None
+                else f"area:{item.area_uuid}"
+                if item.area_uuid
+                else None
             ),
+            heading_id=(f"heading:{item.heading_uuid}" if item.heading_uuid else None),
             notes_markdown=(
                 item.notes[note_offset : note_offset + _NOTES_LIMIT]
                 if full and include_notes
@@ -682,7 +792,11 @@ class ThingsWorkspace:
             checklist=checklist,
             direct_tags=direct_tags,
             inherited_tags=inherited_tags,
-            start=item.start.isoformat() if item.start else "someday" if item.someday else None,
+            start=item.start.isoformat()
+            if item.start
+            else "someday"
+            if item.someday
+            else None,
             deadline=item.deadline.isoformat() if item.deadline else None,
             remind_at=self._reminder(item),
             recurrence=recurrence,
@@ -692,19 +806,24 @@ class ThingsWorkspace:
                 if item.start == self._clock().date() or item.tonight
                 else None
             ),
-            signals=self._signals(
-                item,
-                checklist_truncated=checklist_truncated,
-                tags_truncated=tags_truncated,
-                notes_truncated=notes_truncated,
-            ),
+            signals=[
+                *self._signals(
+                    item,
+                    checklist_truncated=checklist_truncated,
+                    tags_truncated=tags_truncated,
+                    notes_truncated=notes_truncated,
+                ),
+                *(["recurrence_links_truncated"] if len(linked_ids) > 40 else []),
+            ],
         )
 
     def _tag_sources(self, item: Record) -> list[Record]:
         sources: list[Record] = []
         if item.parent_uuid and (parent := self._library.records.get(item.parent_uuid)):
             sources.append(parent)
-            if parent.area_uuid and (area := self._library.records.get(parent.area_uuid)):
+            if parent.area_uuid and (
+                area := self._library.records.get(parent.area_uuid)
+            ):
                 sources.append(area)
         elif item.area_uuid and (area := self._library.records.get(item.area_uuid)):
             sources.append(area)
@@ -754,7 +873,9 @@ class ThingsWorkspace:
             signals.append("waiting")
         if item.someday:
             signals.append("someday")
-        if item.recurrence_role != "none" and item.recurrence_type == "unknown":
+        if item.trashed:
+            signals.append("trashed")
+        if item.recurrence.role != "none" and item.recurrence.repeat_type == "unknown":
             signals.append("recurrence_unknown")
         if checklist_truncated:
             signals.append("checklist_truncated")
@@ -772,6 +893,1118 @@ class ThingsWorkspace:
         return datetime.combine(item.start, time(hour, minute), tzinfo=tz).isoformat()
 
     def _prepare(self, call: CommitCall) -> _Prepared:
+        context = self._preparation_context(call)
+        self._prepare_tag_registry(call, context)
+        self._prepare_items(call, context)
+        self._finish_preparation(call, context)
+        return context.result()
+
+    def _prepare_items(self, call: CommitCall, context: _PreparationContext) -> None:
+        self._prepare_creates(call, context)
+        self._prepare_changes(call, context)
+
+    def _prepare_creates(self, call: CommitCall, context: _PreparationContext) -> None:
+        """Plan all create entries, including generated copies and children."""
+        local = context.local
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        for entry in call.create:
+            uuid = local[entry.key][0] if entry.key else new_uuid()
+            if entry.kind == "heading":
+                home = self._home(entry.into, "task", local, new_item=True)
+                if home[1] != "project" or home[0] is None:
+                    raise _Abort(self._rejected("A heading needs a Project."))
+                project = self._library.records.get(home[0])
+                if project is not None:
+                    preconditions[project.id] = self._revision(project)
+                    preconditions[f"scope:project:{project.uuid}"] = (
+                        self._project_scope_revision(project.uuid)
+                    )
+                heading_indexes = [
+                    item.sort_index
+                    for item in self._library.records.values()
+                    if item.heading and item.parent_uuid == home[0] and not item.trashed
+                ]
+                heading_indexes.extend(
+                    write.sort_index
+                    for write in writes
+                    if write.action == "create_heading"
+                    and write.into_uuid == home[0]
+                    and write.sort_index is not None
+                )
+                writes.append(
+                    Write(
+                        action="create_heading",
+                        uuid=uuid,
+                        kind="task",
+                        title=entry.title,
+                        into_uuid=home[0],
+                        into_kind="project",
+                        anytime=True,
+                        sort_index=max(heading_indexes, default=-1024) + 1024,
+                    )
+                )
+                summary.append(f"Create heading: {entry.title}")
+                continue
+            home = self._home(entry.into, entry.kind, local, new_item=True)
+            start, someday, tonight, remind = self._schedule_input(
+                entry.start,
+                entry.remind_at,
+                start_present="start" in entry.model_fields_set,
+            )
+            if entry.into is None and (start is not None or someday or tonight):
+                home = (None, None, False, False)
+            created_heading_uuid: str | None = None
+            if entry.heading_id is not None:
+                if entry.kind != "task" or home[1] != "project" or home[0] is None:
+                    raise _Abort(
+                        self._rejected("Only a Task in a Project can use a heading.")
+                    )
+                if entry.heading_id.startswith("$"):
+                    created_heading_uuid = local[entry.heading_id][0]
+                    heading_write = next(
+                        (
+                            write
+                            for write in writes
+                            if write.action == "create_heading"
+                            and write.uuid == created_heading_uuid
+                        ),
+                        None,
+                    )
+                    if heading_write is None or heading_write.into_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                else:
+                    heading = self._required_exact(entry.heading_id)
+                    if not heading.heading or heading.parent_uuid != home[0]:
+                        raise _Abort(
+                            self._rejected(
+                                "The heading must belong to the Task's Project."
+                            )
+                        )
+                    created_heading_uuid = heading.uuid
+                    preconditions[heading.id] = self._revision(heading)
+            tags = self._tag_ids(entry.tag_ids, local)
+            if entry.waiting:
+                waiting, tag_write = self._waiting_tag(writes)
+                if tag_write:
+                    writes.append(tag_write)
+                tags = list(dict.fromkeys([*tags, waiting]))
+            sort_index = self._after_index(
+                entry.after,
+                local,
+                writes,
+                kind=entry.kind,
+                home=home,
+                present="after" in entry.model_fields_set,
+                preconditions=preconditions,
+            )
+            today_index = self._today_after_index(
+                entry.today_after,
+                local,
+                writes,
+                present="today_after" in entry.model_fields_set,
+                on_today=start == self._clock().date() or tonight,
+                new_item=True,
+                preconditions=preconditions,
+            )
+            common_create = Write(
+                action="create",
+                uuid=uuid,
+                kind=entry.kind,
+                title=entry.title,
+                notes=entry.notes_markdown,
+                into_uuid=home[0],
+                into_kind=home[1],
+                inbox=home[2],
+                anytime=home[3],
+                start=start,
+                deadline=date.fromisoformat(entry.deadline) if entry.deadline else None,
+                remind=remind,
+                tonight=tonight,
+                someday=someday,
+                tag_uuids=tags,
+                heading_uuid=created_heading_uuid,
+                sort_index=sort_index,
+                today_index=today_index,
+                owner_today=self._clock().date(),
+            )
+            repeat_template_uuid: str | None = None
+            if entry.repeat is not None:
+                repeat_template_uuid = new_uuid()
+                rule = new_rule(
+                    mode=entry.repeat.mode,
+                    unit=entry.repeat.unit,
+                    interval=entry.repeat.interval,
+                    anchor=start or self._clock().date(),
+                    weekday_codes=[
+                        _WEEKDAY_CODES[weekday] for weekday in entry.repeat.weekdays
+                    ],
+                )
+                writes.append(
+                    replace(
+                        common_create,
+                        uuid=repeat_template_uuid,
+                        recurrence_rule=rule,
+                        sort_index=sort_index,
+                        today_index=None,
+                    )
+                )
+                common_create = replace(
+                    common_create,
+                    recurrence_links=[repeat_template_uuid],
+                    recurrence_generated=True,
+                )
+                warnings.append("This creates future generated Tasks.")
+                context.risky = True
+            writes.append(common_create)
+            for row_index, title in enumerate(entry.checklist):
+                if repeat_template_uuid is not None:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=title,
+                            checklist_parent_uuid=repeat_template_uuid,
+                            checklist_status="open",
+                            checklist_index=row_index * 1024,
+                        )
+                    )
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=title,
+                        checklist_parent_uuid=uuid,
+                        checklist_status="open",
+                        checklist_index=row_index * 1024,
+                    )
+                )
+            for action_index, title in enumerate(entry.next_actions):
+                writes.append(
+                    Write(
+                        action="create",
+                        uuid=new_uuid(),
+                        kind="task",
+                        title=title,
+                        into_uuid=uuid,
+                        into_kind="project",
+                        anytime=True,
+                        sort_index=action_index * 1024,
+                    )
+                )
+            summary.append(
+                f"Create repeating {entry.kind}: {entry.title}"
+                if entry.repeat is not None
+                else f"Create {entry.kind}: {entry.title}"
+            )
+            if entry.next_actions:
+                summary.append(
+                    f"Add {len(entry.next_actions)} next actions to {entry.title}"
+                )
+            context.risky = context.risky or entry.kind == "area"
+            if entry.kind == "area":
+                preconditions["scope:areas"] = self._area_scope_revision()
+                warnings.append("The Area registry will change.")
+
+    def _prepare_recurrence_change(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        context: _PreparationContext,
+        desired: _DesiredItemChange | None = None,
+    ) -> bool:
+        """Plan a repeat-rule change and report whether it ends item planning."""
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        repeat_edit = change.repeat
+        repeat_rule_changed = False
+        repeat_interval = (
+            change.repeat_interval
+            if change.repeat_interval is not None
+            else repeat_edit.interval
+            if repeat_edit is not None
+            else None
+        )
+        if (
+            item.recurrence.role == "none"
+            and repeat_edit is not None
+            and not repeat_edit.remove
+        ):
+            if desired is None:
+                raise RuntimeError("repeat conversion needs a projected item state")
+            if item.kind != "task" or item.trashed or item.status != "open":
+                raise _Abort(
+                    self._rejected(
+                        "Only an open Task outside Trash can start repeating."
+                    )
+                )
+            if repeat_edit.unit is None:
+                raise _Abort(
+                    self._needs_input(
+                        "Starting repetition needs day, week, month, or year."
+                    )
+                )
+            if item.notes_format == "rich" and not change.replace_rich_note:
+                raise _Abort(
+                    self._unsupported(
+                        "This Task has a rich note. Replace it explicitly with Markdown "
+                        "before it becomes the future repeating template."
+                    )
+                )
+            template_uuid = new_uuid()
+            rule = new_rule(
+                mode=repeat_edit.mode or "fixed",
+                unit=repeat_edit.unit,
+                interval=repeat_edit.interval or 1,
+                anchor=desired.start or self._clock().date(),
+                weekday_codes=(
+                    [_WEEKDAY_CODES[weekday] for weekday in repeat_edit.weekdays]
+                    if repeat_edit.weekdays is not None
+                    else None
+                ),
+            )
+            writes.append(
+                Write(
+                    action="create",
+                    uuid=template_uuid,
+                    kind="task",
+                    title=desired.title,
+                    notes=desired.notes,
+                    into_uuid=desired.home[0],
+                    into_kind=desired.home[1],
+                    inbox=desired.home[2],
+                    anytime=desired.home[3],
+                    start=desired.start,
+                    deadline=desired.deadline,
+                    remind=desired.remind,
+                    tonight=desired.tonight,
+                    someday=desired.someday,
+                    tag_uuids=desired.tag_uuids,
+                    heading_uuid=desired.heading_uuid,
+                    sort_index=desired.sort_index,
+                    today_index=desired.today_index,
+                    owner_today=self._clock().date(),
+                    recurrence_rule=rule,
+                )
+            )
+            for projected_row in desired.checklist.rows:
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=projected_row.title,
+                        checklist_parent_uuid=template_uuid,
+                        checklist_status="open",
+                        checklist_index=projected_row.sort_index,
+                    )
+                )
+            writes.append(
+                Write(
+                    action="repeat_link",
+                    uuid=item.uuid,
+                    kind="task",
+                    recurrence_links=[template_uuid],
+                    recurrence_generated=True,
+                )
+            )
+            preconditions[f"scope:repeat:{template_uuid}"] = (
+                self._recurrence_scope_revision(template_uuid)
+            )
+            summary.append(f"Start repeating: {item.title}")
+            warnings.append(
+                "This keeps the current Task and creates its future repeating template."
+            )
+            context.risky = True
+            return False
+        if change.repeat_interval is not None or repeat_edit is not None:
+            if repeat_edit is not None and repeat_edit.remove:
+                try:
+                    item.recurrence.validate_interval_template(kind=item.kind)
+                except ValueError as error:
+                    raise _Abort(self._unsupported(str(error))) from error
+                linked = [
+                    candidate
+                    for candidate in self._library.records.values()
+                    if item.uuid in candidate.recurrence.links
+                ]
+                for candidate in linked:
+                    preconditions[candidate.id] = self._revision(candidate)
+                    writes.append(
+                        Write(
+                            action="repeat_link",
+                            uuid=candidate.uuid,
+                            kind="task",
+                            recurrence_links=[],
+                        )
+                    )
+                for checklist_row in item.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=checklist_row.uuid,
+                            checklist_parent_uuid=item.uuid,
+                            checklist_remove=True,
+                        )
+                    )
+                writes.append(
+                    Write(
+                        action="permanent_delete",
+                        uuid=item.uuid,
+                        kind="task",
+                    )
+                )
+                preconditions[f"scope:repeat:{item.uuid}"] = (
+                    self._recurrence_scope_revision(item.uuid)
+                )
+                summary.append(f"Stop repeating: {item.title}")
+                warnings.append(
+                    "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
+                )
+                context.risky = True
+                return True
+            try:
+                if (
+                    repeat_edit is not None
+                    and repeat_edit.weekdays
+                    and (repeat_edit.mode or item.recurrence.repeat_type) != "fixed"
+                ):
+                    raise ValueError("Weekdays need fixed repeat mode")
+                recurrence = item.recurrence.transition(
+                    kind=item.kind,
+                    mode=repeat_edit.mode if repeat_edit else None,
+                    unit=repeat_edit.unit if repeat_edit else None,
+                    interval=repeat_interval,
+                    weekday_codes=(
+                        [_WEEKDAY_CODES[weekday] for weekday in repeat_edit.weekdays]
+                        if repeat_edit is not None and repeat_edit.weekdays is not None
+                        else None
+                    ),
+                )
+            except ValueError as error:
+                raise _Abort(self._unsupported(str(error))) from error
+            writes.append(
+                Write(
+                    action="repeat",
+                    uuid=item.uuid,
+                    kind="task",
+                    recurrence_rule=recurrence.rule,
+                )
+            )
+            preconditions[f"scope:repeat:{item.uuid}"] = (
+                self._recurrence_scope_revision(item.uuid)
+            )
+            parts = []
+            if repeat_edit is not None and repeat_edit.mode is not None:
+                parts.append(f"mode to {repeat_edit.mode.replace('_', ' ')}")
+            if repeat_edit is not None and repeat_edit.unit is not None:
+                parts.append(f"unit to {repeat_edit.unit}")
+            if repeat_interval is not None:
+                parts.append(f"interval to {repeat_interval}")
+            summary.append(f"Change repeat rule for {item.title}: {', '.join(parts)}")
+            warnings.append("This changes future generated Tasks.")
+            context.risky = True
+            repeat_rule_changed = True
+        if item.recurrence.role == "template" and not repeat_rule_changed:
+            safe_template_fields = {
+                "id",
+                "if_revision",
+                "title",
+                "notes_markdown",
+                "replace_rich_note",
+                "waiting",
+                "tags_add",
+                "tags_remove",
+                "checklist_add",
+                "checklist_change",
+                "checklist_remove",
+                "checklist_order",
+            }
+            if change.model_fields_set - safe_template_fields:
+                raise _Abort(
+                    self._unsupported(
+                        "Use repeat removal for template lifecycle changes."
+                    )
+                )
+            warnings.append("This changes future generated Tasks.")
+            context.risky = True
+        if (
+            item.recurrence.role == "instance"
+            and item.recurrence.repeat_type == "unknown"
+        ):
+            raise _Abort(
+                self._unsupported(
+                    "This generated Task has an unknown repeat template. Read its "
+                    "template before changing it."
+                )
+            )
+        return False
+
+    def _desired_item_change(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        local: dict[str, tuple[str, Kind | str]],
+        context: _PreparationContext,
+    ) -> _DesiredItemChange:
+        """Project one change for both its current item and a future template."""
+        home = (
+            self._home(change.into, item.kind, local, new_item=False)
+            if "into" in change.model_fields_set
+            else self._record_home(item)
+        )
+        start, someday, tonight, remind = self._schedule_input(
+            change.start,
+            change.remind_at,
+            start_present="start" in change.model_fields_set,
+        )
+        start_present = "start" in change.model_fields_set
+        remind_present = "remind_at" in change.model_fields_set
+        placement_clears_schedule = "into" in change.model_fields_set and (
+            home[2] or home[3]
+        )
+        if placement_clears_schedule:
+            desired_start = None
+            desired_someday = False
+            desired_tonight = False
+            desired_remind = None
+        elif start_present:
+            desired_start = start
+            desired_someday = someday
+            desired_tonight = tonight
+            desired_remind = (
+                remind
+                if remind_present
+                else item.remind
+                if start is not None and not someday
+                else None
+            )
+        elif change.remind_at is not None:
+            desired_start = start
+            desired_someday = someday
+            desired_tonight = tonight
+            desired_remind = remind
+        else:
+            desired_start = item.start
+            desired_someday = item.someday
+            desired_tonight = item.tonight
+            desired_remind = None if remind_present else item.remind
+        desired_deadline = (
+            date.fromisoformat(change.deadline)
+            if change.deadline
+            else None
+            if "deadline" in change.model_fields_set
+            else item.deadline
+        )
+
+        tags = list(item.tag_uuids)
+        if change.tags_add or change.tags_remove:
+            add = self._tag_ids(change.tags_add, local)
+            remove = set(self._tag_ids(change.tags_remove, local))
+            if remove.intersection(add):
+                raise _Abort(
+                    self._rejected("A tag cannot be added and removed in one change.")
+                )
+            tags = [uuid for uuid in tags if uuid not in remove]
+            tags = list(dict.fromkeys([*tags, *add]))
+        if change.waiting is not None:
+            if change.waiting:
+                waiting, tag_write = self._waiting_tag(context.writes)
+                if tag_write:
+                    context.writes.append(tag_write)
+                tags = [uuid for uuid in tags if uuid != waiting]
+                tags.append(waiting)
+            else:
+                existing_waiting = self._library.tag_uuid(self._library.waiting_tag())
+                if existing_waiting is not None:
+                    tags = [uuid for uuid in tags if uuid != existing_waiting]
+
+        heading_uuid = item.heading_uuid
+        clear_heading = (
+            "into" in change.model_fields_set
+            and item.heading_uuid is not None
+            and (home[1] != "project" or home[0] != item.parent_uuid)
+        )
+        if clear_heading:
+            heading_uuid = None
+        if "heading_id" in change.model_fields_set:
+            clear_heading = change.heading_id is None
+            heading_uuid = None
+            if change.heading_id is not None:
+                if item.kind != "task":
+                    raise _Abort(self._rejected("Only a Task can use a heading."))
+                if home[1] != "project":
+                    raise _Abort(
+                        self._rejected("A heading needs a destination Project.")
+                    )
+                heading = self._required_exact(change.heading_id)
+                if not heading.heading or heading.parent_uuid != home[0]:
+                    raise _Abort(
+                        self._rejected("The heading must belong to the Task's Project.")
+                    )
+                heading_uuid = heading.uuid
+                context.preconditions[heading.id] = self._revision(heading)
+
+        sort_index = self._after_index(
+            change.after,
+            local,
+            context.writes,
+            kind=item.kind,
+            home=home,
+            present="after" in change.model_fields_set,
+            moving_uuid=item.uuid,
+            preconditions=context.preconditions,
+        )
+        desired_sort_index = sort_index if sort_index is not None else item.sort_index
+        today_index = self._today_after_index(
+            change.today_after,
+            local,
+            context.writes,
+            present="today_after" in change.model_fields_set,
+            on_today=(desired_start == self._clock().date() or desired_tonight),
+            new_item=False,
+            preconditions=context.preconditions,
+            moving_uuid=item.uuid,
+        )
+        desired_today_index = (
+            today_index if today_index is not None else item.today_index
+        )
+        notes = (
+            change.notes_markdown or ""
+            if "notes_markdown" in change.model_fields_set
+            else item.notes
+        )
+        template_home = home
+        if (
+            "into" not in change.model_fields_set
+            and home[3]
+            and (desired_start is not None or desired_someday or desired_tonight)
+        ):
+            template_home = (None, None, False, False)
+        update_home = (
+            home
+            if "into" in change.model_fields_set
+            or "heading_id" in change.model_fields_set
+            else (None, None, False, False)
+        )
+        return _DesiredItemChange(
+            update=Write(
+                action="update",
+                uuid=item.uuid,
+                kind=item.kind,
+                title=change.title,
+                notes=notes if "notes_markdown" in change.model_fields_set else None,
+                status=_internal_status(change.status) if change.status else None,
+                into_uuid=update_home[0],
+                into_kind=update_home[1],
+                inbox=update_home[2],
+                anytime=update_home[3],
+                start=start,
+                clear_start="start" in change.model_fields_set and change.start is None,
+                deadline=date.fromisoformat(change.deadline)
+                if change.deadline
+                else None,
+                clear_deadline="deadline" in change.model_fields_set
+                and change.deadline is None,
+                remind=desired_remind if start_present else remind,
+                clear_remind="remind_at" in change.model_fields_set
+                and change.remind_at is None,
+                tonight=tonight,
+                someday=someday,
+                tag_uuids=tags
+                if change.tags_add or change.tags_remove or change.waiting is not None
+                else None,
+                sort_index=sort_index,
+                today_index=today_index,
+                owner_today=self._clock().date(),
+                heading_uuid=heading_uuid
+                if "heading_id" in change.model_fields_set
+                else None,
+                clear_heading=clear_heading,
+            ),
+            home=template_home,
+            title=change.title or item.title,
+            notes=notes,
+            start=desired_start,
+            deadline=desired_deadline,
+            remind=desired_remind,
+            tonight=desired_tonight,
+            someday=desired_someday,
+            tag_uuids=tags,
+            heading_uuid=heading_uuid,
+            sort_index=desired_sort_index,
+            today_index=desired_today_index,
+            checklist=self._project_checklist(item, change, local),
+        )
+
+    def _project_checklist(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        local: dict[str, tuple[str, Kind | str]],
+    ) -> _ChecklistProjection:
+        """Project the final current checklist once for both repeat copies."""
+        if not (
+            change.checklist_add
+            or change.checklist_change
+            or change.checklist_remove
+            or change.checklist_order is not None
+        ):
+            return _ChecklistProjection(
+                rows=tuple(
+                    _ProjectedChecklistRow(
+                        uuid=row.uuid,
+                        title=row.title,
+                        status=row.status,
+                        sort_index=row.sort_index,
+                    )
+                    for row in sorted(
+                        item.checklists, key=lambda row: (row.sort_index, row.uuid)
+                    )
+                ),
+                removed_uuids=(),
+            )
+        rows = {
+            f"check:{row.uuid}": _ProjectedChecklistRow(
+                uuid=row.uuid,
+                title=row.title,
+                status=row.status,
+                sort_index=row.sort_index,
+            )
+            for row in item.checklists
+        }
+        order = [
+            f"check:{row.uuid}"
+            for row in sorted(
+                item.checklists, key=lambda row: (row.sort_index, row.uuid)
+            )
+        ]
+
+        def place(reference: str, after: str | None, *, present: bool) -> None:
+            if not present:
+                return
+            order.remove(reference)
+            if after is None:
+                order.insert(0, reference)
+                return
+            if after not in order:
+                raise _Abort(
+                    self._needs_input(
+                        f"Checklist row {after} is not available for final order."
+                    )
+                )
+            order.insert(order.index(after) + 1, reference)
+
+        for index, addition in enumerate(change.checklist_add):
+            reference = addition.key or f"$checklist_{index}_{new_uuid()}"
+            uuid = local[addition.key][0] if addition.key else new_uuid()
+            rows[reference] = _ProjectedChecklistRow(
+                uuid=uuid,
+                title=addition.title,
+                status="open",
+                sort_index=0,
+            )
+            order.append(reference)
+            place(
+                reference,
+                addition.after,
+                present="after" in addition.model_fields_set,
+            )
+        for row_change in change.checklist_change:
+            reference = row_change.id
+            row = rows.get(reference)
+            if row is None:
+                raise _Abort(
+                    self._needs_input(
+                        f"Checklist row {reference} is not on {item.title}."
+                    )
+                )
+            rows[reference] = replace(
+                row,
+                title=row_change.title or row.title,
+                status=(
+                    cast(Status, _internal_status(row_change.status))
+                    if row_change.status
+                    else row.status
+                ),
+            )
+            place(
+                reference,
+                row_change.after,
+                present="after" in row_change.model_fields_set,
+            )
+        removed_uuids: list[str] = []
+        for reference in change.checklist_remove:
+            row = rows.pop(reference, None)
+            if row is None:
+                raise _Abort(
+                    self._needs_input(
+                        f"Checklist row {reference} is not on {item.title}."
+                    )
+                )
+            order.remove(reference)
+            removed_uuids.append(row.uuid)
+        if change.checklist_order is not None:
+            if set(change.checklist_order) != set(order):
+                raise _Abort(
+                    self._rejected(
+                        "checklist_order must name every remaining row once."
+                    )
+                )
+            order = list(change.checklist_order)
+        return _ChecklistProjection(
+            rows=tuple(
+                replace(rows[reference], sort_index=index * 1024)
+                for index, reference in enumerate(order)
+            ),
+            removed_uuids=tuple(removed_uuids),
+        )
+
+    def _prepare_lifecycle_or_heading_change(
+        self, item: Record, change: ChangeEntry, context: _PreparationContext
+    ) -> bool:
+        """Plan heading and lifecycle changes that end normal item planning."""
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        lifecycle = change.lifecycle or ("trash" if change.trash else None)
+        if item.heading:
+            if lifecycle == "delete_permanently":
+                assigned = [
+                    child
+                    for child in self._library.records.values()
+                    if child.heading_uuid == item.uuid
+                ]
+                for child in assigned:
+                    child_home = self._record_home(child)
+                    preconditions[child.id] = self._revision(child)
+                    writes.append(
+                        Write(
+                            action="update",
+                            uuid=child.uuid,
+                            kind=child.kind,
+                            into_uuid=child_home[0],
+                            into_kind=child_home[1],
+                            inbox=child_home[2],
+                            anytime=child_home[3],
+                            clear_heading=True,
+                        )
+                    )
+                writes.append(
+                    Write(action="permanent_delete", uuid=item.uuid, kind="task")
+                )
+                summary.append(f"Permanently delete heading: {item.title}")
+                if assigned:
+                    summary.append(
+                        f"Clear the heading from {len(assigned)} assigned Tasks"
+                    )
+                warnings.append("This heading deletion cannot be undone.")
+                context.risky = True
+                return True
+            if change.title is not None:
+                writes.append(
+                    Write(
+                        action="update", uuid=item.uuid, kind="task", title=change.title
+                    )
+                )
+                summary.append(f"Rename heading: {item.title} to {change.title}")
+            if "after" in change.model_fields_set:
+                writes.extend(
+                    self._heading_order_writes(
+                        item,
+                        after=change.after,
+                        preconditions=preconditions,
+                    )
+                )
+                summary.append(f"Reorder heading: {item.title}")
+            return True
+        if item.kind == "area" and change.status is not None:
+            raise _Abort(self._rejected("Areas do not have a completion state."))
+        if item.kind == "area" and "into" in change.model_fields_set:
+            raise _Abort(self._rejected("Areas stay in the top-level registry."))
+        if item.kind == "area":
+            preconditions["scope:areas"] = self._area_scope_revision()
+
+        if lifecycle is None:
+            return False
+        if item.kind not in {"task", "project"}:
+            raise _Abort(self._rejected("Only a Task or Project has this lifecycle."))
+        if item.kind == "project":
+            preconditions[f"scope:project:{item.uuid}"] = self._project_scope_revision(
+                item.uuid
+            )
+        if lifecycle == "trash":
+            writes.append(Write(action="trash", uuid=item.uuid, kind=item.kind))
+            summary.append(f"Trash {item.kind}: {item.title}")
+            warnings.append(
+                f"{item.title} will move to Trash and can be restored in Things."
+            )
+        elif lifecycle == "restore":
+            if not item.trashed:
+                raise _Abort(self._rejected(f"{item.title} is not in Trash."))
+            writes.append(Write(action="restore", uuid=item.uuid, kind=item.kind))
+            summary.append(f"Restore {item.kind}: {item.title}")
+            warnings.append(f"{item.title} will return to its prior Things location.")
+        else:
+            if not item.trashed:
+                raise _Abort(
+                    self._needs_input(
+                        f"Move {item.title} to Trash before permanent deletion."
+                    )
+                )
+            descendants = (
+                self._project_descendants(item.uuid) if item.kind == "project" else []
+            )
+            if item.kind == "project" and descendants and not change.delete_contents:
+                raise _Abort(
+                    self._needs_input(
+                        f"{item.title} still contains {len(descendants)} records. "
+                        "Move them first or retry with delete_contents true."
+                    )
+                )
+            if item.kind == "project" and change.delete_contents:
+                for descendant in descendants:
+                    preconditions[descendant.id] = self._revision(descendant)
+                    for child_row in descendant.checklists:
+                        writes.append(
+                            Write(
+                                action="checklist",
+                                uuid=child_row.uuid,
+                                checklist_parent_uuid=descendant.uuid,
+                                checklist_remove=True,
+                            )
+                        )
+                    writes.append(
+                        Write(
+                            action="permanent_delete",
+                            uuid=descendant.uuid,
+                            kind=descendant.kind,
+                        )
+                    )
+            for item_row in item.checklists:
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=item_row.uuid,
+                        checklist_parent_uuid=item.uuid,
+                        checklist_remove=True,
+                    )
+                )
+            writes.append(
+                Write(action="permanent_delete", uuid=item.uuid, kind=item.kind)
+            )
+            summary.append(f"Permanently delete {item.kind}: {item.title}")
+            warnings.append("This deletion cannot be undone.")
+            if descendants:
+                warnings.append(
+                    f"{len(descendants)} contained records will also be deleted."
+                )
+        context.risky = True
+        return True
+
+    def _prepare_checklist_change(
+        self,
+        item: Record,
+        projection: _ChecklistProjection,
+        context: _PreparationContext,
+    ) -> None:
+        """Move the current checklist to its already validated final projection."""
+        existing = {row.uuid: row for row in item.checklists}
+        for row in projection.rows:
+            previous = existing.get(row.uuid)
+            if previous is not None and (
+                previous.title,
+                previous.status,
+                previous.sort_index,
+            ) == (row.title, row.status, row.sort_index):
+                continue
+            context.writes.append(
+                Write(
+                    action="checklist",
+                    uuid=row.uuid,
+                    title=row.title
+                    if previous is None or row.title != previous.title
+                    else None,
+                    checklist_parent_uuid=item.uuid,
+                    checklist_status=(
+                        row.status
+                        if previous is None or row.status != previous.status
+                        else None
+                    ),
+                    checklist_index=row.sort_index,
+                )
+            )
+        for uuid in projection.removed_uuids:
+            context.writes.append(
+                Write(action="checklist", uuid=uuid, checklist_remove=True)
+            )
+
+    def _prepare_changes(self, call: CommitCall, context: _PreparationContext) -> None:
+        """Plan existing-item changes as one atomic batch."""
+        local = context.local
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
+        for change in call.change:
+            item = self._required_exact(change.id)
+            revision = self._revision(item)
+            if revision != change.if_revision:
+                raise _Abort(self._stale(f"{item.title} changed. Read it again."))
+            preconditions[item.id] = revision
+            if (
+                item.notes_format == "rich"
+                and "notes_markdown" in change.model_fields_set
+            ):
+                if not change.replace_rich_note:
+                    raise _Abort(
+                        self._unsupported(
+                            "That note contains rich text. Retry with replace_rich_note true "
+                            "only if the owner wants to replace all formatting with Markdown."
+                        )
+                    )
+                warnings.append(
+                    f"{item.title}'s rich formatting will be replaced with Markdown."
+                )
+                context.risky = True
+            elif change.replace_rich_note:
+                raise _Abort(
+                    self._rejected(
+                        "replace_rich_note is only for an existing rich note."
+                    )
+                )
+            starts_repeating = (
+                item.recurrence.role == "none"
+                and change.repeat is not None
+                and not change.repeat.remove
+            )
+            desired = (
+                self._desired_item_change(item, change, local, context)
+                if starts_repeating
+                else None
+            )
+            if self._prepare_recurrence_change(item, change, context, desired):
+                continue
+            if self._prepare_lifecycle_or_heading_change(item, change, context):
+                continue
+            desired = desired or self._desired_item_change(item, change, local, context)
+            if any(
+                field in change.model_fields_set
+                for field in {
+                    "title",
+                    "status",
+                    "notes_markdown",
+                    "into",
+                    "start",
+                    "deadline",
+                    "remind_at",
+                    "waiting",
+                    "tags_add",
+                    "tags_remove",
+                    "after",
+                    "today_after",
+                    "heading_id",
+                }
+            ):
+                writes.append(desired.update)
+
+            self._prepare_checklist_change(item, desired.checklist, context)
+
+            if change.move_contents_to is not None:
+                if item.kind != "area":
+                    raise _Abort(
+                        self._rejected(
+                            "Only an Area can move its contents as a registry change."
+                        )
+                    )
+                target = self._required_exact(change.move_contents_to)
+                if target.kind != "area" or target.uuid == item.uuid:
+                    raise _Abort(
+                        self._rejected("Area contents must move to another exact Area.")
+                    )
+                preconditions[target.id] = self._revision(target)
+                children = self._library.children_in_area(item.uuid)
+                for child in children:
+                    preconditions[child.id] = self._revision(child)
+                    writes.append(
+                        Write(
+                            action="move",
+                            uuid=child.uuid,
+                            kind=child.kind,
+                            into_uuid=target.uuid,
+                            into_kind="area",
+                        )
+                    )
+                writes.append(Write(action="delete_area", uuid=item.uuid, kind="area"))
+                summary.append(
+                    f"Move {len(children)} items from {item.title} to {target.title}"
+                )
+                summary.append(f"Remove empty Area: {item.title}")
+                warnings.append("One Area will be removed.")
+                context.risky = True
+            elif change.remove_if_empty:
+                if item.kind != "area":
+                    raise _Abort(self._rejected("Only an empty Area can be removed."))
+                if self._library.children_in_area(item.uuid):
+                    raise _Abort(
+                        self._needs_input(
+                            f"{item.title} still contains work. Choose another Area."
+                        )
+                    )
+                writes.append(Write(action="delete_area", uuid=item.uuid, kind="area"))
+                summary.append(f"Remove empty Area: {item.title}")
+                warnings.append("One Area will be removed.")
+                context.risky = True
+            else:
+                summary.append(f"Change {item.kind}: {item.title}")
+                if item.kind == "area":
+                    context.risky = True
+                    warnings.append("The Area registry will change.")
+                if item.kind == "project" and change.status in {
+                    "completed",
+                    "canceled",
+                }:
+                    open_children = [
+                        child
+                        for child in self._library.project(item.id)[1:]
+                        if child.status == "open"
+                    ]
+                    if open_children:
+                        context.risky = True
+                        preconditions[f"scope:project:{item.uuid}"] = (
+                            self._project_scope_revision(item.uuid)
+                        )
+                        warnings.append(
+                            f"{item.title} still has {len(open_children)} open actions."
+                        )
+
+    def _finish_preparation(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Apply batch-wide invariants after all planners finish."""
+        if not context.writes:
+            raise _Abort(self._rejected("The request did not produce a change."))
+        if any(write.action == "delete_area" for write in context.writes):
+            expected_scope = self._area_scope_revision()
+            if call.scope_revision != expected_scope:
+                raise _Abort(
+                    self._stale("Read the system and use its current scope_revision.")
+                )
+            context.preconditions["scope:areas"] = expected_scope
+        if len(context.writes) > 20 or len(call.change) > 5:
+            context.risky = True
+            context.warnings.append("This is a broad batch change.")
+
+    def _preparation_context(self, call: CommitCall) -> _PreparationContext:
+        """Validate registry snapshots and allocate all local references."""
         changes_areas = any(entry.kind == "area" for entry in call.create) or any(
             change.id.startswith("area:") for change in call.change
         )
@@ -780,7 +2013,17 @@ class ThingsWorkspace:
             if call.scope_revision != expected_scope:
                 raise _Abort(
                     self._stale(
-                        "The Area registry changed. Read the system and use its current scope_revision."
+                        "The Area registry changed. Read the system and use its "
+                        "current scope_revision."
+                    )
+                )
+        if call.change_tags:
+            expected_tags = self._tag_revision()
+            if call.tags_revision != expected_tags:
+                raise _Abort(
+                    self._stale(
+                        "The tag registry changed. Read tags and use its current "
+                        "scope_revision as tags_revision."
                     )
                 )
 
@@ -807,400 +2050,181 @@ class ThingsWorkspace:
                 if row.key:
                     local[row.key] = (new_uuid(), "check")
 
-        writes: list[Write] = []
-        preconditions: dict[str, str] = {}
-        summary: list[str] = []
-        warnings: list[str] = []
-        risky = False
-        uses_tags = bool(call.ensure_tags) or any(
-            entry.tag_ids or entry.waiting for entry in call.create
-        ) or any(
-            change.tags_add
-            or change.tags_remove
-            or change.waiting is not None
-            for change in call.change
+        context = _PreparationContext(
+            local=local,
+            writes=[],
+            preconditions={},
+            summary=[],
+            warnings=[],
+        )
+        uses_tags = (
+            bool(call.ensure_tags or call.change_tags)
+            or any(entry.tag_ids or entry.waiting for entry in call.create)
+            or any(
+                change.tags_add or change.tags_remove or change.waiting is not None
+                for change in call.change
+            )
         )
         if uses_tags:
-            preconditions["scope:tags"] = self._tag_revision()
+            context.preconditions["scope:tags"] = self._tag_revision()
+        return context
+
+    def _prepare_tag_registry(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Plan tag registry and hierarchy changes in one place."""
         for tag_entry in call.ensure_tags:
-            uuid = local[tag_entry.key][0]
-            writes.append(
+            uuid = context.local[tag_entry.key][0]
+            context.writes.append(
                 Write(action="ensure_tag", uuid=uuid, title=tag_entry.title)
             )
-            summary.append(f"Ensure tag: {tag_entry.title}")
-        for entry in call.create:
-            uuid = local[entry.key][0] if entry.key else new_uuid()
-            home = self._home(entry.into, entry.kind, local, new_item=True)
-            start, someday, tonight, remind = self._schedule_input(
-                entry.start,
-                entry.remind_at,
-                start_present="start" in entry.model_fields_set,
+            context.summary.append(f"Ensure tag: {tag_entry.title}")
+            if tag_entry.parent_id is None:
+                continue
+            parent_uuid = (
+                context.local[tag_entry.parent_id][0]
+                if tag_entry.parent_id.startswith("$")
+                else tag_entry.parent_id.removeprefix("tag:")
             )
-            if entry.into is None and (
-                start is not None or someday or tonight
+            if (
+                not tag_entry.parent_id.startswith("$")
+                and parent_uuid not in self._library.tags
             ):
-                home = (None, None, False, False)
-            tags = self._tag_ids(entry.tag_ids, local)
-            if entry.waiting:
-                waiting, tag_write = self._waiting_tag(writes)
-                if tag_write:
-                    writes.append(tag_write)
-                tags = list(dict.fromkeys([*tags, waiting]))
-            sort_index = self._after_index(
-                entry.after,
-                local,
-                writes,
-                kind=entry.kind,
-                home=home,
-                present="after" in entry.model_fields_set,
-                preconditions=preconditions,
-            )
-            today_index = self._today_after_index(
-                entry.today_after,
-                local,
-                writes,
-                present="today_after" in entry.model_fields_set,
-                on_today=start == self._clock().date() or tonight,
-                new_item=True,
-                preconditions=preconditions,
-            )
-            writes.append(
-                Write(
-                    action="create",
-                    uuid=uuid,
-                    kind=entry.kind,
-                    title=entry.title,
-                    notes=entry.notes_markdown,
-                    into_uuid=home[0],
-                    into_kind=home[1],
-                    inbox=home[2],
-                    anytime=home[3],
-                    start=start,
-                    deadline=date.fromisoformat(entry.deadline) if entry.deadline else None,
-                    remind=remind,
-                    tonight=tonight,
-                    someday=someday,
-                    tag_uuids=tags,
-                    sort_index=sort_index,
-                    today_index=today_index,
-                    owner_today=self._clock().date(),
-                )
-            )
-            for row_index, title in enumerate(entry.checklist):
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=new_uuid(),
-                        title=title,
-                        checklist_parent_uuid=uuid,
-                        checklist_status="open",
-                        checklist_index=row_index * 1024,
-                    )
-                )
-            for action_index, title in enumerate(entry.next_actions):
-                writes.append(
-                    Write(
-                        action="create",
-                        uuid=new_uuid(),
-                        kind="task",
-                        title=title,
-                        into_uuid=uuid,
-                        into_kind="project",
-                        anytime=True,
-                        sort_index=action_index * 1024,
-                    )
-                )
-            summary.append(f"Create {entry.kind}: {entry.title}")
-            if entry.next_actions:
-                summary.append(f"Add {len(entry.next_actions)} next actions to {entry.title}")
-            risky = risky or entry.kind == "area"
-            if entry.kind == "area":
-                preconditions["scope:areas"] = self._area_scope_revision()
-                warnings.append("The Area registry will change.")
-
-        for change in call.change:
-            item = self._required_exact(change.id)
-            revision = self._revision(item)
-            if revision != change.if_revision:
-                raise _Abort(self._stale(f"{item.title} changed. Read it again."))
-            preconditions[item.id] = revision
-            if item.notes_format == "rich" and "notes_markdown" in change.model_fields_set:
-                raise _Abort(self._unsupported("That note contains unsupported rich text."))
-            if item.recurrence_role != "none":
                 raise _Abort(
-                    self._unsupported(
-                        "This recurring item is read-only because its mutation semantics are not proven safe."
+                    self._needs_input(
+                        f"I could not find exact tag {tag_entry.parent_id}."
                     )
                 )
-            if item.kind == "area" and change.status is not None:
-                raise _Abort(self._rejected("Areas do not have a completion state."))
-            if item.kind == "area" and "into" in change.model_fields_set:
-                raise _Abort(self._rejected("Areas stay in the top-level registry."))
-            if item.kind == "area":
-                preconditions["scope:areas"] = self._area_scope_revision()
-
-            home = (None, None, False, False)
-            if "into" in change.model_fields_set:
-                home = self._home(change.into, item.kind, local, new_item=False)
-            start, someday, tonight, remind = self._schedule_input(
-                change.start,
-                change.remind_at,
-                start_present="start" in change.model_fields_set,
-            )
-            tags = list(item.tag_uuids)
-            if change.tags_add or change.tags_remove:
-                add = self._tag_ids(change.tags_add, local)
-                remove = set(self._tag_ids(change.tags_remove, local))
-                overlap = remove.intersection(add)
-                if overlap:
-                    raise _Abort(
-                        self._rejected(
-                            "A tag cannot be added and removed in one change."
-                        )
-                    )
-                tags = [uuid for uuid in tags if uuid not in remove]
-                tags = list(dict.fromkeys([*tags, *add]))
-            if change.waiting is not None:
-                if change.waiting:
-                    waiting, tag_write = self._waiting_tag(writes)
-                    if tag_write:
-                        writes.append(tag_write)
-                    tags = [uuid for uuid in tags if uuid != waiting]
-                    tags.append(waiting)
-                else:
-                    existing_waiting = self._library.tag_uuid(
-                        self._library.waiting_tag()
-                    )
-                    if existing_waiting is not None:
-                        tags = [uuid for uuid in tags if uuid != existing_waiting]
-            status = _internal_status(change.status) if change.status else None
-            order_home = (
-                home
-                if "into" in change.model_fields_set
-                else self._record_home(item)
-            )
-            sort_index = self._after_index(
-                change.after,
-                local,
-                writes,
-                kind=item.kind,
-                home=order_home,
-                present="after" in change.model_fields_set,
-                moving_uuid=item.uuid,
-                preconditions=preconditions,
-            )
-            changes_schedule_date = (
-                "start" in change.model_fields_set or change.remind_at is not None
-            )
-            desired_start = start if changes_schedule_date else item.start
-            desired_tonight = tonight if changes_schedule_date else item.tonight
-            today_index = self._today_after_index(
-                change.today_after,
-                local,
-                writes,
-                present="today_after" in change.model_fields_set,
-                on_today=(
-                    desired_start == self._clock().date() or desired_tonight
-                ),
-                new_item=False,
-                preconditions=preconditions,
-                moving_uuid=item.uuid,
-            )
-            notes = None
-            if "notes_markdown" in change.model_fields_set:
-                notes = change.notes_markdown or ""
-            main_write = Write(
-                action="update",
-                uuid=item.uuid,
-                kind=item.kind,
-                title=change.title,
-                notes=notes,
-                status=status,
-                into_uuid=home[0],
-                into_kind=home[1],
-                inbox=home[2],
-                anytime=home[3],
-                start=start,
-                clear_start="start" in change.model_fields_set and change.start is None,
-                deadline=date.fromisoformat(change.deadline) if change.deadline else None,
-                clear_deadline="deadline" in change.model_fields_set and change.deadline is None,
-                remind=remind,
-                clear_remind="remind_at" in change.model_fields_set and change.remind_at is None,
-                tonight=tonight,
-                someday=someday,
-                tag_uuids=tags if (change.tags_add or change.tags_remove or change.waiting is not None) else None,
-                sort_index=sort_index,
-                today_index=today_index,
-                owner_today=self._clock().date(),
-            )
-            if any(
-                field in change.model_fields_set
-                for field in {
-                    "title", "status", "notes_markdown", "into", "start", "deadline",
-                    "remind_at", "waiting", "tags_add", "tags_remove", "after",
-                    "today_after",
-                }
-            ):
-                writes.append(main_write)
-
-            checklist_ids: dict[str, str] = {}
-            for addition in change.checklist_add:
-                uuid = local[addition.key][0] if addition.key else new_uuid()
-                checklist_ids[addition.key or f"check:{uuid}"] = uuid
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=uuid,
-                        title=addition.title,
-                        checklist_parent_uuid=item.uuid,
-                        checklist_status="open",
-                        checklist_index=self._check_after_index(
-                            item,
-                            addition.after,
-                            local,
-                            writes,
-                            present="after" in addition.model_fields_set,
-                        ),
-                    )
+            self._validate_tag_parent(uuid, parent_uuid, context.writes)
+            context.writes.append(
+                Write(
+                    action="reparent_tag",
+                    uuid=uuid,
+                    tag_parent_uuids=[parent_uuid],
                 )
-            known_rows = {row.uuid: row for row in item.checklists}
-            for row_change in change.checklist_change:
-                uuid = row_change.id.removeprefix("check:")
-                if uuid not in known_rows:
+            )
+            context.summary.append(f"Place tag under: {tag_entry.title}")
+
+        for tag_change in call.change_tags:
+            uuid = tag_change.id.removeprefix("tag:")
+            current_title = self._library.tags.get(uuid)
+            if current_title is None:
+                raise _Abort(
+                    self._needs_input(f"I could not find exact tag {tag_change.id}.")
+                )
+            if tag_change.title is not None:
+                collision = next(
+                    (
+                        other_uuid
+                        for other_uuid, title in self._library.tags.items()
+                        if other_uuid != uuid
+                        and title.casefold() == tag_change.title.casefold()
+                    ),
+                    None,
+                )
+                if collision is not None:
                     raise _Abort(
                         self._needs_input(
-                            f"Checklist row {row_change.id} is not on {item.title}."
+                            f"Another tag is already named {tag_change.title}."
                         )
                     )
-                writes.append(
+                context.writes.append(
+                    Write(action="rename_tag", uuid=uuid, title=tag_change.title)
+                )
+                context.summary.append(
+                    f"Rename tag: {current_title} to {tag_change.title}"
+                )
+            if "parent_id" in tag_change.model_fields_set:
+                requested_parent_uuid = (
+                    tag_change.parent_id.removeprefix("tag:")
+                    if tag_change.parent_id is not None
+                    else None
+                )
+                if (
+                    requested_parent_uuid is not None
+                    and requested_parent_uuid not in self._library.tags
+                ):
+                    raise _Abort(
+                        self._needs_input(
+                            f"I could not find exact tag {tag_change.parent_id}."
+                        )
+                    )
+                self._validate_tag_parent(uuid, requested_parent_uuid, context.writes)
+                context.writes.append(
                     Write(
-                        action="checklist",
+                        action="reparent_tag",
                         uuid=uuid,
-                        title=row_change.title,
-                        checklist_parent_uuid=item.uuid,
-                        checklist_status=(
-                            _internal_status(row_change.status)
-                            if row_change.status
-                            else None
-                        ),
-                        checklist_index=self._check_after_index(
-                            item,
-                            row_change.after,
-                            local,
-                            writes,
-                            present="after" in row_change.model_fields_set,
-                            moving_uuid=uuid,
+                        tag_parent_uuids=(
+                            [requested_parent_uuid] if requested_parent_uuid else []
                         ),
                     )
                 )
-            for row_id in change.checklist_remove:
-                uuid = row_id.removeprefix("check:")
-                if uuid not in known_rows:
-                    raise _Abort(self._needs_input(f"Checklist row {row_id} is not on {item.title}."))
-                writes.append(Write(action="checklist", uuid=uuid, checklist_remove=True))
-            if change.checklist_order is not None:
-                remaining = {f"check:{row.uuid}" for row in item.checklists} - set(change.checklist_remove)
-                added = {
-                    key if key.startswith("$") else f"check:{uuid}"
-                    for key, uuid in checklist_ids.items()
-                }
-                if set(change.checklist_order) != remaining | added:
-                    raise _Abort(self._rejected("checklist_order must name every remaining row once."))
-                for order, reference in enumerate(change.checklist_order):
-                    uuid = local[reference][0] if reference.startswith("$") else reference.removeprefix("check:")
-                    if uuid not in known_rows:
-                        planned_index = next(
-                            (
-                                index
-                                for index, write in enumerate(writes)
-                                if write.action == "checklist"
-                                and write.uuid == uuid
-                                and not write.checklist_remove
-                            ),
-                            None,
-                        )
-                        if planned_index is not None:
-                            writes[planned_index] = replace(
-                                writes[planned_index], checklist_index=order * 1024
-                            )
-                            continue
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=uuid,
-                            checklist_parent_uuid=item.uuid,
-                            checklist_index=order * 1024,
-                        )
-                    )
+                context.summary.append(f"Change tag parent: {current_title}")
+            if tag_change.delete_permanently:
+                self._prepare_tag_deletion(uuid, current_title, context)
+            context.risky = True
 
-            if change.move_contents_to is not None:
-                if item.kind != "area":
-                    raise _Abort(self._rejected("Only an Area can move its contents as a registry change."))
-                target = self._required_exact(change.move_contents_to)
-                if target.kind != "area" or target.uuid == item.uuid:
-                    raise _Abort(self._rejected("Area contents must move to another exact Area."))
-                preconditions[target.id] = self._revision(target)
-                children = self._library.children_in_area(item.uuid)
-                for child in children:
-                    preconditions[child.id] = self._revision(child)
-                    writes.append(
-                        Write(
-                            action="move",
-                            uuid=child.uuid,
-                            kind=child.kind,
-                            into_uuid=target.uuid,
-                            into_kind="area",
-                        )
-                    )
-                writes.append(Write(action="delete_area", uuid=item.uuid, kind="area"))
-                summary.append(f"Move {len(children)} items from {item.title} to {target.title}")
-                summary.append(f"Remove empty Area: {item.title}")
-                warnings.append("One Area will be removed.")
-                risky = True
-            elif change.remove_if_empty:
-                if item.kind != "area":
-                    raise _Abort(self._rejected("Only an empty Area can be removed."))
-                if self._library.children_in_area(item.uuid):
-                    raise _Abort(self._needs_input(f"{item.title} still contains work. Choose another Area."))
-                writes.append(Write(action="delete_area", uuid=item.uuid, kind="area"))
-                summary.append(f"Remove empty Area: {item.title}")
-                warnings.append("One Area will be removed.")
-                risky = True
-            else:
-                summary.append(f"Change {item.kind}: {item.title}")
-                if item.kind == "area":
-                    risky = True
-                    warnings.append("The Area registry will change.")
-                if item.kind == "project" and change.status in {"completed", "canceled"}:
-                    open_children = [
-                        child
-                        for child in self._library.project(item.id)[1:]
-                        if child.status == "open"
-                    ]
-                    if open_children:
-                        risky = True
-                        preconditions[
-                            f"scope:project:{item.uuid}"
-                        ] = self._project_scope_revision(item.uuid)
-                        warnings.append(f"{item.title} still has {len(open_children)} open actions.")
-
-        if not writes:
-            raise _Abort(self._rejected("The request did not produce a change."))
-        if any(write.action == "delete_area" for write in writes):
-            expected_scope = self._area_scope_revision()
-            if call.scope_revision != expected_scope:
-                raise _Abort(self._stale("Read the system and use its current scope_revision."))
-            preconditions["scope:areas"] = expected_scope
-        if len(writes) > 20 or len(call.change) > 5:
-            risky = True
-            warnings.append("This is a broad batch change.")
-        return _Prepared(
-            writes=writes,
-            preconditions=preconditions,
-            summary=list(dict.fromkeys(summary))[:40],
-            warnings=list(dict.fromkeys(warnings))[:40],
-            risky=risky,
+    def _prepare_tag_deletion(
+        self, uuid: str, title: str, context: _PreparationContext
+    ) -> None:
+        """Detach every reference before the irreversible tag delete."""
+        for item in self._library.records.values():
+            if uuid not in item.tag_uuids:
+                continue
+            context.preconditions[item.id] = self._revision(item)
+            context.writes.append(
+                Write(
+                    action="tags",
+                    uuid=item.uuid,
+                    kind=item.kind,
+                    tag_uuids=[tag for tag in item.tag_uuids if tag != uuid],
+                )
+            )
+        for child_uuid, parents in self._library.tag_parents.items():
+            if uuid not in parents:
+                continue
+            context.writes.append(
+                Write(
+                    action="reparent_tag",
+                    uuid=child_uuid,
+                    tag_parent_uuids=[parent for parent in parents if parent != uuid],
+                )
+            )
+        context.writes.append(Write(action="delete_tag", uuid=uuid, title=title))
+        context.summary.append(f"Permanently delete tag: {title}")
+        context.warnings.append(
+            "The tag will be removed from all items and cannot be restored."
         )
+
+    def _validate_tag_parent(
+        self,
+        tag_uuid: str,
+        parent_uuid: str | None,
+        planned: list[Write],
+    ) -> None:
+        """Reject a parent that reaches this tag through current or planned links."""
+        if parent_uuid is None:
+            return
+        planned_parents = {
+            write.uuid: list(write.tag_parent_uuids or [])
+            for write in planned
+            if write.action == "reparent_tag"
+        }
+        pending = [parent_uuid]
+        seen: set[str] = set()
+        while pending:
+            ancestor = pending.pop()
+            if ancestor == tag_uuid:
+                raise _Abort(self._rejected("A tag parent cannot create a cycle."))
+            if ancestor in seen:
+                continue
+            seen.add(ancestor)
+            pending.extend(
+                planned_parents.get(
+                    ancestor,
+                    self._library.tag_parents.get(ancestor, []),
+                )
+            )
 
     def _home(
         self,
@@ -1368,9 +2392,15 @@ class ThingsWorkspace:
                 None,
             )
             if previous is None:
-                raise _Abort(self._rejected("An after reference must come earlier in the request."))
+                raise _Abort(
+                    self._rejected(
+                        "An after reference must come earlier in the request."
+                    )
+                )
             if previous.kind != kind or self._write_scope(previous) != wanted_scope:
-                raise _Abort(self._rejected("An after reference must be in the same list."))
+                raise _Abort(
+                    self._rejected("An after reference must be in the same list.")
+                )
             anchor_uuid = previous.uuid
             anchor_index = previous.sort_index or 0
         else:
@@ -1378,7 +2408,9 @@ class ThingsWorkspace:
             if item.uuid == moving_uuid:
                 raise _Abort(self._rejected("An item cannot follow itself."))
             if item.kind != kind or self._record_scope(item) != wanted_scope:
-                raise _Abort(self._rejected("An after reference must be in the same list."))
+                raise _Abort(
+                    self._rejected("An after reference must be in the same list.")
+                )
             preconditions[item.id] = self._revision(item)
             anchor_uuid = item.uuid
             anchor_index = item.sort_index
@@ -1395,6 +2427,60 @@ class ThingsWorkspace:
             moving_uuid=moving_uuid,
         )
         return repaired[anchor_uuid] + 512
+
+    def _heading_order_writes(
+        self,
+        heading: Record,
+        *,
+        after: str | None,
+        preconditions: dict[str, str],
+    ) -> list[Write]:
+        """Return one complete, stable heading order for a Project."""
+        project_uuid = heading.parent_uuid
+        if project_uuid is None:
+            raise _Abort(self._rejected("A heading needs a Project."))
+        ordered = sorted(
+            (
+                item
+                for item in self._library.records.values()
+                if item.heading
+                and item.parent_uuid == project_uuid
+                and not item.trashed
+                and item.uuid != heading.uuid
+            ),
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        if after is None:
+            ordered.insert(0, heading)
+        else:
+            anchor = self._required_exact(after)
+            if not anchor.heading or anchor.parent_uuid != project_uuid:
+                raise _Abort(
+                    self._rejected(
+                        "A heading after reference must be in the same Project."
+                    )
+                )
+            position = next(
+                index for index, item in enumerate(ordered) if item.uuid == anchor.uuid
+            )
+            ordered.insert(position + 1, heading)
+        preconditions[f"scope:project:{project_uuid}"] = self._project_scope_revision(
+            project_uuid
+        )
+        writes: list[Write] = []
+        for index, item in enumerate(ordered):
+            preconditions[item.id] = self._revision(item)
+            wanted = index * 1024
+            if item.sort_index != wanted:
+                writes.append(
+                    Write(
+                        action="update",
+                        uuid=item.uuid,
+                        kind="task",
+                        sort_index=wanted,
+                    )
+                )
+        return writes
 
     def _rebalance_scope(
         self,
@@ -1429,10 +2515,7 @@ class ThingsWorkspace:
         )
         positions: dict[str, int] = {}
         combined = sorted(
-            [
-                (item.sort_index, item.uuid, "existing", item)
-                for item in existing
-            ]
+            [(item.sort_index, item.uuid, "existing", item) for item in existing]
             + [
                 (write.sort_index or 0, write.uuid, "planned", index)
                 for index, write in planned_rows
@@ -1515,9 +2598,7 @@ class ThingsWorkspace:
         present: bool,
         moving_uuid: str | None = None,
     ) -> int | None:
-        indexes = [
-            row.sort_index for row in item.checklists if row.uuid != moving_uuid
-        ]
+        indexes = [row.sort_index for row in item.checklists if row.uuid != moving_uuid]
         indexes.extend(
             write.checklist_index
             for write in planned
@@ -1528,18 +2609,18 @@ class ThingsWorkspace:
             and write.checklist_index is not None
         )
         if not present:
-            return (
-                max(indexes, default=-1024) + 1024
-                if moving_uuid is None
-                else None
-            )
+            return max(indexes, default=-1024) + 1024 if moving_uuid is None else None
         if reference is None:
             return min(indexes, default=1024) - 1024
         if reference.startswith("$"):
             uuid = local[reference][0]
-            previous = next((write for write in reversed(planned) if write.uuid == uuid), None)
+            previous = next(
+                (write for write in reversed(planned) if write.uuid == uuid), None
+            )
             if previous is None or previous.checklist_parent_uuid != item.uuid:
-                raise _Abort(self._rejected("A checklist after reference must come earlier."))
+                raise _Abort(
+                    self._rejected("A checklist after reference must come earlier.")
+                )
             anchor_uuid = previous.uuid
             anchor_index = previous.checklist_index or 0
         else:
@@ -1560,9 +2641,7 @@ class ThingsWorkspace:
             return anchor_index + 1024
         if later[0] - anchor_index > 1:
             return anchor_index + (later[0] - anchor_index) // 2
-        repaired = self._rebalance_checklist(
-            item, planned, moving_uuid=moving_uuid
-        )
+        repaired = self._rebalance_checklist(item, planned, moving_uuid=moving_uuid)
         return repaired[anchor_uuid] + 512
 
     @staticmethod
@@ -1572,9 +2651,7 @@ class ThingsWorkspace:
         *,
         moving_uuid: str | None,
     ) -> dict[str, int]:
-        existing = [
-            row for row in item.checklists if row.uuid != moving_uuid
-        ]
+        existing = [row for row in item.checklists if row.uuid != moving_uuid]
         planned_rows = [
             (index, write)
             for index, write in enumerate(planned)
@@ -1608,9 +2685,7 @@ class ThingsWorkspace:
                     )
             else:
                 index = cast(int, value)
-                planned[index] = replace(
-                    planned[index], checklist_index=new_index
-                )
+                planned[index] = replace(planned[index], checklist_index=new_index)
         return positions
 
     def _today_after_index(
@@ -1645,11 +2720,7 @@ class ThingsWorkspace:
             and write.today_index is not None
         )
         if not present:
-            return (
-                max(indexes, default=-1024) + 1024
-                if new_item and on_today
-                else None
-            )
+            return max(indexes, default=-1024) + 1024 if new_item and on_today else None
         if not on_today:
             raise _Abort(
                 self._rejected("today_after needs an item scheduled for Today.")
@@ -1661,9 +2732,7 @@ class ThingsWorkspace:
             previous = next(
                 (write for write in reversed(planned) if write.uuid == uuid), None
             )
-            if previous is None or not (
-                previous.start == today or previous.tonight
-            ):
+            if previous is None or not (previous.start == today or previous.tonight):
                 raise _Abort(
                     self._rejected(
                         "A today_after reference must be earlier and on Today."
@@ -1675,9 +2744,7 @@ class ThingsWorkspace:
             item = self._required_exact(reference)
             if item.uuid == moving_uuid:
                 raise _Abort(self._rejected("A Today item cannot follow itself."))
-            if not item.is_open() or not (
-                item.start == today or item.tonight
-            ):
+            if not item.is_open() or not (item.start == today or item.tonight):
                 raise _Abort(
                     self._rejected("A today_after reference must be on Today.")
                 )
@@ -1723,10 +2790,7 @@ class ThingsWorkspace:
             key=lambda pair: (pair[1].today_index or 0, pair[1].uuid),
         )
         combined = sorted(
-            [
-                (item.today_index, item.uuid, "existing", item)
-                for item in existing
-            ]
+            [(item.today_index, item.uuid, "existing", item) for item in existing]
             + [
                 (write.today_index or 0, write.uuid, "planned", index)
                 for index, write in planned_rows
@@ -1752,9 +2816,7 @@ class ThingsWorkspace:
                     )
             else:
                 index = cast(int, value)
-                planned[index] = replace(
-                    planned[index], today_index=new_index
-                )
+                planned[index] = replace(planned[index], today_index=new_index)
         return positions
 
     def _stage(self, record: IntentRecord, prepared: _Prepared) -> Result:
@@ -1802,7 +2864,9 @@ class ThingsWorkspace:
             self._save_result(record, "unchanged", result)
             return result
         if self._preconditions_changed(record.plan):
-            result = self._stale("Relevant Things data changed. Read it before a new intent.")
+            result = self._stale(
+                "Relevant Things data changed. Read it before a new intent."
+            )
             self._save_result(record, "stale", result)
             return result
         pending_record = IntentRecord(
@@ -1867,7 +2931,10 @@ class ThingsWorkspace:
         return result
 
     def _resume(self, record: IntentRecord, *, allow_apply: bool) -> Result:
-        if record.state in {"applied", "unchanged", "stale"} and record.result is not None:
+        if (
+            record.state in {"applied", "unchanged", "stale"}
+            and record.result is not None
+        ):
             return Result.model_validate(record.result)
         if record.state == "needs_approval" and record.result is not None:
             return Result.model_validate(record.result)
@@ -1888,12 +2955,18 @@ class ThingsWorkspace:
             receipt=record.plan_id or record.intent_id,
         )
 
-    def _settled(self, intent_id: str, writes: list[Write], *, unchanged: bool) -> Result:
-        ids = list(dict.fromkeys(write.uuid for write in writes if write.action != "ensure_tag"))
+    def _settled(
+        self, intent_id: str, writes: list[Write], *, unchanged: bool
+    ) -> Result:
+        ids = list(
+            dict.fromkeys(
+                write.uuid for write in writes if write.action != "ensure_tag"
+            )
+        )
         items = [
             self._fact(item, full=False)
             for uuid in ids
-            if (item := self._library.records.get(uuid)) is not None and not item.heading
+            if (item := self._library.records.get(uuid)) is not None
         ][:40]
         tags: list[TagFact] = []
         for write in writes:
@@ -1903,16 +2976,13 @@ class ThingsWorkspace:
             uuid = self._library.tag_uuid(title)
             if uuid is None or any(tag.id == f"tag:{uuid}" for tag in tags):
                 continue
-            tags.append(
-                TagFact(
-                    id=f"tag:{uuid}",
-                    title=_bounded_tag_title(self._library.tags[uuid]),
-                )
-            )
+            tags.append(self._tag_fact(uuid))
         return Result(
             next="done",
             status="unchanged" if unchanged else "applied",
-            instruction="The requested state was already true." if unchanged else "Cloud read-back matched the requested state.",
+            instruction="The requested state was already true."
+            if unchanged
+            else "Cloud read-back matched the requested state.",
             items=items,
             tags=tags,
             receipt=intent_id,
@@ -1962,117 +3032,18 @@ class ThingsWorkspace:
                 if self._project_scope_revision(uuid) != expected:
                     return True
                 continue
+            if public_id.startswith("scope:repeat:"):
+                uuid = public_id.removeprefix("scope:repeat:")
+                if self._recurrence_scope_revision(uuid) != expected:
+                    return True
+                continue
             item = self._exact_item(public_id)
             if item is None or self._revision(item) != expected:
                 return True
         return False
 
     def _writes_match(self, writes: list[Write]) -> bool:
-        tag_aliases = {
-            write.uuid: actual
-            for write in writes
-            if write.action == "ensure_tag"
-            and (actual := self._library.tag_uuid(write.title or "")) is not None
-        }
-        normalized = [
-            replace(
-                write,
-                tag_uuids=[tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids],
-            )
-            if write.tag_uuids is not None
-            else write
-            for write in writes
-        ]
-        return all(self._write_matches(write) for write in normalized)
-
-    def _write_matches(self, write: Write) -> bool:
-        if write.action == "ensure_tag":
-            return self._library.tags.get(write.uuid) == (write.title or "") or self._library.tag_uuid(write.title or "") is not None
-        if write.action == "checklist":
-            parent, row = self._library._find_checklist(write.uuid)  # noqa: SLF001
-            if write.checklist_remove:
-                return row is None
-            return row is not None and parent is not None and all(
-                (
-                    write.title is None or row.title == write.title,
-                    write.checklist_status is None or row.status == write.checklist_status,
-                    write.checklist_parent_uuid is None or parent.uuid == write.checklist_parent_uuid,
-                    write.checklist_index is None or row.sort_index == write.checklist_index,
-                )
-            )
-        item = self._library.records.get(write.uuid)
-        if write.action == "delete_area":
-            return item is None
-        if item is None:
-            return False
-        if write.action == "complete":
-            return item.status == "done"
-        if write.action == "cancel":
-            return item.status == "dropped"
-        if write.action == "rename_area":
-            return item.title == write.title
-        if write.action == "tags":
-            return item.tag_uuids == (write.tag_uuids or [])
-        if write.action == "move":
-            return self._placement_matches(item, write)
-        checks = [
-            write.title is None or item.title == write.title,
-            write.notes is None or item.notes == write.notes,
-            write.status is None or item.status == write.status,
-            write.tag_uuids is None or item.tag_uuids == write.tag_uuids,
-            write.deadline is None or item.deadline == write.deadline,
-            not write.clear_deadline or item.deadline is None,
-            write.start is None or item.start == write.start,
-            not write.clear_start or item.start is None,
-            write.start is None or item.tonight == write.tonight,
-            not write.clear_start or not item.tonight,
-            write.remind is None or item.remind == write.remind,
-            not write.clear_remind or item.remind is None,
-            not write.someday or (item.someday and not item.tonight),
-            not write.tonight or item.tonight,
-            not write.anytime
-            or (
-                not item.inbox
-                and not item.someday
-                and not item.tonight
-                and item.start is None
-            ),
-            write.sort_index is None or item.sort_index == write.sort_index,
-            write.today_index is None or item.today_index == write.today_index,
-        ]
-        if (
-            write.action == "create"
-            or write.into_uuid is not None
-            or write.into_kind is not None
-            or write.inbox
-            or write.anytime
-        ):
-            checks.append(self._placement_matches(item, write))
-        if write.action == "create":
-            checks.append(item.kind == write.kind)
-        return all(checks)
-
-    @staticmethod
-    def _placement_matches(item: Record, write: Write) -> bool:
-        if write.kind == "area":
-            return (
-                not item.inbox
-                and item.parent_uuid is None
-                and item.area_uuid is None
-            )
-        if write.into_kind == "project":
-            return item.parent_uuid == write.into_uuid and item.area_uuid is None and not item.inbox
-        if write.into_kind == "area":
-            return item.area_uuid == write.into_uuid and item.parent_uuid is None and not item.inbox
-        if (
-            write.kind == "project"
-            or write.anytime
-            or write.start is not None
-            or write.someday
-            or write.tonight
-        ):
-            return not item.inbox and item.parent_uuid is None and item.area_uuid is None
-        return item.inbox and item.parent_uuid is None and item.area_uuid is None
+        return self._library.matches(writes)
 
     def _save_result(
         self, record: IntentRecord, state: IntentState, result: Result
@@ -2108,7 +3079,9 @@ class ThingsWorkspace:
         if kind is None:
             return None
         item = self._library.records.get(uuid)
-        return item if item is not None and item.kind == kind else None
+        if item is None:
+            return None
+        return item if item.public_kind == kind else None
 
     def _required_exact(self, value: str) -> Record:
         item = self._exact_item(value)
@@ -2124,7 +3097,9 @@ class ThingsWorkspace:
             "notes_source": item.notes_source,
             "notes_format": item.notes_format,
             "status": item.status,
-            "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+            "completed_at": item.completed_at.isoformat()
+            if item.completed_at
+            else None,
             "trashed": item.trashed,
             "inbox": item.inbox,
             "start": item.start.isoformat() if item.start else None,
@@ -2138,10 +3113,12 @@ class ThingsWorkspace:
             "tags": item.tag_uuids,
             "sort": item.sort_index,
             "today_sort": item.today_index,
-            "recurrence": [item.recurrence_role, item.recurrence_type, item.recurrence_template_uuid],
+            "recurrence": cast(object, asdict(item.recurrence)),
             "checklist": [
                 [row.uuid, row.title, row.status, row.sort_index]
-                for row in sorted(item.checklists, key=lambda row: (row.sort_index, row.uuid))
+                for row in sorted(
+                    item.checklists, key=lambda row: (row.sort_index, row.uuid)
+                )
             ],
         }
         return "r_" + _digest(payload)
@@ -2165,16 +3142,12 @@ class ThingsWorkspace:
         return "s_" + _digest(rows)
 
     @staticmethod
-    def _list_scope_key(
-        kind: Kind, scope: tuple[str, str | None]
-    ) -> str:
+    def _list_scope_key(kind: Kind, scope: tuple[str, str | None]) -> str:
         return "scope:list:" + json.dumps(
             [kind, scope[0], scope[1]], separators=(",", ":")
         )
 
-    def _list_scope_revision(
-        self, kind: Kind, scope: tuple[str, str | None]
-    ) -> str:
+    def _list_scope_revision(self, kind: Kind, scope: tuple[str, str | None]) -> str:
         items = sorted(
             (
                 item
@@ -2215,20 +3188,50 @@ class ThingsWorkspace:
         rows.extend(
             [item.id, self._revision(item)]
             for item in sorted(
-                self._library.records.values(), key=lambda item: item.id
+                self._project_descendants(uuid), key=lambda item: item.id
             )
-            if item.parent_uuid == uuid and not item.trashed and not item.heading
         )
+        return "s_" + _digest(rows)
+
+    def _project_descendants(self, uuid: str) -> list[Record]:
+        """Return the complete Project subtree with the deepest records first."""
+        by_parent: dict[str, list[Record]] = {}
+        for item in self._library.records.values():
+            if item.parent_uuid is not None:
+                by_parent.setdefault(item.parent_uuid, []).append(item)
+        ordered: list[Record] = []
+
+        def visit(parent_uuid: str, path: frozenset[str]) -> None:
+            for child in sorted(
+                by_parent.get(parent_uuid, []),
+                key=lambda item: (item.sort_index, item.uuid),
+            ):
+                if child.uuid in path:
+                    raise _Abort(
+                        self._rejected("The Project structure contains a cycle.")
+                    )
+                visit(child.uuid, path | {child.uuid})
+                ordered.append(child)
+
+        visit(uuid, frozenset({uuid}))
+        return ordered
+
+    def _recurrence_scope_revision(self, uuid: str) -> str:
+        rows = [
+            [item.id, self._revision(item)]
+            for item in sorted(self._library.records.values(), key=lambda item: item.id)
+            if item.uuid == uuid or uuid in item.recurrence.links
+        ]
         return "s_" + _digest(rows)
 
     @staticmethod
     def _recurrence_kind(item: Record) -> RecurrenceKind:
-        if item.recurrence_role == "template":
+        if item.recurrence.role == "template":
             return "template"
-        if item.recurrence_role == "instance":
-            if item.recurrence_type == "fixed":
+        if item.recurrence.role == "instance":
+            if item.recurrence.repeat_type == "fixed":
                 return "fixed_instance"
-            if item.recurrence_type == "after_completion":
+            if item.recurrence.repeat_type == "after_completion":
                 return "after_completion_instance"
             return "unknown"
         return "none"
@@ -2251,9 +3254,14 @@ class ThingsWorkspace:
 
 
 def _fingerprint(value: object) -> str:
-    return "sha256:" + sha256(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-    ).hexdigest()
+    return (
+        "sha256:"
+        + sha256(
+            json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode()
+        ).hexdigest()
+    )
 
 
 def _bounded_tag_title(title: str) -> str:
@@ -2270,23 +3278,39 @@ def _bounded_order(value: int) -> int:
 
 def _digest(value: object) -> str:
     return sha256(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+        json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode()
     ).hexdigest()[:24]
 
 
 def _public_status(status: Status) -> PublicStatus:
-    return "completed" if status == "done" else "canceled" if status == "dropped" else "open"
+    return (
+        "completed"
+        if status == "done"
+        else "canceled"
+        if status == "dropped"
+        else "open"
+    )
 
 
 def _internal_status(status: str | None) -> Status | None:
     if status is None:
         return None
-    return "done" if status == "completed" else "dropped" if status == "canceled" else "open"
+    return (
+        "done"
+        if status == "completed"
+        else "dropped"
+        if status == "canceled"
+        else "open"
+    )
 
 
 def _outcome_unknown(error: CloudError) -> bool:
     text = str(error).casefold()
-    return any(term in text for term in ("timed out", "unknown", "read-back", "read back"))
+    return any(
+        term in text for term in ("timed out", "unknown", "read-back", "read back")
+    )
 
 
 def _write_json(write: Write) -> JsonDict:
@@ -2309,4 +3333,7 @@ def _write_from_json(payload: dict[str, object]) -> Write:
 
 
 def _result_json(result: Result) -> JsonDict:
-    return cast(JsonDict, result.model_dump(mode="json", exclude_defaults=True, exclude_none=True))
+    return cast(
+        JsonDict,
+        result.model_dump(mode="json", exclude_defaults=True, exclude_none=True),
+    )
