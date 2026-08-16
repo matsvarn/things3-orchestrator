@@ -30,6 +30,7 @@
   `things_approve` only after the owner accepts the change.
 - **A write returns `stop`.** Report its `instruction`. Keep the work
   unchanged until the owner gives a new decision.
-- **The requested write is unsupported.** Keep the item unchanged. Check the
-  [current limits](../README.md#current-limits). Do not use raw Cloud fields as
-  a bypass.
+- **A write returns `unsupported`.** Keep the item unchanged. The stored record
+  does not have enough safe structure for that change. Do not use raw Cloud
+  fields as a bypass. Check the [capability proof](capability-proof.md) and the
+  returned instruction.

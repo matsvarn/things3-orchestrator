@@ -1566,6 +1566,246 @@ def test_trash_is_a_recoverable_task_patch(tmp_path: Path) -> None:
     assert library.records["task"].trashed is True
 
 
+def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    rule = {
+        "tp": 0,
+        "fu": 256,
+        "fa": 2,
+        "of": [{"wd": 0}, {"wd": 4}],
+        "sr": 1_775_232_000,
+        "ia": 1_775_232_000,
+        "ed": 64_092_211_200,
+        "rc": 0,
+        "ts": 0,
+        "rrv": 4,
+    }
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="template-new",
+                title="Routine",
+                recurrence_rule=rule,
+            ),
+            Write(
+                action="create",
+                uuid="instance-new",
+                title="Routine",
+                recurrence_links=["template-new"],
+                recurrence_generated=True,
+            ),
+        ]
+    )
+
+    assert len(client.committed) == 2
+    template = next(item for item in client.committed if item.uuid == "template-new")
+    instance = next(item for item in client.committed if item.uuid == "instance-new")
+    assert template.payload["rr"] == rule
+    assert template.payload["rt"] == []
+    assert instance.payload["rr"] is None
+    assert instance.payload["rt"] == ["template-new"]
+    assert instance.payload["lt"] is True
+    assert library.records["template-new"].recurrence.role == "template"
+    assert library.records["instance-new"].recurrence.template_uuid == "template-new"
+
+
+def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template": Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 8, "fa": 1},
+                ),
+            ),
+            "instance": Record(
+                uuid="instance",
+                kind="task",
+                title="Routine",
+                entity="Task6",
+                recurrence=RecurrenceState(
+                    role="instance",
+                    repeat_type="fixed",
+                    template_uuid="template",
+                    links=("template",),
+                ),
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(action="repeat_link", uuid="instance", recurrence_links=[]),
+            Write(action="permanent_delete", uuid="template"),
+        ]
+    )
+
+    assert {item.uuid for item in client.committed} == {"instance", "template"}
+    link = next(item for item in client.committed if item.uuid == "instance")
+    assert link.payload["rt"] == []
+    assert library.records["instance"].recurrence.role == "none"
+    assert "template" not in library.records
+
+
+def test_memory_lifecycle_and_tag_admin_actions_are_reversible_until_delete() -> None:
+    library = MemoryLibrary(
+        [
+            Record(uuid="heading", kind="task", title="Next", heading=True),
+            Record(
+                uuid="task",
+                kind="task",
+                title="Call",
+                trashed=True,
+                heading_uuid="heading",
+                tag_uuids=["old"],
+            ),
+        ]
+    )
+    library.tags.update({"old": "Old", "parent": "Parent"})
+    library.tag_parents["old"] = []
+
+    library.apply(
+        [
+            Write(action="restore", uuid="task"),
+            Write(action="rename_tag", uuid="old", title="New"),
+            Write(action="reparent_tag", uuid="old", tag_parent_uuids=["parent"]),
+        ]
+    )
+
+    assert library.records["task"].trashed is False
+    assert library.tags["old"] == "New"
+    assert library.tag_parents["old"] == ["parent"]
+
+    library.apply([Write(action="permanent_delete", uuid="heading")])
+    library.apply([Write(action="delete_tag", uuid="old")])
+    assert "heading" not in library.records
+    assert library.records["task"].heading_uuid is None
+    assert library.records["task"].tag_uuids == []
+    assert "old" not in library.tags
+
+
+def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "task": Record(
+                uuid="task",
+                kind="task",
+                title="Call",
+                trashed=True,
+                entity="Task6",
+            ),
+            "heading": Record(
+                uuid="heading",
+                kind="task",
+                title="Next",
+                heading=True,
+                entity="Task6",
+            ),
+            "child": Record(
+                uuid="child",
+                kind="task",
+                title="Ship",
+                heading_uuid="heading",
+                entity="Task6",
+            ),
+        }
+    )
+    library.tags.update({"old": "Old", "parent": "Parent"})
+    library.tag_parents["old"] = []
+
+    result = library.apply(
+        [
+            Write(action="restore", uuid="task"),
+            Write(action="rename_tag", uuid="old", title="New"),
+            Write(action="reparent_tag", uuid="old", tag_parent_uuids=["parent"]),
+            Write(action="permanent_delete", uuid="heading", title="Next"),
+        ]
+    )
+
+    assert len(client.committed) == 3
+    restore = next(item for item in client.committed if item.uuid == "task")
+    assert restore.action == 1
+    assert restore.kind == "Task6"
+    assert restore.payload["tr"] is False
+    assert set(restore.payload) == {"tr", "md"}
+    tag = next(item for item in client.committed if item.uuid == "old")
+    assert tag.action == 1
+    assert tag.kind == "Tag4"
+    assert tag.payload["tt"] == "New"
+    assert tag.payload["pn"] == ["parent"]
+    assert set(tag.payload) == {"tt", "pn", "md"}
+    heading = next(item for item in client.committed if item.uuid == "heading")
+    assert heading.action == 2
+    assert heading.kind == "Task6"
+    assert heading.payload == {}
+    assert result.verified == ["Call", "New", "Next"]
+    assert library.records["task"].trashed is False
+    assert library.tags["old"] == "New"
+    assert library.tag_parents["old"] == ["parent"]
+    assert "heading" not in library.records
+    assert library.records["child"].heading_uuid is None
+
+    library.apply([Write(action="delete_tag", uuid="old", title="New")])
+    assert client.committed[0].action == 2
+    assert client.committed[0].kind == "Tag4"
+    assert client.committed[0].payload == {}
+    assert "old" not in library.tags
+
+
+def test_ensure_tag_preserves_parent_aliases_for_memory_and_cloud(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryLibrary()
+    memory.tags["parent"] = "Parent"
+    memory.apply(
+        [
+            Write(action="ensure_tag", uuid="$parent", title="Parent"),
+            Write(
+                action="ensure_tag",
+                uuid="child",
+                title="Child",
+                tag_parent_uuids=["$parent"],
+            ),
+        ]
+    )
+    assert memory.tag_parents["child"] == ["parent"]
+
+    client = _CaptureClient()
+    cloud = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    cloud.tags["parent"] = "Parent"
+    cloud.apply(
+        [
+            Write(action="ensure_tag", uuid="$parent", title="Parent"),
+            Write(
+                action="ensure_tag",
+                uuid="child",
+                title="Child",
+                tag_parent_uuids=["$parent"],
+            ),
+        ]
+    )
+    child = next(item for item in client.committed if item.uuid == "child")
+    assert child.kind == "Tag4"
+    assert child.payload["pn"] == ["parent"]
+    assert cloud.tag_parents["child"] == ["parent"]
+
+
 def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]

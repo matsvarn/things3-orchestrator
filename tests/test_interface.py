@@ -566,6 +566,85 @@ def test_tag_schema_matches_runtime_local_reference_rules() -> None:
     assert "tags" in APPROVE_OUT["properties"]
 
 
+def test_advanced_mutations_stay_in_one_commit_shape() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "advanced-mutation-shape-001",
+            "tags_revision": "s_tags",
+            "ensure_tags": [
+                {"key": "$people", "title": "People"},
+                {"key": "$alex", "title": "Alex", "parent_id": "$people"},
+            ],
+            "change_tags": [{"id": "tag:old", "title": "Archive"}],
+            "change": [
+                {
+                    "id": "task:template",
+                    "if_revision": "r_repeat",
+                    "repeat": {
+                        "mode": "after_completion",
+                        "unit": "week",
+                        "interval": 2,
+                    },
+                },
+                {
+                    "id": "heading:next",
+                    "if_revision": "r_heading",
+                    "after": None,
+                },
+                {
+                    "id": "task:rich",
+                    "if_revision": "r_rich",
+                    "notes_markdown": "Replacement",
+                    "replace_rich_note": True,
+                },
+            ],
+        }
+    )
+
+    assert call.ensure_tags[1].parent_id == "$people"
+    assert call.change_tags[0].title == "Archive"
+    assert call.change[0].repeat is not None
+    assert call.change[1].model_fields_set == {"id", "if_revision", "after"}
+    change_schema = COMMIT_IN["properties"]["change"]["items"]["properties"]
+    assert change_schema["lifecycle"]["enum"] == [
+        "trash",
+        "restore",
+        "delete_permanently",
+    ]
+
+
+def test_irreversible_mutations_cannot_hide_other_edits() -> None:
+    with pytest.raises(ValueError, match="lifecycle change"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "permanent-delete-mixed-001",
+                "change": [
+                    {
+                        "id": "task:old",
+                        "if_revision": "r_old",
+                        "lifecycle": "delete_permanently",
+                        "title": "Hidden edit",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValueError, match="tag deletion"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-delete-mixed-001",
+                "tags_revision": "s_tags",
+                "change_tags": [
+                    {
+                        "id": "tag:old",
+                        "title": "Hidden edit",
+                        "delete_permanently": True,
+                    }
+                ],
+            }
+        )
+
+
 def test_manual_schemas_are_flat_and_compact() -> None:
     schemas = (READ_IN, COMMIT_IN, APPROVE_IN, RESULT_OUT)
     for schema in schemas:
@@ -585,12 +664,12 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    assert discovery_chars < 10_300
+    assert discovery_chars < 13_000
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 10_900
+    assert wire_chars < 13_100
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC

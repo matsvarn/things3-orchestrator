@@ -8,6 +8,7 @@ SECURITY.md
 deploy/Caddyfile
 deploy/serve-http.service
 docs/adr/0001-revisioned-workspace-behind-three-tools.md
+docs/capability-proof.md
 docs/clients.md
 docs/comparison.md
 docs/maintainer.md
@@ -26,6 +27,7 @@ plugin/skills/things-orchestrator/references/task-system.md
 public-files.txt
 pyproject.toml
 scripts/check_release.py
+scripts/probe_cloud_capabilities.py
 scripts/setup
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
@@ -42,6 +44,7 @@ tests/test_cloud.py
 tests/test_interface.py
 tests/test_journal.py
 tests/test_plugin_secret_scan.py
+tests/test_recurrence.py
 tests/test_server.py
 tests/test_workflow_skill.py
 tests/test_workspace.py

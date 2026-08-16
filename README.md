@@ -59,22 +59,30 @@ Cursor, Codex, and Claude. Reprint it with
 
 Changing the tools: [docs/maintainer.md](docs/maintainer.md).
 
-## Current limits
+## Current capability
 
 The server can create and update Tasks, Projects, Areas, tags, native
 checklists, Markdown notes, dates, reminders, and list order. It can complete
-or cancel Tasks and Projects. It can move Tasks and Projects to the recoverable
-Things Trash after confirmation. It can also remove an empty Area after it
-moves all contained work to another Area.
+or cancel Tasks and Projects.
 
-The server reads repeat mode, unit, and interval. It can change the interval
-of an existing repeating template after confirmation. The full Cloud rule is
-kept without data loss. It does not create repeat rules, change their pattern,
-or change generated copies. Those operations need more lifecycle proof.
+It can create repeat rules. It can change repeat mode, unit, interval, and
+weekly pattern. It can edit or complete a generated copy. It can stop a repeat
+rule and keep linked copies as ordinary Tasks. Rule changes keep unknown Cloud
+fields.
 
-It can create and rename headings, and assign or clear a Task's heading. It
-does not reorder or remove headings. It does not permanently delete Tasks or
-Projects. Deletion moves them to the recoverable Things Trash.
+It can create, rename, reorder, assign, clear, and remove headings. It can
+create nested tags, rename or reparent them, and remove their references before
+deletion.
+
+It can move Tasks and Projects to recoverable Trash, restore them, or delete
+them permanently. Permanent Project deletion removes descendants first, so it
+does not leave detached Tasks. Irreversible changes need confirmation.
+
+It reads structured rich notes without overwriting them. An explicit approved
+operation can replace the complete rich note with Markdown.
+
+See the executable [capability proof](docs/capability-proof.md) for each memory,
+Cloud, live, approval, and read-back gate.
 
 ## Develop
 

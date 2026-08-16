@@ -19,5 +19,13 @@ account for every contained Task and Project.
 Inspect duplicate titles and empty Projects before suggesting cleanup. Use
 completion history, notes, placement, and the owner's words.
 
+Repair tag names and parent relationships when they reduce duplicate filters.
+Delete a tag only after its use is clear. Preserve rich notes unless the owner
+accepts a full Markdown replacement.
+
+Use Trash for reversible cleanup. Restore accidental cleanup. Permanently
+delete only on an explicit request. For a Project, account for all descendants
+before the Project itself.
+
 Finish when every reviewed item and affected Area is accounted for, or one
 specific owner question blocks the remaining decision.

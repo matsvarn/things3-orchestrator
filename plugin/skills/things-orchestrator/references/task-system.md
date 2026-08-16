@@ -21,5 +21,12 @@ date. Keep the existing item unchanged while the choice is open.
 When titles match, use the parent, notes, tags, and exact Things identity to
 tell items apart. If they still match, ask the owner which item they mean.
 
+Use headings when they reveal stable Project sections. Rename or reorder a heading
+when the section meaning changes. Delete it only when it is empty.
+
+For repeating work, separate the future cadence from today's work. Change the
+repeating template for future copies. Change the generated copy for the current cycle.
+Stop repetition when the owner wants to keep the work without new copies.
+
 Keep the answer in the owner's words. Finish when each unclear choice has one
 supported interpretation or one concise question for the owner.

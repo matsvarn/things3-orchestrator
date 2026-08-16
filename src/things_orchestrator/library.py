@@ -135,9 +135,15 @@ class Write:
         "rename_area",
         "delete_area",
         "trash",
+        "restore",
+        "permanent_delete",
         "ensure_tag",
+        "rename_tag",
+        "reparent_tag",
+        "delete_tag",
         "checklist",
         "repeat",
+        "repeat_link",
     ]
     uuid: str
     kind: Kind = "task"
@@ -167,6 +173,9 @@ class Write:
     checklist_index: int | None = None
     checklist_remove: bool = False
     recurrence_rule: dict[str, JsonValue] | None = None
+    recurrence_links: list[str] | None = None
+    recurrence_generated: bool = False
+    tag_parent_uuids: list[str] | None = None
 
 
 @dataclass
@@ -182,6 +191,7 @@ class Library(Protocol):
     def today(self, *, waiting_tag: str, today: date) -> list[Record]: ...
     def inbox(self, limit: int = 15) -> list[Record]: ...
     def week(self, *, today: date, limit: int = 15) -> list[Record]: ...
+    def trash(self) -> list[Record]: ...
     def project(self, value: str) -> list[Record]: ...
     def heading_title(self, item: Record) -> str | None: ...
     def next_index(self, write: Write) -> int: ...
@@ -294,6 +304,10 @@ class MemoryLibrary:
         ]
         hits.sort(key=lambda item: (item.deadline or item.start or date.max, item.sort_index))
         return hits[:limit]
+
+    def trash(self) -> list[Record]:
+        hits = [item for item in self.records.values() if item.trashed]
+        return sorted(hits, key=lambda item: (item.kind, item.sort_index, item.title))
 
     def project(self, value: str) -> list[Record]:
         root = self.get(value)
@@ -458,14 +472,59 @@ class MemoryLibrary:
                     raise ValueError("The heading must belong to the destination Project")
             if write.action == "ensure_tag":
                 existing = self.tag_uuid(write.title or "")
+                parents = [
+                    tag_aliases.get(parent, parent)
+                    for parent in (write.tag_parent_uuids or [])
+                ]
                 if existing is None:
                     uuid = write.uuid
                     self.tags[uuid] = write.title or ""
+                    self.tag_parents[uuid] = parents
                     tag_aliases[write.uuid] = uuid
                     created[write.title or uuid] = uuid
                 else:
                     tag_aliases[write.uuid] = existing
+                    if write.tag_parent_uuids is not None:
+                        self.tag_parents[existing] = parents
                     created[write.title or existing] = existing
+                continue
+            if write.action == "rename_tag":
+                tag_uuid = tag_aliases.get(write.uuid, write.uuid)
+                if tag_uuid not in self.tags:
+                    raise ValueError("Tag does not exist")
+                if not write.title or not write.title.strip():
+                    raise ValueError("Tag rename needs a title")
+                self.tags[tag_uuid] = write.title.strip()
+                verified.append(self.tags[tag_uuid])
+                continue
+            if write.action == "reparent_tag":
+                tag_uuid = tag_aliases.get(write.uuid, write.uuid)
+                if tag_uuid not in self.tags:
+                    raise ValueError("Tag does not exist")
+                parents = [
+                    tag_aliases.get(parent, parent)
+                    for parent in (write.tag_parent_uuids or [])
+                ]
+                if tag_uuid in parents:
+                    raise ValueError("A tag cannot be its own parent")
+                if any(parent not in self.tags for parent in parents):
+                    raise ValueError("Tag parent does not exist")
+                self.tag_parents[tag_uuid] = parents
+                verified.append(self.tags[tag_uuid])
+                continue
+            if write.action == "delete_tag":
+                tag_uuid = tag_aliases.get(write.uuid, write.uuid)
+                title = self.tags.pop(tag_uuid, write.title or tag_uuid)
+                self.tag_parents.pop(tag_uuid, None)
+                for tagged_item in self.records.values():
+                    tagged_item.tag_uuids = [
+                        tag for tag in tagged_item.tag_uuids if tag != tag_uuid
+                    ]
+                for tag, parents in self.tag_parents.items():
+                    self.tag_parents[tag] = [
+                        parent for parent in parents if parent != tag_uuid
+                    ]
+                verified.append(title)
                 continue
             if write.action == "checklist":
                 parent, line = self._find_checklist(write.uuid)
@@ -560,6 +619,13 @@ class MemoryLibrary:
                     ),
                     today_index=write.today_index or 0,
                     heading=write.action == "create_heading",
+                    recurrence=(
+                        RecurrenceState()
+                        .fold_rule(write.recurrence_rule)
+                        .fold_links(write.recurrence_links)
+                        if write.recurrence_links
+                        else RecurrenceState().fold_rule(write.recurrence_rule)
+                    ),
                 )
                 self.records[record.uuid] = record
                 created[record.title] = record.id
@@ -579,9 +645,24 @@ class MemoryLibrary:
                 del self.records[item.uuid]
             elif write.action == "trash":
                 item.trashed = True
+            elif write.action == "restore":
+                item.trashed = False
+            elif write.action == "permanent_delete":
+                for child in self.records.values():
+                    if child.parent_uuid == item.uuid:
+                        child.parent_uuid = None
+                    if child.area_uuid == item.uuid:
+                        child.area_uuid = None
+                    if child.heading_uuid == item.uuid:
+                        child.heading_uuid = None
+                del self.records[item.uuid]
             elif write.action == "repeat":
                 assert write.recurrence_rule is not None
                 item.recurrence = item.recurrence.fold_rule(write.recurrence_rule)
+            elif write.action == "repeat_link":
+                item.recurrence = item.recurrence.fold_links(
+                    write.recurrence_links or []
+                )
             elif write.action == "rename_area" and write.title:
                 item.title = write.title
             elif write.action == "move":
@@ -689,6 +770,13 @@ class MemoryLibrary:
                         ]
                     )
             verified.append(item.title)
+        for record in self.records.values():
+            if record.recurrence.role != "instance" or not record.recurrence.template_uuid:
+                continue
+            template = self.records.get(record.recurrence.template_uuid)
+            record.recurrence = record.recurrence.resolve_instance_type(
+                template.recurrence.repeat_type if template else None
+            )
         return ApplyResult(verified=list(dict.fromkeys(verified)), created=created)
 
     def _find_checklist(self, uuid: str) -> tuple[Record | None, ChecklistLine | None]:

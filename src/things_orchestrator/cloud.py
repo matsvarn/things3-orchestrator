@@ -365,6 +365,15 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         raw = event.get("p")
         payload: dict[str, Any] = raw if isinstance(raw, dict) else {}
         if action == 2:
+            deleted = library.records.get(uuid)
+            if deleted is not None:
+                for item in library.records.values():
+                    if item.parent_uuid == uuid:
+                        item.parent_uuid = None
+                    if item.area_uuid == uuid:
+                        item.area_uuid = None
+                    if item.heading_uuid == uuid:
+                        item.heading_uuid = None
             library.records.pop(uuid, None)
             library.tags.pop(uuid, None)
             library.tag_parents.pop(uuid, None)
@@ -621,6 +630,11 @@ class CloudLibrary(MemoryLibrary):
             for write in writes
             if write.action in {"create", "create_heading"}
         }
+        created_headings = {
+            write.uuid: write.into_uuid
+            for write in writes
+            if write.action == "create_heading"
+        }
         for write in writes:
             current_record = self.records.get(write.uuid)
             if write.action == "repeat":
@@ -649,16 +663,25 @@ class CloudLibrary(MemoryLibrary):
                 project_uuid = write.into_uuid or (
                     current_record.parent_uuid if current_record else None
                 )
-                if (
-                    heading is None
-                    or not heading.heading
-                    or not project_uuid
-                    or heading.parent_uuid != project_uuid
-                ):
+                existing_matches = (
+                    heading is not None
+                    and heading.heading
+                    and bool(project_uuid)
+                    and heading.parent_uuid == project_uuid
+                )
+                planned_matches = (
+                    bool(project_uuid)
+                    and created_headings.get(write.heading_uuid) == project_uuid
+                )
+                if not existing_matches and not planned_matches:
                     raise CloudError("The heading must belong to the destination Project")
             if write.action == "ensure_tag":
                 title = write.title or ""
                 existing_tag = self.tag_uuid(title)
+                parents = [
+                    tag_map.get(parent, parent)
+                    for parent in (write.tag_parent_uuids or [])
+                ]
                 if existing_tag is None:
                     envelopes.append(
                         Envelope(
@@ -669,7 +692,7 @@ class CloudLibrary(MemoryLibrary):
                                 "tt": title,
                                 "ix": 0,
                                 "sh": None,
-                                "pn": [],
+                                "pn": parents,
                                 "xx": {"sn": {}, "_t": "oo"},
                             },
                         )
@@ -678,7 +701,28 @@ class CloudLibrary(MemoryLibrary):
                     created[title or write.uuid] = write.uuid
                 else:
                     tag_map[write.uuid] = existing_tag
+                    if write.tag_parent_uuids is not None:
+                        envelopes.append(
+                            Envelope(
+                                uuid=existing_tag,
+                                action=1,
+                                kind="Tag4",
+                                payload={"pn": parents, "md": _now()},
+                            )
+                        )
                     created[title or existing_tag] = existing_tag
+                continue
+            if write.action in {"rename_tag", "reparent_tag", "delete_tag"}:
+                write = replace(
+                    write,
+                    uuid=tag_map.get(write.uuid, write.uuid),
+                    tag_parent_uuids=(
+                        [tag_map.get(parent, parent) for parent in write.tag_parent_uuids]
+                        if write.tag_parent_uuids is not None
+                        else None
+                    ),
+                )
+                envelopes.append(self._envelope(write))
                 continue
             if write.tag_uuids:
                 write = replace(
@@ -789,12 +833,49 @@ class CloudLibrary(MemoryLibrary):
                 kind=entity,
                 payload={"tr": True, "md": _now()},
             )
+        if write.action == "restore":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"tr": False, "md": _now()},
+            )
+        if write.action == "permanent_delete":
+            return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
+        if write.action == "rename_tag":
+            if not write.title or not write.title.strip():
+                raise CloudError("Tag rename needs a title")
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind="Tag4",
+                payload={"tt": write.title.strip(), "md": _now()},
+            )
+        if write.action == "reparent_tag":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind="Tag4",
+                payload={
+                    "pn": list(write.tag_parent_uuids or []),
+                    "md": _now(),
+                },
+            )
+        if write.action == "delete_tag":
+            return Envelope(uuid=write.uuid, action=2, kind="Tag4", payload={})
         if write.action == "repeat":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
                 kind=entity,
                 payload={"rr": deepcopy(write.recurrence_rule), "md": _now()},
+            )
+        if write.action == "repeat_link":
+            return Envelope(
+                uuid=write.uuid,
+                action=1,
+                kind=entity,
+                payload={"rt": list(write.recurrence_links or []), "md": _now()},
             )
         if write.action == "rename_area":
             return Envelope(
@@ -888,7 +969,10 @@ class CloudLibrary(MemoryLibrary):
             if envelope.action == 2:
                 return envelope.uuid not in self.tags
             return (
-                self.tags.get(envelope.uuid) == envelope.payload.get("tt")
+                (
+                    "tt" not in envelope.payload
+                    or self.tags.get(envelope.uuid) == envelope.payload["tt"]
+                )
                 and (
                     "pn" not in envelope.payload
                     or self.tag_parents.get(envelope.uuid, []) == envelope.payload["pn"]
@@ -1049,6 +1133,8 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "ti" not in payload or item.today_index == int(payload["ti"] or 0),
         "tr" not in payload or item.trashed == bool(payload["tr"]),
         "rr" not in payload or item.recurrence.rule == payload["rr"],
+        "rt" not in payload
+        or list(item.recurrence.links) == [str(link) for link in payload["rt"]],
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
@@ -1155,7 +1241,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "tp": 1 if write.kind == "project" else 0,
         "sr": sr,
         "dds": None,
-        "rt": [],
+        "rt": list(write.recurrence_links or []),
         "rmd": schedule.get("rmd"),
         "ss": _status_code(write.status or "open"),
         "tr": False,
@@ -1171,7 +1257,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "agr": [write.heading_uuid] if write.heading_uuid else [],
         "ix": write.sort_index or 0,
         "cd": now,
-        "lt": False,
+        "lt": write.recurrence_generated,
         "icc": 0,
         "md": now,
         "ti": write.today_index or 0,
@@ -1184,7 +1270,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "acrd": None,
         "sp": now if write.status in {"done", "dropped"} else None,
         "sb": 1 if write.tonight else 0,
-        "rr": None,
+        "rr": deepcopy(write.recurrence_rule),
         "xx": {"sn": {}, "_t": "oo"},
     }
     return payload
