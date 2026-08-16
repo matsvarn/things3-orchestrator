@@ -77,8 +77,8 @@ class RecurrenceState:
     ) -> RecurrenceState:
         """Apply one atomic semantic change to an existing repeat template.
 
-        The implementation changes only the known ``tp``, ``fu``, and ``fa``
-        fields. All other Cloud fields remain opaque and are copied exactly.
+        The implementation changes only known recurrence fields. All other
+        Cloud fields remain opaque and are copied exactly.
         ``remove`` is exclusive because clearing a rule is a lifecycle change,
         not a rule edit.
         """
@@ -105,6 +105,7 @@ class RecurrenceState:
             raise ValueError("Repeat mode must be fixed or after_completion")
         if unit is not None and unit not in _UNIT_CODES:
             raise ValueError("Repeat unit must be day, week, month, or year")
+        _validate_weekday_codes(weekday_codes)
 
         rule = self.rule
         assert rule is not None
@@ -118,6 +119,15 @@ class RecurrenceState:
         if remove:
             return RecurrenceState()
 
+        current_unit = repeat_unit(rule)
+        assert current_unit is not None
+        target_mode: RepeatMode = mode or (
+            "fixed" if self.repeat_type == "fixed" else "after_completion"
+        )
+        target_unit = unit or current_unit
+        if target_mode == "after_completion" and weekday_codes is not None:
+            raise ValueError("Weekday selectors need a fixed weekly repeat rule")
+
         changed = deepcopy(rule)
         if mode is not None:
             changed["tp"] = _MODE_CODES[mode]
@@ -125,22 +135,28 @@ class RecurrenceState:
             changed["fu"] = _UNIT_CODES[unit]
         if interval is not None:
             changed["fa"] = interval
-        if unit is not None or weekday_codes is not None:
-            target_unit = unit or repeat_unit(rule)
-            assert target_unit is not None
+        rebuild_fixed_offsets = target_mode == "fixed" and (
+            self.repeat_type == "after_completion"
+            or (unit is not None and unit != current_unit)
+            or weekday_codes is not None
+        )
+        if target_mode == "after_completion" and (
+            self.repeat_type != "after_completion"
+            or (unit is not None and unit != current_unit)
+        ):
+            changed["of"] = []
+        elif rebuild_fixed_offsets:
             changed["of"] = _offsets_for_unit(
                 rule,
                 target_unit,
                 weekday_codes=weekday_codes,
             )
+        if unit is not None and unit != current_unit:
             if isinstance(rule.get("sr"), (int, float)):
                 changed["ts"] = -7 if target_unit == "year" else 0
-        next_mode: RepeatMode = mode or (
-            "fixed" if self.repeat_type == "fixed" else "after_completion"
-        )
         return replace(
             self,
-            repeat_type=next_mode,
+            repeat_type=target_mode,
             rule=changed,
         )
 
@@ -295,26 +311,34 @@ def _offsets_for_unit(
     *,
     weekday_codes: list[int] | None,
 ) -> list[JsonValue]:
+    _validate_weekday_codes(weekday_codes)
+    if weekday_codes is not None and unit != "week":
+        raise ValueError("Weekday selectors need a fixed weekly repeat rule")
+    if unit == "day":
+        return []
+    if unit == "week" and weekday_codes is not None:
+        return [{"wd": code} for code in weekday_codes]
+
     raw = rule.get("sr")
     if not isinstance(raw, (int, float)):
-        if weekday_codes is not None:
-            raise ValueError("This repeat rule has an unsupported start anchor")
-        current = rule.get("of")
-        return deepcopy(current) if isinstance(current, list) else []
+        raise ValueError("This repeat rule has an unsupported start anchor")
     anchor = datetime.fromtimestamp(raw, timezone.utc).date()
     if unit == "week":
-        codes = (
-            weekday_codes
-            if weekday_codes is not None
-            else [(anchor.weekday() + 1) % 7]
-        )
-        if any(code < 0 or code > 6 for code in codes) or len(codes) != len(set(codes)):
-            raise ValueError("Weekday selectors must be unique values from 0 through 6")
-        return [{"wd": code} for code in codes]
-    if weekday_codes:
-        raise ValueError("Weekday selectors need a weekly repeat rule")
+        return [{"wd": (anchor.weekday() + 1) % 7}]
     if unit == "month":
         return [{"dy": anchor.day - 1}]
     if unit == "year":
         return [{"dy": anchor.day - 1, "mo": anchor.month - 1}]
     return []
+
+
+def _validate_weekday_codes(weekday_codes: list[int] | None) -> None:
+    if weekday_codes is None:
+        return
+    if not weekday_codes or any(
+        isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 6
+        for code in weekday_codes
+    ):
+        raise ValueError("Weekday selectors must be unique values from 0 through 6")
+    if len(weekday_codes) != len(set(weekday_codes)):
+        raise ValueError("Weekday selectors must be unique values from 0 through 6")

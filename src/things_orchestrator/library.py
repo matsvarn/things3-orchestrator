@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from .recurrence import JsonValue, RecurrenceState
@@ -122,7 +122,12 @@ class Record:
 
 @dataclass(frozen=True)
 class Write:
-    """One library mutation. Cloud batches these into a single commit."""
+    """Stable journal form for one mutation.
+
+    Adapters compile this compatibility record to a typed mutation family
+    before they execute it. Old pending journal entries therefore keep their
+    wire shape while adapter code does not depend on one flat action union.
+    """
 
     action: Literal[
         "create",
@@ -178,6 +183,101 @@ class Write:
     tag_parent_uuids: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class _CreateMutation:
+    write: Write
+    heading: bool
+
+
+@dataclass(frozen=True)
+class _EditMutation:
+    write: Write
+    action: Literal["update", "move", "tags", "rename_area"]
+
+
+@dataclass(frozen=True)
+class _LifecycleMutation:
+    write: Write
+    action: Literal[
+        "complete", "cancel", "delete_area", "trash", "restore", "permanent_delete"
+    ]
+
+
+@dataclass(frozen=True)
+class _TagMutation:
+    write: Write
+    action: Literal["ensure_tag", "rename_tag", "reparent_tag", "delete_tag"]
+
+
+@dataclass(frozen=True)
+class _ChecklistMutation:
+    write: Write
+
+
+@dataclass(frozen=True)
+class _RecurrenceMutation:
+    write: Write
+    action: Literal["repeat", "repeat_link"]
+
+
+_Mutation = (
+    _CreateMutation
+    | _EditMutation
+    | _LifecycleMutation
+    | _TagMutation
+    | _ChecklistMutation
+    | _RecurrenceMutation
+)
+
+
+def _compile_mutation(write: Write) -> _Mutation:
+    """Compile the journal form to the small internal mutation interface."""
+    action = write.action
+    if action in {"create", "create_heading"}:
+        return _CreateMutation(write, heading=action == "create_heading")
+    if action in {"update", "move", "tags", "rename_area"}:
+        return _EditMutation(
+            write, cast(Literal["update", "move", "tags", "rename_area"], action)
+        )
+    if action in {
+        "complete",
+        "cancel",
+        "delete_area",
+        "trash",
+        "restore",
+        "permanent_delete",
+    }:
+        return _LifecycleMutation(
+            write,
+            cast(
+                Literal[
+                    "complete",
+                    "cancel",
+                    "delete_area",
+                    "trash",
+                    "restore",
+                    "permanent_delete",
+                ],
+                action,
+            ),
+        )
+    if action in {"ensure_tag", "rename_tag", "reparent_tag", "delete_tag"}:
+        return _TagMutation(
+            write,
+            cast(
+                Literal["ensure_tag", "rename_tag", "reparent_tag", "delete_tag"],
+                action,
+            ),
+        )
+    if action == "checklist":
+        return _ChecklistMutation(write)
+    if action in {"repeat", "repeat_link"}:
+        return _RecurrenceMutation(
+            write, cast(Literal["repeat", "repeat_link"], action)
+        )
+    raise ValueError(f"Unknown mutation action: {action}")
+
+
 @dataclass
 class ApplyResult:
     verified: list[str]
@@ -203,6 +303,7 @@ class Library(Protocol):
     def tag_uuid(self, title: str) -> str | None: ...
     def waiting_tag(self) -> str: ...
     def apply(self, writes: list[Write]) -> ApplyResult: ...
+    def matches(self, writes: list[Write]) -> bool: ...
 
 
 class MemoryLibrary:
@@ -444,12 +545,160 @@ class MemoryLibrary:
             self.records, self.tags, self.tag_parents = snapshot
             raise
 
+    def matches(self, writes: list[Write]) -> bool:
+        """Verify a mutation batch against the current materialized state.
+
+        This is the shared read-back seam for both library adapters. It keeps
+        journal recovery independent from adapter storage details.
+        """
+        tag_aliases = {
+            write.uuid: actual
+            for write in writes
+            if write.action == "ensure_tag"
+            and (actual := self.tag_uuid(write.title or "")) is not None
+        }
+        normalized = [
+            replace(
+                write,
+                tag_uuids=[tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids],
+            )
+            if write.tag_uuids is not None
+            else write
+            for write in writes
+        ]
+        return all(self._write_matches(write) for write in normalized)
+
+    def _write_matches(self, write: Write) -> bool:
+        mutation = _compile_mutation(write)
+        if isinstance(mutation, _TagMutation) and mutation.action == "ensure_tag":
+            return self.tags.get(write.uuid) == (write.title or "") or self.tag_uuid(
+                write.title or ""
+            ) is not None
+        if isinstance(mutation, _TagMutation) and mutation.action == "rename_tag":
+            return self.tags.get(write.uuid) == (write.title or "")
+        if isinstance(mutation, _TagMutation) and mutation.action == "reparent_tag":
+            return self.tag_parents.get(write.uuid, []) == (
+                write.tag_parent_uuids or []
+            )
+        if isinstance(mutation, _TagMutation) and mutation.action == "delete_tag":
+            return write.uuid not in self.tags
+        if isinstance(mutation, _ChecklistMutation):
+            parent, row = self._find_checklist(write.uuid)
+            if write.checklist_remove:
+                return row is None
+            return row is not None and parent is not None and all(
+                (
+                    write.title is None or row.title == write.title,
+                    write.checklist_status is None
+                    or row.status == write.checklist_status,
+                    write.checklist_parent_uuid is None
+                    or parent.uuid == write.checklist_parent_uuid,
+                    write.checklist_index is None
+                    or row.sort_index == write.checklist_index,
+                )
+            )
+        item = self.records.get(write.uuid)
+        if isinstance(mutation, _LifecycleMutation) and mutation.action in {
+            "delete_area",
+            "permanent_delete",
+        }:
+            return item is None
+        if item is None:
+            return False
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "trash":
+            return item.trashed
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "restore":
+            return not item.trashed
+        if isinstance(mutation, _RecurrenceMutation) and mutation.action == "repeat":
+            return item.recurrence.rule == write.recurrence_rule
+        if isinstance(mutation, _RecurrenceMutation) and mutation.action == "repeat_link":
+            return list(item.recurrence.links) == (write.recurrence_links or [])
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "complete":
+            return item.status == "done"
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "cancel":
+            return item.status == "dropped"
+        if isinstance(mutation, _EditMutation) and mutation.action == "rename_area":
+            return item.title == write.title
+        if isinstance(mutation, _EditMutation) and mutation.action == "tags":
+            return item.tag_uuids == (write.tag_uuids or [])
+        if isinstance(mutation, _EditMutation) and mutation.action == "move":
+            return self._placement_matches(item, write)
+        checks = [
+            write.title is None or item.title == write.title,
+            write.notes is None or item.notes == write.notes,
+            write.status is None or item.status == write.status,
+            write.tag_uuids is None or item.tag_uuids == write.tag_uuids,
+            write.deadline is None or item.deadline == write.deadline,
+            not write.clear_deadline or item.deadline is None,
+            write.start is None or item.start == write.start,
+            not write.clear_start or item.start is None,
+            write.start is None or item.tonight == write.tonight,
+            not write.clear_start or not item.tonight,
+            write.remind is None or item.remind == write.remind,
+            not write.clear_remind or item.remind is None,
+            not write.someday or (item.someday and not item.tonight),
+            not write.tonight or item.tonight,
+            not write.anytime
+            or (
+                not item.inbox
+                and not item.someday
+                and not item.tonight
+                and item.start is None
+            ),
+            write.sort_index is None or item.sort_index == write.sort_index,
+            write.today_index is None or item.today_index == write.today_index,
+        ]
+        if (
+            isinstance(mutation, _CreateMutation)
+            or write.into_uuid is not None
+            or write.into_kind is not None
+            or write.inbox
+            or write.anytime
+        ):
+            checks.append(self._placement_matches(item, write))
+        if isinstance(mutation, _CreateMutation):
+            checks.append(item.kind == write.kind)
+        if isinstance(mutation, _CreateMutation) and mutation.heading:
+            checks.append(item.heading)
+        return all(checks)
+
+    @staticmethod
+    def _placement_matches(item: Record, write: Write) -> bool:
+        if write.kind == "area":
+            return not item.inbox and item.parent_uuid is None and item.area_uuid is None
+        if write.into_kind == "project":
+            return (
+                item.parent_uuid == write.into_uuid
+                and item.area_uuid is None
+                and not item.inbox
+                and item.heading_uuid == write.heading_uuid
+            )
+        if write.into_kind == "area":
+            return (
+                item.area_uuid == write.into_uuid
+                and item.parent_uuid is None
+                and not item.inbox
+            )
+        if (
+            write.kind == "project"
+            or write.anytime
+            or write.start is not None
+            or write.someday
+            or write.tonight
+        ):
+            return not item.inbox and item.parent_uuid is None and item.area_uuid is None
+        return item.inbox and item.parent_uuid is None and item.area_uuid is None
+
     def _apply_unchecked(self, writes: list[Write]) -> ApplyResult:
         created: dict[str, str] = {}
         verified: list[str] = []
         tag_aliases: dict[str, str] = {}
         for write in writes:
-            if write.action == "repeat":
+            mutation = _compile_mutation(write)
+            if (
+                isinstance(mutation, _RecurrenceMutation)
+                and mutation.action == "repeat"
+            ):
                 current = self.records.get(write.uuid)
                 if current is None or write.recurrence_rule is None:
                     raise ValueError("Repeat changes need an exact repeating Task template")
@@ -470,7 +719,7 @@ class MemoryLibrary:
                     or heading.parent_uuid != project_uuid
                 ):
                     raise ValueError("The heading must belong to the destination Project")
-            if write.action == "ensure_tag":
+            if isinstance(mutation, _TagMutation) and mutation.action == "ensure_tag":
                 existing = self.tag_uuid(write.title or "")
                 parents = [
                     tag_aliases.get(parent, parent)
@@ -488,7 +737,7 @@ class MemoryLibrary:
                         self.tag_parents[existing] = parents
                     created[write.title or existing] = existing
                 continue
-            if write.action == "rename_tag":
+            if isinstance(mutation, _TagMutation) and mutation.action == "rename_tag":
                 tag_uuid = tag_aliases.get(write.uuid, write.uuid)
                 if tag_uuid not in self.tags:
                     raise ValueError("Tag does not exist")
@@ -497,7 +746,7 @@ class MemoryLibrary:
                 self.tags[tag_uuid] = write.title.strip()
                 verified.append(self.tags[tag_uuid])
                 continue
-            if write.action == "reparent_tag":
+            if isinstance(mutation, _TagMutation) and mutation.action == "reparent_tag":
                 tag_uuid = tag_aliases.get(write.uuid, write.uuid)
                 if tag_uuid not in self.tags:
                     raise ValueError("Tag does not exist")
@@ -512,7 +761,7 @@ class MemoryLibrary:
                 self.tag_parents[tag_uuid] = parents
                 verified.append(self.tags[tag_uuid])
                 continue
-            if write.action == "delete_tag":
+            if isinstance(mutation, _TagMutation) and mutation.action == "delete_tag":
                 tag_uuid = tag_aliases.get(write.uuid, write.uuid)
                 title = self.tags.pop(tag_uuid, write.title or tag_uuid)
                 self.tag_parents.pop(tag_uuid, None)
@@ -526,7 +775,7 @@ class MemoryLibrary:
                     ]
                 verified.append(title)
                 continue
-            if write.action == "checklist":
+            if isinstance(mutation, _ChecklistMutation):
                 parent, line = self._find_checklist(write.uuid)
                 if write.checklist_remove:
                     if parent is not None:
@@ -561,7 +810,7 @@ class MemoryLibrary:
                 destination.checklists.sort(key=lambda item: (item.sort_index, item.uuid))
                 verified.append(replacement.title)
                 continue
-            if write.action in {"create", "create_heading"}:
+            if isinstance(mutation, _CreateMutation):
                 parent_uuid: str | None = None
                 area_uuid: str | None = None
                 inbox = (
@@ -618,7 +867,7 @@ class MemoryLibrary:
                         else self.next_index(write)
                     ),
                     today_index=write.today_index or 0,
-                    heading=write.action == "create_heading",
+                    heading=mutation.heading,
                     recurrence=(
                         RecurrenceState()
                         .fold_rule(write.recurrence_rule)
@@ -634,20 +883,32 @@ class MemoryLibrary:
             item = self.records.get(write.uuid)
             if item is None:
                 continue
-            if write.action == "complete":
+            if (
+                isinstance(mutation, _LifecycleMutation)
+                and mutation.action == "complete"
+            ):
                 item.status = "done"
                 item.completed_at = datetime.now(timezone.utc)
-            elif write.action == "cancel":
+            elif (
+                isinstance(mutation, _LifecycleMutation)
+                and mutation.action == "cancel"
+            ):
                 item.status = "dropped"
                 item.completed_at = datetime.now(timezone.utc)
-            elif write.action == "delete_area":
+            elif (
+                isinstance(mutation, _LifecycleMutation)
+                and mutation.action == "delete_area"
+            ):
                 item.trashed = True
                 del self.records[item.uuid]
-            elif write.action == "trash":
+            elif isinstance(mutation, _LifecycleMutation) and mutation.action == "trash":
                 item.trashed = True
-            elif write.action == "restore":
+            elif isinstance(mutation, _LifecycleMutation) and mutation.action == "restore":
                 item.trashed = False
-            elif write.action == "permanent_delete":
+            elif (
+                isinstance(mutation, _LifecycleMutation)
+                and mutation.action == "permanent_delete"
+            ):
                 for child in self.records.values():
                     if child.parent_uuid == item.uuid:
                         child.parent_uuid = None
@@ -656,16 +917,26 @@ class MemoryLibrary:
                     if child.heading_uuid == item.uuid:
                         child.heading_uuid = None
                 del self.records[item.uuid]
-            elif write.action == "repeat":
+            elif (
+                isinstance(mutation, _RecurrenceMutation)
+                and mutation.action == "repeat"
+            ):
                 assert write.recurrence_rule is not None
                 item.recurrence = item.recurrence.fold_rule(write.recurrence_rule)
-            elif write.action == "repeat_link":
+            elif (
+                isinstance(mutation, _RecurrenceMutation)
+                and mutation.action == "repeat_link"
+            ):
                 item.recurrence = item.recurrence.fold_links(
                     write.recurrence_links or []
                 )
-            elif write.action == "rename_area" and write.title:
+            elif (
+                isinstance(mutation, _EditMutation)
+                and mutation.action == "rename_area"
+                and write.title
+            ):
                 item.title = write.title
-            elif write.action == "move":
+            elif isinstance(mutation, _EditMutation) and mutation.action == "move":
                 item.heading_uuid = write.heading_uuid
                 if write.into_kind == "project":
                     item.parent_uuid = write.into_uuid
@@ -691,9 +962,13 @@ class MemoryLibrary:
                         item.tonight = False
                         item.start = None
                         item.remind = None
-            elif write.action == "tags" and write.tag_uuids is not None:
+            elif (
+                isinstance(mutation, _EditMutation)
+                and mutation.action == "tags"
+                and write.tag_uuids is not None
+            ):
                 item.tag_uuids = list(write.tag_uuids)
-            elif write.action == "update":
+            elif isinstance(mutation, _EditMutation) and mutation.action == "update":
                 if write.clear_heading:
                     item.heading_uuid = None
                 if write.status is not None:

@@ -17,9 +17,23 @@ from things_orchestrator.interface import (
     READ_OUT,
     RESULT_OUT,
     ApproveCall,
+    ChangeEntry,
+    ChangeTag,
+    ChecklistAdd,
+    ChecklistChange,
+    ChecklistFact,
     CommitCall,
+    CreateEntry,
+    EnsureTag,
+    ItemFact,
+    PlanFact,
     ReadCall,
+    RecurrenceFact,
+    RepeatCreate,
+    RepeatEdit,
     Result,
+    ReviewSection,
+    TagFact,
 )
 
 
@@ -664,13 +678,106 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    assert discovery_chars < 13_000
+    assert discovery_chars < 13_500
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 13_100
+    assert wire_chars < 13_400
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
     assert "private" in APPROVE_DESC
+
+
+def test_manual_schema_contracts_match_the_runtime_models() -> None:
+    pairs = (
+        (ReadCall, READ_IN),
+        (CommitCall, COMMIT_IN),
+        (ApproveCall, APPROVE_IN),
+        (CreateEntry, COMMIT_IN["properties"]["create"]["items"]),
+        (ChangeEntry, COMMIT_IN["properties"]["change"]["items"]),
+        (EnsureTag, COMMIT_IN["properties"]["ensure_tags"]["items"]),
+        (ChangeTag, COMMIT_IN["properties"]["change_tags"]["items"]),
+        (
+            RepeatCreate,
+            COMMIT_IN["properties"]["create"]["items"]["properties"]["repeat"],
+        ),
+        (
+            RepeatEdit,
+            COMMIT_IN["properties"]["change"]["items"]["properties"]["repeat"],
+        ),
+        (
+            ChecklistAdd,
+            COMMIT_IN["properties"]["change"]["items"]["properties"][
+                "checklist_add"
+            ]["items"],
+        ),
+        (
+            ChecklistChange,
+            COMMIT_IN["properties"]["change"]["items"]["properties"][
+                "checklist_change"
+            ]["items"],
+        ),
+        (Result, RESULT_OUT),
+        (ItemFact, RESULT_OUT["properties"]["items"]["items"]),
+        (TagFact, RESULT_OUT["properties"]["tags"]["items"]),
+        (
+            ReviewSection,
+            RESULT_OUT["properties"]["sections"]["items"],
+        ),
+        (PlanFact, RESULT_OUT["properties"]["plan"]),
+        (
+            ChecklistFact,
+            RESULT_OUT["properties"]["items"]["items"]["properties"][
+                "checklist"
+            ]["items"],
+        ),
+        (
+            RecurrenceFact,
+            RESULT_OUT["properties"]["items"]["items"]["properties"][
+                "recurrence"
+            ],
+        ),
+    )
+    constraints = {
+        "const",
+        "default",
+        "enum",
+        "format",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "pattern",
+    }
+
+    for model, manual in pairs:
+        runtime = model.model_json_schema(by_alias=True)
+        assert set(manual.get("properties", {})) == set(runtime.get("properties", {}))
+        assert set(manual.get("required", [])) == set(runtime.get("required", []))
+        for name, runtime_property in runtime.get("properties", {}).items():
+            while "$ref" in runtime_property:
+                target = runtime
+                for part in runtime_property["$ref"].removeprefix("#/").split("/"):
+                    target = target[part]
+                runtime_property = target
+            if "anyOf" in runtime_property:
+                non_null = [
+                    branch
+                    for branch in runtime_property["anyOf"]
+                    if branch.get("type") != "null"
+                ]
+                if len(non_null) == 1:
+                    runtime_property = non_null[0]
+            manual_property = manual["properties"][name]
+            for key in constraints & runtime_property.keys():
+                if key == "default" and runtime_property[key] is None:
+                    continue
+                assert manual_property.get(key) == runtime_property[key], (
+                    model.__name__,
+                    name,
+                    key,
+                )

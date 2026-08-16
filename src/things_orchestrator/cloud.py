@@ -24,6 +24,13 @@ from .library import (
     Record,
     Status,
     Write,
+    _ChecklistMutation,
+    _compile_mutation,
+    _CreateMutation,
+    _EditMutation,
+    _LifecycleMutation,
+    _RecurrenceMutation,
+    _TagMutation,
     day_ts,
     from_ts,
     offset_from_remind,
@@ -636,8 +643,12 @@ class CloudLibrary(MemoryLibrary):
             if write.action == "create_heading"
         }
         for write in writes:
+            mutation = _compile_mutation(write)
             current_record = self.records.get(write.uuid)
-            if write.action == "repeat":
+            if (
+                isinstance(mutation, _RecurrenceMutation)
+                and mutation.action == "repeat"
+            ):
                 if current_record is None or write.recurrence_rule is None:
                     raise CloudError(
                         "Repeat changes need an exact repeating Task template"
@@ -675,7 +686,7 @@ class CloudLibrary(MemoryLibrary):
                 )
                 if not existing_matches and not planned_matches:
                     raise CloudError("The heading must belong to the destination Project")
-            if write.action == "ensure_tag":
+            if isinstance(mutation, _TagMutation) and mutation.action == "ensure_tag":
                 title = write.title or ""
                 existing_tag = self.tag_uuid(title)
                 parents = [
@@ -712,7 +723,7 @@ class CloudLibrary(MemoryLibrary):
                         )
                     created[title or existing_tag] = existing_tag
                 continue
-            if write.action in {"rename_tag", "reparent_tag", "delete_tag"}:
+            if isinstance(mutation, _TagMutation):
                 write = replace(
                     write,
                     uuid=tag_map.get(write.uuid, write.uuid),
@@ -758,6 +769,7 @@ class CloudLibrary(MemoryLibrary):
         return coalesced, created
 
     def _envelope(self, write: Write) -> Envelope:
+        mutation = _compile_mutation(write)
         existing = self.records.get(write.uuid)
         if existing is not None and existing.kind != write.kind:
             write = replace(write, kind=existing.kind)
@@ -765,9 +777,9 @@ class CloudLibrary(MemoryLibrary):
             (existing.entity if existing and existing.entity else "")
             or ("Area3" if write.kind == "area" else "Task6")
         )
-        if write.action in {"create", "create_heading"}:
+        if isinstance(mutation, _CreateMutation):
             create_payload = _create_payload(write)
-            if write.action == "create_heading":
+            if mutation.heading:
                 create_payload["tp"] = 2
             return Envelope(
                 uuid=write.uuid,
@@ -775,7 +787,7 @@ class CloudLibrary(MemoryLibrary):
                 kind="Area3" if write.kind == "area" else "Task6",
                 payload=create_payload,
             )
-        if write.action == "checklist":
+        if isinstance(mutation, _ChecklistMutation):
             parent, existing_line = self._find_checklist(write.uuid)
             if write.checklist_remove:
                 return Envelope(uuid=write.uuid, action=2, kind="ChecklistItem3", payload={})
@@ -824,25 +836,31 @@ class CloudLibrary(MemoryLibrary):
                 kind="ChecklistItem3",
                 payload=checklist_payload,
             )
-        if write.action == "delete_area":
+        if (
+            isinstance(mutation, _LifecycleMutation)
+            and mutation.action == "delete_area"
+        ):
             return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
-        if write.action == "trash":
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "trash":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
                 kind=entity,
                 payload={"tr": True, "md": _now()},
             )
-        if write.action == "restore":
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "restore":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
                 kind=entity,
                 payload={"tr": False, "md": _now()},
             )
-        if write.action == "permanent_delete":
+        if (
+            isinstance(mutation, _LifecycleMutation)
+            and mutation.action == "permanent_delete"
+        ):
             return Envelope(uuid=write.uuid, action=2, kind=entity, payload={})
-        if write.action == "rename_tag":
+        if isinstance(mutation, _TagMutation) and mutation.action == "rename_tag":
             if not write.title or not write.title.strip():
                 raise CloudError("Tag rename needs a title")
             return Envelope(
@@ -851,7 +869,7 @@ class CloudLibrary(MemoryLibrary):
                 kind="Tag4",
                 payload={"tt": write.title.strip(), "md": _now()},
             )
-        if write.action == "reparent_tag":
+        if isinstance(mutation, _TagMutation) and mutation.action == "reparent_tag":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
@@ -861,23 +879,23 @@ class CloudLibrary(MemoryLibrary):
                     "md": _now(),
                 },
             )
-        if write.action == "delete_tag":
+        if isinstance(mutation, _TagMutation) and mutation.action == "delete_tag":
             return Envelope(uuid=write.uuid, action=2, kind="Tag4", payload={})
-        if write.action == "repeat":
+        if isinstance(mutation, _RecurrenceMutation) and mutation.action == "repeat":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
                 kind=entity,
                 payload={"rr": deepcopy(write.recurrence_rule), "md": _now()},
             )
-        if write.action == "repeat_link":
+        if isinstance(mutation, _RecurrenceMutation) and mutation.action == "repeat_link":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
                 kind=entity,
                 payload={"rt": list(write.recurrence_links or []), "md": _now()},
             )
-        if write.action == "rename_area":
+        if isinstance(mutation, _EditMutation) and mutation.action == "rename_area":
             return Envelope(
                 uuid=write.uuid,
                 action=1,
@@ -885,13 +903,17 @@ class CloudLibrary(MemoryLibrary):
                 payload={"tt": write.title, "md": _now()},
             )
         payload: dict[str, Any] = {"md": _now()}
-        if write.action == "complete":
+        if isinstance(mutation, _LifecycleMutation) and mutation.action == "complete":
             payload.update({"ss": 3, "sp": _now()})
-        elif write.action == "cancel":
+        elif isinstance(mutation, _LifecycleMutation) and mutation.action == "cancel":
             payload.update({"ss": 2, "sp": _now()})
-        elif write.action == "tags" and write.tag_uuids is not None:
+        elif (
+            isinstance(mutation, _EditMutation)
+            and mutation.action == "tags"
+            and write.tag_uuids is not None
+        ):
             payload["tg"] = write.tag_uuids
-        elif write.action == "move":
+        elif isinstance(mutation, _EditMutation) and mutation.action == "move":
             payload.update(_placement(write))
         else:
             if write.status is not None:

@@ -21,7 +21,7 @@ Every capability group in this document passed all six release gates:
 | Task and Project Trash or restore | Yes | Yes | Yes | Yes | Yes | Yes |
 | Task purge and descendant-first Project purge | Yes | Yes | Yes | Yes | Yes | Yes |
 | Heading create, rename, assign, clear, and reorder | Yes | Yes | Yes | Yes | Defined | Yes |
-| Empty heading deletion | Yes | Yes | Yes | Yes | Yes | Yes |
+| Heading deletion with assignment cleanup | Yes | Yes | Yes | Yes | Yes | Yes |
 | Tag create, assign, rename, reparent, and delete | Yes | Yes | Yes | Yes | Yes | Yes |
 | Markdown write and explicit rich-note replacement | Yes | Yes | Yes | Yes | Yes | Yes |
 
@@ -44,7 +44,7 @@ repeat, and Project transitions use the public commit and approval path. The
 2026-08-16 run passed these transitions:
 
 - nested tag create, rename, reparent, and delete;
-- heading reorder and empty heading delete;
+- heading rename, reorder, and assigned-Task cleanup on delete;
 - Project Trash, structure-preserving restore, and descendant-first tree purge;
 - Task Trash, restore, and purge;
 - structured rich-note write and explicit Markdown replacement;

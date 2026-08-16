@@ -1530,7 +1530,7 @@ def test_task_moves_and_uses_destination_heading_in_one_change() -> None:
     assert task.heading_uuid == heading.uuid
 
 
-def test_heading_delete_accounts_for_trashed_assigned_tasks() -> None:
+def test_heading_delete_clears_trashed_assigned_tasks_in_one_plan() -> None:
     project = Record(uuid="heading-project", kind="project", title="Plan")
     heading = Record(
         uuid="heading-used",
@@ -1565,8 +1565,12 @@ def test_heading_delete_accounts_for_trashed_assigned_tasks() -> None:
         )
     )
 
-    assert result.status == "needs_input"
-    assert heading.uuid in module._library.records  # noqa: SLF001
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in module._library.records  # noqa: SLF001
+    assert task.heading_uuid is None
 
 
 def test_project_heading_and_task_create_together_with_local_heading() -> None:
@@ -2030,7 +2034,7 @@ def test_repeat_mode_unit_and_interval_change_in_one_approved_plan() -> None:
         "tp": 1,
         "fu": 256,
         "fa": 2,
-        "of": [{"wd": 5}],
+        "of": [],
         "sr": 1_775_232_000,
         "ts": 0,
         "rrv": 99,
@@ -2303,6 +2307,46 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert stopped.status == "applied"
     assert template.uuid not in module._library.records  # noqa: SLF001
     assert instance.recurrence.role == "none"
+
+
+def test_repeat_rule_and_template_metadata_change_in_one_plan() -> None:
+    template = Record(
+        uuid="repeat-metadata-template",
+        kind="task",
+        title="Old routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
+        ),
+    )
+    module = workspace([template])
+    current = detail(module, template.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repeat-metadata-change-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": current.revision,
+                        "title": "New routine",
+                        "notes_markdown": "Use the new checklist.",
+                        "repeat": {"interval": 2},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert template.title == "New routine"
+    assert template.notes == "Use the new checklist."
+    assert template.recurrence.interval == 2
 
 
 def test_generated_task_completion_is_an_ordinary_exact_change() -> None:

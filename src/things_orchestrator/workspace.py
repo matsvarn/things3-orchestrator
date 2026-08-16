@@ -67,6 +67,27 @@ class _Prepared:
     risky: bool
 
 
+@dataclass
+class _PreparationContext:
+    """Mutable planning state shared by cohesive preparation branches."""
+
+    local: dict[str, tuple[str, Kind | str]]
+    writes: list[Write]
+    preconditions: dict[str, str]
+    summary: list[str]
+    warnings: list[str]
+    risky: bool = False
+
+    def result(self) -> _Prepared:
+        return _Prepared(
+            writes=self.writes,
+            preconditions=self.preconditions,
+            summary=list(dict.fromkeys(self.summary))[:40],
+            warnings=list(dict.fromkeys(self.warnings))[:40],
+            risky=self.risky,
+        )
+
+
 @dataclass(frozen=True)
 class _ItemCursor:
     ids: list[str]
@@ -817,183 +838,21 @@ class ThingsWorkspace:
         return datetime.combine(item.start, time(hour, minute), tzinfo=tz).isoformat()
 
     def _prepare(self, call: CommitCall) -> _Prepared:
-        changes_areas = any(entry.kind == "area" for entry in call.create) or any(
-            change.id.startswith("area:") for change in call.change
-        )
-        if changes_areas:
-            expected_scope = self._area_scope_revision()
-            if call.scope_revision != expected_scope:
-                raise _Abort(
-                    self._stale(
-                        "The Area registry changed. Read the system and use its current scope_revision."
-                    )
-                )
-        if call.change_tags:
-            expected_tags = self._tag_revision()
-            if call.tags_revision != expected_tags:
-                raise _Abort(
-                    self._stale(
-                        "The tag registry changed. Read tags and use its current "
-                        "scope_revision as tags_revision."
-                    )
-                )
+        context = self._preparation_context(call)
+        self._prepare_tag_registry(call, context)
+        self._prepare_items(call, context)
+        self._finish_preparation(call, context)
+        return context.result()
 
-        local: dict[str, tuple[str, Kind | str]] = {}
-        for tag_entry in call.ensure_tags:
-            matches = [
-                uuid
-                for uuid, title in self._library.tags.items()
-                if title.casefold() == tag_entry.title.casefold()
-            ]
-            if len(matches) > 1:
-                raise _Abort(
-                    self._needs_input(
-                        f"Several tags are named {tag_entry.title}. Use an exact tag ID."
-                    )
-                )
-            existing = matches[0] if matches else None
-            local[tag_entry.key] = (existing or new_uuid(), "tag")
-        for entry in call.create:
-            if entry.key:
-                local[entry.key] = (new_uuid(), entry.kind)
-        for change in call.change:
-            for row in change.checklist_add:
-                if row.key:
-                    local[row.key] = (new_uuid(), "check")
-
-        writes: list[Write] = []
-        preconditions: dict[str, str] = {}
-        summary: list[str] = []
-        warnings: list[str] = []
-        risky = False
-        uses_tags = bool(call.ensure_tags or call.change_tags) or any(
-            entry.tag_ids or entry.waiting for entry in call.create
-        ) or any(
-            change.tags_add
-            or change.tags_remove
-            or change.waiting is not None
-            for change in call.change
-        )
-        if uses_tags:
-            preconditions["scope:tags"] = self._tag_revision()
-        for tag_entry in call.ensure_tags:
-            uuid = local[tag_entry.key][0]
-            writes.append(
-                Write(action="ensure_tag", uuid=uuid, title=tag_entry.title)
-            )
-            summary.append(f"Ensure tag: {tag_entry.title}")
-            if tag_entry.parent_id is not None:
-                ensured_parent_uuid = (
-                    local[tag_entry.parent_id][0]
-                    if tag_entry.parent_id.startswith("$")
-                    else tag_entry.parent_id.removeprefix("tag:")
-                )
-                if (
-                    not tag_entry.parent_id.startswith("$")
-                    and ensured_parent_uuid not in self._library.tags
-                ):
-                    raise _Abort(
-                        self._needs_input(
-                            f"I could not find exact tag {tag_entry.parent_id}."
-                        )
-                    )
-                self._validate_tag_parent(uuid, ensured_parent_uuid, writes)
-                writes.append(
-                    Write(
-                        action="reparent_tag",
-                        uuid=uuid,
-                        tag_parent_uuids=[ensured_parent_uuid],
-                    )
-                )
-                summary.append(f"Place tag under: {tag_entry.title}")
-        for tag_change in call.change_tags:
-            uuid = tag_change.id.removeprefix("tag:")
-            current_title = self._library.tags.get(uuid)
-            if current_title is None:
-                raise _Abort(
-                    self._needs_input(f"I could not find exact tag {tag_change.id}.")
-                )
-            if tag_change.title is not None:
-                collision = next(
-                    (
-                        other_uuid
-                        for other_uuid, title in self._library.tags.items()
-                        if other_uuid != uuid
-                        and title.casefold() == tag_change.title.casefold()
-                    ),
-                    None,
-                )
-                if collision is not None:
-                    raise _Abort(
-                        self._needs_input(
-                            f"Another tag is already named {tag_change.title}."
-                        )
-                    )
-                writes.append(
-                    Write(
-                        action="rename_tag",
-                        uuid=uuid,
-                        title=tag_change.title,
-                    )
-                )
-                summary.append(f"Rename tag: {current_title} to {tag_change.title}")
-            if "parent_id" in tag_change.model_fields_set:
-                requested_parent_uuid = (
-                    tag_change.parent_id.removeprefix("tag:")
-                    if tag_change.parent_id is not None
-                    else None
-                )
-                if (
-                    requested_parent_uuid is not None
-                    and requested_parent_uuid not in self._library.tags
-                ):
-                    raise _Abort(
-                        self._needs_input(
-                            f"I could not find exact tag {tag_change.parent_id}."
-                        )
-                    )
-                self._validate_tag_parent(uuid, requested_parent_uuid, writes)
-                writes.append(
-                    Write(
-                        action="reparent_tag",
-                        uuid=uuid,
-                        tag_parent_uuids=(
-                            [requested_parent_uuid] if requested_parent_uuid else []
-                        ),
-                    )
-                )
-                summary.append(f"Change tag parent: {current_title}")
-            if tag_change.delete_permanently:
-                for item in self._library.records.values():
-                    if uuid not in item.tag_uuids:
-                        continue
-                    preconditions[item.id] = self._revision(item)
-                    writes.append(
-                        Write(
-                            action="tags",
-                            uuid=item.uuid,
-                            kind=item.kind,
-                            tag_uuids=[tag for tag in item.tag_uuids if tag != uuid],
-                        )
-                    )
-                for child_uuid, parents in self._library.tag_parents.items():
-                    if uuid not in parents:
-                        continue
-                    writes.append(
-                        Write(
-                            action="reparent_tag",
-                            uuid=child_uuid,
-                            tag_parent_uuids=[parent for parent in parents if parent != uuid],
-                        )
-                    )
-                writes.append(
-                    Write(action="delete_tag", uuid=uuid, title=current_title)
-                )
-                summary.append(f"Permanently delete tag: {current_title}")
-                warnings.append(
-                    "The tag will be removed from all items and cannot be restored."
-                )
-            risky = True
+    def _prepare_items(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Plan task, project, heading, checklist, and Area mutations."""
+        local = context.local
+        writes = context.writes
+        preconditions = context.preconditions
+        summary = context.summary
+        warnings = context.warnings
         for entry in call.create:
             uuid = local[entry.key][0] if entry.key else new_uuid()
             if entry.kind == "heading":
@@ -1147,7 +1006,7 @@ class ThingsWorkspace:
                     recurrence_generated=True,
                 )
                 warnings.append("This creates future generated Tasks.")
-                risky = True
+                context.risky = True
             writes.append(common_create)
             for row_index, title in enumerate(entry.checklist):
                 if repeat_template_uuid is not None:
@@ -1191,7 +1050,7 @@ class ThingsWorkspace:
             )
             if entry.next_actions:
                 summary.append(f"Add {len(entry.next_actions)} next actions to {entry.title}")
-            risky = risky or entry.kind == "area"
+            context.risky = context.risky or entry.kind == "area"
             if entry.kind == "area":
                 preconditions["scope:areas"] = self._area_scope_revision()
                 warnings.append("The Area registry will change.")
@@ -1213,12 +1072,13 @@ class ThingsWorkspace:
                 warnings.append(
                     f"{item.title}'s rich formatting will be replaced with Markdown."
                 )
-                risky = True
+                context.risky = True
             elif change.replace_rich_note:
                 raise _Abort(
                     self._rejected("replace_rich_note is only for an existing rich note.")
                 )
             repeat_edit = change.repeat
+            repeat_rule_changed = False
             repeat_interval = (
                 change.repeat_interval
                 if change.repeat_interval is not None
@@ -1259,7 +1119,7 @@ class ThingsWorkspace:
                     warnings.append(
                         "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
                     )
-                    risky = True
+                    context.risky = True
                     continue
                 try:
                     if (
@@ -1306,9 +1166,9 @@ class ThingsWorkspace:
                     parts.append(f"interval to {repeat_interval}")
                 summary.append(f"Change repeat rule for {item.title}: {', '.join(parts)}")
                 warnings.append("This changes future generated Tasks.")
-                risky = True
-                continue
-            if item.recurrence.role == "template":
+                context.risky = True
+                repeat_rule_changed = True
+            if item.recurrence.role == "template" and not repeat_rule_changed:
                 raise _Abort(
                     self._unsupported(
                         "This recurring item is read-only because its mutation semantics are not proven safe."
@@ -1332,19 +1192,31 @@ class ThingsWorkspace:
                         for child in self._library.records.values()
                         if child.heading_uuid == item.uuid
                     ]
-                    if assigned:
-                        raise _Abort(
-                            self._needs_input(
-                                f"{item.title} still contains {len(assigned)} Tasks. "
-                                "Clear or change their heading first."
+                    for child in assigned:
+                        child_home = self._record_home(child)
+                        preconditions[child.id] = self._revision(child)
+                        writes.append(
+                            Write(
+                                action="update",
+                                uuid=child.uuid,
+                                kind=child.kind,
+                                into_uuid=child_home[0],
+                                into_kind=child_home[1],
+                                inbox=child_home[2],
+                                anytime=child_home[3],
+                                clear_heading=True,
                             )
                         )
                     writes.append(
                         Write(action="permanent_delete", uuid=item.uuid, kind="task")
                     )
                     summary.append(f"Permanently delete heading: {item.title}")
+                    if assigned:
+                        summary.append(
+                            f"Clear the heading from {len(assigned)} assigned Tasks"
+                        )
                     warnings.append("This heading deletion cannot be undone.")
-                    risky = True
+                    context.risky = True
                     continue
                 if change.title is not None:
                     writes.append(
@@ -1443,7 +1315,7 @@ class ThingsWorkspace:
                         warnings.append(
                             f"{len(descendants)} contained records will also be deleted."
                         )
-                risky = True
+                context.risky = True
                 continue
 
             home = (None, None, False, False)
@@ -1702,7 +1574,7 @@ class ThingsWorkspace:
                 summary.append(f"Move {len(children)} items from {item.title} to {target.title}")
                 summary.append(f"Remove empty Area: {item.title}")
                 warnings.append("One Area will be removed.")
-                risky = True
+                context.risky = True
             elif change.remove_if_empty:
                 if item.kind != "area":
                     raise _Abort(self._rejected("Only an empty Area can be removed."))
@@ -1711,11 +1583,11 @@ class ThingsWorkspace:
                 writes.append(Write(action="delete_area", uuid=item.uuid, kind="area"))
                 summary.append(f"Remove empty Area: {item.title}")
                 warnings.append("One Area will be removed.")
-                risky = True
+                context.risky = True
             else:
                 summary.append(f"Change {item.kind}: {item.title}")
                 if item.kind == "area":
-                    risky = True
+                    context.risky = True
                     warnings.append("The Area registry will change.")
                 if item.kind == "project" and change.status in {"completed", "canceled"}:
                     open_children = [
@@ -1724,28 +1596,220 @@ class ThingsWorkspace:
                         if child.status == "open"
                     ]
                     if open_children:
-                        risky = True
+                        context.risky = True
                         preconditions[
                             f"scope:project:{item.uuid}"
                         ] = self._project_scope_revision(item.uuid)
                         warnings.append(f"{item.title} still has {len(open_children)} open actions.")
 
-        if not writes:
+    def _finish_preparation(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Apply batch-wide invariants after all planners finish."""
+        if not context.writes:
             raise _Abort(self._rejected("The request did not produce a change."))
-        if any(write.action == "delete_area" for write in writes):
+        if any(write.action == "delete_area" for write in context.writes):
             expected_scope = self._area_scope_revision()
             if call.scope_revision != expected_scope:
                 raise _Abort(self._stale("Read the system and use its current scope_revision."))
-            preconditions["scope:areas"] = expected_scope
-        if len(writes) > 20 or len(call.change) > 5:
-            risky = True
-            warnings.append("This is a broad batch change.")
-        return _Prepared(
-            writes=writes,
-            preconditions=preconditions,
-            summary=list(dict.fromkeys(summary))[:40],
-            warnings=list(dict.fromkeys(warnings))[:40],
-            risky=risky,
+            context.preconditions["scope:areas"] = expected_scope
+        if len(context.writes) > 20 or len(call.change) > 5:
+            context.risky = True
+            context.warnings.append("This is a broad batch change.")
+
+    def _preparation_context(self, call: CommitCall) -> _PreparationContext:
+        """Validate registry snapshots and allocate all local references."""
+        changes_areas = any(entry.kind == "area" for entry in call.create) or any(
+            change.id.startswith("area:") for change in call.change
+        )
+        if changes_areas:
+            expected_scope = self._area_scope_revision()
+            if call.scope_revision != expected_scope:
+                raise _Abort(
+                    self._stale(
+                        "The Area registry changed. Read the system and use its "
+                        "current scope_revision."
+                    )
+                )
+        if call.change_tags:
+            expected_tags = self._tag_revision()
+            if call.tags_revision != expected_tags:
+                raise _Abort(
+                    self._stale(
+                        "The tag registry changed. Read tags and use its current "
+                        "scope_revision as tags_revision."
+                    )
+                )
+
+        local: dict[str, tuple[str, Kind | str]] = {}
+        for tag_entry in call.ensure_tags:
+            matches = [
+                uuid
+                for uuid, title in self._library.tags.items()
+                if title.casefold() == tag_entry.title.casefold()
+            ]
+            if len(matches) > 1:
+                raise _Abort(
+                    self._needs_input(
+                        f"Several tags are named {tag_entry.title}. Use an exact tag ID."
+                    )
+                )
+            existing = matches[0] if matches else None
+            local[tag_entry.key] = (existing or new_uuid(), "tag")
+        for entry in call.create:
+            if entry.key:
+                local[entry.key] = (new_uuid(), entry.kind)
+        for change in call.change:
+            for row in change.checklist_add:
+                if row.key:
+                    local[row.key] = (new_uuid(), "check")
+
+        context = _PreparationContext(
+            local=local,
+            writes=[],
+            preconditions={},
+            summary=[],
+            warnings=[],
+        )
+        uses_tags = bool(call.ensure_tags or call.change_tags) or any(
+            entry.tag_ids or entry.waiting for entry in call.create
+        ) or any(
+            change.tags_add
+            or change.tags_remove
+            or change.waiting is not None
+            for change in call.change
+        )
+        if uses_tags:
+            context.preconditions["scope:tags"] = self._tag_revision()
+        return context
+
+    def _prepare_tag_registry(
+        self, call: CommitCall, context: _PreparationContext
+    ) -> None:
+        """Plan tag registry and hierarchy changes in one place."""
+        for tag_entry in call.ensure_tags:
+            uuid = context.local[tag_entry.key][0]
+            context.writes.append(
+                Write(action="ensure_tag", uuid=uuid, title=tag_entry.title)
+            )
+            context.summary.append(f"Ensure tag: {tag_entry.title}")
+            if tag_entry.parent_id is None:
+                continue
+            parent_uuid = (
+                context.local[tag_entry.parent_id][0]
+                if tag_entry.parent_id.startswith("$")
+                else tag_entry.parent_id.removeprefix("tag:")
+            )
+            if (
+                not tag_entry.parent_id.startswith("$")
+                and parent_uuid not in self._library.tags
+            ):
+                raise _Abort(
+                    self._needs_input(
+                        f"I could not find exact tag {tag_entry.parent_id}."
+                    )
+                )
+            self._validate_tag_parent(uuid, parent_uuid, context.writes)
+            context.writes.append(
+                Write(
+                    action="reparent_tag",
+                    uuid=uuid,
+                    tag_parent_uuids=[parent_uuid],
+                )
+            )
+            context.summary.append(f"Place tag under: {tag_entry.title}")
+
+        for tag_change in call.change_tags:
+            uuid = tag_change.id.removeprefix("tag:")
+            current_title = self._library.tags.get(uuid)
+            if current_title is None:
+                raise _Abort(
+                    self._needs_input(f"I could not find exact tag {tag_change.id}.")
+                )
+            if tag_change.title is not None:
+                collision = next(
+                    (
+                        other_uuid
+                        for other_uuid, title in self._library.tags.items()
+                        if other_uuid != uuid
+                        and title.casefold() == tag_change.title.casefold()
+                    ),
+                    None,
+                )
+                if collision is not None:
+                    raise _Abort(
+                        self._needs_input(
+                            f"Another tag is already named {tag_change.title}."
+                        )
+                    )
+                context.writes.append(
+                    Write(action="rename_tag", uuid=uuid, title=tag_change.title)
+                )
+                context.summary.append(
+                    f"Rename tag: {current_title} to {tag_change.title}"
+                )
+            if "parent_id" in tag_change.model_fields_set:
+                requested_parent_uuid = (
+                    tag_change.parent_id.removeprefix("tag:")
+                    if tag_change.parent_id is not None
+                    else None
+                )
+                if (
+                    requested_parent_uuid is not None
+                    and requested_parent_uuid not in self._library.tags
+                ):
+                    raise _Abort(
+                        self._needs_input(
+                            f"I could not find exact tag {tag_change.parent_id}."
+                        )
+                    )
+                self._validate_tag_parent(
+                    uuid, requested_parent_uuid, context.writes
+                )
+                context.writes.append(
+                    Write(
+                        action="reparent_tag",
+                        uuid=uuid,
+                        tag_parent_uuids=(
+                            [requested_parent_uuid] if requested_parent_uuid else []
+                        ),
+                    )
+                )
+                context.summary.append(f"Change tag parent: {current_title}")
+            if tag_change.delete_permanently:
+                self._prepare_tag_deletion(uuid, current_title, context)
+            context.risky = True
+
+    def _prepare_tag_deletion(
+        self, uuid: str, title: str, context: _PreparationContext
+    ) -> None:
+        """Detach every reference before the irreversible tag delete."""
+        for item in self._library.records.values():
+            if uuid not in item.tag_uuids:
+                continue
+            context.preconditions[item.id] = self._revision(item)
+            context.writes.append(
+                Write(
+                    action="tags",
+                    uuid=item.uuid,
+                    kind=item.kind,
+                    tag_uuids=[tag for tag in item.tag_uuids if tag != uuid],
+                )
+            )
+        for child_uuid, parents in self._library.tag_parents.items():
+            if uuid not in parents:
+                continue
+            context.writes.append(
+                Write(
+                    action="reparent_tag",
+                    uuid=child_uuid,
+                    tag_parent_uuids=[parent for parent in parents if parent != uuid],
+                )
+            )
+        context.writes.append(Write(action="delete_tag", uuid=uuid, title=title))
+        context.summary.append(f"Permanently delete tag: {title}")
+        context.warnings.append(
+            "The tag will be removed from all items and cannot be restored."
         )
 
     def _validate_tag_parent(
@@ -2598,134 +2662,7 @@ class ThingsWorkspace:
         return False
 
     def _writes_match(self, writes: list[Write]) -> bool:
-        tag_aliases = {
-            write.uuid: actual
-            for write in writes
-            if write.action == "ensure_tag"
-            and (actual := self._library.tag_uuid(write.title or "")) is not None
-        }
-        normalized = [
-            replace(
-                write,
-                tag_uuids=[tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids],
-            )
-            if write.tag_uuids is not None
-            else write
-            for write in writes
-        ]
-        return all(self._write_matches(write) for write in normalized)
-
-    def _write_matches(self, write: Write) -> bool:
-        if write.action == "ensure_tag":
-            return self._library.tags.get(write.uuid) == (write.title or "") or self._library.tag_uuid(write.title or "") is not None
-        if write.action == "rename_tag":
-            return self._library.tags.get(write.uuid) == (write.title or "")
-        if write.action == "reparent_tag":
-            return self._library.tag_parents.get(write.uuid, []) == (
-                write.tag_parent_uuids or []
-            )
-        if write.action == "delete_tag":
-            return write.uuid not in self._library.tags
-        if write.action == "checklist":
-            parent, row = self._library._find_checklist(write.uuid)  # noqa: SLF001
-            if write.checklist_remove:
-                return row is None
-            return row is not None and parent is not None and all(
-                (
-                    write.title is None or row.title == write.title,
-                    write.checklist_status is None or row.status == write.checklist_status,
-                    write.checklist_parent_uuid is None or parent.uuid == write.checklist_parent_uuid,
-                    write.checklist_index is None or row.sort_index == write.checklist_index,
-                )
-            )
-        item = self._library.records.get(write.uuid)
-        if write.action in {"delete_area", "permanent_delete"}:
-            return item is None
-        if item is None:
-            return False
-        if write.action == "trash":
-            return item.trashed
-        if write.action == "restore":
-            return not item.trashed
-        if write.action == "repeat":
-            return item.recurrence.rule == write.recurrence_rule
-        if write.action == "repeat_link":
-            return list(item.recurrence.links) == (write.recurrence_links or [])
-        if write.action == "complete":
-            return item.status == "done"
-        if write.action == "cancel":
-            return item.status == "dropped"
-        if write.action == "rename_area":
-            return item.title == write.title
-        if write.action == "tags":
-            return item.tag_uuids == (write.tag_uuids or [])
-        if write.action == "move":
-            return self._placement_matches(item, write)
-        checks = [
-            write.title is None or item.title == write.title,
-            write.notes is None or item.notes == write.notes,
-            write.status is None or item.status == write.status,
-            write.tag_uuids is None or item.tag_uuids == write.tag_uuids,
-            write.deadline is None or item.deadline == write.deadline,
-            not write.clear_deadline or item.deadline is None,
-            write.start is None or item.start == write.start,
-            not write.clear_start or item.start is None,
-            write.start is None or item.tonight == write.tonight,
-            not write.clear_start or not item.tonight,
-            write.remind is None or item.remind == write.remind,
-            not write.clear_remind or item.remind is None,
-            not write.someday or (item.someday and not item.tonight),
-            not write.tonight or item.tonight,
-            not write.anytime
-            or (
-                not item.inbox
-                and not item.someday
-                and not item.tonight
-                and item.start is None
-            ),
-            write.sort_index is None or item.sort_index == write.sort_index,
-            write.today_index is None or item.today_index == write.today_index,
-        ]
-        if (
-            write.action in {"create", "create_heading"}
-            or write.into_uuid is not None
-            or write.into_kind is not None
-            or write.inbox
-            or write.anytime
-        ):
-            checks.append(self._placement_matches(item, write))
-        if write.action in {"create", "create_heading"}:
-            checks.append(item.kind == write.kind)
-        if write.action == "create_heading":
-            checks.append(item.heading)
-        return all(checks)
-
-    @staticmethod
-    def _placement_matches(item: Record, write: Write) -> bool:
-        if write.kind == "area":
-            return (
-                not item.inbox
-                and item.parent_uuid is None
-                and item.area_uuid is None
-            )
-        if write.into_kind == "project":
-            return (
-                item.parent_uuid == write.into_uuid
-                and item.area_uuid is None
-                and not item.inbox
-                and item.heading_uuid == write.heading_uuid
-            )
-        if write.into_kind == "area":
-            return item.area_uuid == write.into_uuid and item.parent_uuid is None and not item.inbox
-        if (
-            write.kind == "project"
-            or write.anytime
-            or write.start is not None
-            or write.someday
-            or write.tonight
-        ):
-            return not item.inbox and item.parent_uuid is None and item.area_uuid is None
-        return item.inbox and item.parent_uuid is None and item.area_uuid is None
+        return self._library.matches(writes)
 
     def _save_result(
         self, record: IntentRecord, state: IntentState, result: Result

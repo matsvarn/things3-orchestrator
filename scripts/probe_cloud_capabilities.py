@@ -275,22 +275,45 @@ def run() -> dict[str, bool]:
                 "project.restore_tree",
                 results,
             )
-            library.apply(
-                [
-                    Write(
-                        action="update",
-                        uuid=project_task,
-                        into_uuid=project,
-                        into_kind="project",
-                        clear_heading=True,
-                    ),
-                    Write(action="permanent_delete", uuid=heading_a),
-                ]
+            renamed_heading = module.commit(
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-rename-{heading_a}",
+                        "change": [
+                            {
+                                "id": f"heading:{heading_a}",
+                                "if_revision": _revision(module, f"heading:{heading_a}"),
+                                "title": f"{prefix} heading renamed",
+                            }
+                        ],
+                    }
+                )
+            )
+            _proof(
+                renamed_heading.status == "applied"
+                and library.records[heading_a].title.endswith("heading renamed"),
+                "heading.rename",
+                results,
+            )
+            _approved_commit(
+                module,
+                CommitCall.model_validate(
+                    {
+                        "intent_id": f"probe-heading-delete-{heading_a}",
+                        "change": [
+                            {
+                                "id": f"heading:{heading_a}",
+                                "if_revision": _revision(module, f"heading:{heading_a}"),
+                                "lifecycle": "delete_permanently",
+                            }
+                        ],
+                    }
+                ),
             )
             _proof(
                 heading_a not in library.records
                 and library.records[project_task].heading_uuid is None,
-                "heading.delete_empty",
+                "heading.delete_with_assignments",
                 results,
             )
             owned.pop(heading_a)

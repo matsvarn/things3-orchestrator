@@ -513,9 +513,25 @@ class ChangeEntry(StrictModel):
             if self.model_fields_set - allowed:
                 raise ValueError("a repeat interval cannot combine with other changes")
         if self.repeat is not None:
-            allowed = {"id", "if_revision", "repeat"}
+            allowed = {
+                "id",
+                "if_revision",
+                "repeat",
+                "title",
+                "notes_markdown",
+                "replace_rich_note",
+                "waiting",
+                "tags_add",
+                "tags_remove",
+                "checklist_add",
+                "checklist_change",
+                "checklist_remove",
+                "checklist_order",
+            }
+            if self.repeat.remove:
+                allowed = {"id", "if_revision", "repeat"}
             if self.model_fields_set - allowed:
-                raise ValueError("a repeat change cannot combine with other changes")
+                raise ValueError("a repeat change cannot combine with that item change")
         if self.replace_rich_note and "notes_markdown" not in self.model_fields_set:
             raise ValueError("replace_rich_note needs notes_markdown")
         return self
@@ -864,6 +880,8 @@ class Result(StrictModel):
     truncated: bool = False
 
 
+# MCP discovery needs flat schemas without refs or unions. The contract-parity test
+# compares every mirrored model, property, required field, and scalar constraint.
 _STRING: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": 512}
 _NULLABLE_STRING: dict[str, Any] = {"type": ["string", "null"], "maxLength": 512}
 _EXACT_ITEM: dict[str, Any] = {**_STRING, "pattern": _ITEM_ID}
@@ -880,8 +898,16 @@ _CHECK_REFERENCE_SCHEMA: dict[str, Any] = {
     "pattern": _CHECK_REFERENCE,
 }
 _AREA_SCHEMA: dict[str, Any] = {**_STRING, "pattern": _AREA_ID}
-_DATE: dict[str, Any] = {"type": ["string", "null"], "format": "date"}
-_DATE_TIME: dict[str, Any] = {"type": ["string", "null"], "format": "date-time"}
+_DATE: dict[str, Any] = {
+    "type": ["string", "null"],
+    "format": "date",
+    "maxLength": 10,
+}
+_DATE_TIME: dict[str, Any] = {
+    "type": ["string", "null"],
+    "format": "date-time",
+    "maxLength": 40,
+}
 _WEEKDAYS: dict[str, Any] = {
     "type": "array",
     "maxItems": 7,
@@ -907,8 +933,8 @@ READ_IN: dict[str, Any] = {
         "id": _EXACT_ITEM,
         "find": {"type": "string", "minLength": 1, "maxLength": 500},
         "within": {**_STRING, "pattern": _CONTAINER_ID},
-        "from": {"type": "string", "format": "date"},
-        "to": {"type": "string", "format": "date"},
+        "from": {"type": "string", "format": "date", "maxLength": 10},
+        "to": {"type": "string", "format": "date", "maxLength": 10},
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
     },
@@ -920,7 +946,7 @@ _CHECKLIST_ADD: dict[str, Any] = {
     "required": ["title"],
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
-        "title": {"type": "string"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "after": _CHECK_REFERENCE_SCHEMA,
     },
 }
@@ -931,7 +957,7 @@ _CHECKLIST_CHANGE: dict[str, Any] = {
     "required": ["id"],
     "properties": {
         "id": _EXACT_CHECK,
-        "title": {"type": "string"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "after": _CHECK_REFERENCE_SCHEMA,
     },
@@ -1041,7 +1067,11 @@ _CHANGE: dict[str, Any] = {
         "trash": {"const": True},
         "lifecycle": {"enum": ["trash", "restore", "delete_permanently"]},
         "delete_contents": {"const": True},
-        "heading_id": {"type": ["string", "null"], "pattern": _HEADING_ID},
+        "heading_id": {
+            "type": ["string", "null"],
+            "pattern": _HEADING_ID,
+            "maxLength": 512,
+        },
         "repeat_interval": {"type": "integer", "minimum": 1, "maximum": 366},
         "repeat": {
             "type": "object",
@@ -1118,7 +1148,7 @@ _TAG_FACT: dict[str, Any] = {
             "uniqueItems": True,
             "items": _EXACT_TAG,
         },
-        "parents_truncated": {"type": "boolean"},
+        "parents_truncated": {"type": "boolean", "default": False},
         "from_id": _EXACT_ITEM,
     },
 }
@@ -1132,7 +1162,7 @@ _CHECKLIST_FACT: dict[str, Any] = {
         "revision": _STRING,
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
-        "order": {"type": "integer"},
+        "order": {"type": "integer", "minimum": _ORDER_MIN, "maximum": _ORDER_MAX},
     },
 }
 
@@ -1166,7 +1196,7 @@ _RECURRENCE: dict[str, Any] = {
 _ITEM_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "revision", "kind", "title", "status"],
+    "required": ["id", "revision", "kind", "title", "status", "order"],
     "properties": {
         "id": _EXACT_ITEM,
         "revision": _STRING,
@@ -1175,19 +1205,23 @@ _ITEM_FACT: dict[str, Any] = {
         "status": {"enum": ["open", "completed", "canceled"]},
         "into_id": _EXACT_ITEM,
         "heading_id": {**_STRING, "pattern": _HEADING_ID},
-        "notes_markdown": {"type": ["string", "null"]},
+        "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {"type": "array", "maxItems": 100, "items": _CHECKLIST_FACT},
         "direct_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
         "inherited_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
-        "start": {"type": ["string", "null"]},
+        "start": {"type": ["string", "null"], "maxLength": 32},
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
         "recurrence": _RECURRENCE,
-        "order": {"type": "integer"},
-        "today_order": {"type": "integer"},
+        "order": {"type": "integer", "minimum": _ORDER_MIN, "maximum": _ORDER_MAX},
+        "today_order": {
+            "type": "integer",
+            "minimum": _ORDER_MIN,
+            "maximum": _ORDER_MAX,
+        },
         "signals": {
             "type": "array",
-            "maxItems": 40,
+            "maxItems": 20,
             "items": {"type": "string", "maxLength": 1600},
         },
     },
@@ -1198,15 +1232,15 @@ _SECTION: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["key", "title"],
     "properties": {
-        "key": {"type": "string"},
-        "title": {"type": "string"},
+        "key": {"type": "string", "minLength": 1, "maxLength": 80},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
         "item_ids": {
             "type": "array",
             "maxItems": 40,
             "uniqueItems": True,
             "items": _EXACT_ITEM,
         },
-        "signals": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+        "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
     },
 }
 
@@ -1216,7 +1250,11 @@ _PLAN: dict[str, Any] = {
     "required": ["id", "expires_at", "summary"],
     "properties": {
         "id": APPROVE_IN["properties"]["plan_id"],
-        "expires_at": {"type": "string", "format": "date-time"},
+        "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 40,
+        },
         "summary": {"type": "array", "minItems": 1, "maxItems": 40, "items": {"type": "string"}},
         "preserves": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
         "warnings": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
@@ -1254,7 +1292,7 @@ RESULT_OUT: dict[str, Any] = {
         "receipt": _STRING,
         "scope_revision": _STRING,
         "cursor": _STRING,
-        "truncated": {"type": "boolean"},
+        "truncated": {"type": "boolean", "default": False},
     },
 }
 

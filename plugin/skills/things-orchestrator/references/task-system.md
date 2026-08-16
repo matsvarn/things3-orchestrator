@@ -22,7 +22,7 @@ When titles match, use the parent, notes, tags, and exact Things identity to
 tell items apart. If they still match, ask the owner which item they mean.
 
 Use headings when they reveal stable Project sections. Rename or reorder a heading
-when the section meaning changes. Delete it only when it is empty.
+when the section meaning changes. Deleting it keeps its Tasks in the Project.
 
 For repeating work, separate the future cadence from today's work. Change the
 repeating template for future copies. Change the generated copy for the current cycle.
