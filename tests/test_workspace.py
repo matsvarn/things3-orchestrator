@@ -3030,6 +3030,89 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert instance.recurrence.role == "none"
 
 
+def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
+    template = Record(
+        uuid="report-template",
+        kind="task",
+        title="Weekly report",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
+        ),
+    )
+    current = Record(
+        uuid="report-current",
+        kind="task",
+        title="Weekly report",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    return workspace([template, current]), template, current
+
+
+def test_stop_repeat_on_current_copy_deletes_the_template() -> None:
+    module, template, current = _repeating_pair()
+    revision = detail(module, current.id).revision
+
+    planned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-report-repeat-on-current",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+    assert planned.status == "needs_approval"
+    assert planned.plan is not None
+    stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
+    assert stopped.status == "applied"
+    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert current.recurrence.role == "none"
+
+
+def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
+    module, template, current = _repeating_pair()
+    current_revision = detail(module, current.id).revision
+    template_revision = detail(module, template.id).revision
+
+    planned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-report-repeat-both",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": current_revision,
+                        "repeat": {"remove": True},
+                    },
+                    {
+                        "id": template.id,
+                        "if_revision": template_revision,
+                        "repeat": {"remove": True},
+                    },
+                ],
+            }
+        )
+    )
+    assert planned.status == "needs_approval"
+    assert planned.plan is not None
+    stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
+    assert stopped.status == "applied"
+    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert current.recurrence.role == "none"
+
+
 def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> None:
     project = Record(uuid="repeat-project", kind="project", title="Routines")
     heading = Record(
