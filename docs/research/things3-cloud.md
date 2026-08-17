@@ -3,8 +3,7 @@
 **Unofficial. Not a user guide.** This note describes another project's
 reverse-engineered Cloud protocol. This repo is not affiliated with Cultured
 Code. Using it may conflict with their terms; they can block access or
-disable an account. Do not hammer Cloud. Owners start at the README and
-[docs/clients.md](../clients.md).
+disable an account. Do not hammer Cloud. Owners start at the README.
 
 Reviewed: 2026-08-13
 

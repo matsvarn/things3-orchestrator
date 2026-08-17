@@ -281,12 +281,18 @@ def test_setup_wizard_is_linked_and_does_not_store_cloud_secrets() -> None:
     assert (ROOT / "deploy/Caddyfile").is_file()
     assert (ROOT / "deploy/serve-http.service").is_file()
     clients = (ROOT / "docs/clients.md").read_text()
-    assert "## Same machine" in clients
-    assert "## Other machine" in clients
+    assert "## This Mac" in clients
+    assert "## Already hosted" in clients
     assert "~/.hermes/config.yaml" in clients
     assert "cursor.com/agents" in clients
     assert "cannot use this bearer" in clients
     assert "does not ship MCP OAuth" in clients
+    host = (ROOT / "docs/host.md").read_text()
+    assert "login --url" in host
+    assert "plugin/skills" in host
+    assert "do not run `login`" in host.lower()
+    assert "claude mcp add --transport http" in host
+    assert "serve-http.service" in host
 
 
 def test_readme_is_safe_to_publish() -> None:
@@ -321,17 +327,17 @@ def test_readme_is_safe_to_publish() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert "Python :: 3.13" in pyproject
     assert "Python :: 3.14" in pyproject
-    assert "things-mcp" in readme
-    assert "thingscloudmcp.com" in readme
     assert "Mac can be off" in readme
     assert "docs/trust.md" in readme
     assert "docs/comparison.md" in readme
+    assert "docs/host.md" in readme
     trust = (ROOT / "docs/trust.md").read_text()
     assert "model provider" in trust
     assert "fully private" in trust
     comparison = (ROOT / "docs/comparison.md").read_text()
     assert "Reviewed on 2026-08-14" in comparison
     assert "hald/things-mcp" in comparison
+    assert "thingscloudmcp.com" in comparison
     assert "wbopan/things-cloud-mcp" in comparison
     assert not (ROOT / "docs/public-launch.md").exists()
 

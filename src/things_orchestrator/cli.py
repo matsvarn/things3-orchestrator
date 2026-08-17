@@ -43,7 +43,7 @@ class Snippets(NamedTuple):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Things Cloud MCP server. Three tools: read, commit, and approve.",
-        epilog="From the clone: uv run things-orchestrator login. Merge the Hermes YAML into ~/.hermes/config.yaml.",
+        epilog="From the clone: uv run things-orchestrator login. This Mac: merge the Hermes YAML into ~/.hermes/config.yaml. VPS: docs/host.md.",
     )
     commands = parser.add_subparsers(
         dest="action", required=True, metavar="{login,serve,serve-http,print-config}"
@@ -149,7 +149,8 @@ def _login(
     if rotate_token:
         print("mcp_token rotated. Update every HTTP client header.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
-    print("Next: docs/clients.md. Do not paste the Cloud password into chat.")
+    print("Next: docs/host.md if the server is a VPS, else docs/clients.md.")
+    print("Do not paste the Cloud password into chat.")
 
 
 def _print_config(
@@ -301,17 +302,20 @@ def _print_snippets(snippets: Snippets, *, http_only: bool) -> None:
     http_body = snippets.http.read_text()
     placeholder = "YOUR-HOST" in http_body
     if not http_only:
-        print("Hermes (same machine): merge into ~/.hermes/config.yaml")
+        print("Hermes (this Mac): merge into ~/.hermes/config.yaml")
         print(f"Wrote {snippets.hermes}")
         print(snippets.hermes.read_text(), end="")
         print(f"Cursor / Codex / Claude Desktop JSON: {snippets.stdio}")
         print(json.dumps(json.loads(snippets.stdio.read_text()), indent=2))
         if placeholder:
             print("VPS: uv run things-orchestrator print-config --http --url https://YOUR-HOST")
+            print("On another machine, change skills.external_dirs to a local copy of plugin/skills.")
+            print("Numbered host steps: docs/host.md.")
             return
     print("Hermes (VPS): merge into ~/.hermes/config.yaml")
     print(f"Wrote {snippets.hermes_http}")
     print(snippets.hermes_http.read_text(), end="")
+    print("On another machine, change skills.external_dirs to a local copy of plugin/skills.")
     print(f"Cursor Cloud Agents / Claude Code JSON: {snippets.http}")
     print(json.dumps(json.loads(http_body), indent=2))
     if placeholder:
