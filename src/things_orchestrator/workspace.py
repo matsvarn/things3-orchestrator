@@ -2132,14 +2132,24 @@ class ThingsWorkspace:
             return False
         if change.repeat_interval is not None or repeat_edit is not None:
             if repeat_edit is not None and repeat_edit.remove:
+                target = item
+                if item.recurrence.role == "instance" and item.recurrence.template_uuid:
+                    template = self._library.records.get(item.recurrence.template_uuid)
+                    if template is not None:
+                        target = template
+                if any(
+                    write.action == "permanent_delete" and write.uuid == target.uuid
+                    for write in writes
+                ):
+                    return True
                 try:
-                    item.recurrence.validate_interval_template(kind=item.kind)
+                    target.recurrence.validate_interval_template(kind=target.kind)
                 except ValueError as error:
                     raise _Abort(self._unsupported(str(error))) from error
                 linked = [
                     candidate
                     for candidate in self._library.records.values()
-                    if item.uuid in candidate.recurrence.links
+                    if target.uuid in candidate.recurrence.links
                 ]
                 for candidate in linked:
                     preconditions[candidate.id] = self._revision(candidate)
@@ -2151,26 +2161,27 @@ class ThingsWorkspace:
                             recurrence_links=[],
                         )
                     )
-                for checklist_row in item.checklists:
+                for checklist_row in target.checklists:
                     writes.append(
                         Write(
                             action="checklist",
                             uuid=checklist_row.uuid,
-                            checklist_parent_uuid=item.uuid,
+                            checklist_parent_uuid=target.uuid,
                             checklist_remove=True,
                         )
                     )
                 writes.append(
                     Write(
                         action="permanent_delete",
-                        uuid=item.uuid,
+                        uuid=target.uuid,
                         kind="task",
                     )
                 )
-                preconditions[f"scope:repeat:{item.uuid}"] = (
-                    self._recurrence_scope_revision(item.uuid)
+                preconditions[target.id] = self._revision(target)
+                preconditions[f"scope:repeat:{target.uuid}"] = (
+                    self._recurrence_scope_revision(target.uuid)
                 )
-                summary.append(f"Stop repeating: {item.title}")
+                summary.append(f"Stop repeating: {target.title}")
                 warnings.append(
                     "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
                 )
