@@ -77,11 +77,17 @@ def test_live_proof_uses_public_paths_for_lifecycle_and_heading_reorder() -> Non
     assert '"parent_id": None' not in tag_block
 
 
-def test_owner_guide_separates_recurrence_inspection_from_change_context() -> None:
+def test_owner_guide_is_how_to_talk() -> None:
     from pathlib import Path
 
-    owner = (Path(__file__).parents[1] / "docs" / "owner.md").read_text()
+    root = Path(__file__).parents[1]
+    owner = (root / "docs" / "owner.md").read_text()
+    skill = (
+        root / "plugin" / "skills" / "things-orchestrator" / "references" / "task-system.md"
+    ).read_text()
 
-    assert "`purpose=recurrence` with the exact Task id" in owner
-    assert "separate `purpose=change` read" in owner
-    assert "do not reuse recurrence facts as change refs" in owner
+    assert "purpose=recurrence" not in owner
+    assert "purpose=change" not in owner
+    assert "contextual refs" not in owner
+    assert "`purpose=recurrence`" in skill
+    assert "current copy and template" in skill.lower()

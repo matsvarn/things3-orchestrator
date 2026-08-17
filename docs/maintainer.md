@@ -25,8 +25,9 @@ Keep one production server and one stable model Interface.
   `pip install` this package as the install path: the wheel has no `plugin/`
   (skills or wrapper). `login` writes Hermes YAML plus `mcp.stdio.json` /
   `mcp.http.json`, keeps `mcp_token` unless `--rotate-token`, and keeps an
-  HTTP URL already set. Per-client wiring lives in `docs/clients.md`. Hermes
-  is the default paste.
+  HTTP URL already set. Per-client wiring lives in `docs/clients.md`. A VPS
+  plus a laptop client is `docs/host.md`. Hermes is the default paste.
+  Capability evidence is `docs/capability-proof.md`.
 
 Do not add CRUD tools. Keep discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each

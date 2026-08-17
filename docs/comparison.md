@@ -1,7 +1,8 @@
 # Credential boundary comparison
 
 Reviewed on 2026-08-14. Recheck the linked sources before you publish this
-comparison again.
+comparison again. Read this when choosing between the local Mac MCP, this
+project, and a hosted Cloud login.
 
 The key question is whether a Things Cloud password is used. If it is used,
 the next question is who runs the host that stores it.

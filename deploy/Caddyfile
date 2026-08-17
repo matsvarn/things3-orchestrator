@@ -1,6 +1,7 @@
 # TLS in front of `things-orchestrator serve-http`.
 # Leave the Python process on 127.0.0.1:8787. Do not publish port 8787.
 # The process must outlive SSH — use deploy/serve-http.service or tmux.
+# Numbered host steps: docs/host.md.
 #
 #   uv run things-orchestrator serve-http
 #   uv run things-orchestrator print-config --http --url https://mcp.example.com

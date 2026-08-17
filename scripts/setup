@@ -51,8 +51,10 @@ printf '\nLogin succeeded. The client files are here:\n'
 printf '  %s\n' "$TO_CONFIG_ROOT/mcp.stdio.json"
 printf '  %s\n' "$TO_CONFIG_ROOT/mcp.http.json"
 printf '  %s\n' "$TO_CONFIG_ROOT/mcp.hermes.yaml"
-printf '\nFor Hermes, merge the things key into ~/.hermes/config.yaml.\n'
+printf '  %s\n' "$TO_CONFIG_ROOT/mcp.hermes.http.yaml"
+printf '\nThis Mac: merge mcp.hermes.yaml into ~/.hermes/config.yaml.\n'
 printf 'Do not replace the whole file.\n'
+printf 'This machine is a VPS: open docs/host.md next (Caddy, systemd, laptop Hermes).\n'
 printf 'See docs/clients.md for all client steps.\n'
 printf '\nSmoke test prompt:\n'
 printf '  What should I focus on in Things today?\n\n'

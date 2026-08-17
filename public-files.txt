@@ -13,6 +13,7 @@ docs/adr/0002-contextual-desired-state.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md
+docs/host.md
 docs/maintainer.md
 docs/owner.md
 docs/recovery.md

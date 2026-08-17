@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Docs
+
+- README picks a path: this Mac, or a VPS. Competitor and trust
+  detail live in their own pages.
+- Numbered host guide for Hermes, then Claude Code or another client,
+  against that same hosted server.
+- Owner guide is what to say, not how the tools work.
+
 ## 0.2.0 — 2026-08-17
 
 Same three tools. Shorter first-action skill, clearer owner questions, and

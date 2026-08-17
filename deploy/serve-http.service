@@ -1,5 +1,6 @@
 # Keep serve-http running after SSH logout.
-# Fill User and WorkingDirectory, then:
+# Numbered host steps: docs/host.md.
+# Fill User, WorkingDirectory, and the real uv path, then:
 #   sudo cp deploy/serve-http.service /etc/systemd/system/
 #   sudo systemctl enable --now things-orchestrator-http
 #
