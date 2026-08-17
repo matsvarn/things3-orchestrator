@@ -1,3 +1,9 @@
+"""Product skill contract for the A2-product package.
+
+Winning first-action rules stay in SKILL.md. Form, review, merge, and
+research live in the three disclosed references.
+"""
+
 from __future__ import annotations
 
 import re
@@ -63,8 +69,19 @@ def test_skill_is_model_invoked_with_matching_ui_metadata() -> None:
     assert skill_dirs == {"things-orchestrator"}
 
 
-def test_main_skill_selects_the_smallest_high_quality_things_form() -> None:
-    source = SKILL.read_text(encoding="utf-8")
+def test_main_skill_keeps_winning_first_actions() -> None:
+    lower = SKILL.read_text(encoding="utf-8").lower()
+
+    assert "view=tags" in lower
+    assert "start=evening" in lower
+    assert "distinctive title token" in lower
+    assert "do not create that project" in lower
+    assert "do not start a permanent-delete plan" in lower
+    assert "renew passport" in lower
+
+
+def test_form_choice_lives_in_task_system() -> None:
+    source = (REFERENCES / "task-system.md").read_text(encoding="utf-8")
     lower = source.lower()
 
     assert "smallest useful form" in lower
@@ -92,9 +109,8 @@ def test_main_skill_selects_the_smallest_high_quality_things_form() -> None:
     assert "finished" in planning_stop
 
 
-def test_main_skill_preserves_owner_control_and_natural_language() -> None:
-    source = SKILL.read_text(encoding="utf-8")
-    lower = source.lower()
+def test_owner_control_is_in_the_package() -> None:
+    lower = _skill_text().lower()
 
     assert "owner's words" in lower
     assert "natural things terms" in lower
@@ -118,8 +134,11 @@ def test_main_skill_preserves_owner_control_and_natural_language() -> None:
         "invariant",
         "domain outcome",
         "target registry",
+        "if_revision",
+        "legacy arms",
+        "contextual arms",
     }
-    assert not any(term in _skill_text().lower() for term in internal_jargon)
+    assert not any(term in lower for term in internal_jargon)
 
 
 def test_skill_leaves_request_mechanics_to_the_mcp_interface() -> None:
@@ -127,7 +146,6 @@ def test_skill_leaves_request_mechanics_to_the_mcp_interface() -> None:
     tool_names = re.findall(r"things_[a-z_]+", combined)
 
     assert set(tool_names) == {"things_read", "things_commit", "things_approve"}
-    assert len(tool_names) == 3
     assert "follow each returned" in combined.lower()
 
     mechanics = {

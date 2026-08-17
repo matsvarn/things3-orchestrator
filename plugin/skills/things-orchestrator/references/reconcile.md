@@ -1,37 +1,21 @@
-# Review the Things system
+# Review, merge, and organize
 
-Use this sequence for a weekly review, full review, or Area redesign.
+Select one view, one exact id, or one find; only a Project view uses `within`, and never combine a view with id or find. Search named existing items and edit them; create only when asked to add. Define local refs before use and parent tags before children. Do not copy revisions.
 
-1. Review the full requested range before proposing changes.
-2. Separate what Things shows from what still needs the owner's judgment.
-3. Check Inbox items, Projects without a useful next action, possible
-   duplicates, waiting follow-ups, meaningful dates, and Someday items.
-4. Check whether each Area still represents one ongoing responsibility.
-5. Propose the smallest set of changes. Preserve all other work.
-6. Show structural changes in the owner's words. Apply them only after the
-   owner accepts the proposed result.
-7. Confirm what changed and name anything that still needs a choice.
+## Weekly review or Area redesign
 
-For a Project restructure, use one `purpose=organize` Project read. Build one
-editable draft from its context refs and complete layout. Put sections in the
-required order. Use existing headings or create useful headings. Use
-`unlisted=keep` so omitted work stays in place. Batch related normal changes
-with the draft. If structured recovery asks for new context, read and rebuild once.
+Review the full requested range. Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
 
-Prefer a few stable Areas to speculative categories. Keep an Area when it
-still supports a real responsibility. Before removing or combining Areas,
-account for every contained Task and Project.
+Repair tag names and parent relationships when they reduce duplicate filters. Tag deletion uses `change_tags.delete_permanently`. Preserve rich notes unless the owner accepts a full Markdown replacement. Restore accidental cleanup.
 
-Inspect duplicate titles and empty Projects before suggesting cleanup. Use
-completion history, notes, placement, and the owner's words.
+When a change needs approval, ask one short question in the owner's words. Keep the plan ID private.
 
-Repair tag names and parent relationships when they reduce duplicate filters.
-Delete a tag only after its use is clear. Preserve rich notes unless the owner
-accepts a full Markdown replacement.
+## Organize or merge
 
-Use Trash for reversible cleanup. Restore accidental cleanup. Permanently
-delete only on an explicit request. For a Project, account for all descendants
-before the Project itself.
+Read once with `purpose=organize`. Send one editable draft with ordered sections and `unlisted=keep`. Batch related normal changes with the draft. Use `context refs`. If structured recovery asks for new context, read and rebuild once. If a response is lost or a result is pending or unknown, repeat the same request with no new facts. Use structured recovery only for stale or expired context.
 
-Finish when every reviewed item and affected Area is accounted for, or one
-specific owner question blocks the remaining decision.
+For an atomic merge, move every active visible direct child to an active destination, then set the source Project to `lifecycle=trash` only in one commit. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup.
+
+## Delete
+
+Use `lifecycle=trash` only for an ordinary Task or Project delete because it is recoverable. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. For a non-empty Project, read it completely, use `lifecycle=delete_permanently` with `delete_contents=true`, then approve the plan. Permanently delete only named Trash items.

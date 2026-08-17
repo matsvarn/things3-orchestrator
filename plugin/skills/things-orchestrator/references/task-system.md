@@ -1,39 +1,34 @@
-# Clarify unclear work
+# Form, headings, and repeats
 
-Use this note when the right Things form depends on meaning only the owner can
-supply.
+Use the owner's words and natural Things terms. Preserve the owner's dates and importance. Do not infer urgency. Preserve anything the owner did not ask to change.
 
-## Find the deciding question
+## Choose the smallest useful form
 
-Use the title, notes, children, dates, tags, and location as clues. Treat the
-owner's words as the source of purpose and importance.
+- Task: one clear action. Start with the visible action and name the object.
+- Things checklist: small known steps that share the Task's finish.
+- Project: several actions that finish separately. Add only the next one to three useful actions unless the owner supplied a plan.
+- Headings: scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`; never `lifecycle`. Deleting it keeps its Tasks in the Project.
+- Markdown notes: context, links, plans, and finish criteria. Keep executable steps in checklist rows or Project Tasks.
+- Area: an ongoing responsibility without a finish.
+- Start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.
+- Tag: a filter the owner will reuse. Prefer an exact match.
+- Someday: keep an idea outside active work.
 
-Ask one short question when the answer can change the form, destination, or
-date. Keep the existing item unchanged while the choice is open.
+Stop planning when the owner can start, has the needed context, and can tell when the work is finished.
 
-- For a broad Task, ask for the first visible action.
-- For a vague Project, ask what finished looks like.
-- For an empty Project, ask whether to plan it, keep it for later, or cancel it.
-- For waiting work, identify what must happen and when follow-up becomes useful.
-- For Someday, ask whether the idea is active now only when that choice matters.
-- For an Area, ask which ongoing responsibility it represents.
+## Unclear form
 
-When titles match, use the parent, notes, tags, and exact Things identity to
-tell items apart. If they still match, ask the owner which item they mean.
+Ask one short question. Keep the existing item unchanged.
 
-Use headings when they reveal stable Project sections. Rename or reorder a heading
-when the section meaning changes. Delete it with an organize draft's
-`delete_headings`; never use item `lifecycle`. Deleting it keeps its Tasks in the Project.
+- Broad Task: ask for the first visible action.
+- Vague Project: ask what finished looks like. Do not create it.
+- Empty Project: plan it, keep it for later, or cancel it.
+- Waiting: what must happen, and when follow-up is useful.
+- Someday: whether it is active now, only when that choice matters.
+- Area: which ongoing responsibility it represents.
 
-For an exact edit, search a named existing item before editing it. Create only
-when the owner asks to add. Use one `purpose=change` read and its context refs
-in one commit. Define local refs before use; create parent tags before children.
-For repeating work, search first, then use `purpose=recurrence` with the exact
-Task id, then `purpose=change` only when editable context is needed. Change the
-repeating template for future copies and the generated copy for the current
-cycle. Batch both changes when both must match. A complete repeat rule keeps
-the existing Task identity and metadata.
-For a Task, Project, or heading order anchor outside the returned facts, use one bounded `include` lookup by exact id or unique active find. Use `after` for item or heading order; use `today_after` only for a Task on Today. Use `within` only with `find`; resolve an ambiguous include before preparing a commit.
-Use `start=evening` for evening work. Stop repetition when new copies must stop.
+Finish when each unclear choice has one supported reading or one concise question.
 
-Keep the answer in the owner's words. Finish when each unclear choice has one supported interpretation or one concise question for the owner.
+## Repeats
+
+Search first, then `purpose=recurrence` on the exact Task. Confirm the current copy and template. Change the repeating template for future copies and the generated copy for the current cycle. Change the generated copy for current work. Batch both changes when both must match. A complete repeat rule keeps the current Task. Stopping repetition keeps linked copies as Tasks.
