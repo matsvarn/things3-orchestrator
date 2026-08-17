@@ -13,8 +13,11 @@ the protocol, block access, or disable an account. Use at your own risk.
   the password prompt is this project's CLI, not chat.
 - Keep `~/.config/things-orchestrator/credentials.json` mode 0600. Do
   not commit it, paste it, or put it in issues, screenshots, or chat.
-- Treat login / `print-config` output as secret: it prints the MCP
-  Bearer. Do not screenshot the terminal into an issue.
+- Treat snippet files as secret (`mcp.http.json`,
+  `mcp.hermes.http.yaml`, `mcp.hermes.yaml`, `mcp.stdio.json`). They are
+  mode 0600. Default `login` / `print-config` print paths only.
+  `--show-secrets` prints the MCP Bearer. Do not screenshot that
+  terminal into an issue.
 - Put TLS in front of `serve-http`. Leave the process on `127.0.0.1`.
   Do not publish port 8787. Do not run `/mcp` without a bearer.
   `/health` is liveness only (`{"ok":true}`).

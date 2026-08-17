@@ -28,8 +28,11 @@ keeping all data on one device.
 ## MCP access
 
 The HTTP server binds only to `127.0.0.1`. Put TLS in front of it. Each
-`/mcp` request needs a separate bearer token. `/health` contains no
-account data.
+`/mcp` request needs the MCP bearer. `/health` contains no account data.
+
+All authorized clients share one MCP bearer. There is no per-client
+identity. Owner approval (`things_approve`) is a model workflow rule,
+not a second authentication factor.
 
 The bearer is not the Cloud password. Rotate it with
 `login --rotate-token` if an HTTP configuration leaks.

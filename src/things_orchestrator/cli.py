@@ -1,4 +1,4 @@
-"""Owner commands: login, serve, serve-http, print-config."""
+"""Owner commands: login, serve, serve-http, print-config, doctor."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import NamedTuple
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .cloud import (
@@ -31,6 +34,14 @@ from .workspace import ThingsWorkspace
 
 _LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
 _PLACEHOLDER_HOST = "https://YOUR-HOST/mcp"
+_LOOPBACK_HEALTH = "http://127.0.0.1:8787/health"
+_HEALTH_WAIT_SECONDS = 15
+_SNIPPET_NAMES = (
+    "mcp.stdio.json",
+    "mcp.http.json",
+    "mcp.hermes.yaml",
+    "mcp.hermes.http.yaml",
+)
 
 
 class Snippets(NamedTuple):
@@ -43,10 +54,17 @@ class Snippets(NamedTuple):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Things Cloud MCP server. Three tools: read, commit, and approve.",
-        epilog="From the clone: uv run things-orchestrator login. This Mac: merge the Hermes YAML into ~/.hermes/config.yaml. VPS: docs/host.md.",
+        epilog=(
+            "From the clone: uv run things-orchestrator login. "
+            "HTTP host: uv run things-orchestrator doctor. "
+            "This Mac: merge the Hermes YAML into ~/.hermes/config.yaml. "
+            "VPS: docs/host.md."
+        ),
     )
     commands = parser.add_subparsers(
-        dest="action", required=True, metavar="{login,serve,serve-http,print-config}"
+        dest="action",
+        required=True,
+        metavar="{login,serve,serve-http,print-config,doctor}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -66,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mint a new mcp_token (existing HTTP clients will 401 until they paste it)",
     )
+    login.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="print snippet file bodies (includes the MCP bearer)",
+    )
     commands.add_parser("serve", help="MCP on stdio")
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
     http.add_argument("--port", type=int, default=8787)
@@ -76,6 +99,26 @@ def build_parser() -> argparse.ArgumentParser:
         dest="public_url",
         default="",
         help="HTTPS origin or /mcp URL written into the HTTP snippets",
+    )
+    show.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="print snippet file bodies (includes the MCP bearer)",
+    )
+    doctor = commands.add_parser(
+        "doctor",
+        help="check credentials, snippets, and serve-http /health",
+    )
+    doctor.add_argument(
+        "--wait",
+        action="store_true",
+        help="retry loopback /health for about 15 seconds (serve-http readiness)",
+    )
+    doctor.add_argument(
+        "--url",
+        dest="public_url",
+        default="",
+        help="also GET {origin}/health (no bearer)",
     )
     return parser
 
@@ -89,10 +132,19 @@ def main(argv: list[str] | None = None) -> None:
             public_url=args.public_url,
             rotate_token=args.rotate_token,
             timezone_name=args.timezone,
+            show_secrets=args.show_secrets,
         )
         return
     if args.action == "print-config":
-        _print_config(parser, public_url=args.public_url, http_only=args.http)
+        _print_config(
+            parser,
+            public_url=args.public_url,
+            http_only=args.http,
+            show_secrets=args.show_secrets,
+        )
+        return
+    if args.action == "doctor":
+        _doctor(parser, wait=args.wait, public_url=args.public_url)
         return
     server = _server(parser)
     if args.action == "serve":
@@ -115,6 +167,7 @@ def _login(
     public_url: str,
     rotate_token: bool,
     timezone_name: str,
+    show_secrets: bool,
 ) -> None:
     if not sys.stdin.isatty():
         parser.error("login needs an interactive terminal. Do not paste the password into chat.")
@@ -145,7 +198,7 @@ def _login(
     _remember_checkout()
     snippets = _write_mcp_snippets(path.parent, token=token, public_url=public_url)
     print(f"Stored credentials in {path} (mode 0600, plaintext password).")
-    _print_snippets(snippets, http_only=False)
+    _print_snippets(snippets, http_only=False, show_secrets=show_secrets)
     if rotate_token:
         print("mcp_token rotated. Update every HTTP client header.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
@@ -154,7 +207,11 @@ def _login(
 
 
 def _print_config(
-    parser: argparse.ArgumentParser, *, public_url: str, http_only: bool
+    parser: argparse.ArgumentParser,
+    *,
+    public_url: str,
+    http_only: bool,
+    show_secrets: bool,
 ) -> None:
     creds = credentials_path()
     try:
@@ -167,8 +224,9 @@ def _print_config(
         return
     _remember_checkout()
     snippets = _write_mcp_snippets(creds.parent, token=token, public_url=public_url)
-    _print_snippets(snippets, http_only=http_only)
+    _print_snippets(snippets, http_only=http_only, show_secrets=show_secrets)
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
+    print("Next: docs/host.md if the server is a VPS, else docs/clients.md.")
     print("Do not paste the Cloud password into chat.")
 
 
@@ -298,28 +356,165 @@ def _write_mcp_snippets(config_dir: Path, *, token: str, public_url: str) -> Sni
     return Snippets(stdio=stdio, http=http, hermes=hermes, hermes_http=hermes_http)
 
 
-def _print_snippets(snippets: Snippets, *, http_only: bool) -> None:
+def _print_snippets(snippets: Snippets, *, http_only: bool, show_secrets: bool) -> None:
     http_body = snippets.http.read_text()
     placeholder = "YOUR-HOST" in http_body
     if not http_only:
-        print("Hermes (this Mac): merge into ~/.hermes/config.yaml")
-        print(f"Wrote {snippets.hermes}")
-        print(snippets.hermes.read_text(), end="")
-        print(f"Cursor / Codex / Claude Desktop JSON: {snippets.stdio}")
-        print(json.dumps(json.loads(snippets.stdio.read_text()), indent=2))
-        if placeholder:
-            print("VPS: uv run things-orchestrator print-config --http --url https://YOUR-HOST")
-            print("On another machine, change skills.external_dirs to a local copy of plugin/skills.")
+        _emit_snippet(
+            "Hermes stdio YAML: merge into the active Hermes profile "
+            "config.yaml (default ~/.hermes/config.yaml)",
+            snippets.hermes,
+            snippets.hermes.read_text(),
+            show_secrets=show_secrets,
+        )
+        _emit_snippet(
+            f"Cursor / Claude Desktop JSON: {snippets.stdio}",
+            snippets.stdio,
+            json.dumps(json.loads(snippets.stdio.read_text()), indent=2) + "\n",
+            show_secrets=show_secrets,
+        )
+        if placeholder and show_secrets:
+            print(
+                "VPS: uv run things-orchestrator print-config "
+                "--http --show-secrets --url https://YOUR-HOST"
+            )
+            print(
+                "Keep skills.external_dirs on this host when the agent "
+                "runtime is here; change it only if the agent runs elsewhere."
+            )
             print("Numbered host steps: docs/host.md.")
+            _print_secret_hint(http_only=http_only, show_secrets=show_secrets)
             return
-    print("Hermes (VPS): merge into ~/.hermes/config.yaml")
-    print(f"Wrote {snippets.hermes_http}")
-    print(snippets.hermes_http.read_text(), end="")
-    print("On another machine, change skills.external_dirs to a local copy of plugin/skills.")
-    print(f"Cursor Cloud Agents / Claude Code JSON: {snippets.http}")
-    print(json.dumps(json.loads(http_body), indent=2))
+    _emit_snippet(
+        "Hermes HTTP YAML: merge into the active Hermes profile "
+        "config.yaml (default ~/.hermes/config.yaml)",
+        snippets.hermes_http,
+        snippets.hermes_http.read_text(),
+        show_secrets=show_secrets,
+    )
+    if show_secrets:
+        print(
+            "Keep skills.external_dirs on this host when the agent "
+            "runtime is here; change it only if the agent runs elsewhere."
+        )
+    _emit_snippet(
+        f"Cursor Cloud Agents / Claude Code JSON: {snippets.http}",
+        snippets.http,
+        json.dumps(json.loads(http_body), indent=2) + "\n",
+        show_secrets=show_secrets,
+    )
     if placeholder:
-        print("Replace YOUR-HOST, or rerun with --url https://your-host.")
+        print("HTTP URL still has YOUR-HOST. Rerun with --url https://your-host.")
+    _print_secret_hint(http_only=http_only, show_secrets=show_secrets)
+
+
+def _emit_snippet(label: str, path: Path, body: str, *, show_secrets: bool) -> None:
+    if not show_secrets:
+        print(f"Wrote {path}")
+        return
+    print(label)
+    print(f"Wrote {path}")
+    print(body, end="")
+
+
+def _print_secret_hint(*, http_only: bool, show_secrets: bool) -> None:
+    if show_secrets:
+        return
+    command = "uv run things-orchestrator print-config --show-secrets"
+    if http_only:
+        command += " --http"
+    print(f"To print snippet contents: {command}")
+
+
+def _doctor(
+    parser: argparse.ArgumentParser, *, wait: bool, public_url: str
+) -> None:
+    creds = credentials_path()
+    try:
+        email, _password, token = load_credentials(path=creds)
+    except CloudError:
+        parser.error(_LOGIN)
+        return
+    if not token:
+        parser.error(_LOGIN)
+        return
+    print(f"credentials: ok ({email})")
+    failed = False
+
+    timezone_name = load_timezone(path=creds)
+    if not timezone_name:
+        print("timezone: missing")
+        failed = True
+    else:
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            print(f"timezone: invalid ({timezone_name})")
+            failed = True
+        else:
+            print(f"timezone: ok ({timezone_name})")
+
+    config_dir = creds.parent
+    missing = [name for name in _SNIPPET_NAMES if not (config_dir / name).is_file()]
+    if missing:
+        print(f"snippets: missing {', '.join(missing)}")
+        failed = True
+    else:
+        print("snippets: ok")
+
+    resolved = _resolved_http_url(config_dir, "")
+    hosted = "YOUR-HOST" not in resolved
+    if hosted:
+        print(f"http url: {resolved}")
+    else:
+        print("http url: placeholder")
+
+    loopback = _probe_loopback(wait=wait)
+    print(f"loopback health: {loopback}")
+    if loopback != "ok" and (wait or hosted):
+        failed = True
+
+    if public_url.strip():
+        remote = _probe_health(_origin_health_url(public_url))
+        print(f"remote health: {remote}")
+        if remote != "ok":
+            failed = True
+
+    if failed:
+        sys.exit(1)
+
+
+def _origin_health_url(public_url: str) -> str:
+    raw = public_url.strip().rstrip("/")
+    if raw.endswith("/mcp"):
+        raw = raw[: -len("/mcp")].rstrip("/")
+    return f"{raw}/health"
+
+
+def _probe_loopback(*, wait: bool) -> str:
+    deadline = time.monotonic() + _HEALTH_WAIT_SECONDS
+    status = _probe_health(_LOOPBACK_HEALTH)
+    while wait and status != "ok" and time.monotonic() < deadline:
+        time.sleep(1)
+        status = _probe_health(_LOOPBACK_HEALTH)
+    return status
+
+
+def _probe_health(url: str, *, timeout: float = 2.0) -> str:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            raw = response.read()
+    except HTTPError:
+        return "fail"
+    except (URLError, TimeoutError, OSError):
+        return "not listening"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return "fail"
+    if payload == {"ok": True}:
+        return "ok"
+    return "fail"
 
 
 def _checkout_wrapper() -> Path:
