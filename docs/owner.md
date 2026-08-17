@@ -33,6 +33,11 @@ draft does not list stays in place. The model can include related edits in the
 same commit. If the context changes or expires, structured recovery tells the
 model which fresh read it needs. Risky work adds one approval step.
 
+The model asks one short question and changes nothing when a date is not named
+as start or deadline, a reminder has no clock time, two items match, a new
+Project has no stated outcome, or a permanent delete does not name exact Trash
+items.
+
 ## Talk
 
 - “Capture a task to renew my password in Things.”
@@ -42,6 +47,8 @@ model which fresh read it needs. Risky work adds one approval step.
 - “Repeat this every Monday and Friday.”
 - “Restore the task I just moved to Trash.”
 - “Group this Project with headings and clean up its old tag.”
+- “Put a date on the contract for 4 September.”
+- “Remind me about the invoice at 09:00.”
 
 Capability evidence is in the [proof matrix](capability-proof.md).
 

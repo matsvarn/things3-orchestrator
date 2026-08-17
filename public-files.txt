@@ -2,6 +2,7 @@
 .github/workflows/ci.yml
 .gitignore
 .python-version
+CHANGELOG.md
 LICENSE
 README.md
 SECURITY.md
