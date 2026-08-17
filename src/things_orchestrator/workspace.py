@@ -573,10 +573,10 @@ class ThingsWorkspace:
             ]
             if not projects:
                 parents: list[Record] = []
-                seen: set[str] = set()
+                seen_parents: set[str] = set()
                 for item in hits:
                     parent_uuid = item.parent_uuid
-                    if parent_uuid is None or parent_uuid in seen:
+                    if parent_uuid is None or parent_uuid in seen_parents:
                         continue
                     parent = self._library.records.get(parent_uuid)
                     if (
@@ -584,7 +584,7 @@ class ThingsWorkspace:
                         and parent.kind == "project"
                         and parent.is_open()
                     ):
-                        seen.add(parent_uuid)
+                        seen_parents.add(parent_uuid)
                         parents.append(parent)
                 if len(parents) == 1:
                     projects = parents
