@@ -1268,8 +1268,8 @@ class ThingsWorkspace:
         terms = {token for token in needle.tokens if token not in _SEARCH_ARTICLES}
         if not terms:
             return False
-        for field in fields:
-            words = set(_normalize_search_text(field).tokens)
+        for text in fields:
+            words = set(_normalize_search_text(text).tokens)
             if terms.issubset(words):
                 return True
             if all(
