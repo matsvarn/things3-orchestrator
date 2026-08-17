@@ -583,6 +583,20 @@ def test_organize_find_resolves_unique_parent_from_matching_tasks() -> None:
     }
 
 
+def test_organize_miss_returns_inbox_tasks_to_group() -> None:
+    home = Record(uuid="home", kind="area", title="Home")
+    first = Record(uuid="kitchen-a", kind="task", title="Remove old tap", inbox=True)
+    second = Record(uuid="kitchen-b", kind="task", title="Measure sink", inbox=True)
+    workspace, _library, _store = contextual_workspace([home, first, second])
+
+    result = workspace.read(ReadCall(purpose="organize", find="kitchen renovation"))
+
+    assert result.status == "ok"
+    assert result.next == "done"
+    assert {item.id for item in result.items} == {first.id, second.id}
+    assert "create one Project" in result.instruction
+
+
 def test_organize_find_asks_when_matching_tasks_span_two_projects() -> None:
     alpha = Record(uuid="alpha", kind="project", title="Alpha")
     beta = Record(uuid="beta", kind="project", title="Beta")
