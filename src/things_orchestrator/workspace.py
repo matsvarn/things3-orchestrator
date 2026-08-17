@@ -565,22 +565,58 @@ class ThingsWorkspace:
                 )
             if within is not None and within.kind not in {"area", "project"}:
                 return self._needs_input("Search within an exact Area or Project.")
+            hits = self._search(call.find, within)
             projects = [
                 item
-                for item in self._search(call.find, within)
+                for item in hits
                 if item.kind == "project" and not item.heading
             ]
             if not projects:
-                return self._context_recovery(
-                    code="context_required",
-                    instruction=(
-                        "I could not find one active Project. Use a narrower find "
-                        "or exact id."
-                    ),
-                    retry="rebuild",
-                    read=self._selector_arguments(call),
-                    status="needs_input",
-                )
+                parents: list[Record] = []
+                seen_parents: set[str] = set()
+                for item in hits:
+                    parent_uuid = item.parent_uuid
+                    if parent_uuid is None or parent_uuid in seen_parents:
+                        continue
+                    parent = self._library.records.get(parent_uuid)
+                    if (
+                        parent is not None
+                        and parent.kind == "project"
+                        and parent.is_open()
+                    ):
+                        seen_parents.add(parent_uuid)
+                        parents.append(parent)
+                if len(parents) == 1:
+                    projects = parents
+                elif len(parents) > 1:
+                    return Result(
+                        next="ask",
+                        status="needs_input",
+                        instruction=(
+                            f"Those matching items sit in {len(parents)} Projects. "
+                            "Choose one Project, then read it with purpose=organize "
+                            "and its exact id."
+                        ),
+                        items=[
+                            self._fact(item, full=False, include_revision=False)
+                            for item in parents
+                        ],
+                        recovery=RecoveryFact(
+                            code="context_incomplete",
+                            retry="rebuild",
+                        ),
+                    )
+                else:
+                    return self._context_recovery(
+                        code="context_required",
+                        instruction=(
+                            "I could not find one active Project. Use a narrower find "
+                            "or exact id."
+                        ),
+                        retry="rebuild",
+                        read=self._selector_arguments(call),
+                        status="needs_input",
+                    )
             if len(projects) > 1:
                 return Result(
                     next="ask",
