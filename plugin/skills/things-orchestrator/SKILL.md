@@ -11,9 +11,11 @@ Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `
 
 ## Capture
 
-Create once. Title is the action plus the object. Drop filler: remind me, please, to.
+Create once. Title is the action plus the object. Drop filler: remind me, please, to, the.
 
 Example: "Remind me to renew my passport." → create `Renew passport` in Inbox.
+
+For a Project with named next actions, keep those exact titles. Example: replace the kitchen tap → project `Replace kitchen tap` with `Find three suitable taps`, `Measure the sink`, `Order one`.
 
 Do not search first unless a matching item is likely already there.
 
@@ -33,6 +35,7 @@ Examples:
 
 - "The contract must be signed by 4 September." → find `contract`
 - "Mark Test build done and rename Draft notes." → find `Test build`
+- "Order the packing checklist" → find `Pack`
 
 If the find is empty, retry one shorter token. Do not create.
 
@@ -45,8 +48,9 @@ First bind the existing item with one title token (`Sam`, `invoice`, `contract`)
 - Evening → `start=evening`. Not a clock time. Not a reminder.
 - Today → `start=today`.
 - A real latest finish → `deadline`.
+- A reminder needs a clock time. If none was given, ask. Do not invent one.
 
-Do not create a second Task.
+Do not create a second Task. "Remind me about X" changes existing X.
 
 ## Clarify
 
@@ -56,6 +60,10 @@ If the owner asked for a Project but did not say what finished looks like, ask. 
 
 If a permanent delete is not named as exact Trash items, list the candidates and ask. Do not start a permanent-delete plan.
 
+If a date is given without saying start or deadline, ask which it is. Do not set either.
+
 Change nothing until the owner answers.
+
+Do not open Today or Inbox unless the owner asked to review a list.
 
 Read [form, headings, and repeats](references/task-system.md) when the Things form, a heading, or a repeat rule is the work. Read [reviewing the system](references/reconcile.md) for a weekly review, Area redesign, merge, or `purpose=organize`. Read [decision research](references/research.md) when current external facts can change what belongs in Things.

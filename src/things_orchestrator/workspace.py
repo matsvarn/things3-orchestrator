@@ -607,6 +607,28 @@ class ThingsWorkspace:
                         ),
                     )
                 else:
+                    orphans = [
+                        item
+                        for item in self._library.records.values()
+                        if item.kind == "task"
+                        and not item.heading
+                        and item.is_open()
+                        and item.parent_uuid is None
+                    ]
+                    if orphans:
+                        orphans.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
+                        return Result(
+                            next="done",
+                            status="ok",
+                            instruction=(
+                                "No Project matched. To group these existing tasks, "
+                                "create one Project and move them in their current order."
+                            ),
+                            items=[
+                                self._fact(item, full=False, include_revision=True)
+                                for item in orphans[:40]
+                            ],
+                        )
                     return self._context_recovery(
                         code="context_required",
                         instruction=(
@@ -710,7 +732,8 @@ class ThingsWorkspace:
             status="ok",
             instruction=(
                 "Use one organize draft with this context. Listed work can move; "
-                "unlisted work stays unchanged."
+                "unlisted work stays unchanged. Name new headings from the groups "
+                "the tasks already form."
             ),
             items=facts,
             layouts=layouts,
@@ -1223,6 +1246,17 @@ class ThingsWorkspace:
         return sorted(items, key=lambda item: (item.sort_index, item.title))
 
     @staticmethod
+    def _inflected_token(word: str, token: str) -> bool:
+        if word == token:
+            return True
+        suffixes = {"s", "es", "ed", "ing"}
+        if len(word) >= 4 and token.startswith(word) and token[len(word) :] in suffixes:
+            return True
+        if len(token) >= 4 and word.startswith(token) and word[len(token) :] in suffixes:
+            return True
+        return False
+
+    @staticmethod
     def _search_item(item: Record, needle: _NormalizedSearchText) -> bool:
         fields = (item.title, item.notes, *(row.title for row in item.checklists))
         if any(needle.folded in field.casefold() for field in fields):
@@ -1234,10 +1268,16 @@ class ThingsWorkspace:
         terms = {token for token in needle.tokens if token not in _SEARCH_ARTICLES}
         if not terms:
             return False
-        return any(
-            terms.issubset(set(_normalize_search_text(field).tokens))
-            for field in fields
-        )
+        for text in fields:
+            words = set(_normalize_search_text(text).tokens)
+            if terms.issubset(words):
+                return True
+            if all(
+                any(ThingsWorkspace._inflected_token(word, term) for word in words)
+                for term in terms
+            ):
+                return True
+        return False
 
     @staticmethod
     def _is_searchable(item: Record) -> bool:
@@ -1277,7 +1317,15 @@ class ThingsWorkspace:
         return Result(
             next="done",
             status="ok",
-            instruction=instruction if facts else "No matching work is visible.",
+            instruction=(
+                instruction
+                if facts
+                else (
+                    "Nothing on Today. Search with find and one title token."
+                    if view == "today"
+                    else "No matching work is visible. Search with find and one title token."
+                )
+            ),
             items=facts,
             sections=sections,
             scope_revision=scope,
@@ -1803,6 +1851,22 @@ class ThingsWorkspace:
         warnings = context.warnings
         for entry in call.create:
             uuid = local[entry.key][0] if entry.key else new_uuid()
+            if entry.kind == "task":
+                twins = [
+                    item
+                    for item in self._library.records.values()
+                    if item.kind == "task"
+                    and not item.heading
+                    and item.is_open()
+                    and item.title.casefold() == entry.title.casefold()
+                ]
+                if len(twins) == 1:
+                    raise _Abort(
+                        self._needs_input(
+                            f"{twins[0].title} already exists. Change that Task. "
+                            "If this is a reminder, ask for the clock time."
+                        )
+                    )
             if entry.kind == "heading":
                 home = self._home(entry.into, "task", local, new_item=True)
                 if home[1] != "project" or home[0] is None:
@@ -2187,15 +2251,20 @@ class ThingsWorkspace:
                 )
                 context.risky = True
                 return True
+            target = item
+            if item.recurrence.role == "instance" and item.recurrence.template_uuid:
+                template = self._library.records.get(item.recurrence.template_uuid)
+                if template is not None:
+                    target = template
             try:
                 if (
                     repeat_edit is not None
                     and repeat_edit.weekdays
-                    and (repeat_edit.mode or item.recurrence.repeat_type) != "fixed"
+                    and (repeat_edit.mode or target.recurrence.repeat_type) != "fixed"
                 ):
                     raise ValueError("Weekdays need fixed repeat mode")
-                recurrence = item.recurrence.transition(
-                    kind=item.kind,
+                recurrence = target.recurrence.transition(
+                    kind=target.kind,
                     mode=repeat_edit.mode if repeat_edit else None,
                     unit=repeat_edit.unit if repeat_edit else None,
                     interval=repeat_interval,
@@ -2210,13 +2279,14 @@ class ThingsWorkspace:
             writes.append(
                 Write(
                     action="repeat",
-                    uuid=item.uuid,
+                    uuid=target.uuid,
                     kind="task",
                     recurrence_rule=recurrence.rule,
                 )
             )
-            preconditions[f"scope:repeat:{item.uuid}"] = (
-                self._recurrence_scope_revision(item.uuid)
+            preconditions[target.id] = self._revision(target)
+            preconditions[f"scope:repeat:{target.uuid}"] = (
+                self._recurrence_scope_revision(target.uuid)
             )
             parts = []
             if repeat_edit is not None and repeat_edit.mode is not None:
@@ -3676,13 +3746,33 @@ class ThingsWorkspace:
             item = self._required_exact(reference)
             if item.uuid == moving_uuid:
                 raise _Abort(self._rejected("An item cannot follow itself."))
+            companion = next(
+                (
+                    write
+                    for write in reversed(planned)
+                    if write.uuid == item.uuid
+                    and write.action == "update"
+                    and write.kind == kind
+                    and self._write_scope(write) == wanted_scope
+                ),
+                None,
+            )
             if item.kind != kind or self._record_scope(item) != wanted_scope:
-                raise _Abort(
-                    self._rejected("An after reference must be in the same list.")
+                if companion is None:
+                    raise _Abort(
+                        self._rejected("An after reference must be in the same list.")
+                    )
+                preconditions[item.id] = self._revision(item)
+                anchor_uuid = companion.uuid
+                anchor_index = (
+                    companion.sort_index
+                    if companion.sort_index is not None
+                    else item.sort_index
                 )
-            preconditions[item.id] = self._revision(item)
-            anchor_uuid = item.uuid
-            anchor_index = item.sort_index
+            else:
+                preconditions[item.id] = self._revision(item)
+                anchor_uuid = item.uuid
+                anchor_index = item.sort_index
         later = sorted(index for index in indexes if index > anchor_index)
         if not later:
             return anchor_index + 1024

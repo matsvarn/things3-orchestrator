@@ -448,6 +448,84 @@ def test_exact_read_bounds_external_text_and_order_facts() -> None:
     assert "notes_truncated" in item.signals
 
 
+def test_search_matches_pack_when_query_is_packing() -> None:
+    task = Record(uuid="packing", kind="task", title="Pack for trip")
+    module = workspace([task])
+
+    result = module.read(ReadCall(find="packing"))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [task.id]
+
+
+def test_after_can_follow_a_sibling_moved_into_the_same_new_project() -> None:
+    home = Record(uuid="home", kind="area", title="Home")
+    first = Record(uuid="kitchen-a", kind="task", title="Remove old tap", inbox=True)
+    second = Record(uuid="kitchen-b", kind="task", title="Measure sink", inbox=True)
+    module = workspace([home, first, second])
+    first_rev = detail(module, first.id).revision
+    second_rev = detail(module, second.id).revision
+
+    planned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "kitchen-renovation-group",
+                "create": [
+                    {
+                        "key": "$kitchen",
+                        "kind": "project",
+                        "title": "Kitchen renovation",
+                        "into": "area:home",
+                    }
+                ],
+                "change": [
+                    {
+                        "id": first.id,
+                        "if_revision": first_rev,
+                        "into": "$kitchen",
+                    },
+                    {
+                        "id": second.id,
+                        "if_revision": second_rev,
+                        "into": "$kitchen",
+                        "after": first.id,
+                    },
+                ],
+            }
+        )
+    )
+    if planned.status == "needs_approval":
+        assert planned.plan is not None
+        planned = module.approve(ApproveCall(plan_id=planned.plan.id))
+    assert planned.status == "applied"
+    project = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "project" and item.title == "Kitchen renovation"
+    )
+    assert first.parent_uuid == project.uuid
+    assert second.parent_uuid == project.uuid
+    assert first.sort_index < second.sort_index
+
+
+def test_creating_a_duplicate_open_task_title_asks_instead() -> None:
+    existing = Record(uuid="medicine", kind="task", title="Take medicine")
+    module = workspace([existing])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "remind-medicine-tomorrow",
+                "create": [{"title": "Take medicine", "start": "2026-08-18"}],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert "already exists" in result.instruction
+
+
 def test_task_search_scope_never_falls_back_to_global_search() -> None:
     scope = Record(uuid="scope", kind="task", title="Scope")
     match = Record(uuid="match", kind="task", title="Needle")
