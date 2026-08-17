@@ -1,25 +1,53 @@
 # Fix
 
+Check the serving host first:
+
+```console
+# Run on VPS
+sudo systemctl status things-orchestrator-http
+journalctl -u things-orchestrator-http -e
+curl -sS http://127.0.0.1:8787/health
+# → {"ok":true}
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/mcp
+# → 401
+uv run things-orchestrator doctor
+```
+
+```console
+# Run on VPS
+uv run things-orchestrator doctor --url https://YOUR-HOST
+```
+
+```console
+# Run on Mac after leaving SSH
+curl -sS https://YOUR-HOST/health
+# → {"ok":true}
+```
+
+Host steps: [host.md](host.md).
+
 - **Tools missing on this Mac.** That is not an empty list. From the
   clone, in a private terminal: `uv run things-orchestrator login`.
   Then merge the snippet again in [clients.md](clients.md). If serve
   cannot find this clone, run `login` from it.
 - **Tools missing against a VPS.** Do not run `login` on the laptop.
-  On the host: `uv run things-orchestrator print-config --http`. Merge
-  that snippet. Numbered steps: [host.md](host.md).
+  On the host: `uv run things-orchestrator print-config --http` (paths).
+  To see the bearer in a private terminal:
+  `print-config --http --show-secrets`. Merge that snippet.
 - **Cloud credentials were rejected.** Run `login` again on the
   serving host. Never paste the password into chat.
 - **Login says no history key.** Turn on Things Cloud in Things 3,
   then `login` again.
-- **Lost the MCP snippet.** `uv run things-orchestrator print-config`.
-  `print-config --http` reprints HTTP without wiping a URL you already
-  set. `login` keeps `mcp_token` unless you pass `--rotate-token`.
-- **MCP HTTP 401.** Bearer mismatch: `print-config --http` on the
-  serving host, update the client header, restart `serve-http`. Only
-  `--rotate-token` replaces `mcp_token`. Then update every client.
+- **Lost the MCP snippet.** `uv run things-orchestrator print-config`
+  reprints paths. `print-config --http` reprints HTTP paths without
+  wiping a URL you already set. `--show-secrets` prints the bodies.
+  `login` keeps `mcp_token` unless you pass `--rotate-token`.
+- **MCP HTTP 401.** Bearer mismatch: `print-config --http --show-secrets`
+  on the serving host, update the client header, restart `serve-http`.
+  Only `--rotate-token` replaces `mcp_token`. Then update every client.
 - **Remote client cannot connect.** `serve-http` is still running after
-  SSH logout, TLS reaches `/mcp`
-  ([deploy/Caddyfile](../deploy/Caddyfile)), `/health` returns
+  SSH logout, TLS reaches `/mcp` (Tailscale Serve or
+  [deploy/Caddyfile](../deploy/Caddyfile)), `/health` returns
   `{"ok":true}`, and the bearer matches. Do not expose port 8787
   without TLS. [host.md](host.md).
 - **Claude.ai / ChatGPT.** This server has no MCP OAuth. Use Hermes,

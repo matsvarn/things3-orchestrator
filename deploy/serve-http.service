@@ -1,10 +1,13 @@
 # Keep serve-http running after SSH logout.
-# Numbered host steps: docs/host.md.
+# Host steps: docs/host.md (private Tailscale or public Caddy).
 # Fill User, WorkingDirectory, and the real uv path, then:
-#   sudo cp deploy/serve-http.service /etc/systemd/system/
+#   sudo cp deploy/serve-http.service /etc/systemd/system/things-orchestrator-http.service
 #   sudo systemctl enable --now things-orchestrator-http
+#   uv run things-orchestrator doctor --wait
 #
-# Caddy still terminates TLS. Do not publish port 8787.
+# Leave the process on 127.0.0.1:8787. Put TLS in front (Tailscale
+# Serve on the tailnet, or Caddy for public HTTPS). Do not publish
+# port 8787.
 # Do not put Cloud credentials or the MCP token in this unit.
 # login already wrote credentials.json (mode 0600).
 

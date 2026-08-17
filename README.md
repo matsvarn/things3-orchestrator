@@ -39,8 +39,9 @@ Other local clients: [docs/clients.md](docs/clients.md).
 ### A VPS
 
 Your Mac can be off. Do not run `scripts/setup` on the laptop. Login
-and the server live on the VPS. Hermes, then Claude Code or another
-client, against that same host: [docs/host.md](docs/host.md).
+and the server live on the VPS. The personal default is a private
+Tailscale VPS ([docs/host.md](docs/host.md)). Public HTTPS is for
+off-tailnet clients such as Cursor Cloud Agents.
 
 ## Talk
 
@@ -65,7 +66,8 @@ full Markdown replace.
 It asks instead of guessing a date kind, a reminder time, a Project
 outcome, or a permanent-delete target.
 
-What shipped in each tag: [CHANGELOG.md](CHANGELOG.md).
+What shipped in each tag: [CHANGELOG.md](CHANGELOG.md). Proof matrix:
+[docs/capability-proof.md](docs/capability-proof.md).
 
 ## Develop
 

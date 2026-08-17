@@ -19,15 +19,21 @@ Keep one production server and one stable model Interface.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
 - `server.py` exposes stdio and Streamable HTTP.
-- `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`, and
-  `print-config`. Callers run `uv run things-orchestrator` from the checkout.
-  `plugin/bin` locates that checkout when a client copies the plugin. Do not
-  `pip install` this package as the install path: the wheel has no `plugin/`
-  (skills or wrapper). `login` writes Hermes YAML plus `mcp.stdio.json` /
-  `mcp.http.json`, keeps `mcp_token` unless `--rotate-token`, and keeps an
-  HTTP URL already set. Per-client wiring lives in `docs/clients.md`. A VPS
-  plus a laptop client is `docs/host.md`. Hermes is the default paste.
-  Capability evidence is `docs/capability-proof.md`.
+- `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
+  `print-config`, and `doctor`. Callers run `uv run things-orchestrator`
+  from the checkout. `plugin/bin` locates that checkout when a client
+  copies the plugin. Do not `pip install` this package as the install
+  path: the wheel has no `plugin/` (skills or wrapper). `login` writes
+  Hermes YAML plus `mcp.stdio.json` / `mcp.http.json`, keeps `mcp_token`
+  unless `--rotate-token`, and keeps an HTTP URL already set. Default
+  `login` / `print-config` print snippet paths. `--show-secrets` prints
+  bodies including the MCP bearer. `doctor` checks credentials,
+  snippets, timezone, and loopback `http://127.0.0.1:8787/health`.
+  Loopback is required after a hosted URL is set, or with `--wait`.
+  `doctor --url` checks remote `/health`.
+  Per-client wiring lives in `docs/clients.md`. A VPS plus a client is
+  `docs/host.md`. Hermes is the default paste. Capability evidence is
+  `docs/capability-proof.md`.
 
 Do not add CRUD tools. Keep discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each

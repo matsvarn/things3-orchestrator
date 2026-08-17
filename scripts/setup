@@ -54,7 +54,7 @@ printf '  %s\n' "$TO_CONFIG_ROOT/mcp.hermes.yaml"
 printf '  %s\n' "$TO_CONFIG_ROOT/mcp.hermes.http.yaml"
 printf '\nThis Mac: merge mcp.hermes.yaml into ~/.hermes/config.yaml.\n'
 printf 'Do not replace the whole file.\n'
-printf 'This machine is a VPS: open docs/host.md next (Caddy, systemd, laptop Hermes).\n'
+printf 'This machine is a VPS: open docs/host.md (private Tailscale or public HTTPS).\n'
 printf 'See docs/clients.md for all client steps.\n'
 printf '\nSmoke test prompt:\n'
 printf '  What should I focus on in Things today?\n\n'

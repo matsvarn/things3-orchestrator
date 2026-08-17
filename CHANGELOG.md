@@ -4,11 +4,21 @@
 
 ### Docs
 
-- README picks a path: this Mac, or a VPS. Competitor and trust
-  detail live in their own pages.
-- Numbered host guide for Hermes, then Claude Code or another client,
-  against that same hosted server.
-- Owner guide is what to say, not how the tools work.
+- Hosting rewrite: three topologies. Private Tailscale is the personal
+  VPS default. Public Caddy is for off-tailnet clients. Command blocks
+  say where they run.
+- Client guide: Codex hosted MCP is `~/.codex/config.toml` Streamable
+  HTTP, not a merge of `mcp.http.json`.
+- README still picks this Mac or a VPS. Capability proof is linked.
+  Owner guide is what to say, not how the tools work.
+
+### CLI
+
+- `login` / `print-config` print snippet paths only. `--show-secrets`
+  prints bodies including the MCP bearer.
+- `doctor` checks credentials, snippets, timezone, and loopback
+  `http://127.0.0.1:8787/health`. Loopback is required after a hosted
+  URL is set, or with `--wait`. `--url` checks remote `/health`.
 
 ## 0.2.0 — 2026-08-17
 

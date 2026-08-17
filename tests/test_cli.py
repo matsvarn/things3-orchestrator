@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -9,6 +10,10 @@ from things_orchestrator.cli import _server, build_parser, main
 from things_orchestrator.cloud import CloudError
 
 ROOT = Path(__file__).parents[1]
+
+
+def _stdout_without_secret_flag(out: str) -> str:
+    return out.replace("--show-secrets", "").replace("show-secrets", "")
 
 
 def test_mcp_plugin_launches_the_checkout_wrapper() -> None:
@@ -41,6 +46,63 @@ def _fake_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("things_orchestrator.cli.getpass", lambda _: "secret")
 
 
+def _seed_credentials(
+    tmp_path: Path,
+    *,
+    token: str = "keep-me",
+    timezone: str = "Europe/Berlin",
+    password: str = "secret",
+) -> Path:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {
+                "email": "user@example.com",
+                "password": password,
+                "mcp_token": token,
+                "timezone": timezone,
+            }
+        )
+        + "\n"
+    )
+    return creds
+
+
+def _seed_snippets(
+    tmp_path: Path, *, token: str = "keep-me", url: str = "https://YOUR-HOST/mcp"
+) -> None:
+    (tmp_path / "mcp.stdio.json").write_text("{}\n")
+    (tmp_path / "mcp.http.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "things": {
+                        "url": url,
+                        "headers": {"Authorization": f"Bearer {token}"},
+                    }
+                }
+            }
+        )
+        + "\n"
+    )
+    (tmp_path / "mcp.hermes.yaml").write_text("mcp_servers: {}\n")
+    (tmp_path / "mcp.hermes.http.yaml").write_text("mcp_servers: {}\n")
+
+
+class _HealthResponse:
+    def __init__(self, body: bytes = b'{"ok":true}') -> None:
+        self._body = body
+
+    def __enter__(self) -> _HealthResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
 def test_login_prints_stdio_and_http_snippets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -53,14 +115,22 @@ def test_login_prints_stdio_and_http_snippets(
     out = capsys.readouterr().out
     wrapper = str((ROOT / "plugin/bin/things-orchestrator").resolve())
     skills = str((ROOT / "plugin/skills").resolve())
-    assert wrapper in out
-    assert "mcp_servers" in out
-    assert "~/.hermes/config.yaml" in out
-    assert "mcpServers" in out
+    assert "fixed-token" not in out
+    assert "Bearer fixed-token" not in out
+    assert "Authorization" not in out
+    assert "mcp_servers" not in out
+    assert "mcpServers" not in out
+    assert str(tmp_path / "mcp.stdio.json") in out
+    assert str(tmp_path / "mcp.http.json") in out
+    assert str(tmp_path / "mcp.hermes.yaml") in out
+    assert str(tmp_path / "mcp.hermes.http.yaml") in out
+    assert "print-config --show-secrets" in out
     assert "docs/clients.md" in out
     assert "Do not paste the Cloud password into chat." in out
+    assert "The HTTP Bearer is the MCP token, not the Cloud password." in out
     assert "codex plugin marketplace add ." not in out
-    assert "secret" not in out
+    assert "secret" not in _stdout_without_secret_flag(out)
+    assert wrapper not in out
     stdio = json.loads((tmp_path / "mcp.stdio.json").read_text())
     assert stdio["mcpServers"]["things"] == {"command": wrapper, "args": ["serve"]}
     http = json.loads((tmp_path / "mcp.http.json").read_text())
@@ -90,6 +160,40 @@ def test_login_prints_stdio_and_http_snippets(
     ):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_login_show_secrets_prints_bodies_and_bearer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = tmp_path / "credentials.json"
+    _fake_cloud(monkeypatch)
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "fixed-token")
+    main(
+        [
+            "login",
+            "--timezone",
+            "Europe/Berlin",
+            "--show-secrets",
+            "--url",
+            "https://tasks.example.com",
+        ]
+    )
+    out = capsys.readouterr().out
+    wrapper = str((ROOT / "plugin/bin/things-orchestrator").resolve())
+    assert "fixed-token" in out
+    assert "Bearer fixed-token" in out
+    assert "mcp_servers" in out
+    assert "mcpServers" in out
+    assert wrapper in out
+    assert "active Hermes profile" in out
+    assert "~/.hermes/config.yaml" in out
+    assert "Cursor / Claude Desktop JSON" in out
+    assert "Cursor Cloud Agents / Claude Code JSON" in out
+    assert "Codex" not in out
+    assert '"secret"' not in out
+    assert "docs/clients.md" in out
 
 
 def test_login_keeps_mcp_token_unless_rotated(
@@ -123,14 +227,40 @@ def test_print_config_reprints_without_login(
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     main(["print-config", "--http", "--url", "https://tasks.example.com"])
     out = capsys.readouterr().out
-    assert "secret" not in out
-    assert "keep-me" in out
+    assert "secret" not in _stdout_without_secret_flag(out)
+    assert "keep-me" not in out
+    assert "Bearer" in out
+    assert str(tmp_path / "mcp.http.json") in out
+    assert str(tmp_path / "mcp.hermes.http.yaml") in out
+    assert "print-config --show-secrets" in out
     http = json.loads((tmp_path / "mcp.http.json").read_text())
     assert http["mcpServers"]["things"]["url"] == "https://tasks.example.com/mcp"
     assert http["mcpServers"]["things"]["headers"]["Authorization"] == "Bearer keep-me"
     hermes_http = (tmp_path / "mcp.hermes.http.yaml").read_text()
     assert "https://tasks.example.com/mcp" in hermes_http
     assert "Bearer keep-me" in hermes_http
+
+
+def test_print_config_show_secrets_prints_bearer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {"email": "user@example.com", "password": "secret", "mcp_token": "keep-me"}
+        )
+        + "\n"
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    main(["print-config", "--http", "--show-secrets", "--url", "https://tasks.example.com"])
+    out = capsys.readouterr().out
+    assert '"secret"' not in out
+    assert "keep-me" in out
+    assert "Bearer keep-me" in out
+    assert "Cursor Cloud Agents / Claude Code JSON" in out
+    assert "Codex" not in out
+    assert "active Hermes profile" in out
 
 
 def test_print_config_keeps_existing_http_url(
@@ -173,6 +303,110 @@ def test_print_config_without_credentials_points_at_login(
         main(["print-config"])
     assert caught.value.code == 2
     assert "uv run things-orchestrator login" in capsys.readouterr().err
+
+
+def test_doctor_without_credentials_points_at_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "things_orchestrator.cli.credentials_path", lambda: tmp_path / "missing.json"
+    )
+    with pytest.raises(SystemExit) as caught:
+        main(["doctor"])
+    assert caught.value.code == 2
+    assert "uv run things-orchestrator login" in capsys.readouterr().err
+
+
+def test_doctor_without_server_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = _seed_credentials(tmp_path)
+    _seed_snippets(tmp_path)
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+
+    def refused(url: str, timeout: float = 2.0) -> object:
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("things_orchestrator.cli.urlopen", refused)
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "keep-me" not in out
+    assert "secret" not in out
+    assert "credentials: ok" in out
+    assert "timezone: ok (Europe/Berlin)" in out
+    assert "snippets: ok" in out
+    assert "http url: placeholder" in out
+    assert "loopback health: not listening" in out
+
+
+def test_doctor_hosted_url_requires_loopback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = _seed_credentials(tmp_path)
+    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+
+    def refused(url: str, timeout: float = 2.0) -> object:
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("things_orchestrator.cli.urlopen", refused)
+    with pytest.raises(SystemExit) as caught:
+        main(["doctor"])
+    assert caught.value.code == 1
+    out = capsys.readouterr().out
+    assert "http url: https://tasks.example.com/mcp" in out
+    assert "loopback health: not listening" in out
+
+
+def test_doctor_wait_retries_until_health_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = _seed_credentials(tmp_path)
+    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    attempts = {"n": 0}
+
+    def flaky(url: str, timeout: float = 2.0) -> _HealthResponse:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise URLError("connection refused")
+        return _HealthResponse()
+
+    monkeypatch.setattr("things_orchestrator.cli.urlopen", flaky)
+    monkeypatch.setattr("things_orchestrator.cli.time.sleep", lambda _seconds: None)
+    main(["doctor", "--wait"])
+    out = capsys.readouterr().out
+    assert attempts["n"] == 3
+    assert "loopback health: ok" in out
+    assert "http url: https://tasks.example.com/mcp" in out
+    assert "keep-me" not in out
+    assert "secret" not in out
+
+
+def test_doctor_url_probes_origin_health(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = _seed_credentials(tmp_path)
+    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    seen: list[str] = []
+
+    def record(url: str, timeout: float = 2.0) -> _HealthResponse:
+        seen.append(url)
+        return _HealthResponse()
+
+    monkeypatch.setattr("things_orchestrator.cli.urlopen", record)
+    main(["doctor", "--url", "https://tasks.example.com/mcp"])
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8787/health" in seen
+    assert "https://tasks.example.com/health" in seen
+    assert "remote health: ok" in out
+    assert "loopback health: ok" in out
+    assert "keep-me" not in out
 
 
 def test_serve_without_credentials_points_at_login(
@@ -287,12 +521,20 @@ def test_setup_wizard_is_linked_and_does_not_store_cloud_secrets() -> None:
     assert "cursor.com/agents" in clients
     assert "cannot use this bearer" in clients
     assert "does not ship MCP OAuth" in clients
+    assert "config.toml" in clients
+    assert "bearer_token_env_var" in clients or "http_headers" in clients
     host = (ROOT / "docs/host.md").read_text()
     assert "login --url" in host
     assert "plugin/skills" in host
     assert "do not run `login`" in host.lower()
-    assert "claude mcp add --transport http" in host
     assert "serve-http.service" in host
+    assert "claude mcp add --transport http" not in host
+    assert "Tailscale" in host
+    assert "topolog" in host.lower()
+    assert "Things Cloud password" in host
+    assert "VPS" in host
+    assert "Hermes Desktop" in host or "Hermes desktop" in host
+    assert "docs/host.md" in stages
 
 
 def test_readme_is_safe_to_publish() -> None:
@@ -331,6 +573,7 @@ def test_readme_is_safe_to_publish() -> None:
     assert "docs/trust.md" in readme
     assert "docs/comparison.md" in readme
     assert "docs/host.md" in readme
+    assert "docs/capability-proof.md" in readme
     trust = (ROOT / "docs/trust.md").read_text()
     assert "model provider" in trust
     assert "fully private" in trust
@@ -348,7 +591,10 @@ def test_parser_names_the_owner_commands() -> None:
     assert "serve" in help_text
     assert "serve-http" in help_text
     assert "print-config" in help_text
+    assert "doctor" in help_text
     assert "uv run things-orchestrator login" in help_text
+    compact = help_text.replace("-\n", "-").replace("\n", " ")
+    assert "things-orchestrator doctor" in compact
     with pytest.raises(SystemExit):
         build_parser().parse_args(["serve-http", "--host", "0.0.0.0"])
 
