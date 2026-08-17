@@ -830,7 +830,9 @@ class CommitCall(StrictModel):
         if changes_areas and self.scope_revision is None:
             raise ValueError("Area changes need a system scope_revision")
         if self.change_tags and self.tags_revision is None:
-            raise ValueError("tag changes need a tags_revision from a tags read")
+            if self.scope_revision is None:
+                raise ValueError("tag changes need a tags_revision from a tags read")
+            self.tags_revision = self.scope_revision
         tag_change_ids = [entry.id for entry in self.change_tags]
         if _duplicates(tag_change_ids):
             raise ValueError("each existing tag can change once")

@@ -2876,6 +2876,7 @@ def test_tag_registry_changes_batch_with_reference_cleanup() -> None:
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
     tag_read = module.read(ReadCall(view="tags"))
     assert tag_read.scope_revision is not None
+    assert "tags_revision" in tag_read.instruction
 
     prepared = module.commit(
         CommitCall.model_validate(
@@ -2892,6 +2893,18 @@ def test_tag_registry_changes_batch_with_reference_cleanup() -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
+
+    copied = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-admin-scope-as-tags-001",
+                "scope_revision": tag_read.scope_revision,
+                "change_tags": [{"id": "tag:parent", "title": "People"}],
+            }
+        )
+    )
+    assert copied.status == "needs_approval"
+
     applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
     assert applied.status == "applied"
     assert library.tags == {"child": "Child", "parent": "People"}
