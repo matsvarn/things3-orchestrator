@@ -864,6 +864,33 @@ def test_area_changes_require_system_scope_revision(
         CommitCall.model_validate(payload)
 
 
+def test_tag_changes_accept_tags_read_scope_revision() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "rename-office-at-office-20260817",
+            "scope_revision": "s_0af453b688a58b13dd349bc5",
+            "change_tags": [
+                {
+                    "id": "tag:office",
+                    "parent_id": "tag:contexts",
+                    "title": "At office",
+                }
+            ],
+        }
+    )
+    assert call.tags_revision == "s_0af453b688a58b13dd349bc5"
+
+
+def test_tag_changes_without_any_revision_still_fail() -> None:
+    with pytest.raises(ValidationError, match="tags_revision"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "rename-office-at-office-20260817",
+                "change_tags": [{"id": "tag:office", "title": "At office"}],
+            }
+        )
+
+
 def test_checklist_order_can_use_all_rows_from_paged_detail() -> None:
     order = [f"check:row-{index}" for index in range(101)]
     call = CommitCall.model_validate(

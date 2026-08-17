@@ -1358,7 +1358,7 @@ class ThingsWorkspace:
         return Result(
             next="done",
             status="ok",
-            instruction="Use exact tag IDs for changes.",
+            instruction="Send this scope_revision as tags_revision with change_tags. Use exact tag IDs.",
             tags=page_rows,
             truncated=cursor is not None,
             cursor=cursor,
