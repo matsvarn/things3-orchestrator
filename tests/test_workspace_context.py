@@ -556,6 +556,49 @@ def test_organize_read_can_find_one_project_without_a_retry() -> None:
     assert {item.id for item in result.items} == {project.id, task.id}
 
 
+def test_organize_find_resolves_unique_parent_from_matching_tasks() -> None:
+    project = Record(uuid="event-create", kind="project", title="Event")
+    first = Record(
+        uuid="venue-a", kind="task", title="Book venue", parent_uuid="event-create"
+    )
+    second = Record(
+        uuid="venue-b", kind="task", title="Confirm venue", parent_uuid="event-create"
+    )
+    other = Record(
+        uuid="catering", kind="task", title="Choose catering", parent_uuid="event-create"
+    )
+    workspace, _library, _store = contextual_workspace(
+        [project, first, second, other]
+    )
+
+    result = workspace.read(ReadCall(purpose="organize", find="venue"))
+
+    assert result.status == "ok"
+    assert result.context and result.context.purpose == "organize"
+    assert {item.id for item in result.items} == {
+        project.id,
+        first.id,
+        second.id,
+        other.id,
+    }
+
+
+def test_organize_find_asks_when_matching_tasks_span_two_projects() -> None:
+    alpha = Record(uuid="alpha", kind="project", title="Alpha")
+    beta = Record(uuid="beta", kind="project", title="Beta")
+    first = Record(uuid="one", kind="task", title="Book venue", parent_uuid="alpha")
+    second = Record(uuid="two", kind="task", title="Confirm venue", parent_uuid="beta")
+    workspace, _library, _store = contextual_workspace(
+        [alpha, beta, first, second]
+    )
+
+    result = workspace.read(ReadCall(purpose="organize", find="venue"))
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert {item.id for item in result.items} == {alpha.id, beta.id}
+
+
 def test_organize_read_accepts_exact_project_id_and_exposes_merge_registry() -> None:
     source_area = Record(uuid="source-area", kind="area", title="Source")
     destination_area = Record(uuid="destination-area", kind="area", title="Destination")
