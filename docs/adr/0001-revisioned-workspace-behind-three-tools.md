@@ -20,7 +20,8 @@ bound revisions before it writes.
 
 The Cloud adapter coalesces changes by UUID before commit. It forces a Cloud
 pull after commit and verifies the pulled state. An uncertain outcome returns
-`retry_same`; the journal prevents a blind repost.
+`retry_same`; the journal prevents a blind repost. After three unsettled
+pending attempts the tools stop instead of looping.
 
 We rejected CRUD tools because they repeat identity and safety rules. We
 rejected caller-authored Cloud operations because they expose a shallow seam.
