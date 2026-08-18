@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Moving a task from Inbox into a Project or Area now leaves Inbox.
+  Native Things used to keep it there after a successful-looking
+  move. Repeating the same move repairs already-stuck items.
+
 ### Docs
 
 - Hosting rewrite: three topologies. Private Tailscale is the personal

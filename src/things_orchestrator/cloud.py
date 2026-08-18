@@ -59,7 +59,7 @@ _TASK_KINDS = {"Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 
 class CloudError(RuntimeError):
@@ -488,19 +488,17 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "pr" in payload and isinstance(payload["pr"], list) and payload["pr"]:
             item.parent_uuid = str(payload["pr"][0])
             item.area_uuid = None
-            item.inbox = False
         elif "pr" in payload:
             item.parent_uuid = None
         if "ar" in payload and isinstance(payload["ar"], list) and payload["ar"]:
             item.area_uuid = str(payload["ar"][0])
             item.parent_uuid = None
             item.heading_uuid = None
-            item.inbox = False
         elif "ar" in payload:
             item.area_uuid = None
         if "st" in payload and payload["st"] is not None:
             state = int(payload["st"])
-            item.inbox = state == 0 and not item.parent_uuid and not item.area_uuid
+            item.inbox = _inbox_from_list_state(item, state)
             item.someday = state == 2 and item.start is None
         if "agr" in payload and isinstance(payload["agr"], list) and payload["agr"]:
             item.heading_uuid = str(payload["agr"][0])
@@ -832,8 +830,10 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "sb" not in payload or item.tonight == (int(payload["sb"] or 0) == 1),
         "pr" not in payload
         or item.parent_uuid == (str(payload["pr"][0]) if payload["pr"] else None),
+        not payload.get("pr") or not item.inbox,
         "ar" not in payload
         or item.area_uuid == (str(payload["ar"][0]) if payload["ar"] else None),
+        not payload.get("ar") or not item.inbox,
         "agr" not in payload
         or item.heading_uuid == (str(payload["agr"][0]) if payload["agr"] else None),
         "tg" not in payload or item.tag_uuids == [str(tag) for tag in payload["tg"]],
@@ -852,8 +852,7 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         checks.append(item.heading == (payload["tp"] == 2))
     if "st" in payload:
         state = int(payload["st"])
-        has_home = bool(payload.get("pr") or payload.get("ar"))
-        checks.append(item.inbox == (state == 0 and not has_home))
+        checks.append(item.inbox == _inbox_from_list_state(item, state))
         checks.append(item.someday == (state == 2 and item.start is None))
     return all(checks)
 
@@ -1198,7 +1197,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
         if write.action == "tags" and write.tag_uuids is not None:
             payload["tg"] = write.tag_uuids
         elif write.action == "move":
-            payload.update(_placement(write))
+            payload.update(_placement(write, self.library.records.get(write.uuid)))
         else:
             if write.status is not None:
                 payload.update(
@@ -1284,20 +1283,39 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                 or write.heading_uuid is not None
                 or write.clear_heading
             ):
-                payload.update(_placement(write))
+                payload.update(_placement(write, self.library.records.get(write.uuid)))
         return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
 
 
-def _placement(write: Write) -> dict[str, Any]:
+def _inbox_from_list_state(item: Record, state: int) -> bool:
+    return state == 0 and item.kind != "project" and not item.heading
+
+
+def _needs_anytime_list_state(write: Write, current: Record | None) -> bool:
+    if (
+        write.someday
+        or write.start is not None
+        or write.tonight
+        or write.anytime
+        or write.inbox
+    ):
+        return False
+    return current is None or not (
+        current.someday or current.start is not None or current.tonight
+    )
+
+
+def _placement(write: Write, current: Record | None = None) -> dict[str, Any]:
+    payload: dict[str, Any]
     if write.into_kind == "project" and write.into_uuid:
-        return {
+        payload = {
             "pr": [write.into_uuid],
             "ar": [],
             "agr": [write.heading_uuid] if write.heading_uuid else [],
         }
-    if write.into_kind == "area" and write.into_uuid:
-        return {"ar": [write.into_uuid], "pr": [], "agr": []}
-    if write.kind == "project" or write.anytime:
+    elif write.into_kind == "area" and write.into_uuid:
+        payload = {"ar": [write.into_uuid], "pr": [], "agr": []}
+    elif write.kind == "project" or write.anytime:
         return {
             "pr": [],
             "ar": [],
@@ -1309,17 +1327,22 @@ def _placement(write: Write) -> dict[str, Any]:
             "ato": None,
             "rmd": None,
         }
-    return {
-        "pr": [],
-        "ar": [],
-        "agr": [],
-        "st": 0,
-        "sb": 0,
-        "sr": None,
-        "tir": None,
-        "ato": None,
-        "rmd": None,
-    }
+    else:
+        return {
+            "pr": [],
+            "ar": [],
+            "agr": [],
+            "st": 0,
+            "sb": 0,
+            "sr": None,
+            "tir": None,
+            "ato": None,
+            "rmd": None,
+        }
+    if _needs_anytime_list_state(write, current):
+        # Native Inbox is st=0 even when pr or ar is set.
+        payload["st"] = 1
+    return payload
 
 
 def _schedule(
