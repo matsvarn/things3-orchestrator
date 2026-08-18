@@ -202,7 +202,7 @@ def test_skill_teaches_the_proven_write_forms() -> None:
         "rich notes",
         "lifecycle=trash",
         "ordinary task or project",
-        "every active visible direct child",
+        "remaining descendants go to trash with it",
     ):
         assert capability in lower
 
@@ -211,11 +211,9 @@ def test_skill_teaches_safe_delete_and_merge_forms() -> None:
     lower = _skill_text().lower()
 
     assert "lifecycle=trash` only for an ordinary task or project delete" in lower
-    assert "set the source project to `lifecycle=trash` only" in lower
-    assert "every active visible direct child" in lower
-    assert "if completed, trashed, template, or hidden children exist" in lower
-    assert "do not use atomic merge" in lower
-    assert "choose separate safe cleanup" in lower
+    assert "set the source project to `lifecycle=trash`" in lower
+    assert "remaining descendants go to trash with it" in lower
+    assert "include the destination" in lower
     assert "every permanent task or project deletion target must already be in trash" in lower
     assert "including tasks and empty projects" in lower
     assert "for a non-empty project, read it completely" in lower
@@ -251,26 +249,23 @@ def test_skill_teaches_the_contextual_short_path() -> None:
     assert "stale or expired" in lower
 
 
-def test_skill_teaches_weak_model_selector_and_dependency_rules() -> None:
-    lower = _skill_text().lower()
+def test_specialized_write_forms_live_in_disclosed_references() -> None:
+    skill = SKILL.read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "task-system.md").read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "reconcile.md").read_text(encoding="utf-8").lower()
 
-    for instruction in (
-        "select one view",
-        "a project view uses `within`",
-        "an area view uses `within`",
-        "never combine a view with id or find",
-        "search named existing items and edit them",
-        "create only when asked to add",
-        "search first",
-        "purpose=recurrence",
-        "purpose=change",
-        "define local refs before use",
-        "parent tags before children",
-        "start=evening",
-        "delete_headings",
-        "never `lifecycle`",
-    ):
-        assert instruction in lower
+    assert "start=evening" in skill
+    assert "select one view" not in skill
+    assert "local neighborhood" not in skill
+
+    assert "search first" in form
+    assert "purpose=recurrence" in form
+    assert "lifecycle=trash` is recoverable teardown" in form
+
+    assert "search named existing items and edit them" in review
+    assert "create only when asked to add" in review
+    assert "delete_headings" in review
+    assert "remaining descendants go to trash with it" in review
 
 
 def test_main_and_reference_files_stay_lean() -> None:

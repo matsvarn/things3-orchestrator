@@ -48,7 +48,7 @@ def test_public_contract_does_not_advertise_system_organization_drafts() -> None
         assert "system structure" not in text
         assert "system layout" not in text
         assert "system-wide organization draft" not in text
-    assert "view system with the default review purpose" in interface
+    assert "view=system is the Area and Project registry" in interface
     assert "purpose=organize" in skill
     assert "one complete Project layout" in adr
 

@@ -264,13 +264,12 @@ def test_each_tool_emits_only_fields_accepted_by_its_output_schema() -> None:
     )
     assert commit_result.structured_content is not None
     validate(instance=commit_result.structured_content, schema=COMMIT_OUT)
-    assert set(commit_result.structured_content["items"][0]) == {
-        "id",
-        "revision",
-        "kind",
-        "title",
-        "status",
-    }
+    created = commit_result.structured_content["items"][0]
+    assert created["id"].startswith("task:")
+    assert created["kind"] == "task"
+    assert created["title"] == "Created"
+    assert created["status"] == "open"
+    assert "signals" in created
 
     scope = workspace.read(ReadCall(view="system")).scope_revision
     area_result = asyncio.run(

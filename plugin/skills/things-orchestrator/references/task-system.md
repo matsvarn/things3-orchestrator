@@ -7,7 +7,7 @@ Use the owner's words and natural Things terms. Preserve the owner's dates and i
 - Task: one clear action. Start with the visible action and name the object.
 - Things checklist: small known steps that share the Task's finish.
 - Project: several actions that finish separately. Add only the next one to three useful actions unless the owner supplied a plan.
-- Headings: scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`; never `lifecycle`. Deleting it keeps its Tasks in the Project.
+- Headings: scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
 - Markdown notes: context, links, plans, and finish criteria. Keep executable steps in checklist rows or Project Tasks.
 - Area: an ongoing responsibility without a finish.
 - Start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.
@@ -31,4 +31,4 @@ Finish when each unclear choice has one supported reading or one concise questio
 
 ## Repeats
 
-Search first, then `purpose=recurrence` on the exact Task. Confirm the current copy and template. Change the repeating template for future copies and the generated copy for the current cycle. Change the generated copy for current work. Batch both changes when both must match. A complete repeat rule keeps the current Task. Stopping repetition keeps linked copies as Tasks.
+Search first, then `purpose=recurrence` on the exact Task. Confirm the current copy and template. Change the repeating template for future copies and the generated copy for the current cycle. Change the generated copy for current work. Batch both changes when both must match. A complete repeat rule on an ordinary Task keeps it as the current copy and creates its future template. Stopping repetition keeps linked copies as Tasks.

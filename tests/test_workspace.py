@@ -48,18 +48,27 @@ def test_empty_read_returns_bounded_today_sections() -> None:
                 deadline=NOW.date().replace(day=14),
             ),
             Record(uuid="box", kind="task", title="Inbox", inbox=True),
+            Record(
+                uuid="tonight",
+                kind="task",
+                title="Tonight",
+                start=NOW.date(),
+                tonight=True,
+            ),
         ]
     )
 
     result = module.read(ReadCall())
 
     assert result.status == "ok"
-    assert [section.key for section in result.sections] == ["overdue", "inbox"]
-    assert [item.id for item in result.items] == ["task:late", "task:box"]
+    assert [section.key for section in result.sections] == ["overdue", "evening"]
+    assert [item.id for item in result.items] == ["task:late", "task:tonight"]
     assert [section.item_ids for section in result.sections] == [
         ["task:late"],
-        ["task:box"],
+        ["task:tonight"],
     ]
+    inbox = module.read(ReadCall(view="inbox"))
+    assert [item.id for item in inbox.items] == ["task:box"]
     assert result.scope_revision and result.scope_revision.startswith("s_")
 
 
@@ -129,7 +138,7 @@ def test_change_find_requires_one_active_match() -> None:
     ).read(ReadCall(purpose="change", find="invoice"))
     assert ambiguous.status == "needs_input"
     assert ambiguous.context is None
-    assert "matches 2 active items" in ambiguous.instruction
+    assert "matches 2 items" in ambiguous.instruction
     assert {item.id for item in ambiguous.items} == {"task:one", "task:two"}
     assert all(item.revision is None for item in ambiguous.items)
 
@@ -195,7 +204,7 @@ def test_change_find_does_not_stem_or_fuzz_token_fallback() -> None:
 
     assert result.status == "needs_input"
     assert result.context is None
-    assert "found no active item" in result.instruction
+    assert "found no item" in result.instruction
 
 
 def test_find_includes_active_headings_for_rename() -> None:
@@ -213,7 +222,7 @@ def test_find_includes_active_headings_for_rename() -> None:
     assert review.items[0].id == "heading:prep"
 
 
-def test_find_excludes_completed_trashed_and_repeat_template_headings() -> None:
+def test_review_find_excludes_completed_trashed_and_repeat_templates() -> None:
     records = [
         Record(uuid="done", kind="task", title="Prep done", status="done"),
         Record(uuid="trash", kind="task", title="Prep trash", trashed=True),
@@ -226,11 +235,19 @@ def test_find_excludes_completed_trashed_and_repeat_template_headings() -> None:
         ),
     ]
 
-    result = workspace(records).read(ReadCall(purpose="change", find="Prep"))
+    review = workspace(records).read(ReadCall(find="Prep"))
+    assert review.items == []
 
-    assert result.status == "needs_input"
-    assert result.context is None
-    assert "found no active item" in result.instruction
+    change = workspace(records).read(ReadCall(purpose="change", find="invoice"))
+    assert change.status == "needs_input"
+    assert change.context is None
+
+    restore = workspace(records).read(ReadCall(purpose="change", find="Prep trash"))
+    assert restore.status == "ok"
+    assert restore.context is not None
+    assert [item.id for item in restore.items if item.id == "task:trash"] == [
+        "task:trash"
+    ]
 
 
 def test_context_change_accepts_matching_redundant_identity_but_rejects_mismatch() -> None:
@@ -1845,7 +1862,7 @@ def test_area_removal_needs_system_scope_revision() -> None:
     assert module._library.records["task"].area_uuid == "new"  # noqa: SLF001
 
 
-def test_trash_needs_approval_and_keeps_project_children() -> None:
+def test_trash_needs_approval_and_tears_down_project_children() -> None:
     project = Record(uuid="project", kind="project", title="Launch")
     child = Record(uuid="child", kind="task", title="Ship", parent_uuid="project")
     module = workspace([project, child])
@@ -1864,14 +1881,65 @@ def test_trash_needs_approval_and_keeps_project_children() -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
-    assert "Trash project: Launch" in prepared.plan.summary
+    assert any("contained records" in line for line in prepared.plan.summary)
     assert project.trashed is False
+    assert child.trashed is False
 
     settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
 
     assert settled.status == "applied"
     assert project.trashed is True
+    assert child.trashed is True
     assert child.parent_uuid == project.uuid
+
+
+def test_project_trash_tears_down_completed_and_template_leftovers() -> None:
+    project = Record(uuid="mixed", kind="project", title="Mixed")
+    done = Record(
+        uuid="done-child",
+        kind="task",
+        title="Done",
+        parent_uuid=project.uuid,
+        status="done",
+    )
+    template = Record(
+        uuid="template-child",
+        kind="task",
+        title="Repeat",
+        parent_uuid=project.uuid,
+        recurrence=RecurrenceState(role="template", repeat_type="fixed"),
+    )
+    heading = Record(
+        uuid="heading-child",
+        kind="task",
+        title="Group",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    module = workspace([project, done, template, heading])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-mixed-001",
+                "change": [
+                    {
+                        "id": project.id,
+                        "if_revision": detail(module, project.id).revision,
+                        "lifecycle": "trash",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert project.trashed is True
+    assert done.trashed is True
+    assert template.trashed is True
+    assert heading.trashed is True
 
 
 def test_project_children_move_and_trash_as_one_approved_batch() -> None:
@@ -1917,7 +1985,6 @@ def test_project_children_move_and_trash_as_one_approved_batch() -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
-    assert any("Move 2 children" in line for line in prepared.plan.summary)
     assert source.trashed is False
     assert first.parent_uuid == source.uuid
     assert second.parent_uuid == source.uuid
@@ -1934,7 +2001,7 @@ def test_project_children_move_and_trash_as_one_approved_batch() -> None:
     ]
 
 
-def test_project_merge_rejects_partial_move_without_writes() -> None:
+def test_project_merge_tears_down_unmoved_children() -> None:
     source = Record(uuid="partial-source", kind="project", title="Source")
     destination = Record(
         uuid="partial-destination", kind="project", title="Destination"
@@ -1967,14 +2034,19 @@ def test_project_merge_rejects_partial_move_without_writes() -> None:
         )
     )
 
-    assert result.status == "needs_input"
-    assert source.trashed is False
-    assert first.parent_uuid == source.uuid
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert source.trashed is True
+    assert first.parent_uuid == destination.uuid
+    assert first.trashed is False
     assert second.parent_uuid == source.uuid
+    assert second.trashed is True
 
 
 @pytest.mark.parametrize("edge", ["heading", "trashed"])
-def test_project_merge_rejects_hidden_children_without_writes(edge: str) -> None:
+def test_project_merge_tears_down_hidden_leftovers(edge: str) -> None:
     source = Record(uuid=f"{edge}-source", kind="project", title="Source")
     destination = Record(
         uuid=f"{edge}-destination", kind="project", title="Destination"
@@ -2015,10 +2087,15 @@ def test_project_merge_rejects_hidden_children_without_writes(edge: str) -> None
         )
     )
 
-    assert result.status == "rejected"
-    assert source.trashed is False
-    assert movable.parent_uuid == source.uuid
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert source.trashed is True
+    assert movable.parent_uuid == destination.uuid
+    assert movable.trashed is False
     assert child.parent_uuid == source.uuid
+    assert child.trashed is True
 
 
 @pytest.mark.parametrize("hidden", ["completed", "trashed"])
@@ -5481,3 +5558,268 @@ def test_approval_plan_groups_anytime_destination() -> None:
     assert result.status == "needs_approval"
     assert result.plan is not None
     assert any("project:launch → Anytime" in line for line in result.plan.summary)
+
+
+def test_project_restore_returns_the_trashed_subtree() -> None:
+    project = Record(uuid="done-launch", kind="project", title="Launch", trashed=True)
+    heading = Record(
+        uuid="done-heading",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    child = Record(
+        uuid="done-child",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    module = workspace([project, heading, child])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "restore-tree-001",
+                "change": [
+                    {
+                        "id": project.id,
+                        "if_revision": detail(module, project.id).revision,
+                        "lifecycle": "restore",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert project.trashed is False
+    assert heading.trashed is False
+    assert child.trashed is False
+    assert child.parent_uuid == project.uuid
+    assert child.heading_uuid == heading.uuid
+
+
+def test_heading_trash_is_recoverable() -> None:
+    project = Record(uuid="headed", kind="project", title="Launch")
+    heading = Record(
+        uuid="group",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    module = workspace([project, heading])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-trash-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": detail(module, heading.id).revision,
+                        "lifecycle": "trash",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert heading.trashed is True
+    assert heading.parent_uuid == project.uuid
+
+
+def test_template_trash_is_allowed() -> None:
+    template = Record(
+        uuid="repeat-template",
+        kind="task",
+        title="Water plants",
+        recurrence=RecurrenceState(role="template", repeat_type="fixed"),
+    )
+    module = workspace([template])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "template-trash-001",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": detail(module, template.id).revision,
+                        "lifecycle": "trash",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert template.trashed is True
+
+
+def test_instance_recurrence_fact_inherits_the_template_rule() -> None:
+    template = Record(
+        uuid="habit-template",
+        kind="task",
+        title="Water plants",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 256, "fa": 2, "of": [{"wd": 1}]},
+        ),
+    )
+    instance = Record(
+        uuid="habit-copy",
+        kind="task",
+        title="Water plants",
+        recurrence=RecurrenceState(
+            role="instance",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, instance])
+
+    fact = detail(module, instance.id)
+    assert fact.recurrence is not None
+    assert fact.recurrence.kind == "after_completion_instance"
+    assert fact.recurrence.mode == "after_completion"
+    assert fact.recurrence.unit == "week"
+    assert fact.recurrence.interval == 2
+    assert fact.recurrence.weekdays == ["monday"]
+    assert fact.recurrence.template_id == template.id
+
+
+def test_change_find_can_bind_trashed_work() -> None:
+    trashed = Record(uuid="old-invoice", kind="task", title="Pay invoice", trashed=True)
+    module = workspace([trashed])
+
+    result = module.read(ReadCall(purpose="change", find="invoice"))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert [item.id for item in result.items] == [trashed.id]
+
+
+def test_paged_read_asks_for_the_cursor() -> None:
+    records = [
+        Record(uuid=f"page-{index}", kind="task", title=f"Task {index}", inbox=True)
+        for index in range(50)
+    ]
+    module = workspace(records)
+
+    result = module.read(ReadCall(view="inbox", limit=20))
+
+    assert result.cursor is not None
+    assert result.next == "read"
+    assert "cursor" in result.instruction.casefold()
+
+
+def test_empty_week_does_not_use_find_copy() -> None:
+    module = workspace()
+
+    result = module.read(ReadCall(view="week"))
+
+    assert result.status == "ok"
+    assert result.items == []
+    assert "week" in result.instruction.casefold()
+    assert "find" not in result.instruction.casefold()
+
+
+def test_tag_delete_plan_uses_tag_ids() -> None:
+    task = Record(uuid="tagged", kind="task", title="Ship", tag_uuids=["focus"])
+    library = MemoryLibrary([task])
+    library.tags["focus"] = "Focus"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    tags = module.read(ReadCall(view="tags"))
+    assert tags.scope_revision is not None
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-delete-plan-001",
+                "tags_revision": tags.scope_revision,
+                "change_tags": [{"id": "tag:focus", "delete_permanently": True}],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("Permanently delete tag: Focus" in line for line in result.plan.summary)
+    assert all(
+        not item_id.startswith("task:")
+        for section in result.sections
+        for item_id in section.item_ids
+    )
+
+
+def test_applied_receipt_echoes_placement() -> None:
+    project = Record(uuid="home", kind="project", title="Home")
+    task = Record(uuid="milk", kind="task", title="Buy milk", inbox=True)
+    module = workspace([project, task])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "receipt-placement-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "into": project.id,
+                        "start": "today",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.items
+    fact = result.items[0]
+    assert fact.into_id == project.id
+    assert fact.start == NOW.date().isoformat()
+    assert "today" in fact.signals
+
+
+def test_applied_receipt_echoes_heading_id() -> None:
+    project = Record(uuid="headed-home", kind="project", title="Home")
+    heading = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(uuid="draft", kind="task", title="Draft", parent_uuid=project.uuid)
+    module = workspace([project, heading, task])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "receipt-heading-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "heading_id": heading.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.items[0].heading_id == heading.id

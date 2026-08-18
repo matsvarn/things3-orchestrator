@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed
+
+- Change and organize reads return the local neighborhood. Include a
+  destination to move or merge. Unresolved includes no longer abort the
+  target context.
+- `lifecycle=trash` on a Project moves remaining descendants to Trash
+  with it. Restore of that Project restores the same parent-linked
+  subtree. Heading trash is no longer a silent no-op.
+- Today lists overdue, Evening, Today, and Waiting. Inbox stays on
+  `view=inbox`. Evening is grouped before Today so tonight work does
+  not land in Today.
+- A cursor now returns `next=read`. Commit receipts echo `into_id`,
+  `heading_id`, `start`, and `signals`. Instance recurrence facts
+  inherit the template rule.
+- MCP tool descriptions are the short call contract. Teardown, repeat,
+  and organize details live in the skill references.
+
 ### Fixed
 
 - A heading `into` a different Project is rejected unless the batch is

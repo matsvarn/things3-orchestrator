@@ -118,8 +118,8 @@ class ReadSelector:
             raise ValueError("selector includes cannot exceed 40")
         if len({entry for entry in self.includes}) != len(self.includes):
             raise ValueError("selector includes must be unique")
-        if self.purpose != "change" and self.includes:
-            raise ValueError("selector includes are only available for change")
+        if self.purpose not in {"change", "organize"} and self.includes:
+            raise ValueError("selector includes are only available for change or organize")
         selectors = sum(
             value is not None for value in (self.view, self.item_id, self.find)
         )

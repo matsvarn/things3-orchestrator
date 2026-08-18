@@ -58,13 +58,14 @@ The live contextual proofs are named in the JSON output:
   it with its context ref.
 - `ax.project_move_to_area`: create source and destination Areas plus a
   Project through the public path, read the Project once with
-  `purpose=change`, then move it with the Project and destination Area refs.
+  `purpose=change` and include the destination Area, then move it with the
+  Project and destination Area refs.
 - `ax.organize_draft`: read one Project with `purpose=organize`, create a
   heading, assign a Task, preserve unlisted work, and verify the layout.
-- `ax.project_merge`: read one exact source Project with `purpose=organize`,
-  move its visible direct children and heading assignments to one active
-  destination Project, trash the now-empty source in one approved commit, and
-  force an exact Task read-back. Cleanup deletes only the five probe UUIDs.
+- `ax.project_merge`: read one exact source Project with `purpose=organize`
+  and include the destination, move the children you want to keep, trash the
+  source in one approved commit, and force an exact Task read-back. Cleanup
+  deletes only the five probe UUIDs.
 - `recurrence.inspect_relationship`: read the repeat template and generated
   copy with `purpose=recurrence`, then verify both sides before mutation.
 - `tag.assign_task_readback`: add a disposable tag to a probe Task, refresh
