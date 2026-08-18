@@ -5895,3 +5895,109 @@ def test_permanent_heading_delete_receipt_names_the_gone_id() -> None:
     assert applied.status == "applied"
     assert applied.missing_ids == ["task:gone"]
     assert heading.uuid not in module._library.records  # noqa: SLF001
+
+
+def test_heading_can_be_purged_after_its_project_is_trashed() -> None:
+    project = Record(uuid="old-home", kind="project", title="Old home")
+    heading = Record(
+        uuid="later-head",
+        kind="task",
+        title="Later",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    child = Record(
+        uuid="under-later",
+        kind="task",
+        title="Under later",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+    )
+    module = workspace([project, heading, child])
+    trash = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "trash-then-purge-heading-001",
+                "change": [
+                    {
+                        "id": project.id,
+                        "if_revision": detail(module, project.id).revision,
+                        "lifecycle": "trash",
+                    }
+                ],
+            }
+        )
+    )
+    assert trash.plan is not None
+    assert module.approve(ApproveCall(plan_id=trash.plan.id)).status == "applied"
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "purge-heading-in-trash-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": detail(module, heading.id).revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in module._library.records  # noqa: SLF001
+    assert child.heading_uuid is None
+    assert child.parent_uuid == project.uuid
+    assert child.trashed is True
+
+
+def test_tag_delete_receipt_names_the_gone_tag() -> None:
+    task = Record(uuid="tagged", kind="task", title="Ship", tag_uuids=["focus"])
+    library = MemoryLibrary([task])
+    library.tags["focus"] = "Focus"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    tags = module.read(ReadCall(view="tags"))
+    assert tags.scope_revision is not None
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "tag-delete-receipt-001",
+                "tags_revision": tags.scope_revision,
+                "change_tags": [{"id": "tag:focus", "delete_permanently": True}],
+            }
+        )
+    )
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert "tag:focus" in applied.missing_ids
+
+
+def test_find_within_trash_ignores_living_notes_hits() -> None:
+    living = Record(
+        uuid="outlook",
+        kind="task",
+        title="Outlook pilot",
+        notes="later enterprise provisioning",
+    )
+    heading = Record(
+        uuid="later-head",
+        kind="task",
+        title="Later",
+        heading=True,
+        parent_uuid="gone",
+        trashed=True,
+    )
+    module = workspace([living, heading])
+
+    living_hit = module.read(ReadCall(find="Later"))
+    assert living.id in {item.id for item in living_hit.items}
+
+    trash_hit = module.read(ReadCall(find="Later", within="trash"))
+    assert [item.id for item in trash_hit.items] == [heading.id]
+    assert "trashed" in trash_hit.items[0].signals

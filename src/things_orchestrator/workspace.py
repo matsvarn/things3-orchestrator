@@ -306,6 +306,23 @@ class ThingsWorkspace:
             )
 
         if call.find is not None:
+            if call.within == "trash":
+                matches = [
+                    item
+                    for item in self._search(call.find, None, closed=True)
+                    if item.trashed
+                ]
+                return self._page(
+                    matches,
+                    call.limit,
+                    full=False,
+                    instruction=(
+                        "These Trash matches. Use purpose=change to restore."
+                        if matches
+                        else "No Trash item matched that find."
+                    ),
+                    view="trash",
+                )
             within = self._exact_item(call.within) if call.within else None
             if call.within and within is None:
                 return self._context_recovery(
@@ -540,14 +557,21 @@ class ThingsWorkspace:
                 )
         else:
             assert call.find is not None
-            within = self._exact_item(call.within) if call.within else None
-            if call.within and within is None:
-                return self._needs_input(
-                    "I could not find that exact search scope. Read the Project or Area, then search again."
-                )
-            if within is not None and within.kind not in {"area", "project"}:
-                return self._needs_input("Search within an exact Area or Project.")
-            matches = self._search(call.find, within, closed=True)
+            if call.within == "trash":
+                matches = [
+                    item
+                    for item in self._search(call.find, None, closed=True)
+                    if item.trashed
+                ]
+            else:
+                within = self._exact_item(call.within) if call.within else None
+                if call.within and within is None:
+                    return self._needs_input(
+                        "I could not find that exact search scope. Read the Project or Area, then search again."
+                    )
+                if within is not None and within.kind not in {"area", "project"}:
+                    return self._needs_input("Search within an exact Area or Project.")
+                matches = self._search(call.find, within, closed=True)
             if len(matches) > _CHANGE_FIND_LIMIT:
                 return self._needs_input(
                     f"That change search matches more than {_CHANGE_FIND_LIMIT} items. Use a narrower find or exact id."
@@ -3156,17 +3180,12 @@ class ThingsWorkspace:
                     if child.heading_uuid == item.uuid
                 ]
                 for child in assigned:
-                    child_home = self._record_home(child)
                     preconditions[child.id] = self._revision(child)
                     writes.append(
                         Write(
                             action="update",
                             uuid=child.uuid,
                             kind=child.kind,
-                            into_uuid=child_home[0],
-                            into_kind=child_home[1],
-                            inbox=child_home[2],
-                            anytime=child_home[3],
                             clear_heading=True,
                         )
                     )
@@ -3563,7 +3582,12 @@ class ThingsWorkspace:
             dict.fromkeys(
                 write.into_uuid
                 for write in context.writes
-                if write.into_kind == "project" and write.into_uuid is not None
+                if write.into_kind == "project"
+                and write.into_uuid is not None
+                and (
+                    (current := self._library.records.get(write.uuid)) is None
+                    or current.parent_uuid != write.into_uuid
+                )
             )
         )
         for destination_uuid in destination_uuids:
@@ -5047,6 +5071,7 @@ class ThingsWorkspace:
                 add_tag(write.uuid)
                 continue
             if write.action == "delete_tag":
+                missing_ids.append(f"tag:{write.uuid}")
                 continue
             if write.action == "checklist":
                 parent = write.checklist_parent_uuid

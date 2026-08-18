@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- Permanently deleting a heading whose Project is already in Trash no
+  longer runs the merge-destination check. Same-home heading cleanup is
+  not a merge.
+- Deleted tags appear in applied `missing_ids` as `tag:<id>`.
+- `within=trash` searches Trash by title so a living notes-hit cannot
+  hide a short heading name.
+
 ## 0.2.2 — 2026-08-19
 
 The first release that can finish work. Neighborhood reads, Project
