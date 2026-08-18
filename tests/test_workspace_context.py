@@ -476,25 +476,33 @@ def test_project_change_rejects_non_area_destination_ref_without_write() -> None
     assert library.records[project.uuid].area_uuid is None
 
 
-def test_area_change_registry_overflow_returns_safe_recovery() -> None:
+def test_area_change_context_stays_the_local_neighborhood() -> None:
     areas = [
         Record(uuid=f"area-{index}", kind="area", title=f"Area {index}")
         for index in range(121)
     ]
     workspace, _library, _store = contextual_workspace(areas)
 
-    result = workspace.read(ReadCall(purpose="change", id=areas[0].id))
+    local = workspace.read(ReadCall(purpose="change", id=areas[0].id))
+    assert local.status == "ok"
+    assert local.context is not None
+    assert {item.id for item in local.items} == {areas[0].id}
 
-    assert result.status == "needs_input"
-    assert result.next == "read"
-    assert result.context is None
-    assert result.items == []
-    assert result.recovery and result.recovery.code == "context_incomplete"
-    assert result.recovery.retry == "rebuild"
-    assert result.recovery.read == {
-        "id": areas[0].id,
-        "limit": 40,
-    }
+
+def test_area_change_include_binds_a_destination_area() -> None:
+    current = Record(uuid="work", kind="area", title="Work")
+    destination = Record(uuid="home", kind="area", title="Home")
+    workspace, _library, _store = contextual_workspace([current, destination])
+
+    included = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=current.id,
+            include=[{"id": destination.id}],
+        )
+    )
+    assert included.status == "ok"
+    assert {item.id for item in included.items} == {current.id, destination.id}
 
 
 def test_organize_read_returns_complete_project_layout() -> None:

@@ -156,7 +156,7 @@ class _PreparationContext:
 
 @dataclass
 class _Neighborhood:
-    """Local records for one change, organize include, or Project teardown."""
+    """Local records for one change or organize include."""
 
     records: list[Record] = field(default_factory=list)
     placement_ids: set[str] = field(default_factory=set)
@@ -523,18 +523,18 @@ class ThingsWorkspace:
             matches = self._search(call.find, within, closed=True)
             if len(matches) > _CHANGE_FIND_LIMIT:
                 return self._needs_input(
-                    f"That change search matches more than {_CHANGE_FIND_LIMIT} active items. Use a narrower find or exact id."
+                    f"That change search matches more than {_CHANGE_FIND_LIMIT} items. Use a narrower find or exact id."
                 )
             if not matches:
                 return self._needs_input(
-                    "That change search found no active item. Use a narrower find or exact id."
+                    "That change search found no item. Use a narrower find or exact id."
                 )
             if len(matches) > 1:
                 return Result(
                     next="ask",
                     status="needs_input",
                     instruction=(
-                        f"That change search matches {len(matches)} active items. "
+                        f"That change search matches {len(matches)} items. "
                         "Choose one item, then read it with purpose=change and its exact id."
                     ),
                     items=[
@@ -609,9 +609,6 @@ class ThingsWorkspace:
             if parent is not None and parent.kind == "project":
                 for heading in self._project_headings(parent.uuid):
                     neighborhood.add(heading)
-        elif target.kind == "area":
-            for area in self._library.areas():
-                neighborhood.add(area)
         template = self._library.records.get(template_uuid_of(target) or "")
         if template is not None:
             neighborhood.add(template)
