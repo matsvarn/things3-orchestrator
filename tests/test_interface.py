@@ -144,6 +144,16 @@ def test_change_include_is_compact_and_bounded() -> None:
         ReadCall.model_validate(
             {"purpose": "review", "include": [{"id": "task:anchor"}]}
         )
+    assert (
+        ReadCall.model_validate(
+            {
+                "purpose": "organize",
+                "id": "project:source",
+                "include": [{"id": "project:destination"}],
+            }
+        ).include[0].id
+        == "project:destination"
+    )
     with pytest.raises(ValidationError, match="cannot combine"):
         ReadCall.model_validate(
             {
@@ -407,6 +417,7 @@ def test_organize_draft_supports_existing_new_and_unheaded_sections() -> None:
                             "task_refs": ["t2", "$newtask"],
                         },
                         {"task_refs": ["t3"]},
+                        {"heading_key": "$empty", "heading_title": "Empty"},
                     ],
                     "delete_headings": ["h2"],
                 }
@@ -1113,8 +1124,13 @@ def test_tag_schema_matches_runtime_local_reference_rules() -> None:
     assert change["tags_remove"]["items"]["pattern"].startswith("^tag:")
     assert call.ensure_tags[0].key == "$focus"
     assert "tags" in READ_OUT["properties"]
+    assert "recovery" in READ_OUT["properties"]
     assert "tags" in COMMIT_OUT["properties"]
     assert "tags" in APPROVE_OUT["properties"]
+    commit_item = COMMIT_OUT["properties"]["items"]["items"]
+    assert "into_id" in commit_item["properties"]
+    assert "start" in commit_item["properties"]
+    assert "signals" in commit_item["properties"]
 
 
 def test_advanced_mutations_stay_in_one_commit_shape() -> None:
@@ -1247,11 +1263,10 @@ def test_manual_schemas_are_flat_and_compact() -> None:
         "requires a complete Project read, lifecycle='delete_permanently' with "
         "delete_contents=true, and approval"
     ) in COMMIT_DESC
-    assert "every active visible direct child" in COMMIT_DESC
+    assert "Remaining descendants go to Trash with it" in COMMIT_DESC
     assert "A heading can use into only to follow its source Project" in COMMIT_DESC
     assert "do not move a heading into a different Project by itself" in COMMIT_DESC
-    assert "If completed, trashed, template, or hidden children exist" in COMMIT_DESC
-    assert "do not use atomic merge; choose separate safe cleanup" in COMMIT_DESC
+    assert "include the destination" in COMMIT_DESC
     assert "private" in APPROVE_DESC
 
 
@@ -1274,7 +1289,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "parent tags before children",
         "use start=evening",
         "organize.delete_headings",
-        "never use lifecycle for headings",
+        "lifecycle=trash on a heading or project",
     ):
         assert instruction in commit_lower
 

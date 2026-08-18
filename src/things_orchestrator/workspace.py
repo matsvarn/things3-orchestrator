@@ -140,7 +140,6 @@ class _PreparationContext:
     preconditions: dict[str, str]
     summary: list[str]
     warnings: list[str]
-    project_trash_sources: list[str] = field(default_factory=list)
     project_heading_moves: dict[str, str] = field(default_factory=dict)
     allow_project_heading_moves: bool = False
     risky: bool = False
@@ -153,6 +152,25 @@ class _PreparationContext:
             warnings=list(dict.fromkeys(self.warnings))[:40],
             risky=self.risky,
         )
+
+
+@dataclass
+class _Neighborhood:
+    """Local records for one change, organize include, or Project teardown."""
+
+    records: list[Record] = field(default_factory=list)
+    placement_ids: set[str] = field(default_factory=set)
+    missing_ids: list[str] = field(default_factory=list)
+    include_signals: list[str] = field(default_factory=list)
+    include_note: str | None = None
+
+    def add(self, item: Record | None, *, placement: bool = False) -> None:
+        if item is None:
+            return
+        if all(saved.uuid != item.uuid for saved in self.records):
+            self.records.append(item)
+        if placement:
+            self.placement_ids.add(item.uuid)
 
 
 @dataclass(frozen=True)
@@ -391,19 +409,21 @@ class ThingsWorkspace:
             for row in page
             if (item := self._exact_item(row.item_id)) is not None
         ]
-        return Result(
-            next="done",
-            status="ok",
-            instruction=(
-                "These records have native-state conflicts. "
-                "Use diagnostics and repairs."
-                if diagnostics
-                else "No native-state conflicts are visible."
-            ),
-            items=items,
-            diagnostics=diagnostics,
-            cursor=cursor,
-            truncated=cursor is not None,
+        return self._follow_cursor(
+            Result(
+                next="done",
+                status="ok",
+                instruction=(
+                    "These records have native-state conflicts. "
+                    "Use diagnostics and repairs."
+                    if diagnostics
+                    else "No native-state conflicts are visible."
+                ),
+                items=items,
+                diagnostics=diagnostics,
+                cursor=cursor,
+                truncated=cursor is not None,
+            )
         )
 
     def _diagnostic_title(self, conflict: Conflict) -> str:
@@ -500,7 +520,7 @@ class ThingsWorkspace:
                 )
             if within is not None and within.kind not in {"area", "project"}:
                 return self._needs_input("Search within an exact Area or Project.")
-            matches = self._search(call.find, within)
+            matches = self._search(call.find, within, closed=True)
             if len(matches) > _CHANGE_FIND_LIMIT:
                 return self._needs_input(
                     f"That change search matches more than {_CHANGE_FIND_LIMIT} active items. Use a narrower find or exact id."
@@ -534,96 +554,76 @@ class ThingsWorkspace:
                 read=self._selector_arguments(call),
                 status="unsupported",
             )
-        included = self._resolve_change_includes(call)
-        if isinstance(included, Result):
-            return included
-        placement_ids: set[str] = set()
-        if target.kind == "area":
-            records = [
-                target,
-                *[item for item in self._library.system() if item.id != target.id],
-            ]
-            for included_record in included:
-                for dependency in self._include_dependencies(included_record):
-                    if dependency.uuid not in {item.uuid for item in records}:
-                        records.append(dependency)
-        else:
-            # A Task or heading change can move across Projects and into a
-            # destination heading. Include the active placement registry in
-            # the same context, so the model can select both refs in one
-            # read. Keep the target and its direct dependencies first. This
-            # preserves the full target detail and the existing change seam.
-            records = self._change_dependencies(target)
-            for included_record in included:
-                for dependency in self._include_dependencies(included_record):
-                    if dependency.uuid not in {item.uuid for item in records}:
-                        records.append(dependency)
-            if target.kind == "task":
-                placement = self._active_placement_registry()
-                placement_ids = {item.uuid for item in placement}
-                seen = {item.uuid for item in records}
-                records.extend(item for item in placement if item.uuid not in seen)
-        if len(records) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(records))
-        refs, by_id = self._context_refs(records)
+        neighborhood = self._neighborhood_collect(target)
+        self._neighborhood_include(neighborhood, call)
+        if len(neighborhood.records) > _CONTEXT_LIMIT:
+            return self._oversized_context(call, len(neighborhood.records))
+        refs, by_id = self._context_refs(neighborhood.records)
         context = self._create_context(
             call,
             refs,
-            scope="system" if target.kind == "area" else f"change:{target.id}",
+            scope=f"change:{target.id}",
         )
         facts = [
             self._fact(
                 record,
                 full=record.uuid == target.uuid,
-                include_revision=(
-                    record.uuid in placement_ids
-                    or record.uuid in {item.uuid for item in included}
-                ),
+                include_revision=record.uuid in neighborhood.placement_ids,
             ).model_copy(update={"ref": by_id[record.id]})
-            for record in records
+            for record in neighborhood.records
         ]
+        instruction = (
+            "Use context_id and short refs for one coherent change. "
+            "Omitted item fields remain unchanged. Include a destination to move."
+        )
+        if neighborhood.include_note:
+            instruction = f"{instruction} {neighborhood.include_note}"
         return Result(
             next="done",
             status="ok",
-            instruction=(
-                "Use context_id and short refs for one coherent change. "
-                "Omitted item fields remain unchanged."
-            ),
+            instruction=instruction,
             items=facts,
+            signals=neighborhood.include_signals,
             context=self._public_context(context),
             scope_revision=(
                 self._area_scope_revision()
                 if target.kind == "area"
                 else self._detail_revision(target)
             ),
+            missing_ids=neighborhood.missing_ids,
         )
 
-    def _active_placement_registry(self) -> list[Record]:
-        """Return active Areas, Projects, and headings for contextual moves."""
+    def _neighborhood_collect(self, target: Record) -> _Neighborhood:
+        """Collect the local neighborhood for one change target."""
+        neighborhood = _Neighborhood()
 
-        def active(item: Record) -> bool:
-            if item.trashed or item.status != "open":
-                return False
-            if item.recurrence.role == "template":
-                return False
-            if item.kind in {"area", "project"}:
-                return not item.heading
-            return item.kind == "task" and item.heading and item.parent_uuid is not None
+        def place(item: Record) -> None:
+            neighborhood.add(self._library.records.get(item.parent_uuid or ""))
+            neighborhood.add(self._library.records.get(item.area_uuid or ""))
+            neighborhood.add(self._library.records.get(item.heading_uuid or ""))
 
-        kind_order = {"area": 0, "project": 1, "heading": 2}
-        return sorted(
-            (item for item in self._library.records.values() if active(item)),
-            key=lambda item: (
-                kind_order[item.public_kind],
-                item.sort_index,
-                item.title.casefold(),
-                item.uuid,
-            ),
-        )
+        neighborhood.add(target)
+        place(target)
+        if target.kind == "task":
+            parent = self._library.records.get(target.parent_uuid or "")
+            if parent is not None and parent.kind == "project":
+                for heading in self._project_headings(parent.uuid):
+                    neighborhood.add(heading)
+        elif target.kind == "area":
+            for area in self._library.areas():
+                neighborhood.add(area)
+        template = self._library.records.get(template_uuid_of(target) or "")
+        if template is not None:
+            neighborhood.add(template)
+            place(template)
+        if target.recurrence.role == "template":
+            for candidate in self._library.recurrence_instances(target.uuid):
+                neighborhood.add(candidate)
+        return neighborhood
 
-    def _resolve_change_includes(self, call: ReadCall) -> list[Record] | Result:
-        """Resolve each bounded include without scanning a task registry."""
-        resolved: list[Record] = []
+    def _neighborhood_include(self, neighborhood: _Neighborhood, call: ReadCall) -> None:
+        """Add resolved includes without aborting the target neighborhood."""
+        notes: list[str] = []
         for include in call.include:
             within = self._exact_item(include.within) if include.within else None
             if include.within and (
@@ -631,43 +631,36 @@ class ThingsWorkspace:
                 or within.kind not in {"area", "project"}
                 or not self._is_searchable(within)
             ):
-                return self._needs_input(
-                    "An include scope must identify an active Area or Project."
-                )
+                notes.append("An include scope must identify an active Area or Project.")
+                neighborhood.include_signals.append("include_unresolved")
+                continue
             if include.id is not None:
                 exact = self._exact_item(include.id)
-                matches = [exact] if exact is not None and self._is_searchable(exact) else []
+                matches = [exact] if exact is not None else []
+                if not matches:
+                    neighborhood.missing_ids.append(include.id)
             else:
                 assert include.find is not None
                 matches = self._search(include.find, within)
             if len(matches) != 1:
-                candidates = [
-                    self._fact(item, full=False, include_revision=False)
-                    for item in matches[:_CHANGE_FIND_LIMIT]
-                ]
+                neighborhood.include_signals.append("include_unresolved")
                 if not matches:
-                    instruction = (
-                        "That include found no active item. Use an exact id or a narrower find."
+                    notes.append(
+                        "An include found no item. Use an exact id or a narrower find."
                     )
                 else:
-                    instruction = (
-                        f"That include matches {len(matches)} active items. "
-                        "Choose one item or narrow the find."
+                    notes.append(
+                        "An include was not unique. Choose one item or narrow the find."
                     )
-                return Result(
-                    next="ask",
-                    status="needs_input",
-                    instruction=instruction,
-                    items=candidates,
-                )
-            assert matches[0] is not None
-            record = matches[0]
-            if all(existing.uuid != record.uuid for existing in resolved):
-                resolved.append(record)
-        return resolved
+                continue
+            for dependency in self._include_dependencies(matches[0]):
+                neighborhood.add(dependency, placement=True)
+        neighborhood.include_signals = list(dict.fromkeys(neighborhood.include_signals))
+        neighborhood.missing_ids = list(dict.fromkeys(neighborhood.missing_ids))[:10]
+        neighborhood.include_note = " ".join(dict.fromkeys(notes)) or None
 
     def _include_dependencies(self, record: Record) -> list[Record]:
-        """Return one included item and only its direct placement facts."""
+        """Return one included item, its anchors, and destination headings."""
         dependencies: list[Record] = []
 
         def add(item: Record | None) -> None:
@@ -678,7 +671,23 @@ class ThingsWorkspace:
         add(self._library.records.get(record.parent_uuid or ""))
         add(self._library.records.get(record.area_uuid or ""))
         add(self._library.records.get(record.heading_uuid or ""))
+        if record.kind == "project":
+            for heading in self._project_headings(record.uuid):
+                add(heading)
         return dependencies
+
+    def _project_headings(self, project_uuid: str) -> list[Record]:
+        return sorted(
+            (
+                item
+                for item in self._library.records.values()
+                if item.heading
+                and item.parent_uuid == project_uuid
+                and not item.trashed
+                and item.status == "open"
+            ),
+            key=lambda item: (item.sort_index, item.title, item.uuid),
+        )
 
     def _recurrence_read(self, call: ReadCall) -> Result:
         """Read one Task and verify its repeat template/copy relationship."""
@@ -852,73 +861,39 @@ class ThingsWorkspace:
             raise AssertionError("organize selector must identify a Project")
         assert project is not None
         source_records = self._library.project(project.id)
-        scope = project.id
-
-        # An exact Project organize read is also the one-read seam for a safe
-        # Project merge. Include every active destination Project and its Area
-        # anchor in the same bounded context. The compiler can then emit one
-        # exact, revision-checked batch without a second registry read.
-        destination_projects = [
-            item
-            for item in self._library.records.values()
-            if item.kind == "project"
-            and item.uuid != project.uuid
-            and item.is_open()
-            and not item.parent_uuid
-        ]
-        destination_projects.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
-        authority_records: list[Record] = []
-        for destination in destination_projects:
-            authority_records.append(destination)
-            if destination.area_uuid:
-                area = self._library.records.get(destination.area_uuid)
-                if area is not None and area.kind == "area" and area.is_open():
-                    authority_records.append(area)
-
-        records: list[Record] = []
-        seen: set[str] = set()
-        for record in [*source_records, *authority_records]:
-            if record.uuid not in seen:
-                seen.add(record.uuid)
-                records.append(record)
-        if len(records) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(records))
-        refs, by_id = self._context_refs(records)
-        context = self._create_context(call, refs, scope=scope)
+        neighborhood = _Neighborhood()
+        for record in source_records:
+            neighborhood.add(record)
+        self._neighborhood_include(neighborhood, call)
+        if len(neighborhood.records) > _CONTEXT_LIMIT:
+            return self._oversized_context(call, len(neighborhood.records))
+        refs, by_id = self._context_refs(neighborhood.records)
+        context = self._create_context(call, refs, scope=project.id)
         facts = [
             self._fact(
                 record,
                 full=False,
-                # Source layout facts stay compact. Destination Projects and
-                # their Areas expose the same authoritative revision that is
-                # already bound in the opaque context.
-                include_revision=record in authority_records,
-            ).model_copy(
-                update={"ref": by_id[record.id]}
-            )
-            for record in records
+                include_revision=record.uuid in neighborhood.placement_ids,
+            ).model_copy(update={"ref": by_id[record.id]})
+            for record in neighborhood.records
         ]
-        layouts = (
-            [self._project_layout(project, source_records, by_id)]
-            if project is not None
-            else []
+        instruction = (
+            "Use one organize draft with this context. Listed work can move; "
+            "unlisted work stays unchanged. Name new headings from the groups "
+            "the tasks already form. Include a destination Project to merge."
         )
+        if neighborhood.include_note:
+            instruction = f"{instruction} {neighborhood.include_note}"
         return Result(
             next="done",
             status="ok",
-            instruction=(
-                "Use one organize draft with this context. Listed work can move; "
-                "unlisted work stays unchanged. Name new headings from the groups "
-                "the tasks already form."
-            ),
+            instruction=instruction,
             items=facts,
-            layouts=layouts,
+            layouts=[self._project_layout(project, source_records, by_id)],
+            signals=neighborhood.include_signals,
             context=self._public_context(context),
-            scope_revision=(
-                self._project_scope_revision(project.uuid)
-                if project is not None
-                else self._area_scope_revision()
-            ),
+            scope_revision=self._project_scope_revision(project.uuid),
+            missing_ids=neighborhood.missing_ids,
         )
 
     def _context_detail_is_complete(self, item: Record) -> bool:
@@ -931,32 +906,6 @@ class ThingsWorkspace:
             and len(inherited) <= 40
             and len(linked) <= 40
         )
-
-    def _change_dependencies(self, target: Record) -> list[Record]:
-        records: list[Record] = []
-
-        def add(item: Record | None) -> None:
-            if item is not None and all(saved.uuid != item.uuid for saved in records):
-                records.append(item)
-
-        def add_place(item: Record) -> None:
-            add(self._library.records.get(item.parent_uuid or ""))
-            add(self._library.records.get(item.area_uuid or ""))
-            add(self._library.records.get(item.heading_uuid or ""))
-
-        add(target)
-        add_place(target)
-        if target.kind == "project":
-            for area in self._library.areas():
-                add(area)
-        template = self._library.records.get(template_uuid_of(target) or "")
-        if template is not None:
-            add(template)
-            add_place(template)
-        if target.recurrence.role == "template":
-            for candidate in self._library.recurrence_instances(target.uuid):
-                add(candidate)
-        return records
 
     def _context_refs(
         self, records: list[Record]
@@ -1263,6 +1212,12 @@ class ThingsWorkspace:
                 compile_call = call.model_copy(
                     update={"scope_revision": self._area_scope_revision()}
                 )
+        elif call.scope_revision is None and any(
+            entry.exact_id.startswith("area:") for entry in context.refs
+        ):
+            compile_call = call.model_copy(
+                update={"scope_revision": self._area_scope_revision()}
+            )
         try:
             return self._contextual_compiler.compile(
                 compile_call, context, self._library
@@ -1388,12 +1343,14 @@ class ThingsWorkspace:
             )
         return []
 
-    def _search(self, text: str, within: Record | None) -> list[Record]:
+    def _search(
+        self, text: str, within: Record | None, *, closed: bool = False
+    ) -> list[Record]:
         needle = _normalize_search_text(text)
         items = [
             item
             for item in self._library.records.values()
-            if self._is_searchable(item)
+            if self._is_searchable(item, closed=closed)
             and self._search_item(item, needle)
         ]
         if within is not None:
@@ -1453,9 +1410,11 @@ class ThingsWorkspace:
         return False
 
     @staticmethod
-    def _is_searchable(item: Record) -> bool:
-        """Search active work, including headings that can be renamed."""
+    def _is_searchable(item: Record, *, closed: bool = False) -> bool:
+        """Search active work, or any record when ending or restoring work."""
 
+        if closed:
+            return True
         return (
             item.status == "open"
             and not item.trashed
@@ -1498,13 +1457,12 @@ class ThingsWorkspace:
         extra_truncated = extra_truncated or (
             view == "audit" and self._audit_sections_truncated(facts)
         )
-        empty = (
-            "Nothing on Today. Search with find and one title token."
-            if view == "today"
-            else "No native-state conflicts are visible."
-            if view == "diagnostics"
-            else "No matching work is visible. Search with find and one title token."
-        )
+        empty = {
+            "today": "Nothing on Today.",
+            "week": "Nothing on the week.",
+            "inbox": "Inbox is empty.",
+            "diagnostics": "No native-state conflicts are visible.",
+        }.get(view or "", "No matching work is visible. Search with find and one title token.")
         visible = bool(facts or result_signals)
         result = Result(
             next="done",
@@ -1528,7 +1486,7 @@ class ThingsWorkspace:
                 view=view,
                 detail=detail,
             )
-        return result
+        return self._follow_cursor(result)
 
     def _continue(self, cursor: str, limit: int) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -1622,7 +1580,7 @@ class ThingsWorkspace:
                 view=saved.view,
                 detail=saved.detail,
             )
-        return result
+        return self._follow_cursor(result)
 
     def _encode_cursor(
         self,
@@ -1663,14 +1621,16 @@ class ThingsWorkspace:
                 revision=expected,
                 expires_at=self._clock() + timedelta(minutes=10),
             )
-        return Result(
-            next="done",
-            status="ok",
-            instruction="Send this scope_revision as tags_revision with change_tags. Use exact tag IDs.",
-            tags=page_rows,
-            truncated=cursor is not None,
-            cursor=cursor,
-            scope_revision=expected,
+        return self._follow_cursor(
+            Result(
+                next="done",
+                status="ok",
+                instruction="Send this scope_revision as tags_revision with change_tags. Use exact tag IDs.",
+                tags=page_rows,
+                truncated=cursor is not None,
+                cursor=cursor,
+                scope_revision=expected,
+            )
         )
 
     def _detail_page(
@@ -1727,37 +1687,49 @@ class ThingsWorkspace:
                 revision=revision,
                 expires_at=self._clock() + timedelta(minutes=10),
             )
-        return Result(
-            next="done",
-            status="ok",
-            instruction=(
-                "Use this note chunk and continue the exact item."
-                if notes_remaining
-                else "Use these current facts."
-                if row_offset == 0 and note_offset == 0
-                else "Continue this exact item."
-            ),
-            items=[
-                self._fact(
-                    item,
-                    full=True,
-                    include_notes=include_notes,
-                    note_offset=note_offset,
-                    checklist=checklist_page,
-                    direct_tags=direct_page,
-                    inherited_tags=inherited_page,
-                    checklist_truncated=next_row_offset < len(checklist),
-                    tags_truncated=bool(direct or inherited)
-                    and next_row_offset < linked_start,
-                    notes_truncated=notes_remaining,
-                    linked_item_ids=linked_page,
-                    links_truncated=next_row_offset < linked_start + len(linked),
-                )
-            ],
-            scope_revision=revision,
-            cursor=next_cursor,
-            truncated=next_cursor is not None,
+        return self._follow_cursor(
+            Result(
+                next="done",
+                status="ok",
+                instruction=(
+                    "Use this note chunk and continue the exact item."
+                    if notes_remaining
+                    else "Use these current facts."
+                    if row_offset == 0 and note_offset == 0
+                    else "Continue this exact item."
+                ),
+                items=[
+                    self._fact(
+                        item,
+                        full=True,
+                        include_notes=include_notes,
+                        note_offset=note_offset,
+                        checklist=checklist_page,
+                        direct_tags=direct_page,
+                        inherited_tags=inherited_page,
+                        checklist_truncated=next_row_offset < len(checklist),
+                        tags_truncated=bool(direct or inherited)
+                        and next_row_offset < linked_start,
+                        notes_truncated=notes_remaining,
+                        linked_item_ids=linked_page,
+                        links_truncated=next_row_offset < linked_start + len(linked),
+                    )
+                ],
+                scope_revision=revision,
+                cursor=next_cursor,
+                truncated=next_cursor is not None,
+            )
         )
+
+    @staticmethod
+    def _follow_cursor(result: Result) -> Result:
+        """Keep next honest: a cursor means the model should read again."""
+        if result.cursor is None:
+            return result
+        instruction = result.instruction
+        if "cursor" not in instruction.casefold():
+            instruction = instruction.rstrip(".") + ". Continue this cursor for the rest."
+        return result.model_copy(update={"next": "read", "instruction": instruction})
 
     def _prune_cursors(self) -> None:
         now = self._clock()
@@ -1791,10 +1763,9 @@ class ThingsWorkspace:
         if view == "today":
             groups = [
                 ("overdue", "Overdue"),
-                ("today", "Today"),
                 ("evening", "Evening"),
+                ("today", "Today"),
                 ("waiting", "Waiting"),
-                ("inbox", "Inbox"),
             ]
             sections = []
             used: set[str] = set()
@@ -2034,6 +2005,11 @@ class ThingsWorkspace:
             links_truncated = links_truncated or len(computed_links) > 40
         else:
             linked_ids = linked_item_ids
+        rule = item.recurrence
+        if item.recurrence.role == "instance":
+            template_record = self._library.records.get(template_uuid_of(item) or "")
+            if template_record is not None and template_record.recurrence.rule:
+                rule = template_record.recurrence
         recurrence = RecurrenceFact(
             kind=self._recurrence_kind(item),
             template_id=(
@@ -2042,15 +2018,15 @@ class ThingsWorkspace:
                 else None
             ),
             mode=(
-                cast(RepeatMode, item.recurrence.repeat_type)
-                if item.recurrence.repeat_type in {"fixed", "after_completion"}
+                cast(RepeatMode, rule.repeat_type)
+                if rule.repeat_type in {"fixed", "after_completion"}
                 else None
             ),
-            unit=item.recurrence.unit,
-            interval=item.recurrence.interval,
+            unit=rule.unit,
+            interval=rule.interval,
             weekdays=[
                 cast(Weekday, _WEEKDAY_NAMES[code])
-                for code in item.recurrence.weekday_codes
+                for code in rule.weekday_codes
                 if code in _WEEKDAY_NAMES
             ],
             linked_item_ids=linked_ids[:40],
@@ -2713,6 +2689,9 @@ class ThingsWorkspace:
                 "checklist_change",
                 "checklist_remove",
                 "checklist_order",
+                "lifecycle",
+                "trash",
+                "delete_contents",
             }
             if change.model_fields_set - safe_template_fields:
                 raise _Abort(
@@ -3098,6 +3077,24 @@ class ThingsWorkspace:
         warnings = context.warnings
         lifecycle = change.lifecycle or ("trash" if change.trash else None)
         if item.heading:
+            if lifecycle == "trash":
+                writes.append(Write(action="trash", uuid=item.uuid, kind="task"))
+                summary.append(f"Trash heading: {item.title}")
+                warnings.append(
+                    f"{item.title} will move to Trash and can be restored in Things."
+                )
+                context.risky = True
+                return True
+            if lifecycle == "restore":
+                if not item.trashed:
+                    raise _Abort(self._rejected(f"{item.title} is not in Trash."))
+                writes.append(Write(action="restore", uuid=item.uuid, kind="task"))
+                summary.append(f"Restore heading: {item.title}")
+                warnings.append(
+                    f"{item.title} will return to its prior Things location."
+                )
+                context.risky = True
+                return True
             if "into" in change.model_fields_set:
                 # A merge moves headings with their source Project. Their
                 # assigned Tasks keep the heading UUID, so moving the heading
@@ -3181,13 +3178,30 @@ class ThingsWorkspace:
             warnings.append(
                 f"{item.title} will move to Trash and can be restored in Things."
             )
-            if item.kind == "project":
-                context.project_trash_sources.append(item.uuid)
         elif lifecycle == "restore":
             if not item.trashed:
                 raise _Abort(self._rejected(f"{item.title} is not in Trash."))
             writes.append(Write(action="restore", uuid=item.uuid, kind=item.kind))
-            summary.append(f"Restore {item.kind}: {item.title}")
+            restored = 0
+            if item.kind == "project":
+                for descendant in reversed(self._project_descendants(item.uuid)):
+                    if not descendant.trashed:
+                        continue
+                    preconditions[descendant.id] = self._revision(descendant)
+                    writes.append(
+                        Write(
+                            action="restore",
+                            uuid=descendant.uuid,
+                            kind=descendant.kind,
+                        )
+                    )
+                    restored += 1
+            if restored:
+                summary.append(
+                    f"Restore {item.kind}: {item.title} and {restored} contained records"
+                )
+            else:
+                summary.append(f"Restore {item.kind}: {item.title}")
             warnings.append(f"{item.title} will return to its prior Things location.")
         else:
             if not item.trashed:
@@ -3479,7 +3493,7 @@ class ThingsWorkspace:
         if not context.writes:
             raise _Abort(self._rejected("The request did not produce a change."))
         self._validate_project_destinations(context)
-        self._validate_project_trash_batches(context)
+        self._plan_project_teardown(context)
         if any(write.action == "delete_area" for write in context.writes):
             expected_scope = self._area_scope_revision()
             if call.scope_revision != expected_scope:
@@ -3659,91 +3673,57 @@ class ThingsWorkspace:
                     )
                 )
 
-    def _validate_project_trash_batches(
-        self, context: _PreparationContext
-    ) -> None:
-        """Require a grouped project trash to leave no direct child behind.
-
-        A plain project-trash request keeps its historical behavior.  Once a
-        batch moves one child of that project, however, the planner treats the
-        source trash as the final step of one operation.  It checks the
-        projected parent state before approval, so a partial move cannot
-        produce a hidden or orphaned source project.
-        """
-        for source_uuid in dict.fromkeys(context.project_trash_sources):
-            source = self._library.records.get(source_uuid)
-            if source is None or source.kind != "project":
+    def _plan_project_teardown(self, context: _PreparationContext) -> None:
+        """Trash remaining descendants when a Project is trashed in this batch."""
+        leaving = {
+            write.uuid
+            for write in context.writes
+            if write.action in {"update", "move"}
+            and (write.inbox or write.anytime or write.into_uuid is not None)
+        }
+        already = {
+            write.uuid
+            for write in context.writes
+            if write.action in {"trash", "restore", "permanent_delete"}
+        }
+        insertions: list[tuple[int, list[Write]]] = []
+        for index, write in enumerate(context.writes):
+            if write.action != "trash":
                 continue
-            children = sorted(
-                (
-                    item
-                    for item in self._library.records.values()
-                    if item.parent_uuid == source_uuid
-                ),
-                key=lambda item: (item.sort_index, item.uuid),
-            )
-            if not children:
+            item = self._library.records.get(write.uuid)
+            if item is None or item.kind != "project":
                 continue
-
-            projected_parents = {
-                item.uuid: item.parent_uuid for item in children
-            }
-            hidden_after_move: set[str] = set()
-            for write in context.writes:
-                if write.uuid not in projected_parents:
+            torn: list[Write] = []
+            for descendant in self._project_descendants(item.uuid):
+                if (
+                    descendant.uuid in leaving
+                    or descendant.uuid in already
+                    or descendant.trashed
+                ):
                     continue
-                if write.action not in {"update", "move"}:
-                    continue
-                if write.into_kind == "project":
-                    projected_parents[write.uuid] = write.into_uuid
-                elif write.into_kind == "area":
-                    projected_parents[write.uuid] = None
-                elif write.inbox or write.anytime:
-                    projected_parents[write.uuid] = None
-                elif write.action == "move" and write.into_uuid is None:
-                    projected_parents[write.uuid] = None
-
-            moved = [
-                child
-                for child in children
-                if projected_parents[child.uuid] != source_uuid
-            ]
-            if not moved:
-                continue
-
-            hidden_after_move.update(
-                child.uuid
-                for child in children
-                if child.trashed
-                or child.status != "open"
-                or child.recurrence.role == "template"
-                or (child.heading and not context.allow_project_heading_moves)
-                # Headings are visible direct children and can move with their
-                # assigned Tasks during a Project merge.
-            )
-            if hidden_after_move:
-                raise _Abort(
-                    self._rejected(
-                        f"Cannot trash {source.title} with hidden, completed, "
-                        "or heading children. Read the full Project and move "
-                        "every active child first."
+                context.preconditions[descendant.id] = self._revision(descendant)
+                torn.append(
+                    Write(
+                        action="trash",
+                        uuid=descendant.uuid,
+                        kind=descendant.kind,
                     )
                 )
-            if len(moved) != len(children):
-                raise _Abort(
-                    self._needs_input(
-                        f"{source.title} still contains work. Move every child "
-                        "in the same batch before trashing the Project."
-                    )
-                )
+                already.add(descendant.uuid)
+            if not torn:
+                continue
+            insertions.append((index, torn))
             context.summary.append(
-                f"Move {len(moved)} children out before trashing Project: "
-                f"{source.title}"
+                f"Trash {item.kind}: {item.title} and {len(torn)} contained records"
             )
             context.warnings.append(
-                "The source Project is checked empty after all child moves."
+                f"{len(torn)} contained records will also move to Trash."
             )
-            context.risky = True
+        offset = 0
+        for index, torn in insertions:
+            at = index + offset
+            context.writes[at:at] = torn
+            offset += len(torn)
 
     def _preparation_context(
         self, call: CommitCall, *, contextual_commit: bool = False
@@ -4764,7 +4744,12 @@ class ThingsWorkspace:
         move_titles: dict[str, str] = {}
         for write in prepared.writes:
             item = self._library.records.get(write.uuid)
-            item_id = item.id if item is not None else f"{write.kind}:{write.uuid}"
+            if write.action in {"delete_tag", "rename_tag", "reparent_tag", "ensure_tag"}:
+                item_id = None
+            elif item is not None:
+                item_id = item.id
+            else:
+                item_id = f"{write.kind}:{write.uuid}"
             if write.action == "create":
                 add(f"create_{write.kind}", write.title or write.kind, item_id)
             elif write.action == "trash":
@@ -5315,14 +5300,18 @@ class ThingsWorkspace:
             and template.recurrence.rule is not None
         )
 
-    @staticmethod
-    def _recurrence_kind(item: Record) -> RecurrenceKind:
+    def _recurrence_kind(self, item: Record) -> RecurrenceKind:
         if item.recurrence.role == "template":
             return "template"
         if item.recurrence.role == "instance":
-            if item.recurrence.repeat_type == "fixed":
+            repeat_type = item.recurrence.repeat_type
+            if repeat_type not in {"fixed", "after_completion"}:
+                template = self._library.records.get(template_uuid_of(item) or "")
+                if template is not None:
+                    repeat_type = template.recurrence.repeat_type
+            if repeat_type == "fixed":
                 return "fixed_instance"
-            if item.recurrence.repeat_type == "after_completion":
+            if repeat_type == "after_completion":
                 return "after_completion_instance"
             return "unknown"
         return "none"

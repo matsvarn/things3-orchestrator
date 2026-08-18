@@ -273,8 +273,8 @@ class ReadCall(StrictModel):
                 raise ValueError("from must not be after to")
         if self.purpose == "change" and self.id is None and self.find is None:
             raise ValueError("change purpose needs an exact id or unique find")
-        if self.include and self.purpose != "change":
-            raise ValueError("include is only available for change purpose")
+        if self.include and self.purpose not in {"change", "organize"}:
+            raise ValueError("include is only available for change or organize")
         if self.purpose == "recurrence" and self.id is None:
             raise ValueError("recurrence purpose needs an exact Task id")
         if self.purpose == "recurrence" and any(
@@ -710,8 +710,10 @@ class ChangeEntry(StrictModel):
             allowed = {"id", "if_revision", "ref", "title", "after", "lifecycle"}
             if self.model_fields_set - allowed:
                 raise ValueError("a heading can only rename, reorder, or delete")
-            if self.lifecycle not in {None, "delete_permanently"}:
-                raise ValueError("a heading supports only permanent deletion")
+            if self.lifecycle not in {None, "trash", "restore", "delete_permanently"}:
+                raise ValueError(
+                    "a heading supports trash, restore, or permanent deletion"
+                )
         if self.repeat_interval is not None:
             allowed = {"id", "if_revision", "ref", "repeat_interval"}
             if self.model_fields_set - allowed:
@@ -814,8 +816,6 @@ class OrganizeSection(StrictModel):
         if self.heading_key is None and self.heading_ref is None:
             if self.heading_title is not None:
                 raise ValueError("heading_title needs an existing or new heading")
-            if not self.task_refs:
-                raise ValueError("an unheaded section needs tasks")
         return self
 
 
@@ -2112,6 +2112,14 @@ _ITEM_SUMMARY: dict[str, Any] = {
         "kind": {"enum": ["task", "project", "area", "heading"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
+        "into_id": _EXACT_ITEM,
+        "heading_id": {**_STRING, "pattern": _HEADING_ID},
+        "start": {"type": "string", "maxLength": 32, "pattern": START_PATTERN},
+        "signals": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "maxLength": 1600},
+        },
     },
 }
 _CONTROL_PROPERTIES: dict[str, Any] = {
@@ -2181,6 +2189,7 @@ READ_OUT: dict[str, Any] = {
         "cursor": _STRING,
         "missing_ids": RESULT_OUT["properties"]["missing_ids"],
         "truncated": {"type": "boolean"},
+        "recovery": _RECOVERY,
     },
 }
 
@@ -2216,14 +2225,14 @@ APPROVE_OUT: dict[str, Any] = {
 READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
-    "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. fields is ids-only and selects notes, checklist, tags, and/or recurrence links; omit it for all four, or send [] for core facts only. Recurrence kind stays on the item. "
+    "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change or organize. fields is ids-only and selects notes, checklist, tags, and/or recurrence links; omit it for all four, or send [] for core facts only. Recurrence kind stays on the item. "
     "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags and put only direct_tag_ids and inherited_tag_ids on items; join those IDs to the registry for titles and parents. Every item first gets a 400-character note prefix, then remaining budget is spent in request order on checklist titles, tag ids and titles, then the rest of each note. The complete structured result stays under 256 KB. If still large, parent graphs go first, then extra notes, checklists, recurrence links, then tag membership; if core metadata still overflows, fewer items return with a cursor. truncated_fields and signals name omitted notes, checklist, tags, or recurrence; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
     "remind_at, recurrence, order, today_order, and signals. Compact reviews add has_notes and has_checklist when those exist. "
-    "For a Project purpose change, the context also includes short refs for active Areas. "
-    "For a Task or Project after anchor, or a heading order anchor, outside the target's returned facts, add up to 40 compact include lookups to the same change read. Use today_after for a Task that is on Today now or is moved to Today earlier in the same commit. Each include uses one exact id or one unique active find; use within only with find. An ambiguous or missing include returns candidates and creates no context. "
+    "A change or organize read returns the local neighborhood, not the whole registry. Include a destination Project or Area to move or merge. "
+    "For a Task or Project after anchor, or a heading order anchor, outside the target's returned facts, add up to 40 compact include lookups to the same change or organize read. Use today_after for a Task that is on Today now or is moved to Today earlier in the same commit. Each include uses one exact id or one unique active find; use within only with find. An unresolved include stays out of the context and does not block the target. "
     "Use the returned context_id and item ref in change; use an Area ref as into for a Project move. Do not send id or if_revision with ref. "
     "Review reads can use returned IDs and revisions for legacy changes. Follow next and instruction."
 )
@@ -2234,11 +2243,11 @@ COMMIT_DESC = (
     "A complete repeat rule on an exact ordinary Task keeps it as the current copy and creates its future template. "
     "Batch requested metadata, schedule, placement, order, and checklist changes into that conversion; both copies get the desired future content. "
     "An ensured tag key can be used in tag_ids or tags_add in the same commit. Define local refs before use and parent tags before children. Use start=evening for evening work. "
-    "Use organize.delete_headings to delete Project headings; never use lifecycle for headings. Use change_tags.delete_permanently for tag deletion. "
+    "Use organize.delete_headings to delete Project headings. lifecycle=trash on a heading or Project is recoverable teardown. Use change_tags.delete_permanently for tag deletion. "
     "For a context change, send context_id and ref only; ref is authoritative and the context supplies the revision. "
     "For a Project move, send the Project ref and the destination Area ref as into; do not use an organize draft. "
-    "Ordinary Task or Project Trash uses only lifecycle='trash'. delete_contents is only for permanent Project deletion with lifecycle='delete_permanently'. remove_if_empty and move_contents_to are Area-only. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. Permanent deletion of a non-empty Project additionally requires a complete Project read, lifecycle='delete_permanently' with delete_contents=true, and approval. "
-    "For an atomic Project merge, read one complete Project first. In one approved commit, move every active visible direct child to an active destination Project, then set the source Project to lifecycle='trash' only. A heading can use into only to follow its source Project during that atomic merge; do not move a heading into a different Project by itself. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup. "
+    "Ordinary Task or Project Trash uses only lifecycle='trash'. Project trash also moves remaining descendants to Trash. delete_contents is only for permanent Project deletion with lifecycle='delete_permanently'. remove_if_empty and move_contents_to are Area-only. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. Permanent deletion of a non-empty Project additionally requires a complete Project read, lifecycle='delete_permanently' with delete_contents=true, and approval. "
+    "For a Project merge, organize the source and include the destination. Move the children you want to keep, then set the source Project to lifecycle='trash'. Remaining descendants go to Trash with it. A heading can use into only to follow its source Project during that merge; do not move a heading into a different Project by itself. "
     "If you also send id and if_revision, they must exactly match the context. After pending, retry the exact payload. "
     "If the client loses the response or the outcome is pending or unknown, retry the exact same intent_id and byte-equivalent semantic payload. "
     "Do not read first, add scope_revision, or rebuild. Use a fresh read only for stale or expired context recovery. "

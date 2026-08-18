@@ -129,7 +129,13 @@ def test_task_change_context_moves_across_projects_in_one_commit(
         [source, destination, source_heading, destination_heading, task]
     )
 
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=task.id,
+            include=[{"id": destination.id}],
+        )
+    )
 
     assert read.status == "ok"
     assert read.context and read.context.complete
@@ -202,26 +208,25 @@ def test_task_change_include_binds_named_cross_project_after_anchor() -> None:
     assert library.records[target.uuid].sort_index > library.records[anchor.uuid].sort_index
 
 
-def test_change_include_missing_or_ambiguous_returns_candidates_without_context() -> None:
+def test_change_include_missing_or_ambiguous_keeps_the_target_context() -> None:
     project = Record(uuid="project", kind="project", title="Work")
     target = Record(uuid="target", kind="task", title="Target", parent_uuid=project.uuid)
     first = Record(uuid="first", kind="task", title="Same", parent_uuid=project.uuid)
     second = Record(uuid="second", kind="task", title="Same", parent_uuid=project.uuid)
     workspace, _library, _store = contextual_workspace([project, target, first, second])
 
-    ambiguous = workspace.read(
-        ReadCall(purpose="change", id=target.id, include=[{"find": "Same"}])
+    result = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=target.id,
+            include=[{"find": "Same"}, {"find": "Absent"}],
+        )
     )
-    assert ambiguous.status == "needs_input"
-    assert ambiguous.context is None
-    assert {item.id for item in ambiguous.items} == {first.id, second.id}
-
-    missing = workspace.read(
-        ReadCall(purpose="change", id=target.id, include=[{"find": "Absent"}])
-    )
-    assert missing.status == "needs_input"
-    assert missing.context is None
-    assert missing.items == []
+    assert result.status == "ok"
+    assert result.context is not None
+    assert "include_unresolved" in result.signals
+    assert target.id in {item.id for item in result.items}
+    assert first.id not in {item.id for item in result.items}
 
 
 def test_task_change_include_today_after_anchor_is_revision_checked() -> None:
@@ -297,9 +302,9 @@ def test_change_include_uses_combined_context_bound() -> None:
         ReadCall(purpose="change", id=target.id, include=[{"id": anchor.id}])
     )
 
-    assert result.status == "needs_input"
-    assert result.context is None
-    assert result.recovery and result.recovery.code == "context_incomplete"
+    assert result.status == "ok"
+    assert result.context is not None
+    assert {item.id for item in result.items} >= {target.id, projects[0].id, anchor.id, projects[1].id}
 
 
 def test_task_change_rejects_an_invalid_destination_kind_without_a_write() -> None:
@@ -324,17 +329,24 @@ def test_task_change_rejects_an_invalid_destination_kind_without_a_write() -> No
 
 
 def test_task_change_context_overflow_returns_bounded_recovery() -> None:
-    projects = [
-        Record(uuid=f"project-{index}", kind="project", title=f"Project {index}")
+    project = Record(uuid="home", kind="project", title="Home")
+    headings = [
+        Record(
+            uuid=f"heading-{index}",
+            kind="task",
+            title=f"Heading {index}",
+            parent_uuid=project.uuid,
+            heading=True,
+        )
         for index in range(120)
     ]
     task = Record(
         uuid="overflow-task",
         kind="task",
         title="Overflow",
-        parent_uuid=projects[0].uuid,
+        parent_uuid=project.uuid,
     )
-    workspace, _library, _store = contextual_workspace([*projects, task])
+    workspace, _library, _store = contextual_workspace([project, *headings, task])
 
     result = workspace.read(ReadCall(purpose="change", id=task.id))
 
@@ -366,7 +378,13 @@ def test_task_change_rejects_a_stale_destination_heading_without_a_write() -> No
     workspace, library, _store = contextual_workspace(
         [source, destination, destination_heading, task]
     )
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=task.id,
+            include=[{"id": destination.id}],
+        )
+    )
     assert read.context
     refs = {item.id: item.ref for item in read.items}
 
@@ -401,7 +419,13 @@ def test_project_change_context_moves_to_an_area_in_two_calls() -> None:
         [current, destination, project]
     )
 
-    read = workspace.read(ReadCall(purpose="change", find="Website"))
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            find="Website",
+            include=[{"id": destination.id}],
+        )
+    )
 
     assert read.status == "ok"
     assert read.context and read.context.complete
@@ -452,15 +476,14 @@ def test_project_change_rejects_non_area_destination_ref_without_write() -> None
     assert library.records[project.uuid].area_uuid is None
 
 
-def test_project_change_area_registry_overflow_returns_safe_recovery() -> None:
-    project = Record(uuid="project", kind="project", title="Website")
+def test_area_change_registry_overflow_returns_safe_recovery() -> None:
     areas = [
         Record(uuid=f"area-{index}", kind="area", title=f"Area {index}")
-        for index in range(120)
+        for index in range(121)
     ]
-    workspace, _library, _store = contextual_workspace([project, *areas])
+    workspace, _library, _store = contextual_workspace(areas)
 
-    result = workspace.read(ReadCall(purpose="change", id=project.id))
+    result = workspace.read(ReadCall(purpose="change", id=areas[0].id))
 
     assert result.status == "needs_input"
     assert result.next == "read"
@@ -469,7 +492,7 @@ def test_project_change_area_registry_overflow_returns_safe_recovery() -> None:
     assert result.recovery and result.recovery.code == "context_incomplete"
     assert result.recovery.retry == "rebuild"
     assert result.recovery.read == {
-        "id": project.id,
+        "id": areas[0].id,
         "limit": 40,
     }
 
@@ -630,7 +653,13 @@ def test_organize_read_accepts_exact_project_id_and_exposes_merge_registry() -> 
         [source_area, destination_area, source, destination, task]
     )
 
-    result = workspace.read(ReadCall(purpose="organize", id=source.id))
+    result = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=source.id,
+            include=[{"id": destination.id}],
+        )
+    )
 
     assert result.status == "ok"
     assert result.context and result.context.complete
@@ -668,7 +697,13 @@ def test_one_read_project_merge_moves_children_and_trashes_source_after_approval
     workspace, library, _store = contextual_workspace(
         [destination_area, source, destination, heading, task]
     )
-    read = workspace.read(ReadCall(purpose="organize", id=source.id))
+    read = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=source.id,
+            include=[{"id": destination.id}],
+        )
+    )
     assert read.context
     refs = {item.id: item.ref for item in read.items}
 
@@ -705,7 +740,13 @@ def test_heading_into_another_project_is_rejected_without_merge() -> None:
         heading=True,
     )
     workspace, library, _store = contextual_workspace([source, destination, heading])
-    read = workspace.read(ReadCall(purpose="organize", id=source.id))
+    read = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=source.id,
+            include=[{"id": destination.id}],
+        )
+    )
     assert read.context
     refs = {item.id: item.ref for item in read.items}
 
@@ -1084,7 +1125,13 @@ def test_context_stale_create_destination_returns_recovery_without_write() -> No
 
     # A system read is intentionally legacy. Use a complete project-change
     # context, which carries the Area registry needed by a Project create.
-    read = workspace.read(ReadCall(purpose="change", id=project.id))
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=project.id,
+            include=[{"id": area.id}],
+        )
+    )
     assert read.context
     refs = {item.id: item.ref for item in read.items}
     assert refs[area.id]

@@ -739,7 +739,11 @@ def run() -> dict[str, bool]:
                 ]
             )
             merge_read = module.read(
-                ReadCall(purpose="organize", id=f"project:{merge_source}")
+                ReadCall(
+                    purpose="organize",
+                    id=f"project:{merge_source}",
+                    include=[{"id": f"project:{merge_destination}"}],
+                )
             )
             if merge_read.status != "ok" or merge_read.context is None:
                 raise RuntimeError(f"live Project merge read failed: {merge_read}")
@@ -898,7 +902,11 @@ def run() -> dict[str, bool]:
                 )
 
             project_change = module.read(
-                ReadCall(purpose="change", id=f"project:{movable_project.uuid}")
+                ReadCall(
+                    purpose="change",
+                    id=f"project:{movable_project.uuid}",
+                    include=[{"id": f"area:{destination_area.uuid}"}],
+                )
             )
             if project_change.status != "ok" or project_change.context is None:
                 raise RuntimeError(

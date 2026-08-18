@@ -16,8 +16,8 @@ When a change needs approval, ask one short question in the owner's words. Keep 
 
 Read once with `purpose=organize`. Send one editable draft with ordered sections and `unlisted=keep`. Batch related normal changes with the draft. Use `context refs`. If structured recovery asks for new context, read and rebuild once. If a response is lost or a result is pending or unknown, repeat the same request with no new facts. Use structured recovery only for stale or expired context.
 
-For an atomic merge, move every active visible direct child to an active destination, then set the source Project to `lifecycle=trash` only in one commit. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup.
+For a merge, organize the source and include the destination. Move the children you want to keep, then set the source Project to `lifecycle=trash`. Remaining descendants go to Trash with it.
 
 ## Delete
 
-Use `lifecycle=trash` only for an ordinary Task or Project delete because it is recoverable. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. For a non-empty Project, read it completely, use `lifecycle=delete_permanently` with `delete_contents=true`, then approve the plan. Permanently delete only named Trash items.
+Use `lifecycle=trash` only for an ordinary Task or Project delete because it is recoverable. Project trash also moves remaining descendants to Trash; restore the Project to bring that subtree back. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. For a non-empty Project, read it completely, use `lifecycle=delete_permanently` with `delete_contents=true`, then approve the plan. Permanently delete only named Trash items.

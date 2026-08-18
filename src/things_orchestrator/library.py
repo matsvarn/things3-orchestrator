@@ -425,12 +425,10 @@ class MemoryLibrary:
                 issue = 0
             elif item.tonight:
                 issue = 1
-            elif item.start == today and not item.inbox:
+            elif item.start == today:
                 issue = 2
-            elif item.inbox:
-                issue = 3
             elif waiting is not None and waiting in item.tag_uuids:
-                issue = 4
+                issue = 3
             else:
                 continue
             ranked.append((issue, item))

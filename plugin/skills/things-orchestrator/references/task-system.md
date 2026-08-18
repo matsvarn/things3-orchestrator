@@ -7,7 +7,7 @@ Use the owner's words and natural Things terms. Preserve the owner's dates and i
 - Task: one clear action. Start with the visible action and name the object.
 - Things checklist: small known steps that share the Task's finish.
 - Project: several actions that finish separately. Add only the next one to three useful actions unless the owner supplied a plan.
-- Headings: scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`; never `lifecycle`. Deleting it keeps its Tasks in the Project.
+- Headings: scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
 - Markdown notes: context, links, plans, and finish criteria. Keep executable steps in checklist rows or Project Tasks.
 - Area: an ongoing responsibility without a finish.
 - Start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.

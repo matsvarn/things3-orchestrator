@@ -76,8 +76,8 @@ _FIELD_REPAIR = {
     ),
     "ids": "ids is a review-only list of 1 to 10 unique exact item IDs",
     "include": (
-        "include is only for purpose=change, must be unique, and accepts "
-        "up to 40 compact lookups"
+        "include is only for purpose=change or organize, must be unique, "
+        "and accepts up to 40 compact lookups"
     ),
 }
 
@@ -322,7 +322,17 @@ def _domain_result(
         summary = summary[:297] + "..."
     structured = result.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
     if not full_items and "items" in structured:
-        summary_fields = {"id", "revision", "kind", "title", "status"}
+        summary_fields = {
+            "id",
+            "revision",
+            "kind",
+            "title",
+            "status",
+            "into_id",
+            "heading_id",
+            "start",
+            "signals",
+        }
         structured["items"] = [
             {key: value for key, value in item.items() if key in summary_fields}
             for item in structured["items"]

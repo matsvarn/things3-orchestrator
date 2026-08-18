@@ -202,7 +202,7 @@ def test_skill_teaches_the_proven_write_forms() -> None:
         "rich notes",
         "lifecycle=trash",
         "ordinary task or project",
-        "every active visible direct child",
+        "remaining descendants go to trash with it",
     ):
         assert capability in lower
 
@@ -211,11 +211,9 @@ def test_skill_teaches_safe_delete_and_merge_forms() -> None:
     lower = _skill_text().lower()
 
     assert "lifecycle=trash` only for an ordinary task or project delete" in lower
-    assert "set the source project to `lifecycle=trash` only" in lower
-    assert "every active visible direct child" in lower
-    assert "if completed, trashed, template, or hidden children exist" in lower
-    assert "do not use atomic merge" in lower
-    assert "choose separate safe cleanup" in lower
+    assert "set the source project to `lifecycle=trash`" in lower
+    assert "remaining descendants go to trash with it" in lower
+    assert "include the destination" in lower
     assert "every permanent task or project deletion target must already be in trash" in lower
     assert "including tasks and empty projects" in lower
     assert "for a non-empty project, read it completely" in lower
@@ -268,7 +266,7 @@ def test_skill_teaches_weak_model_selector_and_dependency_rules() -> None:
         "parent tags before children",
         "start=evening",
         "delete_headings",
-        "never `lifecycle`",
+        "lifecycle=trash` is recoverable teardown",
     ):
         assert instruction in lower
 
