@@ -4287,6 +4287,15 @@ def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
 
 def test_start_null_with_remind_at_is_rejected_before_a_write() -> None:
     task = Record(uuid="later", kind="task", title="Later", someday=True)
+    scheduled = Record(
+        uuid="dated",
+        kind="task",
+        title="Dated",
+        start=NOW.date(),
+        remind="09:00",
+    )
+    module = workspace([task, scheduled])
+    before = (task.someday, task.start, task.remind, scheduled.start, scheduled.remind)
 
     with pytest.raises(Exception, match="start=null cannot combine with remind_at"):
         CommitCall.model_validate(
@@ -4295,15 +4304,35 @@ def test_start_null_with_remind_at_is_rejected_before_a_write() -> None:
                 "change": [
                     {
                         "id": task.id,
-                        "if_revision": "r_ignored",
+                        "if_revision": detail(module, task.id).revision,
                         "start": None,
                         "remind_at": "2026-08-20T09:00:00+00:00",
                     }
                 ],
             }
         )
-    assert task.someday is True
-    assert task.start is None
+    with pytest.raises(Exception, match="start=null cannot combine with remind_at"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "clear-and-remind-003",
+                "change": [
+                    {
+                        "id": scheduled.id,
+                        "if_revision": detail(module, scheduled.id).revision,
+                        "start": None,
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    assert (task.someday, task.start, task.remind, scheduled.start, scheduled.remind) == (
+        True,
+        None,
+        None,
+        NOW.date(),
+        "09:00",
+    )
+    assert before == (task.someday, task.start, task.remind, scheduled.start, scheduled.remind)
 
 
 def test_bulk_ids_return_full_exact_facts() -> None:

@@ -127,6 +127,13 @@ def _duplicates(values: Sequence[Hashable]) -> bool:
     return len(values) != len(set(values))
 
 
+def _reject_cleared_start_with_reminder(
+    fields_set: set[str], start: str | None, remind_at: str | None
+) -> None:
+    if "start" in fields_set and start is None and remind_at is not None:
+        raise ValueError("start=null cannot combine with remind_at")
+
+
 class ReadInclude(StrictModel):
     """One bounded item lookup to add to a change context."""
 
@@ -409,12 +416,9 @@ class CreateEntry(StrictModel):
             self.start is not None or self.remind_at is not None
         ):
             raise ValueError("Inbox or Anytime cannot combine with a schedule")
-        if (
-            "start" in self.model_fields_set
-            and self.start is None
-            and self.remind_at is not None
-        ):
-            raise ValueError("start=null cannot combine with remind_at")
+        _reject_cleared_start_with_reminder(
+            self.model_fields_set, self.start, self.remind_at
+        )
         return self
 
 
@@ -645,12 +649,9 @@ class ChangeEntry(StrictModel):
             self.start is not None or self.remind_at is not None
         ):
             raise ValueError("Inbox or Anytime cannot combine with a schedule")
-        if (
-            "start" in self.model_fields_set
-            and self.start is None
-            and self.remind_at is not None
-        ):
-            raise ValueError("start=null cannot combine with remind_at")
+        _reject_cleared_start_with_reminder(
+            self.model_fields_set, self.start, self.remind_at
+        )
         if self.move_contents_to is not None or self.remove_if_empty:
             allowed = {
                 "id",

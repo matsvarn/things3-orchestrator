@@ -177,20 +177,26 @@ def test_duplicate_includes_are_a_validation_error_not_internal() -> None:
         )
     )
     assert result.is_error is True
+    assert result.structured_content is None
     assert "include" in result.content[0].text.lower()
     assert "unique" in result.content[0].text.lower()
+    assert "internal_error" not in result.content[0].text
 
 
 def test_start_null_cannot_combine_with_remind_at() -> None:
-    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    task = Record(uuid="later", kind="task", title="Later", someday=True)
+    workspace = ThingsWorkspace(MemoryLibrary([task]))
+    server = ThingsMCPServer(workspace)
+    revision = workspace.read(ReadCall(id=task.id)).items[0].revision
     result = asyncio.run(
         server.call_tool(
             "things_commit",
             {
                 "intent_id": "clear-and-remind-001",
-                "create": [
+                "change": [
                     {
-                        "title": "Later",
+                        "id": task.id,
+                        "if_revision": revision,
                         "start": None,
                         "remind_at": "2026-08-20T09:00:00+00:00",
                     }
@@ -199,7 +205,30 @@ def test_start_null_cannot_combine_with_remind_at() -> None:
         )
     )
     assert result.is_error is True
+    assert result.structured_content is None
     assert "start=null cannot combine with remind_at" in result.content[0].text
+    assert task.someday is True
+    assert task.start is None
+    assert task.remind is None
+
+    offset = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "remind-offset-001",
+                "create": [
+                    {
+                        "title": "Call bank",
+                        "start": "2026-08-20",
+                        "remind_at": "2026-08-20T09:00:00",
+                    }
+                ],
+            },
+        )
+    )
+    assert offset.is_error is True
+    assert "start=null cannot combine with remind_at" not in offset.content[0].text
+    assert "UTC offset" in offset.content[0].text
 
 
 def test_mcp_server_version_matches_the_package() -> None:

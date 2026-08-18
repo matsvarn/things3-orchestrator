@@ -79,7 +79,6 @@ _FIELD_REPAIR = {
         "include is only for purpose=change, must be unique, and accepts "
         "up to 40 compact lookups"
     ),
-    "remind_at": "start=null cannot combine with remind_at",
 }
 
 _READ_ONLY = ToolAnnotations(
