@@ -23,9 +23,11 @@ _REPAIR = {
     "missing_parent": "place the item in an active Project",
     "trashed_parent": "restore the parent or move the child",
     "parent_not_project": "place the item under a Project",
+    "area_invalid_parent": "clear the invalid Area parent",
     "missing_area": "place the item in an active Area or clear the Area home",
     "trashed_area": "restore the Area or move the child",
     "area_not_area": "clear the Area home or choose an Area",
+    "area_invalid_home": "clear the invalid Area home",
     "missing_repeat_template": "inspect recurrence before changing it",
     "malformed_repeat": "inspect recurrence before changing it",
     "dangling_tag_parent": "clear or repair the tag parent",
@@ -51,9 +53,11 @@ _REPAIR_KIND = {
     "missing_parent": "rehome_item",
     "trashed_parent": "restore_or_move_child",
     "parent_not_project": "rehome_item",
+    "area_invalid_parent": "clear_area_parent",
     "missing_area": "rehome_or_clear_area",
     "trashed_area": "restore_or_move_child",
     "area_not_area": "rehome_or_clear_area",
+    "area_invalid_home": "clear_area_home",
     "missing_repeat_template": "inspect_recurrence",
     "malformed_repeat": "inspect_recurrence",
     "dangling_tag_parent": "clear_or_repair_tag_parent",
@@ -141,13 +145,17 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
     if item.parent_uuid and parent is None:
         signals.append("missing_parent")
     elif parent is not None and parent.kind != "project":
-        signals.append("parent_not_project")
+        signals.append(
+            "area_invalid_parent" if item.kind == "area" else "parent_not_project"
+        )
     elif parent is not None and parent.trashed and not item.trashed:
         signals.append("trashed_parent")
     if item.area_uuid and area is None:
         signals.append("missing_area")
     elif area is not None and area.kind != "area":
-        signals.append("area_not_area")
+        signals.append(
+            "area_invalid_home" if item.kind == "area" else "area_not_area"
+        )
     elif area is not None and area.trashed and not item.trashed:
         signals.append("trashed_area")
     if item.recurrence.role == "instance":
@@ -167,17 +175,25 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
 
 def _conflict(item_id: str, signals: list[str]) -> Conflict:
     hints = [_REPAIR[name] for name in signals if name in _REPAIR]
-    kinds = [_REPAIR_KIND[name] for name in signals if name in _REPAIR_KIND]
     repairs = tuple(
         (name, _REPAIR_KIND[name]) for name in signals if name in _REPAIR_KIND
     )
     return Conflict(
         item_id=item_id,
         signals=tuple(signals),
-        repair="; ".join(dict.fromkeys(hints)) or None,
-        repair_kind=next(iter(dict.fromkeys(kinds)), None),
+        repair=_legacy_repair(hints),
+        repair_kind=repairs[0][1] if len(repairs) == 1 else None,
         repairs=repairs,
     )
+
+
+def _legacy_repair(hints: list[str]) -> str | None:
+    """Keep singular prose only when it fits; repairs[] is the complete answer."""
+
+    text = "; ".join(dict.fromkeys(hints))
+    if not text or len(text) > 400:
+        return None
+    return text
 
 
 def _tag_conflicts(library: MemoryLibrary) -> list[Conflict]:

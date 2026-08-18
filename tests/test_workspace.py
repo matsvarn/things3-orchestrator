@@ -4344,6 +4344,7 @@ def test_diagnostics_lists_every_repair_on_a_multi_conflict_item() -> None:
 
     row = next(item for item in result.diagnostics if item.id == hybrid.id)
     kinds = {repair.repair_kind for repair in row.repairs}
+    assert row.repair_kind is None
     assert "repeat_placement" in kinds
     assert "clear_inbox_or_schedule" in kinds
     assert [repair.conflict for repair in row.repairs] == row.conflicts
@@ -4367,6 +4368,7 @@ def test_bulk_exact_read_truncates_checklist_text_in_the_shared_budget() -> None
     assert result.status == "ok"
     assert len(result.items[0].notes_markdown or "") == 40_000
     assert "checklist_truncated" in result.items[1].signals
+    assert "checklist" in result.items[1].truncated_fields
     assert len(result.items[1].checklist) == 60
     total = sum(
         len(item.notes_markdown or "")
@@ -4388,9 +4390,200 @@ def test_bulk_exact_read_truncates_notes_across_the_batch() -> None:
     assert len(result.items[0].notes_markdown or "") == 40_000
     assert len(result.items[1].notes_markdown or "") == 40_000
     assert "notes_truncated" in result.items[2].signals
+    assert "notes" in result.items[2].truncated_fields
     assert len(result.items[2].notes_markdown or "") == 20_000
     total = sum(len(item.notes_markdown or "") for item in result.items)
     assert total == 100_000
+
+
+def test_diagnostics_serializes_a_maximally_conflicted_task() -> None:
+    heading = Record(
+        uuid="elsewhere",
+        kind="task",
+        title="Heading",
+        heading=True,
+        parent_uuid="other-project",
+    )
+    other = Record(uuid="other-project", kind="project", title="Other")
+    task = Record(
+        uuid="max",
+        kind="task",
+        title="Max",
+        inbox=True,
+        parent_uuid="missing-project",
+        area_uuid="missing-area",
+        someday=True,
+        tonight=True,
+        start=NOW.date(),
+        remind="25:99",
+        heading_uuid="elsewhere",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="unknown",
+            template_uuid="missing-template",
+        ),
+    )
+    module = workspace([heading, other, task])
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    row = next(item for item in result.diagnostics if item.id == task.id)
+    assert result.status == "ok"
+    assert row.repair is None
+    assert row.repair_kind is None
+    assert len(row.conflicts) >= 12
+    assert [repair.conflict for repair in row.repairs] == row.conflicts
+
+
+def test_diagnostics_cursor_stales_when_a_title_changes() -> None:
+    library = MemoryLibrary()
+    library.tags["a"] = "First"
+    library.tags["b"] = "Second"
+    library.tag_parents["a"] = ["missing"]
+    library.tag_parents["b"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    first = module.read(ReadCall(view="diagnostics", limit=1))
+    assert first.status == "ok"
+    assert first.cursor is not None
+    library.tags["b"] = "Renamed"
+    stale = module.read(ReadCall(cursor=first.cursor, limit=1))
+
+    assert stale.status == "stale"
+    assert stale.next == "read"
+
+
+def test_area_invalid_relations_recommend_clearing_the_relation() -> None:
+    task = Record(uuid="loose", kind="task", title="Loose")
+    project = Record(uuid="launch", kind="project", title="Launch")
+    under_task = Record(
+        uuid="area-under-task",
+        kind="area",
+        title="Under task",
+        parent_uuid=task.uuid,
+    )
+    home_project = Record(
+        uuid="area-home-project",
+        kind="area",
+        title="Home project",
+        area_uuid=project.uuid,
+    )
+    module = workspace([task, project, under_task, home_project])
+
+    result = module.read(ReadCall(view="diagnostics"))
+    by_id = {row.id: row for row in result.diagnostics}
+
+    assert "area_invalid_parent" in by_id[under_task.id].conflicts
+    assert by_id[under_task.id].repair_kind == "clear_area_parent"
+    assert by_id[under_task.id].repair == "clear the invalid Area parent"
+    assert "area_invalid_home" in by_id[home_project.id].conflicts
+    assert by_id[home_project.id].repair_kind == "clear_area_home"
+    assert by_id[home_project.id].repair == "clear the invalid Area home"
+
+
+def test_bulk_read_keeps_bounded_inherited_tags_when_already_truncated() -> None:
+    area_tags = [f"area-tag-{index}" for index in range(41)]
+    area = Record(uuid="home", kind="area", title="Home", tag_uuids=area_tags)
+    task = Record(uuid="ship", kind="task", title="Ship", area_uuid=area.uuid)
+    other = Record(uuid="other", kind="task", title="Other")
+    library = MemoryLibrary([area, task, other])
+    library.tags = {uuid: uuid for uuid in area_tags}
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    exact = module.read(ReadCall(id=task.id, limit=40))
+    assert len(exact.items[0].inherited_tags) == 40
+    assert "tags" in exact.items[0].truncated_fields
+    assert "tags_truncated" in exact.items[0].signals
+
+    bulk = module.read(ReadCall(ids=[task.id, other.id]))
+    item = next(row for row in bulk.items if row.id == task.id)
+    assert len(item.inherited_tags) == 40
+    assert "tags" in item.truncated_fields
+    assert "tags_truncated" in item.signals
+
+
+def test_bulk_truncation_fields_survive_a_full_signal_list() -> None:
+    hog = Record(
+        uuid="hog",
+        kind="task",
+        title="Hog",
+        notes="n" * 50_000,
+        checklists=[
+            ChecklistLine(f"h{index}", "H" * 1000) for index in range(50)
+        ],
+    )
+    heading = Record(
+        uuid="elsewhere",
+        kind="task",
+        title="Heading",
+        heading=True,
+        parent_uuid="other-project",
+    )
+    other = Record(uuid="other-project", kind="project", title="Other")
+    task = Record(
+        uuid="max",
+        kind="task",
+        title="Max",
+        inbox=True,
+        parent_uuid="missing-project",
+        area_uuid="missing-area",
+        someday=True,
+        tonight=True,
+        start=NOW.date(),
+        deadline=NOW.date().replace(day=14),
+        remind="25:99",
+        heading_uuid="elsewhere",
+        notes="m" * 5_000,
+        checklists=[
+            ChecklistLine(f"r{index}", "C" * 300) for index in range(10)
+        ],
+        tag_uuids=[f"t{index}" for index in range(10)],
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="unknown",
+            template_uuid="missing-template",
+        ),
+    )
+    library = MemoryLibrary([hog, heading, other, task])
+    library.tags = {f"t{index}": "T" * 50 for index in range(10)}
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(ids=[hog.id, task.id]))
+    item = next(row for row in result.items if row.id == task.id)
+
+    assert len(item.signals) == 20
+    assert set(item.truncated_fields) == {"notes", "checklist", "tags"}
+    assert "notes_truncated" in item.signals
+    assert "checklist_truncated" in item.signals
+    assert "tags_truncated" in item.signals
+    assert item.notes_markdown != "m" * 5_000
+    assert len(item.checklist) < 10
+    assert len(item.direct_tags) < 10
+
+
+def test_one_item_ids_read_uses_the_bulk_detail_budget() -> None:
+    task = Record(
+        uuid="one",
+        kind="task",
+        title="One",
+        notes="n" * 50_000,
+        checklists=[
+            ChecklistLine(f"r{index}", "C" * 1000) for index in range(80)
+        ],
+    )
+    module = workspace([task])
+
+    result = module.read(ReadCall(ids=[task.id]))
+
+    item = result.items[0]
+    total = len(item.notes_markdown or "") + sum(
+        len(row.title) for row in item.checklist
+    )
+    assert total == 100_000
+    assert "notes" in item.truncated_fields
+    assert "notes_truncated" in item.signals
+    assert len(item.notes_markdown or "") == 20_000
+    assert len(item.checklist) == 80
 
 
 def test_audit_can_filter_by_signal() -> None:

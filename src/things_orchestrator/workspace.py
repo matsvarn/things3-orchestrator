@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
@@ -51,6 +52,7 @@ from .interface import (
     ResultStatus,
     ReviewSection,
     TagFact,
+    TruncatedField,
     Weekday,
 )
 from .interface import (
@@ -71,6 +73,11 @@ from .recurrence import RepeatMode, new_rule
 
 _READ_LIMIT = 40
 _BULK_TEXT_BUDGET = 100_000
+_TRUNCATION_SIGNALS = {
+    "notes": "notes_truncated",
+    "checklist": "checklist_truncated",
+    "tags": "tags_truncated",
+}
 _CONTEXT_LIMIT = 120
 _CHANGE_FIND_LIMIT = 40
 _NOTES_LIMIT = 50_000
@@ -350,7 +357,9 @@ class ThingsWorkspace:
     ) -> Result:
         conflicts = diagnose(self._library)
         ids = [row.item_id for row in conflicts]
-        digest = _diagnostics_digest(conflicts)
+        digest = _diagnostics_digest(
+            conflicts, [self._diagnostic_title(row) for row in conflicts]
+        )
         if expected_ids is not None and (
             ids != expected_ids or digest != expected_digest
         ):
@@ -379,7 +388,7 @@ class ThingsWorkspace:
             status="ok",
             instruction=(
                 "These records have native-state conflicts. "
-                "Use diagnostics and repair_kind."
+                "Use diagnostics and repairs."
                 if diagnostics
                 else "No native-state conflicts are visible."
             ),
@@ -389,21 +398,27 @@ class ThingsWorkspace:
             truncated=cursor is not None,
         )
 
-    def _diagnostic_fact(self, conflict: Conflict) -> DiagnosticFact:
+    def _diagnostic_title(self, conflict: Conflict) -> str:
         if conflict.item_id.startswith("tag:"):
             uuid = conflict.item_id.removeprefix("tag:")
             title = _bounded_tag_title(self._library.tags.get(uuid) or "")
-            if not title.strip():
-                title = "(untitled)"
-            kind: Literal["task", "project", "area", "heading", "tag"] = "tag"
-        else:
-            item = self._exact_item(conflict.item_id)
-            title = _bounded_title(item.title) if item is not None else "(untitled)"
-            kind = item.public_kind if item is not None else "task"
+            return title if title.strip() else "(untitled)"
+        item = self._exact_item(conflict.item_id)
+        return _bounded_title(item.title) if item is not None else "(untitled)"
+
+    def _diagnostic_kind(
+        self, conflict: Conflict
+    ) -> Literal["task", "project", "area", "heading", "tag"]:
+        if conflict.item_id.startswith("tag:"):
+            return "tag"
+        item = self._exact_item(conflict.item_id)
+        return item.public_kind if item is not None else "task"
+
+    def _diagnostic_fact(self, conflict: Conflict) -> DiagnosticFact:
         return DiagnosticFact(
             id=conflict.item_id,
-            kind=kind,
-            title=title,
+            kind=self._diagnostic_kind(conflict),
+            title=self._diagnostic_title(conflict),
             conflicts=list(conflict.signals),
             repair=conflict.repair,
             repair_kind=conflict.repair_kind,
@@ -1459,7 +1474,7 @@ class ThingsWorkspace:
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
-        if full and len(facts) > 1:
+        if full:
             facts = self._bound_bulk_facts(facts)
         snapshot = self._scope_revision(items)
         scope = public_scope or snapshot
@@ -1561,7 +1576,7 @@ class ThingsWorkspace:
             else None
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
-        if saved.full and len(facts) > 1:
+        if saved.full:
             facts = self._bound_bulk_facts(facts)
         sections = self._sections(saved.view, facts) if saved.view is not None else []
         extra_truncated = (
@@ -1826,7 +1841,7 @@ class ThingsWorkspace:
         bounded: list[ItemFact] = []
         for fact in facts:
             remain = max(_BULK_TEXT_BUDGET - used, 0)
-            signals = list(fact.signals)
+            truncated = list(fact.truncated_fields)
             checklist = list(fact.checklist)
             direct = list(fact.direct_tags)
             inherited = list(fact.inherited_tags)
@@ -1835,43 +1850,52 @@ class ThingsWorkspace:
             kept_checks: list[ChecklistFact] = []
             for row in checklist:
                 if remain < len(row.title):
-                    signals.append("checklist_truncated")
+                    truncated.append("checklist")
                     break
                 kept_checks.append(row)
                 remain -= len(row.title)
-            if len(kept_checks) < len(checklist) and "checklist_truncated" not in signals:
-                signals.append("checklist_truncated")
 
+            tags_exhausted = False
             kept_direct: list[TagFact] = []
             for tag in direct:
                 if remain < len(tag.title):
-                    signals.append("tags_truncated")
+                    tags_exhausted = True
                     break
                 kept_direct.append(tag)
                 remain -= len(tag.title)
             kept_inherited: list[TagFact] = []
-            if "tags_truncated" not in signals:
+            if not tags_exhausted:
                 for tag in inherited:
                     if remain < len(tag.title):
-                        signals.append("tags_truncated")
+                        tags_exhausted = True
                         break
                     kept_inherited.append(tag)
                     remain -= len(tag.title)
+            if tags_exhausted:
+                truncated.append("tags")
 
             if remain < len(notes):
                 notes = notes[:remain]
-                signals.append("notes_truncated")
+                truncated.append("notes")
                 remain = 0
             else:
                 remain -= len(notes)
 
+            truncated_fields = _truncated_fields(
+                notes="notes" in truncated,
+                checklist="checklist" in truncated,
+                tags="tags" in truncated,
+            )
             fact = fact.model_copy(
                 update={
                     "notes_markdown": notes or None,
                     "checklist": kept_checks,
                     "direct_tags": kept_direct,
                     "inherited_tags": kept_inherited,
-                    "signals": list(dict.fromkeys(signals))[:20],
+                    "truncated_fields": truncated_fields,
+                    "signals": _signals_with_truncation(
+                        list(fact.signals), truncated_fields
+                    ),
                 }
             )
             used = _BULK_TEXT_BUDGET - remain
@@ -2016,6 +2040,16 @@ class ThingsWorkspace:
                 if item.start == self._clock().date() or item.tonight
                 else None
             ),
+            truncated_fields=_truncated_fields(
+                notes=notes_truncated
+                or (
+                    full
+                    and include_notes
+                    and note_offset + _NOTES_LIMIT < len(item.notes)
+                ),
+                checklist=checklist_truncated,
+                tags=tags_truncated,
+            ),
             signals=self._item_signals(
                 item,
                 checklist_truncated=checklist_truncated,
@@ -2098,16 +2132,16 @@ class ThingsWorkspace:
             ordinary.append("has_checklist")
         if item.recurrence.role != "none" and item.recurrence.repeat_type == "unknown":
             ordinary.append("recurrence_unknown")
-        extras: list[str] = []
-        if checklist_truncated:
-            extras.append("checklist_truncated")
-        if tags_truncated:
-            extras.append("tags_truncated")
-        if notes_truncated:
-            extras.append("notes_truncated")
-        if links_truncated:
-            extras.append("recurrence_links_truncated")
-        return list(dict.fromkeys([*conflicts, *ordinary, *extras]))[:20]
+        extras = ["recurrence_links_truncated"] if links_truncated else []
+        return _signals_with_truncation(
+            [*conflicts, *ordinary],
+            _truncated_fields(
+                notes=notes_truncated,
+                checklist=checklist_truncated,
+                tags=tags_truncated,
+            ),
+            *extras,
+        )
 
     def _reminder(self, item: Record) -> str | None:
         if item.remind is None or item.start is None:
@@ -5196,11 +5230,41 @@ def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
 
 
-def _diagnostics_digest(conflicts: list[Conflict]) -> str:
+def _truncated_fields(
+    *, notes: bool = False, checklist: bool = False, tags: bool = False
+) -> list[TruncatedField]:
+    fields: list[TruncatedField] = []
+    if notes:
+        fields.append("notes")
+    if checklist:
+        fields.append("checklist")
+    if tags:
+        fields.append("tags")
+    return fields
+
+
+def _signals_with_truncation(
+    signals: list[str], truncated_fields: Sequence[str], *extra: str
+) -> list[str]:
+    extras = [_TRUNCATION_SIGNALS[field] for field in truncated_fields]
+    extras.extend(extra)
+    extras = list(dict.fromkeys(extras))
+    skip = set(extras)
+    ordinary = [name for name in dict.fromkeys(signals) if name not in skip]
+    return [*extras, *ordinary[: max(20 - len(extras), 0)]]
+
+
+def _diagnostics_digest(conflicts: list[Conflict], titles: list[str]) -> str:
     return "s_" + _digest(
         [
-            [row.item_id, list(row.signals), row.repair_kind, list(row.repairs)]
-            for row in conflicts
+            [
+                row.item_id,
+                title,
+                list(row.signals),
+                row.repair_kind,
+                list(row.repairs),
+            ]
+            for row, title in zip(conflicts, titles, strict=True)
         ]
     )
 
