@@ -11,7 +11,7 @@ from secrets import token_urlsafe
 from typing import Callable, Literal, cast
 
 from .cloud import CloudError
-from .consistency import diagnose, item_conflicts
+from .consistency import Conflict, diagnose, item_conflicts
 from .context import (
     CompletenessFact,
     ContextConflict,
@@ -37,6 +37,7 @@ from .interface import (
     ChecklistFact,
     CommitCall,
     ContextFact,
+    DiagnosticFact,
     ItemFact,
     LayoutFact,
     LayoutSectionFact,
@@ -68,6 +69,7 @@ from .library import (
 from .recurrence import RepeatMode, new_rule
 
 _READ_LIMIT = 40
+_BULK_TEXT_BUDGET = 100_000
 _CONTEXT_LIMIT = 120
 _CHANGE_FIND_LIMIT = 40
 _NOTES_LIMIT = 50_000
@@ -299,30 +301,30 @@ class ThingsWorkspace:
             ]
             return self._tag_page(rows, offset=0, limit=call.limit)
 
+        if view == "diagnostics":
+            return self._diagnostics_page(call.limit)
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
+        if view == "audit" and call.signals_any:
+            wanted = set(call.signals_any)
+            visible = [
+                item
+                for item in visible
+                if wanted.intersection(
+                    self._item_signals(
+                        item,
+                        checklist_truncated=False,
+                        tags_truncated=False,
+                        notes_truncated=False,
+                    )
+                )
+            ]
         instruction = "Use this review as current evidence."
-        result_signals: list[str] = []
-        tag_truncated = False
         if view == "audit":
             instruction = (
                 "This audit lists each active item once. Continue the cursor for the rest."
             )
-        elif view == "diagnostics":
-            result_signals, tag_truncated = self._diagnostic_tag_signals()
-            if visible or result_signals:
-                instruction = (
-                    "These records have native-state conflicts. "
-                    "Repair the listed signals."
-                )
-                if tag_truncated:
-                    instruction = (
-                        "These records have native-state conflicts. "
-                        "Tag conflict signals are truncated; more exist."
-                    )
-            else:
-                instruction = "No native-state conflicts are visible."
         elif view == "area":
             instruction = (
                 "This Area, its loose tasks, and its Projects. "
@@ -335,28 +337,70 @@ class ThingsWorkspace:
             instruction=instruction,
             view=view,
             public_scope=(self._area_scope_revision() if view == "system" else None),
-            result_signals=result_signals,
-            extra_truncated=tag_truncated,
         )
 
-    def _diagnostic_items(self) -> list[Record]:
-        items: list[Record] = []
-        for conflict in diagnose(self._library):
-            if conflict.item_id.startswith("tag:"):
-                continue
-            item = self._exact_item(conflict.item_id)
-            if item is not None:
-                items.append(item)
-        return items
-
-    def _diagnostic_tag_signals(self) -> tuple[list[str], bool]:
-        rows = [
-            f"{signal}:{conflict.item_id}"
-            for conflict in diagnose(self._library)
-            for signal in conflict.signals
-            if conflict.item_id.startswith("tag:")
+    def _diagnostics_page(
+        self,
+        limit: int,
+        *,
+        offset: int = 0,
+        expected_ids: list[str] | None = None,
+    ) -> Result:
+        conflicts = diagnose(self._library)
+        ids = [row.item_id for row in conflicts]
+        if expected_ids is not None and ids != expected_ids:
+            return self._stale("That result changed. Start the read again.")
+        limit = min(limit, _READ_LIMIT)
+        page = conflicts[offset : offset + limit]
+        next_offset = offset + len(page)
+        cursor = None
+        if next_offset < len(conflicts):
+            cursor = self._encode_cursor(
+                ids,
+                next_offset,
+                self._scope_revision([]),
+                self._scope_revision([]),
+                False,
+                "diagnostics",
+            )
+        diagnostics = [self._diagnostic_fact(row) for row in page]
+        items = [
+            self._fact(item, full=False)
+            for row in page
+            if (item := self._exact_item(row.item_id)) is not None
         ]
-        return rows[:40], len(rows) > 40
+        return Result(
+            next="done",
+            status="ok",
+            instruction=(
+                "These records have native-state conflicts. "
+                "Use diagnostics and repair_kind."
+                if diagnostics
+                else "No native-state conflicts are visible."
+            ),
+            items=items,
+            diagnostics=diagnostics,
+            cursor=cursor,
+            truncated=cursor is not None,
+        )
+
+    def _diagnostic_fact(self, conflict: Conflict) -> DiagnosticFact:
+        if conflict.item_id.startswith("tag:"):
+            uuid = conflict.item_id.removeprefix("tag:")
+            title = self._library.tags.get(uuid) or "(untitled)"
+            kind: Literal["task", "project", "area", "heading", "tag"] = "tag"
+        else:
+            item = self._exact_item(conflict.item_id)
+            title = _bounded_title(item.title) if item is not None else "(untitled)"
+            kind = item.public_kind if item is not None else "task"
+        return DiagnosticFact(
+            id=conflict.item_id,
+            kind=kind,
+            title=title,
+            conflicts=list(conflict.signals),
+            repair=conflict.repair,
+            repair_kind=conflict.repair_kind,
+        )
 
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
@@ -367,9 +411,12 @@ class ThingsWorkspace:
                 missing.append(item_id)
             else:
                 items.append(item)
+        missing_text = _bounded_id_list(missing)
         if missing and not items:
-            return self._needs_input(
-                f"I could not find that exact item ({missing[0]}). Read or search again."
+            return Result(
+                next="read",
+                status="needs_input",
+                instruction=f"I could not find {missing_text}. Read or search again.",
             )
         result = self._page(
             items,
@@ -378,15 +425,11 @@ class ThingsWorkspace:
             instruction=(
                 "Use these exact facts."
                 if not missing
-                else (
-                    "I could not find "
-                    + ", ".join(missing)
-                    + ". Use these exact facts for the others."
-                )
+                else f"I could not find {missing_text}. Use these exact facts for the others."
             ),
         )
         if missing:
-            return result.model_copy(update={"next": "ask", "status": "needs_input"})
+            return result.model_copy(update={"next": "read", "status": "needs_input"})
         return result
 
     def _context_change(self, call: ReadCall) -> Result:
@@ -1278,8 +1321,6 @@ class ThingsWorkspace:
             return self._library.area(area.id)
         if view == "audit":
             return self._library.audit()
-        if view == "diagnostics":
-            return self._diagnostic_items()
         if view == "project":
             assert call.within is not None
             project = self._exact_item(call.within)
@@ -1394,6 +1435,8 @@ class ThingsWorkspace:
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
+        if full and len(facts) > 1:
+            facts = self._bound_bulk_facts(facts)
         snapshot = self._scope_revision(items)
         scope = public_scope or snapshot
         cursor = None
@@ -1407,11 +1450,9 @@ class ThingsWorkspace:
                 view,
             )
         sections = self._sections(view, facts) if view is not None else []
-        if view == "diagnostics":
-            sections = [
-                *sections,
-                *self._diagnostic_repair_sections(facts, result_signals or []),
-            ][:20]
+        extra_truncated = extra_truncated or (
+            view == "audit" and self._audit_sections_truncated(facts)
+        )
         empty = (
             "Nothing on Today. Search with find and one title token."
             if view == "today"
@@ -1462,6 +1503,10 @@ class ThingsWorkspace:
             return self._stale("That cursor is invalid. Start the read again.")
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
+        if saved.view == "diagnostics":
+            return self._diagnostics_page(
+                limit, offset=saved.offset, expected_ids=saved.ids
+            )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
         ]
@@ -1489,22 +1534,18 @@ class ThingsWorkspace:
             else None
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
+        if saved.full and len(facts) > 1:
+            facts = self._bound_bulk_facts(facts)
         sections = self._sections(saved.view, facts) if saved.view is not None else []
-        result_signals: list[str] = []
-        extra_truncated = False
-        if saved.view == "diagnostics":
-            result_signals, extra_truncated = self._diagnostic_tag_signals()
-            sections = [
-                *sections,
-                *self._diagnostic_repair_sections(facts, result_signals),
-            ][:20]
+        extra_truncated = (
+            saved.view == "audit" and self._audit_sections_truncated(facts)
+        )
         return Result(
             next="done",
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
             sections=sections,
-            signals=result_signals,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
             truncated=next_cursor is not None or extra_truncated,
@@ -1720,7 +1761,7 @@ class ThingsWorkspace:
                     item_ids=ids[:40],
                 )
                 for home, ids in homes.items()
-            ][:20]
+            ][:40]
         titles = {
             "area": "Area",
             "audit": "Active items",
@@ -1746,32 +1787,32 @@ class ThingsWorkspace:
         item = self._exact_item(home)
         return item.title if item is not None else home
 
-    def _diagnostic_repair_sections(
-        self, items: list[ItemFact], tag_signals: list[str]
-    ) -> list[ReviewSection]:
-        hints: list[str] = []
-        by_id = {conflict.item_id: conflict for conflict in diagnose(self._library)}
-        for item in items:
-            conflict = by_id.get(item.id)
-            if conflict is None or conflict.repair is None:
-                continue
-            hints.append(f"{item.id}: {conflict.repair}")
-        for signal in tag_signals:
-            name, _, tag_id = signal.partition(":")
-            conflict = by_id.get(tag_id) if tag_id.startswith("tag:") else None
-            if conflict is None or conflict.repair is None:
-                continue
-            hints.append(f"{tag_id}: {conflict.repair}")
-        hints = list(dict.fromkeys(hints))[:40]
-        if not hints:
-            return []
-        return [
-            ReviewSection(
-                key="repairs",
-                title="Repair hints",
-                signals=hints,
-            )
-        ]
+    def _audit_sections_truncated(self, facts: list[ItemFact]) -> bool:
+        homes = {
+            item.id if item.kind in {"area", "project"} else item.into_id or "unfiled"
+            for item in facts
+        }
+        return len(homes) > 40
+
+    def _bound_bulk_facts(self, facts: list[ItemFact]) -> list[ItemFact]:
+        used = 0
+        bounded: list[ItemFact] = []
+        for fact in facts:
+            notes = fact.notes_markdown or ""
+            extra = len(notes) + sum(len(row.title) for row in fact.checklist)
+            if used + extra > _BULK_TEXT_BUDGET and extra:
+                remain = max(_BULK_TEXT_BUDGET - used, 0)
+                notes = notes[:remain]
+                signals = list(dict.fromkeys([*fact.signals, "notes_truncated"]))[:20]
+                fact = fact.model_copy(
+                    update={"notes_markdown": notes or None, "signals": signals}
+                )
+                extra = len(fact.notes_markdown or "") + sum(
+                    len(row.title) for row in fact.checklist
+                )
+            used += extra
+            bounded.append(fact)
+        return bounded
 
     def _detail_lists(
         self, item: Record
@@ -5089,6 +5130,22 @@ def _fingerprint(value: object) -> str:
 
 def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
+
+
+def _bounded_id_list(ids: list[str]) -> str:
+    text = ", ".join(ids)
+    if len(text) <= 800:
+        return text
+    kept: list[str] = []
+    used = 0
+    for item_id in ids:
+        extra = len(item_id) + (2 if kept else 0)
+        if used + extra > 760:
+            kept.append("and more")
+            break
+        kept.append(item_id)
+        used += extra
+    return ", ".join(kept)
 
 
 def _bounded_title(title: str) -> str:

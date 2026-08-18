@@ -4238,9 +4238,13 @@ def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None
     by_id = {item.id: item.signals for item in result.items}
     assert "both_project_and_area" in by_id[both.id]
     assert "orphaned_heading" in by_id[orphan.id]
-    assert "dangling_tag_parent:tag:child" in result.signals
+    assert any(
+        row.id == "tag:child" and "dangling_tag_parent" in row.conflicts
+        for row in result.diagnostics
+    )
     assert result.truncated is False
-    assert any(section.key == "repairs" for section in result.sections)
+    child = next(row for row in result.diagnostics if row.id == "tag:child")
+    assert child.repair_kind == "clear_or_repair_tag_parent"
 
 
 def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
@@ -4253,24 +4257,29 @@ def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
 
     assert result.status == "ok"
     assert result.items == []
-    assert "dangling_tag_parent:tag:child" in result.signals
+    assert result.diagnostics[0].id == "tag:child"
+    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
     assert "No native-state conflicts" not in result.instruction
     assert result.truncated is False
 
 
-def test_tag_diagnostics_set_truncated_when_more_than_forty() -> None:
+def test_tag_diagnostics_page_beyond_the_first_forty() -> None:
     library = MemoryLibrary()
     for index in range(45):
         library.tags[f"t{index}"] = f"Tag {index}"
         library.tag_parents[f"t{index}"] = ["missing"]
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
-    result = module.read(ReadCall(view="diagnostics"))
+    first = module.read(ReadCall(view="diagnostics", limit=40))
 
-    assert result.status == "ok"
-    assert len(result.signals) == 40
-    assert result.truncated is True
-    assert "truncated" in result.instruction.lower()
+    assert first.status == "ok"
+    assert len(first.diagnostics) == 40
+    assert first.truncated is True
+    assert first.cursor is not None
+    second = module.read(ReadCall(cursor=first.cursor, limit=40))
+    assert second.status == "ok"
+    assert len(second.diagnostics) == 5
+    assert second.truncated is False
 
 
 def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
@@ -4280,9 +4289,50 @@ def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
     result = module.read(ReadCall(ids=[first.id, "task:missing"]))
 
     assert result.status == "needs_input"
+    assert result.next == "read"
     assert [item.id for item in result.items] == [first.id]
     assert result.items[0].notes_markdown == "kept"
     assert "task:missing" in result.instruction
+
+
+def test_bulk_exact_read_truncates_notes_across_the_batch() -> None:
+    first = Record(uuid="one", kind="task", title="One", notes="a" * 40_000)
+    second = Record(uuid="two", kind="task", title="Two", notes="b" * 40_000)
+    third = Record(uuid="three", kind="task", title="Three", notes="c" * 40_000)
+    module = workspace([first, second, third])
+
+    result = module.read(ReadCall(ids=[first.id, second.id, third.id]))
+
+    assert result.status == "ok"
+    assert len(result.items[0].notes_markdown or "") == 40_000
+    assert len(result.items[1].notes_markdown or "") == 40_000
+    assert "notes_truncated" in result.items[2].signals
+    assert len(result.items[2].notes_markdown or "") == 20_000
+    total = sum(len(item.notes_markdown or "") for item in result.items)
+    assert total == 100_000
+
+
+def test_audit_can_filter_by_signal() -> None:
+    later = Record(uuid="later", kind="task", title="Later", someday=True)
+    inbox = Record(uuid="box", kind="task", title="Inbox", inbox=True)
+    module = workspace([later, inbox])
+
+    result = module.read(ReadCall(view="audit", signals_any=["someday"]))
+
+    assert [item.id for item in result.items] == [later.id]
+
+
+def test_all_missing_bulk_ids_name_every_missing_id() -> None:
+    module = workspace()
+
+    result = module.read(ReadCall(ids=["task:a", "task:b", "task:c"]))
+
+    assert result.status == "needs_input"
+    assert result.next == "read"
+    assert result.items == []
+    assert "task:a" in result.instruction
+    assert "task:b" in result.instruction
+    assert "task:c" in result.instruction
 
 
 def test_start_null_with_remind_at_is_rejected_before_a_write() -> None:

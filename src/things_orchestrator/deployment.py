@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from .cloud import _CACHE_VERSION
 
@@ -30,7 +32,21 @@ def package_version() -> str:
 
 def git_commit() -> str | None:
     value = os.environ.get("THINGS_ORCHESTRATOR_COMMIT", "").strip()
-    return value or None
+    if value:
+        return value
+    root = Path(__file__).resolve().parents[2]
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    commit = completed.stdout.strip()
+    return commit if completed.returncode == 0 and commit else None
 
 
 def health_payload() -> dict[str, object]:

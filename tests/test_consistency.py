@@ -69,6 +69,36 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
     assert "area_not_area" in conflicts["task:area-is-project"]
     assert "heading_without_project" in conflicts["task:headed"]
     assert "malformed_reminder" in conflicts["task:bad-remind"]
+    project_parent = Record(uuid="root-project", kind="project", title="Root")
+    nested = Record(
+        uuid="inner-project",
+        kind="project",
+        title="Inner",
+        parent_uuid=project_parent.uuid,
+    )
+    area_on_area = Record(
+        uuid="inner-area",
+        kind="area",
+        title="Inner area",
+        area_uuid=area.uuid,
+    )
+    area_on_project = Record(
+        uuid="area-under-project",
+        kind="area",
+        title="Misplaced area",
+        parent_uuid=project_parent.uuid,
+    )
+    kind_conflicts = {
+        row.item_id: set(row.signals)
+        for row in diagnose(
+            MemoryLibrary(
+                [area, project_parent, nested, area_on_area, area_on_project]
+            )
+        )
+    }
+    assert "project_with_project_parent" in kind_conflicts["project:inner-project"]
+    assert "area_with_area_home" in kind_conflicts["area:inner-area"]
+    assert "area_with_project_parent" in kind_conflicts["area:area-under-project"]
     assert "tag_parent_self_reference" in conflicts["tag:self"]
     assert "tag_parent_cycle" in conflicts["tag:a"]
     assert any(row.repair for row in diagnose(library))
