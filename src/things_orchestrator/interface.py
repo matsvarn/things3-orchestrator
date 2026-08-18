@@ -2206,6 +2206,7 @@ COMMIT_OUT: dict[str, Any] = {
         "recovery": _RECOVERY,
         "plan": _PLAN,
         "receipt": _STRING,
+        "missing_ids": RESULT_OUT["properties"]["missing_ids"],
     },
 }
 
@@ -2219,6 +2220,7 @@ APPROVE_OUT: dict[str, Any] = {
         "tags": RESULT_OUT["properties"]["tags"],
         "signals": RESULT_OUT["properties"]["signals"],
         "receipt": _STRING,
+        "missing_ids": RESULT_OUT["properties"]["missing_ids"],
     },
 }
 

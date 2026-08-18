@@ -136,7 +136,10 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
             },
         )
     )
-    assert result.is_error is True
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
+    assert result.structured_content["next"] == "ask"
     text = result.content[0].text
     assert "scope_revision from a fresh view=system read" in text
     assert "Renew password" not in text
@@ -150,7 +153,9 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
             },
         )
     )
-    assert start.is_error is True
+    assert start.is_error is False
+    assert start.structured_content is not None
+    assert start.structured_content["status"] == "rejected"
     assert "today, evening, someday" in start.content[0].text
 
     unknown = asyncio.run(
@@ -159,7 +164,9 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
             {"create": [{"title": "Call bank"}]},
         )
     )
-    assert unknown.is_error is True
+    assert unknown.is_error is False
+    assert unknown.structured_content is not None
+    assert unknown.structured_content["status"] == "rejected"
     assert "intent_id" in unknown.content[0].text
     assert "Renew password" not in unknown.content[0].text
 
@@ -176,8 +183,10 @@ def test_duplicate_includes_are_a_validation_error_not_internal() -> None:
             },
         )
     )
-    assert result.is_error is True
-    assert result.structured_content is None
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
+    assert result.structured_content["next"] == "ask"
     assert "include" in result.content[0].text.lower()
     assert "unique" in result.content[0].text.lower()
     assert "internal_error" not in result.content[0].text
@@ -204,8 +213,9 @@ def test_start_null_cannot_combine_with_remind_at() -> None:
             },
         )
     )
-    assert result.is_error is True
-    assert result.structured_content is None
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
     assert "start=null cannot combine with remind_at" in result.content[0].text
     assert task.someday is True
     assert task.start is None
@@ -226,7 +236,9 @@ def test_start_null_cannot_combine_with_remind_at() -> None:
             },
         )
     )
-    assert offset.is_error is True
+    assert offset.is_error is False
+    assert offset.structured_content is not None
+    assert offset.structured_content["status"] == "rejected"
     assert "start=null cannot combine with remind_at" not in offset.content[0].text
     assert "UTC offset" in offset.content[0].text
 
@@ -312,6 +324,9 @@ def test_health_is_open_without_bearer() -> None:
         assert payload["cache_version"] == 4
         assert payload["capabilities"]["clear_someday"] is True
         assert payload["capabilities"]["area_view"] is True
+        assert payload["capabilities"]["project_teardown"] is True
+        assert payload["capabilities"]["neighborhood_reads"] is True
+        assert payload["capabilities"]["in_band_validation"] is True
         assert payload["tool_schema_hash"].startswith("sha256:")
         assert payload["tool_contract_hash"].startswith("sha256:")
         assert payload["tool_contract_hash"] != payload["tool_schema_hash"]

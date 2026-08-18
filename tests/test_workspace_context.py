@@ -811,6 +811,15 @@ def test_organize_rejects_non_active_visible_projects_without_context(
     assert result.status == "needs_input"
     assert result.context is None
     assert result.recovery and result.recovery.code == "context_required"
+    if state.get("trashed"):
+        assert result.recovery.read == {"purpose": "change", "id": project.id}
+        assert result.next == "read"
+        assert "Trash" in result.instruction
+    else:
+        assert result.recovery.read != {
+            "purpose": "organize",
+            "id": project.id,
+        }
 
 
 def test_organize_read_uses_context_budget_not_normal_read_limit() -> None:

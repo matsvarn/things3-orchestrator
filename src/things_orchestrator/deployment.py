@@ -34,6 +34,9 @@ CAPABILITIES = {
     "bulk_ids": True,
     "trash_view": True,
     "same_batch_today_after": True,
+    "project_teardown": True,
+    "neighborhood_reads": True,
+    "in_band_validation": True,
 }
 
 

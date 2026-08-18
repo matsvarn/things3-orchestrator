@@ -318,6 +318,28 @@ class ThingsWorkspace:
             if within is not None and within.kind not in {"area", "project"}:
                 return self._needs_input("Search within an exact Area or Project.")
             matches = self._search(call.find, within)
+            if matches:
+                return self._page(
+                    matches,
+                    call.limit,
+                    full=False,
+                    instruction="Use an exact ID for a change.",
+                )
+            closed = [
+                item
+                for item in self._search(call.find, within, closed=True)
+                if item.trashed or item.status != "open"
+            ]
+            if closed:
+                return self._page(
+                    closed,
+                    call.limit,
+                    full=False,
+                    instruction=(
+                        "These matches are not active. "
+                        "Use purpose=change to restore, or view=trash."
+                    ),
+                )
             return self._page(
                 matches,
                 call.limit,
@@ -722,16 +744,7 @@ class ThingsWorkspace:
                 or project.kind != "project"
                 or not project.is_open()
             ):
-                return self._context_recovery(
-                    code="context_required",
-                    instruction=(
-                        "That exact Project is not an active visible Project. "
-                        "Read an active Project again."
-                    ),
-                    retry="read",
-                    read=self._selector_arguments(call),
-                    status="needs_input",
-                )
+                return self._organize_unavailable(project)
         elif call.find is not None:
             within = self._exact_item(call.within) if call.within else None
             if call.within and (within is None or not within.is_open()):
@@ -789,6 +802,15 @@ class ThingsWorkspace:
                         ),
                     )
                 else:
+                    closed_projects = [
+                        item
+                        for item in self._search(call.find, within, closed=True)
+                        if item.kind == "project"
+                        and not item.heading
+                        and item.trashed
+                    ]
+                    if len(closed_projects) == 1:
+                        return self._organize_unavailable(closed_projects[0])
                     orphans = [
                         item
                         for item in self._library.records.values()
@@ -844,16 +866,7 @@ class ThingsWorkspace:
                 or project.kind != "project"
                 or not project.is_open()
             ):
-                return self._context_recovery(
-                    code="context_required",
-                    instruction=(
-                        "That exact Project is not an active visible Project. "
-                        "Read an active Project again."
-                    ),
-                    retry="read",
-                    read=self._selector_arguments(call),
-                    status="needs_input",
-                )
+                return self._organize_unavailable(project)
         else:
             raise AssertionError("organize selector must identify a Project")
         assert project is not None
@@ -891,6 +904,34 @@ class ThingsWorkspace:
             context=self._public_context(context),
             scope_revision=self._project_scope_revision(project.uuid),
             missing_ids=neighborhood.missing_ids,
+        )
+
+    def _organize_unavailable(self, project: Record | None) -> Result:
+        """Point organize recovery at a live look, never the same dead selector."""
+        if project is not None and project.kind == "project" and project.trashed:
+            return Result(
+                next="read",
+                status="needs_input",
+                instruction=(
+                    "This Project is in Trash. "
+                    "Restore it with purpose=change, or read view=trash."
+                ),
+                items=[self._fact(project, full=False, include_revision=False)],
+                recovery=RecoveryFact(
+                    code="context_required",
+                    retry="read",
+                    read={"purpose": "change", "id": project.id},
+                ),
+            )
+        return self._context_recovery(
+            code="context_required",
+            instruction=(
+                "That exact Project is not an active visible Project. "
+                "Read an active Project again."
+            ),
+            retry="read",
+            read={"view": "system"},
+            status="needs_input",
         )
 
     def _context_detail_is_complete(self, item: Record) -> bool:
@@ -4979,25 +5020,56 @@ class ThingsWorkspace:
     def _settled(
         self, intent_id: str, writes: list[Write], *, unchanged: bool
     ) -> Result:
-        ids = list(
-            dict.fromkeys(
-                write.uuid for write in writes if write.action != "ensure_tag"
-            )
-        )
+        ids: list[str] = []
+        missing_ids: list[str] = []
+        tags: list[TagFact] = []
+
+        def add_id(uuid: str | None) -> None:
+            if uuid and uuid not in ids:
+                ids.append(uuid)
+
+        def add_tag(uuid: str | None) -> None:
+            if uuid is None or any(tag.id == f"tag:{uuid}" for tag in tags):
+                return
+            tags.append(self._tag_fact(uuid))
+
+        for write in writes:
+            if write.action == "ensure_tag":
+                title = write.title or ""
+                add_tag(self._library.tag_uuid(title) or write.uuid)
+                continue
+            if write.action in {"rename_tag", "reparent_tag"}:
+                add_tag(write.uuid)
+                continue
+            if write.action == "delete_tag":
+                continue
+            if write.action == "checklist":
+                parent = write.checklist_parent_uuid
+                if parent:
+                    add_id(parent)
+                    continue
+                for record in self._library.records.values():
+                    if any(row.uuid == write.uuid for row in record.checklists):
+                        add_id(record.uuid)
+                        break
+                continue
+            if write.action in {"permanent_delete", "delete_area"}:
+                if self._library.records.get(write.uuid) is None:
+                    missing_ids.append(f"{write.kind}:{write.uuid}")
+                else:
+                    add_id(write.uuid)
+                continue
+            add_id(write.uuid)
+            if write.tag_uuids is not None:
+                for tag_uuid in write.tag_uuids:
+                    add_tag(tag_uuid)
+
         items = [
             self._fact(item, full=False)
             for uuid in ids
             if (item := self._library.records.get(uuid)) is not None
         ][:_CONTEXT_LIMIT]
-        tags: list[TagFact] = []
-        for write in writes:
-            if write.action != "ensure_tag":
-                continue
-            title = write.title or ""
-            uuid = self._library.tag_uuid(title)
-            if uuid is None or any(tag.id == f"tag:{uuid}" for tag in tags):
-                continue
-            tags.append(self._tag_fact(uuid))
+        missing_ids = list(dict.fromkeys(missing_ids))[:10]
         return Result(
             next="done",
             status="unchanged" if unchanged else "applied",
@@ -5007,6 +5079,7 @@ class ThingsWorkspace:
             items=items,
             tags=tags,
             receipt=intent_id,
+            missing_ids=missing_ids,
         )
 
     def _plan_payload(self, prepared: _Prepared) -> JsonDict:
