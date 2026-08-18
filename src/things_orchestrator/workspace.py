@@ -331,14 +331,19 @@ class ThingsWorkspace:
                 if item.trashed or item.status != "open"
             ]
             if closed:
+                only_trash = all(item.trashed for item in closed)
+                instruction = (
+                    "These matches are in Trash. "
+                    "Use purpose=change to restore, or view=trash."
+                    if only_trash
+                    else "These matches are not active. "
+                    "Use purpose=change on the exact id, or view=trash."
+                )
                 return self._page(
                     closed,
                     call.limit,
                     full=False,
-                    instruction=(
-                        "These matches are not active. "
-                        "Use purpose=change to restore, or view=trash."
-                    ),
+                    instruction=instruction,
                 )
             return self._page(
                 matches,

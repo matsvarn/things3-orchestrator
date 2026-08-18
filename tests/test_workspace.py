@@ -222,7 +222,7 @@ def test_find_includes_active_headings_for_rename() -> None:
     assert review.items[0].id == "heading:prep"
 
 
-def test_review_find_excludes_completed_trashed_and_repeat_templates() -> None:
+def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:
     records = [
         Record(uuid="done", kind="task", title="Prep done", status="done"),
         Record(uuid="trash", kind="task", title="Prep trash", trashed=True),
@@ -238,7 +238,9 @@ def test_review_find_excludes_completed_trashed_and_repeat_templates() -> None:
     review = workspace(records).read(ReadCall(find="Prep"))
     assert {item.id for item in review.items} == {"task:done", "task:trash"}
     assert "not active" in review.instruction
-    assert "trashed" in next(item.signals for item in review.items if item.id == "task:trash")
+    assert "trashed" in next(
+        item.signals for item in review.items if item.id == "task:trash"
+    )
 
     change = workspace(records).read(ReadCall(purpose="change", find="invoice"))
     assert change.status == "needs_input"
