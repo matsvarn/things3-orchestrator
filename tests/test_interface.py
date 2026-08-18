@@ -26,6 +26,7 @@ from things_orchestrator.interface import (
     CommitCall,
     ContextFact,
     CreateEntry,
+    DiagnosticFact,
     EnsureTag,
     ItemFact,
     LayoutFact,
@@ -67,6 +68,7 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
         {"view": "audit", "id": "task:one"},
         {"ids": ["task:one"], "view": "today"},
         {"ids": []},
+        {"signals_any": ["someday"]},
         {
             "purpose": "change",
             "id": "task:one",
@@ -1170,15 +1172,15 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    # Review completeness adds area/audit/diagnostics/ids and plan sections.
-    # Keep the contract compact, but allow that justified expansion.
-    assert discovery_chars < 16_600
-    assert discovery_chars - 13_406 < 3_200
+    # Review completeness plus paginated DiagnosticFact. Keep the
+    # contract compact, but allow that justified expansion.
+    assert discovery_chars < 17_400
+    assert discovery_chars - 13_406 < 4_000
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 17_000
+    assert wire_chars < 18_000
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
@@ -1307,6 +1309,10 @@ def test_manual_schema_contracts_match_the_runtime_models() -> None:
         (
             ReviewSection,
             RESULT_OUT["properties"]["sections"]["items"],
+        ),
+        (
+            DiagnosticFact,
+            RESULT_OUT["properties"]["diagnostics"]["items"],
         ),
         (PlanFact, RESULT_OUT["properties"]["plan"]),
         (

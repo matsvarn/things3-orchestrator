@@ -55,6 +55,7 @@ RecurrenceKind = Literal[
 ]
 
 _ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
+_DIAGNOSTIC_ID = r"^(task|project|area|heading|tag):[^\s:]+$"
 _CONTAINER_ID = r"^(project|area):[^\s:]+$"
 _CHECK_ID = r"^check:[^\s:]+$"
 _TAG_ID = r"^tag:[^\s:]+$"
@@ -172,6 +173,7 @@ class ReadCall(StrictModel):
     limit: int = Field(default=20, ge=1, le=40)
     include: list[ReadInclude] = Field(default_factory=list, max_length=INCLUDE_LIMIT)
     ids: list[str] = Field(default_factory=list, max_length=BULK_ID_LIMIT)
+    signals_any: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("from_date")
     @classmethod
@@ -223,6 +225,10 @@ class ReadCall(StrictModel):
             raise ValueError("use only one of view, id, find, or ids")
         if "ids" in self.model_fields_set and not self.ids:
             raise ValueError("ids needs at least one exact item ID")
+        if self.signals_any and self.view != "audit":
+            raise ValueError("signals_any needs view audit")
+        if _duplicates(self.signals_any):
+            raise ValueError("signals_any cannot contain duplicates")
         if self.ids and self.purpose != "review":
             raise ValueError("ids is only available for review purpose")
         if self.ids and (
@@ -1185,6 +1191,17 @@ class ItemFact(StrictModel):
     signals: list[str] = Field(default_factory=list, max_length=20)
 
 
+class DiagnosticFact(StrictModel):
+    """One native-state conflict, including tag conflicts."""
+
+    id: str = Field(pattern=_DIAGNOSTIC_ID, max_length=512)
+    kind: Literal["task", "project", "area", "heading", "tag"]
+    title: str = Field(min_length=1, max_length=1000)
+    conflicts: list[str] = Field(min_length=1, max_length=20)
+    repair: str | None = Field(default=None, max_length=400)
+    repair_kind: str | None = Field(default=None, max_length=80)
+
+
 class ReviewSection(StrictModel):
     key: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=200)
@@ -1296,7 +1313,8 @@ class Result(StrictModel):
     instruction: str = Field(min_length=1, max_length=1000)
     items: list[ItemFact] = Field(default_factory=list, max_length=120)
     tags: list[TagFact] = Field(default_factory=list, max_length=40)
-    sections: list[ReviewSection] = Field(default_factory=list, max_length=20)
+    diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
+    sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
     layouts: list[LayoutFact] = Field(default_factory=list, max_length=10)
     signals: list[str] = Field(default_factory=list, max_length=40)
     context: ContextFact | None = None
@@ -1322,6 +1340,7 @@ class Result(StrictModel):
 _STRING: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": 512}
 _NULLABLE_STRING: dict[str, Any] = {"type": ["string", "null"], "maxLength": 512}
 _EXACT_ITEM: dict[str, Any] = {**_STRING, "pattern": _ITEM_ID}
+_EXACT_DIAGNOSTIC: dict[str, Any] = {**_STRING, "pattern": _DIAGNOSTIC_ID}
 _EXACT_TAG: dict[str, Any] = {**_STRING, "pattern": _TAG_ID}
 _TAG_REFERENCE_SCHEMA: dict[str, Any] = {
     **_STRING,
@@ -1438,6 +1457,12 @@ READ_IN: dict[str, Any] = {
             "maxItems": BULK_ID_LIMIT,
             "uniqueItems": True,
             "items": _EXACT_ITEM,
+        },
+        "signals_any": {
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
         },
     },
 }
@@ -1832,6 +1857,25 @@ _SECTION: dict[str, Any] = {
     },
 }
 
+_DIAGNOSTIC: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "kind", "title", "conflicts"],
+    "properties": {
+        "id": _EXACT_DIAGNOSTIC,
+        "kind": {"enum": ["task", "project", "area", "heading", "tag"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "conflicts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+        "repair": {"type": "string", "maxLength": 400},
+        "repair_kind": {"type": "string", "maxLength": 80},
+    },
+}
+
 _CONTEXT_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -1942,7 +1986,8 @@ RESULT_OUT: dict[str, Any] = {
         "instruction": {"type": "string", "minLength": 1, "maxLength": 1000},
         "items": {"type": "array", "maxItems": 120, "items": _ITEM_FACT},
         "tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
-        "sections": {"type": "array", "maxItems": 20, "items": _SECTION},
+        "diagnostics": {"type": "array", "maxItems": 40, "items": _DIAGNOSTIC},
+        "sections": {"type": "array", "maxItems": 40, "items": _SECTION},
         "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
         "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
         "context": _CONTEXT_FACT,
@@ -1992,9 +2037,10 @@ READ_OUT: dict[str, Any] = {
         **_CONTROL_PROPERTIES,
         "items": _READ_ITEMS,
         "tags": RESULT_OUT["properties"]["tags"],
+        "diagnostics": RESULT_OUT["properties"]["diagnostics"],
         "sections": {
             "type": "array",
-            "maxItems": 20,
+            "maxItems": 40,
             "items": _SECTION,
         },
         "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
@@ -2039,7 +2085,7 @@ READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
     "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once. view=diagnostics lists native-state conflicts, including tag conflicts in signals. ids reads 1 to 10 exact items at full fidelity. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repair_kind. ids reads 1 to 10 exact items; large notes are truncated across the batch. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "

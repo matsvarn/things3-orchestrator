@@ -31,6 +31,25 @@ _REPAIR = {
     "dangling_tag_parent": "clear or repair the tag parent",
     "tag_parent_self_reference": "clear the tag parent",
     "tag_parent_cycle": "clear the cyclic tag parent",
+    "project_with_project_parent": "move the Project to an Area or to root Anytime",
+    "area_with_area_home": "clear the nested Area home",
+    "area_with_project_parent": "clear the Area parent",
+}
+_REPAIR_KIND = {
+    "inbox_with_project": "repeat_placement",
+    "inbox_with_area": "repeat_placement",
+    "both_project_and_area": "owner_choice",
+    "orphaned_heading": "clear_heading",
+    "heading_without_project": "clear_heading",
+    "heading_wrong_project": "clear_heading",
+    "dangling_tag_parent": "clear_or_repair_tag_parent",
+    "tag_parent_self_reference": "clear_tag_parent",
+    "tag_parent_cycle": "clear_tag_parent",
+    "malformed_reminder": "clear_reminder",
+    "reminder_without_schedule": "clear_reminder",
+    "project_with_project_parent": "rehome_project",
+    "area_with_area_home": "clear_area_home",
+    "area_with_project_parent": "clear_area_parent",
 }
 
 
@@ -41,6 +60,7 @@ class Conflict:
     item_id: str
     signals: tuple[str, ...]
     repair: str | None = None
+    repair_kind: str | None = None
 
 
 def remind_is_valid(value: str) -> bool:
@@ -99,15 +119,29 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
             signals.append("orphaned_heading")
         elif item.parent_uuid and heading.parent_uuid != item.parent_uuid:
             signals.append("heading_wrong_project")
+    if item.kind == "project" and parent is not None and parent.kind == "project":
+        signals.append("project_with_project_parent")
+    if item.kind == "area" and parent is not None:
+        signals.append("area_with_project_parent")
+    if item.kind == "area" and item.area_uuid:
+        signals.append("area_with_area_home")
     if item.parent_uuid and parent is None:
         signals.append("missing_parent")
-    elif parent is not None and parent.kind != "project":
+    elif (
+        parent is not None
+        and parent.kind != "project"
+        and item.kind != "area"
+    ):
         signals.append("parent_not_project")
     elif parent is not None and parent.trashed and not item.trashed:
         signals.append("trashed_parent")
     if item.area_uuid and area is None:
         signals.append("missing_area")
-    elif area is not None and area.kind != "area":
+    elif (
+        area is not None
+        and area.kind != "area"
+        and item.kind != "area"
+    ):
         signals.append("area_not_area")
     elif area is not None and area.trashed and not item.trashed:
         signals.append("trashed_area")
@@ -128,14 +162,17 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
 
 def _conflict(item_id: str, signals: list[str]) -> Conflict:
     hints = [_REPAIR[name] for name in signals if name in _REPAIR]
+    kinds = [_REPAIR_KIND[name] for name in signals if name in _REPAIR_KIND]
     return Conflict(
         item_id=item_id,
         signals=tuple(signals),
         repair="; ".join(dict.fromkeys(hints)) or None,
+        repair_kind=next(iter(dict.fromkeys(kinds)), None),
     )
 
 
 def _tag_conflicts(library: MemoryLibrary) -> list[Conflict]:
+    cyclic = _cyclic_tags(library.tag_parents)
     found: list[Conflict] = []
     for uuid, parents in sorted(library.tag_parents.items()):
         if uuid not in library.tags:
@@ -145,22 +182,51 @@ def _tag_conflicts(library: MemoryLibrary) -> list[Conflict]:
             signals.append("tag_parent_self_reference")
         if any(parent not in library.tags for parent in parents):
             signals.append("dangling_tag_parent")
-        if _tag_cycle(uuid, library.tag_parents):
+        if uuid in cyclic:
             signals.append("tag_parent_cycle")
         if signals:
             found.append(_conflict(f"tag:{uuid}", signals))
     return found
 
 
-def _tag_cycle(start: str, parents: dict[str, list[str]]) -> bool:
-    seen: set[str] = set()
-    stack = list(parents.get(start, []))
-    while stack:
-        node = stack.pop()
-        if node == start:
-            return True
-        if node in seen or node not in parents:
-            continue
-        seen.add(node)
-        stack.extend(parents.get(node, []))
-    return False
+def _cyclic_tags(parents: dict[str, list[str]]) -> set[str]:
+    """Return every tag that participates in a parent cycle."""
+
+    nodes = set(parents)
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    cyclic: set[str] = set()
+    clock = 0
+
+    def strongconnect(node: str) -> None:
+        nonlocal clock
+        index[node] = low[node] = clock
+        clock += 1
+        stack.append(node)
+        on_stack.add(node)
+        for parent in parents.get(node, []):
+            if parent not in parents:
+                continue
+            if parent not in index:
+                strongconnect(parent)
+                low[node] = min(low[node], low[parent])
+            elif parent in on_stack:
+                low[node] = min(low[node], index[parent])
+        if low[node] != index[node]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        if len(component) > 1 or node in parents.get(node, []):
+            cyclic.update(component)
+
+    for node in sorted(nodes):
+        if node not in index:
+            strongconnect(node)
+    return cyclic

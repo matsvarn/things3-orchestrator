@@ -2,8 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- `view=diagnostics` pages item and tag conflicts in `diagnostics`
+  with `repair_kind`. Continue the cursor for the rest.
+- `view=audit` accepts `signals_any` to keep one GTD state.
+- Audit sections can list up to 40 homes on a page.
+
 ### Fixed
 
+- Bulk exact reads keep a 100 KB notes budget across the batch.
+- All-missing `ids` name every missing ID and use `next=read`.
+- Diagnostics detect nested Projects and Areas.
 - `start: null` cannot combine with `remind_at`. The previous pair
   could schedule a date from the reminder while claiming to clear
   start.
@@ -11,7 +21,7 @@
   `internal_error`.
 - An explicit empty `ids` list is rejected instead of becoming Today.
 - Tag-only diagnostics no longer claim "no conflicts" while returning
-  tag signals. Extra tag conflicts set `truncated`.
+  tag signals.
 - Unexpected internal exceptions set MCP `is_error`.
 
 ### Added
