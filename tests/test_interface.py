@@ -27,6 +27,7 @@ from things_orchestrator.interface import (
     ContextFact,
     CreateEntry,
     DiagnosticFact,
+    DiagnosticRepair,
     EnsureTag,
     ItemFact,
     LayoutFact,
@@ -1174,13 +1175,13 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     )
     # Review completeness plus paginated DiagnosticFact. Keep the
     # contract compact, but allow that justified expansion.
-    assert discovery_chars < 17_400
-    assert discovery_chars - 13_406 < 4_000
+    assert discovery_chars < 18_000
+    assert discovery_chars - 13_406 < 4_600
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 18_000
+    assert wire_chars < 22_000
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
@@ -1313,6 +1314,12 @@ def test_manual_schema_contracts_match_the_runtime_models() -> None:
         (
             DiagnosticFact,
             RESULT_OUT["properties"]["diagnostics"]["items"],
+        ),
+        (
+            DiagnosticRepair,
+            RESULT_OUT["properties"]["diagnostics"]["items"]["properties"][
+                "repairs"
+            ]["items"],
         ),
         (PlanFact, RESULT_OUT["properties"]["plan"]),
         (

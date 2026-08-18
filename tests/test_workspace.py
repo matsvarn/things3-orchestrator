@@ -4245,6 +4245,7 @@ def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None
     assert result.truncated is False
     child = next(row for row in result.diagnostics if row.id == "tag:child")
     assert child.repair_kind == "clear_or_repair_tag_parent"
+    assert any(repair.conflict == "dangling_tag_parent" for repair in child.repairs)
 
 
 def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
@@ -4280,6 +4281,9 @@ def test_tag_diagnostics_page_beyond_the_first_forty() -> None:
     assert second.status == "ok"
     assert len(second.diagnostics) == 5
     assert second.truncated is False
+    library.tag_parents["t0"] = ["t0"]
+    stale = module.read(ReadCall(cursor=first.cursor, limit=40))
+    assert stale.status == "stale"
 
 
 def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
@@ -4292,7 +4296,84 @@ def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
     assert result.next == "read"
     assert [item.id for item in result.items] == [first.id]
     assert result.items[0].notes_markdown == "kept"
+    assert result.missing_ids == ["task:missing"]
     assert "task:missing" in result.instruction
+
+
+def test_diagnostics_bounds_a_long_conflicting_tag_title() -> None:
+    library = MemoryLibrary()
+    library.tags["long"] = "T" * 1001
+    library.tag_parents["long"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    assert result.diagnostics[0].id == "tag:long"
+    assert len(result.diagnostics[0].title) == 1000
+    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
+    assert result.diagnostics[0].repair_kind == "clear_or_repair_tag_parent"
+
+
+def test_diagnostics_uses_untitled_for_a_blank_conflicting_tag() -> None:
+    library = MemoryLibrary()
+    library.tags["blank"] = "   "
+    library.tag_parents["blank"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    assert result.diagnostics[0].title == "(untitled)"
+    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
+
+
+def test_diagnostics_lists_every_repair_on_a_multi_conflict_item() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    hybrid = Record(
+        uuid="stuck",
+        kind="task",
+        title="Stuck",
+        inbox=True,
+        parent_uuid=project.uuid,
+        start=NOW.date(),
+    )
+    module = workspace([project, hybrid])
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    row = next(item for item in result.diagnostics if item.id == hybrid.id)
+    kinds = {repair.repair_kind for repair in row.repairs}
+    assert "repeat_placement" in kinds
+    assert "clear_inbox_or_schedule" in kinds
+    assert [repair.conflict for repair in row.repairs] == row.conflicts
+
+
+def test_bulk_exact_read_truncates_checklist_text_in_the_shared_budget() -> None:
+    first = Record(uuid="one", kind="task", title="One", notes="n" * 40_000)
+    second = Record(
+        uuid="two",
+        kind="task",
+        title="Two",
+        checklists=[
+            ChecklistLine(f"r{index}", "C" * 1000)
+            for index in range(100)
+        ],
+    )
+    module = workspace([first, second])
+
+    result = module.read(ReadCall(ids=[first.id, second.id]))
+
+    assert result.status == "ok"
+    assert len(result.items[0].notes_markdown or "") == 40_000
+    assert "checklist_truncated" in result.items[1].signals
+    assert len(result.items[1].checklist) == 60
+    total = sum(
+        len(item.notes_markdown or "")
+        + sum(len(row.title) for row in item.checklist)
+        for item in result.items
+    )
+    assert total == 100_000
 
 
 def test_bulk_exact_read_truncates_notes_across_the_batch() -> None:
@@ -4330,6 +4411,7 @@ def test_all_missing_bulk_ids_name_every_missing_id() -> None:
     assert result.status == "needs_input"
     assert result.next == "read"
     assert result.items == []
+    assert result.missing_ids == ["task:a", "task:b", "task:c"]
     assert "task:a" in result.instruction
     assert "task:b" in result.instruction
     assert "task:c" in result.instruction

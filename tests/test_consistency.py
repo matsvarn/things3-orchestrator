@@ -99,6 +99,51 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
     assert "project_with_project_parent" in kind_conflicts["project:inner-project"]
     assert "area_with_area_home" in kind_conflicts["area:inner-area"]
     assert "area_with_project_parent" in kind_conflicts["area:area-under-project"]
+    task = Record(uuid="loose-task", kind="task", title="Loose")
+    area_parent_task = Record(
+        uuid="area-under-task",
+        kind="area",
+        title="Area under task",
+        parent_uuid=task.uuid,
+    )
+    area_parent_area = Record(
+        uuid="area-under-area",
+        kind="area",
+        title="Area under area",
+        parent_uuid=area.uuid,
+    )
+    area_home_task = Record(
+        uuid="area-home-task",
+        kind="area",
+        title="Area home task",
+        area_uuid=task.uuid,
+    )
+    area_home_project = Record(
+        uuid="area-home-project",
+        kind="area",
+        title="Area home project",
+        area_uuid=project_parent.uuid,
+    )
+    more = {
+        row.item_id: set(row.signals)
+        for row in diagnose(
+            MemoryLibrary(
+                [
+                    area,
+                    project_parent,
+                    task,
+                    area_parent_task,
+                    area_parent_area,
+                    area_home_task,
+                    area_home_project,
+                ]
+            )
+        )
+    }
+    assert "parent_not_project" in more["area:area-under-task"]
+    assert "parent_not_project" in more["area:area-under-area"]
+    assert "area_not_area" in more["area:area-home-task"]
+    assert "area_not_area" in more["area:area-home-project"]
     assert "tag_parent_self_reference" in conflicts["tag:self"]
     assert "tag_parent_cycle" in conflicts["tag:a"]
     assert any(row.repair for row in diagnose(library))

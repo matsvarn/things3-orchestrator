@@ -4,6 +4,10 @@
 
 ### Added
 
+- Diagnostics rows include a `repairs` list aligned to each conflict.
+- `/health` publishes `tool_schema_hash` so clients can detect a stale
+  cached schema.
+- Missing bulk IDs are also returned as `missing_ids`.
 - `view=diagnostics` pages item and tag conflicts in `diagnostics`
   with `repair_kind`. Continue the cursor for the rest.
 - `view=audit` accepts `signals_any` to keep one GTD state.
@@ -11,7 +15,8 @@
 
 ### Fixed
 
-- Bulk exact reads keep a 100 KB notes budget across the batch.
+- Bulk exact reads keep a 100 KB notes, checklist, and tag budget.
+  Overflow sets the matching truncation signal.
 - All-missing `ids` name every missing ID and use `next=read`.
 - Diagnostics detect nested Projects and Areas.
 - `start: null` cannot combine with `remind_at`. The previous pair
@@ -31,7 +36,7 @@
 - `view=audit` lists every active item once. Compact rows include
   `has_notes` and `has_checklist`.
 - `view=diagnostics` lists native-state conflicts.
-- `ids` reads up to 10 exact items at full fidelity.
+- `ids` returns bounded full-detail facts for up to 10 exact items.
 - Change contexts accept 40 include lookups.
 - Approval plans add grouped counts and ID sections.
 - `/health` reports version, cache version, capabilities, and optional

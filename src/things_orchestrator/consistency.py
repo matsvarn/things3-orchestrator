@@ -73,6 +73,7 @@ class Conflict:
     signals: tuple[str, ...]
     repair: str | None = None
     repair_kind: str | None = None
+    repairs: tuple[tuple[str, str], ...] = ()
 
 
 def remind_is_valid(value: str) -> bool:
@@ -139,21 +140,13 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
         signals.append("area_with_area_home")
     if item.parent_uuid and parent is None:
         signals.append("missing_parent")
-    elif (
-        parent is not None
-        and parent.kind != "project"
-        and item.kind != "area"
-    ):
+    elif parent is not None and parent.kind != "project":
         signals.append("parent_not_project")
     elif parent is not None and parent.trashed and not item.trashed:
         signals.append("trashed_parent")
     if item.area_uuid and area is None:
         signals.append("missing_area")
-    elif (
-        area is not None
-        and area.kind != "area"
-        and item.kind != "area"
-    ):
+    elif area is not None and area.kind != "area":
         signals.append("area_not_area")
     elif area is not None and area.trashed and not item.trashed:
         signals.append("trashed_area")
@@ -175,11 +168,15 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
 def _conflict(item_id: str, signals: list[str]) -> Conflict:
     hints = [_REPAIR[name] for name in signals if name in _REPAIR]
     kinds = [_REPAIR_KIND[name] for name in signals if name in _REPAIR_KIND]
+    repairs = tuple(
+        (name, _REPAIR_KIND[name]) for name in signals if name in _REPAIR_KIND
+    )
     return Conflict(
         item_id=item_id,
         signals=tuple(signals),
         repair="; ".join(dict.fromkeys(hints)) or None,
         repair_kind=next(iter(dict.fromkeys(kinds)), None),
+        repairs=repairs,
     )
 
 
@@ -205,40 +202,48 @@ def _cyclic_tags(parents: dict[str, list[str]]) -> set[str]:
     """Return every tag that participates in a parent cycle."""
 
     nodes = set(parents)
-    index: dict[str, int] = {}
-    low: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
-    cyclic: set[str] = set()
-    clock = 0
+    reverse: dict[str, list[str]] = {node: [] for node in nodes}
+    for node, links in parents.items():
+        for parent in links:
+            if parent in reverse:
+                reverse[parent].append(node)
 
-    def strongconnect(node: str) -> None:
-        nonlocal clock
-        index[node] = low[node] = clock
-        clock += 1
-        stack.append(node)
-        on_stack.add(node)
-        for parent in parents.get(node, []):
-            if parent not in parents:
+    def postorder(graph: dict[str, list[str]]) -> list[str]:
+        seen: set[str] = set()
+        order: list[str] = []
+        for start in sorted(nodes):
+            if start in seen:
                 continue
-            if parent not in index:
-                strongconnect(parent)
-                low[node] = min(low[node], low[parent])
-            elif parent in on_stack:
-                low[node] = min(low[node], index[parent])
-        if low[node] != index[node]:
-            return
-        component: list[str] = []
-        while True:
-            member = stack.pop()
-            on_stack.remove(member)
-            component.append(member)
-            if member == node:
-                break
-        if len(component) > 1 or node in parents.get(node, []):
-            cyclic.update(component)
+            stack: list[tuple[str, bool]] = [(start, False)]
+            while stack:
+                node, finished = stack.pop()
+                if finished:
+                    order.append(node)
+                    continue
+                if node in seen:
+                    continue
+                seen.add(node)
+                stack.append((node, True))
+                for nxt in reversed(graph.get(node, [])):
+                    if nxt not in seen and nxt in nodes:
+                        stack.append((nxt, False))
+        return order
 
-    for node in sorted(nodes):
-        if node not in index:
-            strongconnect(node)
+    cyclic: set[str] = set()
+    seen: set[str] = set()
+    for start in reversed(postorder(parents)):
+        if start in seen:
+            continue
+        component: list[str] = []
+        stack = [start]
+        seen.add(start)
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for nxt in reverse.get(node, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        if len(component) > 1 or start in parents.get(start, []):
+            cyclic.update(component)
     return cyclic

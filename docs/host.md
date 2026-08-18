@@ -84,7 +84,9 @@ is the login user, `WorkingDirectory` is this checkout, and `ExecStart`
 uses that user's `uv` (`command -v uv`, often `~/.local/bin/uv`, not
 `/usr/bin/uv`). Set `THINGS_ORCHESTRATOR_COMMIT` to
 `git rev-parse HEAD` from that checkout so `/health` can tell builds
-apart.
+apart. After a schema-changing deploy, reconnect the MCP client and
+start a fresh agent session so it picks up the new tool schema. Compare
+`/health` `commit` and `tool_schema_hash` with the previous values.
 
 ```console
 # Run on VPS

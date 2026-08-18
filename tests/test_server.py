@@ -313,6 +313,7 @@ def test_health_is_open_without_bearer() -> None:
         assert payload["cache_version"] == 4
         assert payload["capabilities"]["clear_someday"] is True
         assert payload["capabilities"]["area_view"] is True
+        assert payload["tool_schema_hash"].startswith("sha256:")
 
 
 def test_mcp_returns_401_without_authorization() -> None:
