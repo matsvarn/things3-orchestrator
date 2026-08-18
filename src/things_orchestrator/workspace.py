@@ -2750,6 +2750,7 @@ class ThingsWorkspace:
             change.start,
             change.remind_at,
             start_present="start" in change.model_fields_set,
+            existing_tonight=item.tonight,
         )
         start_present = "start" in change.model_fields_set
         remind_present = "remind_at" in change.model_fields_set
@@ -4066,6 +4067,7 @@ class ThingsWorkspace:
         remind_value: str | None,
         *,
         start_present: bool,
+        existing_tonight: bool = False,
     ) -> tuple[date | None, bool, bool, str | None]:
         start, someday, tonight = self._start(start_value)
         reminder_date, reminder = self._remind_input(remind_value)
@@ -4079,7 +4081,7 @@ class ThingsWorkspace:
                     )
                 )
             return start, someday, tonight, reminder
-        return reminder_date, False, False, reminder
+        return reminder_date, False, existing_tonight, reminder
 
     def _after_index(
         self,

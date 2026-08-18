@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Setting only `remind_at` on an Evening task keeps Evening. A reminder
+  is a clock time, not a move out of Evening. Send `start=today` to
+  leave Evening, or `start=evening` to set it.
+
 ## 0.2.1 — 2026-08-18
 
 Same three tools. Production dogfood of 0.2.0 hardened review completeness,
