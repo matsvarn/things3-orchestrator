@@ -19,6 +19,8 @@ class StrictModel(BaseModel):
 Kind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "completed", "canceled"]
 TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
+DetailField = Literal["notes", "checklist", "tags", "recurrence"]
+DETAIL_FIELDS: tuple[DetailField, ...] = ("notes", "checklist", "tags", "recurrence")
 Next = Literal["done", "ask", "approve", "read", "retry_same", "stop"]
 ResultStatus = Literal[
     "ok",
@@ -174,6 +176,7 @@ class ReadCall(StrictModel):
     limit: int = Field(default=20, ge=1, le=40)
     include: list[ReadInclude] = Field(default_factory=list, max_length=INCLUDE_LIMIT)
     ids: list[str] = Field(default_factory=list, max_length=BULK_ID_LIMIT)
+    fields: list[DetailField] = Field(default_factory=list, max_length=4)
     signals_any: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("from_date")
@@ -217,8 +220,12 @@ class ReadCall(StrictModel):
             )
         ):
             raise ValueError("cursor cannot combine with another selector")
-        if self.cursor is not None and (self.include or self.ids or self.signals_any):
-            raise ValueError("cursor cannot combine with include, ids, or signals_any")
+        if self.cursor is not None and (
+            self.include or self.ids or self.signals_any or self.fields
+        ):
+            raise ValueError(
+                "cursor cannot combine with include, ids, fields, or signals_any"
+            )
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
             selectors += 1
@@ -230,6 +237,10 @@ class ReadCall(StrictModel):
             raise ValueError("signals_any needs view audit")
         if _duplicates(self.signals_any):
             raise ValueError("signals_any cannot contain duplicates")
+        if "fields" in self.model_fields_set and not self.ids:
+            raise ValueError("fields needs ids")
+        if _duplicates(self.fields):
+            raise ValueError("fields cannot contain duplicates")
         if self.ids and self.purpose != "review":
             raise ValueError("ids is only available for review purpose")
         if self.ids and (
@@ -1183,6 +1194,8 @@ class ItemFact(StrictModel):
     checklist: list[ChecklistFact] = Field(default_factory=list, max_length=100)
     direct_tags: list[TagFact] = Field(default_factory=list, max_length=40)
     inherited_tags: list[TagFact] = Field(default_factory=list, max_length=40)
+    direct_tag_ids: list[str] = Field(default_factory=list, max_length=40)
+    inherited_tag_ids: list[str] = Field(default_factory=list, max_length=40)
     start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
@@ -1199,6 +1212,15 @@ class ItemFact(StrictModel):
     ) -> list[TruncatedField]:
         if _duplicates(value):
             raise ValueError("truncated_fields cannot contain duplicates")
+        return value
+
+    @field_validator("direct_tag_ids", "inherited_tag_ids")
+    @classmethod
+    def valid_tag_id_lists(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_TAG_ID, item) is None for item in value
+        ):
+            raise ValueError("tag id lists need unique exact tag IDs")
         return value
 
 
@@ -1484,6 +1506,12 @@ READ_IN: dict[str, Any] = {
             "maxItems": BULK_ID_LIMIT,
             "uniqueItems": True,
             "items": _EXACT_ITEM,
+        },
+        "fields": {
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": True,
+            "items": {"enum": ["notes", "checklist", "tags", "recurrence"]},
         },
         "signals_any": {
             "type": "array",
@@ -1845,6 +1873,18 @@ _ITEM_FACT: dict[str, Any] = {
         "checklist": {"type": "array", "maxItems": 100, "items": _CHECKLIST_FACT},
         "direct_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
         "inherited_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
+        "direct_tag_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
+        "inherited_tag_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
         "start": {
             "type": ["string", "null"],
             "maxLength": 32,
@@ -2095,6 +2135,18 @@ _READ_ITEM: dict[str, Any] = {
             "uniqueItems": True,
             "items": {"enum": ["notes", "checklist", "tags", "recurrence"]},
         },
+        "direct_tag_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
+        "inherited_tag_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
     },
 }
 _READ_ITEMS: dict[str, Any] = {
@@ -2159,8 +2211,8 @@ APPROVE_OUT: dict[str, Any] = {
 READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
-    "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags; join item tag ids to that registry. Every item first gets a 400-character note prefix, then remaining budget is spent in request order on checklist titles, tag ids and titles, then the rest of each note. The complete structured result stays under 256 KB. If still large, parent graphs go first, then extra notes, checklists, recurrence links, then tag membership; if core metadata still overflows, fewer items return with a cursor. truncated_fields and signals name omitted notes, checklist, tags, or recurrence; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. fields is ids-only and selects notes, checklist, tags, and/or recurrence links; omit it for all four, or send [] for core facts only. Recurrence kind stays on the item. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags and put only direct_tag_ids and inherited_tag_ids on items; join those IDs to the registry for titles and parents. Every item first gets a 400-character note prefix, then remaining budget is spent in request order on checklist titles, tag ids and titles, then the rest of each note. The complete structured result stays under 256 KB. If still large, parent graphs go first, then extra notes, checklists, recurrence links, then tag membership; if core metadata still overflows, fewer items return with a cursor. truncated_fields and signals name omitted notes, checklist, tags, or recurrence; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "

@@ -645,6 +645,16 @@ class MemoryLibrary:
             key=lambda item: (item.sort_index, item.uuid),
         )
 
+    def resolve_instance_types(self) -> None:
+        for record in self.records.values():
+            template_uuid = template_uuid_of(record)
+            if record.recurrence.role != "instance" or template_uuid is None:
+                continue
+            template = self.records.get(template_uuid)
+            record.recurrence = record.recurrence.resolve_instance_type(
+                template.recurrence.repeat_type if template else None
+            )
+
     def apply(self, writes: list[Write]) -> ApplyResult:
         snapshot = (
             deepcopy(self.records),
@@ -1111,16 +1121,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
         self.verified.append(item.title)
 
     def finish(self) -> None:
-        for record in self.library.records.values():
-            if (
-                record.recurrence.role != "instance"
-                or not record.recurrence.template_uuid
-            ):
-                continue
-            template = self.library.records.get(record.recurrence.template_uuid)
-            record.recurrence = record.recurrence.resolve_instance_type(
-                template.recurrence.repeat_type if template else None
-            )
+        self.library.resolve_instance_types()
 
 
 class _MutationVerifier(_MutationHandler[bool]):

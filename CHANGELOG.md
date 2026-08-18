@@ -4,6 +4,11 @@
 
 ### Added
 
+- Bulk `ids` accepts `fields` to request only `notes`, `checklist`,
+  `tags`, and/or `recurrence`. An explicit empty list returns core
+  facts only. Items carry `direct_tag_ids` and `inherited_tag_ids`;
+  titles and parents live on the top-level `tags` registry.
+
 - `/health` publishes `tool_contract_hash` so description and runtime
   `Result` changes are visible even when discovery schemas stay
   compact. Compare it after a deploy as well as `tool_schema_hash`.
@@ -21,6 +26,9 @@
 - Audit sections can list up to 40 homes on a page.
 
 ### Fixed
+
+- Links-only recurrence instances now resolve their repeat type from
+  the template, matching `template_uuid` instances.
 
 - Recurrence templates list every valid instance, whether the
   relationship is stored as `template_uuid`, `recurrence.links`, or
