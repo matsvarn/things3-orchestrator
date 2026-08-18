@@ -38,6 +38,7 @@ from .interface import (
     CommitCall,
     ContextFact,
     DiagnosticFact,
+    DiagnosticRepair,
     ItemFact,
     LayoutFact,
     LayoutSectionFact,
@@ -345,10 +346,14 @@ class ThingsWorkspace:
         *,
         offset: int = 0,
         expected_ids: list[str] | None = None,
+        expected_digest: str | None = None,
     ) -> Result:
         conflicts = diagnose(self._library)
         ids = [row.item_id for row in conflicts]
-        if expected_ids is not None and ids != expected_ids:
+        digest = _diagnostics_digest(conflicts)
+        if expected_ids is not None and (
+            ids != expected_ids or digest != expected_digest
+        ):
             return self._stale("That result changed. Start the read again.")
         limit = min(limit, _READ_LIMIT)
         page = conflicts[offset : offset + limit]
@@ -358,8 +363,8 @@ class ThingsWorkspace:
             cursor = self._encode_cursor(
                 ids,
                 next_offset,
-                self._scope_revision([]),
-                self._scope_revision([]),
+                digest,
+                digest,
                 False,
                 "diagnostics",
             )
@@ -387,7 +392,9 @@ class ThingsWorkspace:
     def _diagnostic_fact(self, conflict: Conflict) -> DiagnosticFact:
         if conflict.item_id.startswith("tag:"):
             uuid = conflict.item_id.removeprefix("tag:")
-            title = self._library.tags.get(uuid) or "(untitled)"
+            title = _bounded_tag_title(self._library.tags.get(uuid) or "")
+            if not title.strip():
+                title = "(untitled)"
             kind: Literal["task", "project", "area", "heading", "tag"] = "tag"
         else:
             item = self._exact_item(conflict.item_id)
@@ -400,6 +407,10 @@ class ThingsWorkspace:
             conflicts=list(conflict.signals),
             repair=conflict.repair,
             repair_kind=conflict.repair_kind,
+            repairs=[
+                DiagnosticRepair(conflict=name, repair_kind=kind)
+                for name, kind in conflict.repairs
+            ],
         )
 
     def _bulk_exact(self, call: ReadCall) -> Result:
@@ -416,7 +427,11 @@ class ThingsWorkspace:
             return Result(
                 next="read",
                 status="needs_input",
-                instruction=f"I could not find {missing_text}. Read or search again.",
+                instruction=(
+                    f"{len(missing)} requested IDs were not found. "
+                    f"Missing: {missing_text}."
+                ),
+                missing_ids=missing,
             )
         result = self._page(
             items,
@@ -425,11 +440,20 @@ class ThingsWorkspace:
             instruction=(
                 "Use these exact facts."
                 if not missing
-                else f"I could not find {missing_text}. Use these exact facts for the others."
+                else (
+                    f"{len(missing)} requested IDs were not found. "
+                    f"Use these exact facts for the others. Missing: {missing_text}."
+                )
             ),
         )
         if missing:
-            return result.model_copy(update={"next": "read", "status": "needs_input"})
+            return result.model_copy(
+                update={
+                    "next": "read",
+                    "status": "needs_input",
+                    "missing_ids": missing,
+                }
+            )
         return result
 
     def _context_change(self, call: ReadCall) -> Result:
@@ -1505,7 +1529,10 @@ class ThingsWorkspace:
             return self._stale("That cursor expired. Start the read again.")
         if saved.view == "diagnostics":
             return self._diagnostics_page(
-                limit, offset=saved.offset, expected_ids=saved.ids
+                limit,
+                offset=saved.offset,
+                expected_ids=saved.ids,
+                expected_digest=saved.snapshot_revision,
             )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
@@ -1798,19 +1825,56 @@ class ThingsWorkspace:
         used = 0
         bounded: list[ItemFact] = []
         for fact in facts:
+            remain = max(_BULK_TEXT_BUDGET - used, 0)
+            signals = list(fact.signals)
+            checklist = list(fact.checklist)
+            direct = list(fact.direct_tags)
+            inherited = list(fact.inherited_tags)
             notes = fact.notes_markdown or ""
-            extra = len(notes) + sum(len(row.title) for row in fact.checklist)
-            if used + extra > _BULK_TEXT_BUDGET and extra:
-                remain = max(_BULK_TEXT_BUDGET - used, 0)
+
+            kept_checks: list[ChecklistFact] = []
+            for row in checklist:
+                if remain < len(row.title):
+                    signals.append("checklist_truncated")
+                    break
+                kept_checks.append(row)
+                remain -= len(row.title)
+            if len(kept_checks) < len(checklist) and "checklist_truncated" not in signals:
+                signals.append("checklist_truncated")
+
+            kept_direct: list[TagFact] = []
+            for tag in direct:
+                if remain < len(tag.title):
+                    signals.append("tags_truncated")
+                    break
+                kept_direct.append(tag)
+                remain -= len(tag.title)
+            kept_inherited: list[TagFact] = []
+            if "tags_truncated" not in signals:
+                for tag in inherited:
+                    if remain < len(tag.title):
+                        signals.append("tags_truncated")
+                        break
+                    kept_inherited.append(tag)
+                    remain -= len(tag.title)
+
+            if remain < len(notes):
                 notes = notes[:remain]
-                signals = list(dict.fromkeys([*fact.signals, "notes_truncated"]))[:20]
-                fact = fact.model_copy(
-                    update={"notes_markdown": notes or None, "signals": signals}
-                )
-                extra = len(fact.notes_markdown or "") + sum(
-                    len(row.title) for row in fact.checklist
-                )
-            used += extra
+                signals.append("notes_truncated")
+                remain = 0
+            else:
+                remain -= len(notes)
+
+            fact = fact.model_copy(
+                update={
+                    "notes_markdown": notes or None,
+                    "checklist": kept_checks,
+                    "direct_tags": kept_direct,
+                    "inherited_tags": kept_inherited,
+                    "signals": list(dict.fromkeys(signals))[:20],
+                }
+            )
+            used = _BULK_TEXT_BUDGET - remain
             bounded.append(fact)
         return bounded
 
@@ -5130,6 +5194,15 @@ def _fingerprint(value: object) -> str:
 
 def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
+
+
+def _diagnostics_digest(conflicts: list[Conflict]) -> str:
+    return "s_" + _digest(
+        [
+            [row.item_id, list(row.signals), row.repair_kind, list(row.repairs)]
+            for row in conflicts
+        ]
+    )
 
 
 def _bounded_id_list(ids: list[str]) -> str:

@@ -1191,6 +1191,11 @@ class ItemFact(StrictModel):
     signals: list[str] = Field(default_factory=list, max_length=20)
 
 
+class DiagnosticRepair(StrictModel):
+    conflict: str = Field(min_length=1, max_length=80)
+    repair_kind: str = Field(min_length=1, max_length=80)
+
+
 class DiagnosticFact(StrictModel):
     """One native-state conflict, including tag conflicts."""
 
@@ -1200,6 +1205,7 @@ class DiagnosticFact(StrictModel):
     conflicts: list[str] = Field(min_length=1, max_length=20)
     repair: str | None = Field(default=None, max_length=400)
     repair_kind: str | None = Field(default=None, max_length=80)
+    repairs: list[DiagnosticRepair] = Field(default_factory=list, max_length=20)
 
 
 class ReviewSection(StrictModel):
@@ -1323,7 +1329,17 @@ class Result(StrictModel):
     receipt: str | None = Field(default=None, min_length=1, max_length=512)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
+    missing_ids: list[str] = Field(default_factory=list, max_length=10)
     truncated: bool = False
+
+    @field_validator("missing_ids")
+    @classmethod
+    def valid_missing_ids(cls, value: list[str]) -> list[str]:
+        if _duplicates(value) or any(
+            re.fullmatch(_ITEM_ID, item) is None for item in value
+        ):
+            raise ValueError("missing_ids need unique exact item IDs")
+        return value
 
     @model_validator(mode="after")
     def contextual_facts_have_context(self) -> Self:
@@ -1873,6 +1889,23 @@ _DIAGNOSTIC: dict[str, Any] = {
         },
         "repair": {"type": "string", "maxLength": 400},
         "repair_kind": {"type": "string", "maxLength": 80},
+        "repairs": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["conflict", "repair_kind"],
+                "properties": {
+                    "conflict": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "repair_kind": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                    },
+                },
+            },
+        },
     },
 }
 
@@ -1996,6 +2029,12 @@ RESULT_OUT: dict[str, Any] = {
         "receipt": _STRING,
         "scope_revision": _STRING,
         "cursor": _STRING,
+        "missing_ids": {
+            "type": "array",
+            "maxItems": 10,
+            "uniqueItems": True,
+            "items": _EXACT_ITEM,
+        },
         "truncated": {"type": "boolean", "default": False},
     },
 }
@@ -2026,7 +2065,7 @@ _SUMMARY_ITEMS: dict[str, Any] = {
 _READ_ITEMS: dict[str, Any] = {
     "type": "array",
     "maxItems": 120,
-    "items": {**_ITEM_SUMMARY, "additionalProperties": True},
+    "items": _ITEM_FACT,
 }
 
 READ_OUT: dict[str, Any] = {
@@ -2048,6 +2087,7 @@ READ_OUT: dict[str, Any] = {
         "context": _CONTEXT_FACT,
         "scope_revision": _STRING,
         "cursor": _STRING,
+        "missing_ids": RESULT_OUT["properties"]["missing_ids"],
         "truncated": {"type": "boolean"},
     },
 }
@@ -2085,7 +2125,7 @@ READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
     "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repair_kind. ids reads 1 to 10 exact items; large notes are truncated across the batch. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repair_kind. ids returns bounded full-detail facts for 1 to 10 exact items. Truncation signals identify items that need a separate exact read. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. After a schema-changing deploy, reconnect the MCP client so it picks up the new tool schema. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "

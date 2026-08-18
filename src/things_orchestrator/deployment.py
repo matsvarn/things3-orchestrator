@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .cloud import _CACHE_VERSION
+from .interface import (
+    APPROVE_IN,
+    APPROVE_OUT,
+    COMMIT_IN,
+    COMMIT_OUT,
+    READ_IN,
+    READ_OUT,
+)
 
 PACKAGE_NAME = "things-orchestrator"
 CACHE_VERSION = _CACHE_VERSION
@@ -49,11 +59,22 @@ def git_commit() -> str | None:
     return commit if completed.returncode == 0 and commit else None
 
 
+def tool_schema_hash() -> str:
+    blob = json.dumps(
+        [READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()[:24]
+
+
 def health_payload() -> dict[str, object]:
     payload: dict[str, object] = {
         "ok": True,
         "version": package_version(),
         "cache_version": CACHE_VERSION,
+        "tool_schema_hash": tool_schema_hash(),
         "capabilities": dict(CAPABILITIES),
     }
     commit = git_commit()
