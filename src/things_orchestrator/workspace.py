@@ -2234,11 +2234,11 @@ class ThingsWorkspace:
             if change.id is None or "into" not in change.model_fields_set:
                 continue
             item = self._library.records.get(parse_id(change.id)[1])
-            destination = self._exact_item(change.into) if change.into else None
-            if item is not None and item.heading and destination is not None:
-                if destination.kind != "project":
-                    raise _Abort(self._rejected("A heading needs a destination Project."))
-                context.project_heading_moves[item.uuid] = destination.uuid
+            if item is None or not item.heading:
+                continue
+            context.project_heading_moves[item.uuid] = (
+                self._require_heading_destination(item, change, call, context)
+            )
         self._prepare_creates(call, context)
         self._prepare_changes(call, context)
 
@@ -3085,7 +3085,11 @@ class ThingsWorkspace:
         )
 
     def _prepare_lifecycle_or_heading_change(
-        self, item: Record, change: ChangeEntry, context: _PreparationContext
+        self,
+        item: Record,
+        change: ChangeEntry,
+        context: _PreparationContext,
+        call: CommitCall,
     ) -> bool:
         """Plan heading and lifecycle changes that end normal item planning."""
         writes = context.writes
@@ -3098,6 +3102,7 @@ class ThingsWorkspace:
                 # A merge moves headings with their source Project. Their
                 # assigned Tasks keep the heading UUID, so moving the heading
                 # first preserves the source layout in the destination.
+                self._require_heading_destination(item, change, call, context)
                 desired = self._desired_item_change(
                     item, change, context.local, context
                 )
@@ -3331,7 +3336,7 @@ class ThingsWorkspace:
             )
             if self._prepare_recurrence_change(item, change, context, desired):
                 continue
-            if self._prepare_lifecycle_or_heading_change(item, change, context):
+            if self._prepare_lifecycle_or_heading_change(item, change, context, call):
                 continue
             desired = desired or self._desired_item_change(item, change, local, context)
             if any(
@@ -3966,6 +3971,56 @@ class ThingsWorkspace:
                     self._library.tag_parents.get(ancestor, []),
                 )
             )
+
+    def _heading_destination_uuid(
+        self, change: ChangeEntry, context: _PreparationContext
+    ) -> str | None:
+        if change.into is None:
+            return None
+        if change.into.startswith("$"):
+            resolved = context.local.get(change.into)
+            if resolved is None or resolved[1] != "project":
+                return None
+            return resolved[0]
+        if change.into in {"inbox", "anytime"}:
+            return None
+        destination = self._required_exact(change.into)
+        if destination.kind != "project":
+            return None
+        return destination.uuid
+
+    @staticmethod
+    def _heading_follows_source_merge(heading: Record, call: CommitCall) -> bool:
+        if heading.parent_uuid is None:
+            return False
+        source_id = f"project:{heading.parent_uuid}"
+        return any(
+            change.id == source_id
+            and (change.lifecycle == "trash" or change.trash is True)
+            for change in call.change
+        )
+
+    def _require_heading_destination(
+        self,
+        item: Record,
+        change: ChangeEntry,
+        call: CommitCall,
+        context: _PreparationContext,
+    ) -> str:
+        destination_uuid = self._heading_destination_uuid(change, context)
+        if destination_uuid is None:
+            raise _Abort(self._rejected("A heading needs a destination Project."))
+        if (
+            destination_uuid != item.parent_uuid
+            and not self._heading_follows_source_merge(item, call)
+        ):
+            raise _Abort(
+                self._rejected(
+                    "A heading cannot move into a different Project except "
+                    "during an atomic Project merge."
+                )
+            )
+        return destination_uuid
 
     def _home(
         self,

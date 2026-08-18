@@ -694,8 +694,13 @@ class ChangeEntry(StrictModel):
             raise ValueError("delete_contents needs permanent deletion")
         if self.id is not None and self.id.startswith("heading:"):
             if "into" in self.model_fields_set:
-                # A heading can move with its source Project during a merge.
-                # The compiler and workspace still verify the destination Project.
+                # A heading can use into only to follow its source Project
+                # during an atomic merge. Workspace rejects a heading move
+                # into a different Project unless that merge is present.
+                if self.into is None or self.into in {"inbox", "anytime"}:
+                    raise ValueError("a heading needs a destination Project")
+                if self.into.startswith("area:"):
+                    raise ValueError("a heading needs a destination Project")
                 allowed = {"id", "if_revision", "ref", "into"}
                 if self.model_fields_set - allowed:
                     raise ValueError(
@@ -2233,7 +2238,7 @@ COMMIT_DESC = (
     "For a context change, send context_id and ref only; ref is authoritative and the context supplies the revision. "
     "For a Project move, send the Project ref and the destination Area ref as into; do not use an organize draft. "
     "Ordinary Task or Project Trash uses only lifecycle='trash'. delete_contents is only for permanent Project deletion with lifecycle='delete_permanently'. remove_if_empty and move_contents_to are Area-only. Every permanent Task or Project deletion target must already be in Trash, including Tasks and empty Projects. Permanent deletion of a non-empty Project additionally requires a complete Project read, lifecycle='delete_permanently' with delete_contents=true, and approval. "
-    "For an atomic Project merge, read one complete Project first. In one approved commit, move every active visible direct child to an active destination Project, then set the source Project to lifecycle='trash' only. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup. "
+    "For an atomic Project merge, read one complete Project first. In one approved commit, move every active visible direct child to an active destination Project, then set the source Project to lifecycle='trash' only. A heading can use into only to follow its source Project during that atomic merge; do not move a heading into a different Project by itself. If completed, trashed, template, or hidden children exist, do not use atomic merge; choose separate safe cleanup. "
     "If you also send id and if_revision, they must exactly match the context. After pending, retry the exact payload. "
     "If the client loses the response or the outcome is pending or unknown, retry the exact same intent_id and byte-equivalent semantic payload. "
     "Do not read first, add scope_revision, or rebuild. Use a fresh read only for stale or expired context recovery. "

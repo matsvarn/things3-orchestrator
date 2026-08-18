@@ -578,6 +578,46 @@ def test_heading_create_rename_assignment_and_clear_are_explicit() -> None:
         )
 
 
+@pytest.mark.parametrize("into", ["inbox", "anytime", "area:home"])
+def test_heading_change_into_rejects_non_project_homes(into: str) -> None:
+    with pytest.raises(ValidationError, match="destination Project"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-into-home-001",
+                "change": [
+                    {
+                        "id": "heading:h",
+                        "if_revision": "r_h",
+                        "into": into,
+                    }
+                ],
+            }
+        )
+
+
+def test_heading_change_into_remains_valid_for_an_atomic_merge_shape() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "heading-merge-shape-001",
+            "change": [
+                {
+                    "id": "heading:h",
+                    "if_revision": "r_h",
+                    "into": "project:dest",
+                },
+                {
+                    "id": "project:source",
+                    "if_revision": "r_s",
+                    "lifecycle": "trash",
+                },
+            ],
+        }
+    )
+
+    assert call.change[0].into == "project:dest"
+    assert call.change[1].lifecycle == "trash"
+
+
 def test_existing_task_can_use_a_heading_created_in_the_same_commit() -> None:
     call = CommitCall.model_validate(
         {
@@ -1208,6 +1248,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
         "delete_contents=true, and approval"
     ) in COMMIT_DESC
     assert "every active visible direct child" in COMMIT_DESC
+    assert "A heading can use into only to follow its source Project" in COMMIT_DESC
+    assert "do not move a heading into a different Project by itself" in COMMIT_DESC
     assert "If completed, trashed, template, or hidden children exist" in COMMIT_DESC
     assert "do not use atomic merge; choose separate safe cleanup" in COMMIT_DESC
     assert "private" in APPROVE_DESC
