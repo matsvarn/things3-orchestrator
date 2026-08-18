@@ -73,6 +73,9 @@ from .recurrence import RepeatMode, new_rule
 
 _READ_LIMIT = 40
 _BULK_TEXT_BUDGET = 100_000
+_BULK_WIRE_BUDGET = 256_000
+_NOTE_RESERVE = 400
+_TAG_REGISTRY_LIMIT = 400
 _TRUNCATION_SIGNALS = {
     "notes": "notes_truncated",
     "checklist": "checklist_truncated",
@@ -1474,8 +1477,9 @@ class ThingsWorkspace:
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
+        tags: list[TagFact] = []
         if full:
-            facts = self._bound_bulk_facts(facts)
+            facts, tags = self._bound_bulk_page(facts, instruction)
         snapshot = self._scope_revision(items)
         scope = public_scope or snapshot
         cursor = None
@@ -1505,6 +1509,7 @@ class ThingsWorkspace:
             status="ok",
             instruction=instruction if visible else empty,
             items=facts,
+            tags=tags,
             sections=sections,
             signals=result_signals or [],
             scope_revision=scope,
@@ -1576,8 +1581,11 @@ class ThingsWorkspace:
             else None
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
+        tags: list[TagFact] = []
         if saved.full:
-            facts = self._bound_bulk_facts(facts)
+            facts, tags = self._bound_bulk_page(
+                facts, "Continue with these current facts."
+            )
         sections = self._sections(saved.view, facts) if saved.view is not None else []
         extra_truncated = (
             saved.view == "audit" and self._audit_sections_truncated(facts)
@@ -1587,6 +1595,7 @@ class ThingsWorkspace:
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
+            tags=tags,
             sections=sections,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
@@ -1836,7 +1845,15 @@ class ThingsWorkspace:
         }
         return len(homes) > 40
 
-    def _bound_bulk_facts(self, facts: list[ItemFact]) -> list[ItemFact]:
+    def _bound_bulk_page(
+        self, facts: list[ItemFact], instruction: str
+    ) -> tuple[list[ItemFact], list[TagFact]]:
+        facts, tags = _hoist_bulk_tags(facts)
+        facts = self._bound_bulk_text(facts)
+        tags = _prune_unused_tags(facts, tags)
+        return _trim_bulk_wire(facts, tags, instruction)
+
+    def _bound_bulk_text(self, facts: list[ItemFact]) -> list[ItemFact]:
         used = 0
         bounded: list[ItemFact] = []
         for fact in facts:
@@ -1846,60 +1863,47 @@ class ThingsWorkspace:
             direct = list(fact.direct_tags)
             inherited = list(fact.inherited_tags)
             notes = fact.notes_markdown or ""
+            prefix = notes[: min(len(notes), _NOTE_RESERVE, remain)]
+            remain -= len(prefix)
+            rest = notes[len(prefix) :]
 
-            kept_checks: list[ChecklistFact] = []
-            for row in checklist:
-                if remain < len(row.title):
-                    truncated.append("checklist")
-                    break
-                kept_checks.append(row)
-                remain -= len(row.title)
+            kept_checks, remain, checks_cut = _take_budget(
+                checklist, remain, lambda row: len(row.title)
+            )
+            if checks_cut:
+                truncated.append("checklist")
 
-            tags_exhausted = False
-            kept_direct: list[TagFact] = []
-            for tag in direct:
-                if remain < len(tag.title):
-                    tags_exhausted = True
-                    break
-                kept_direct.append(tag)
-                remain -= len(tag.title)
+            kept_direct, remain, direct_cut = _take_budget(
+                direct, remain, _tag_cost
+            )
             kept_inherited: list[TagFact] = []
-            if not tags_exhausted:
-                for tag in inherited:
-                    if remain < len(tag.title):
-                        tags_exhausted = True
-                        break
-                    kept_inherited.append(tag)
-                    remain -= len(tag.title)
-            if tags_exhausted:
+            inherited_cut = False
+            if not direct_cut:
+                kept_inherited, remain, inherited_cut = _take_budget(
+                    inherited, remain, _tag_cost
+                )
+            if direct_cut or inherited_cut:
                 truncated.append("tags")
 
-            if remain < len(notes):
-                notes = notes[:remain]
+            if remain < len(rest):
+                notes = prefix + rest[:remain]
                 truncated.append("notes")
                 remain = 0
             else:
-                remain -= len(notes)
+                notes = prefix + rest
+                remain -= len(rest)
 
-            truncated_fields = _truncated_fields(
-                notes="notes" in truncated,
-                checklist="checklist" in truncated,
-                tags="tags" in truncated,
-            )
-            fact = fact.model_copy(
-                update={
-                    "notes_markdown": notes or None,
-                    "checklist": kept_checks,
-                    "direct_tags": kept_direct,
-                    "inherited_tags": kept_inherited,
-                    "truncated_fields": truncated_fields,
-                    "signals": _signals_with_truncation(
-                        list(fact.signals), truncated_fields
-                    ),
-                }
+            bounded.append(
+                _with_completeness(
+                    fact,
+                    notes=notes or None,
+                    checklist=kept_checks,
+                    direct=kept_direct,
+                    inherited=kept_inherited,
+                    truncated=truncated,
+                )
             )
             used = _BULK_TEXT_BUDGET - remain
-            bounded.append(fact)
         return bounded
 
     def _detail_lists(
@@ -5228,6 +5232,231 @@ def _fingerprint(value: object) -> str:
 
 def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
+
+
+def _tag_cost(tag: TagFact) -> int:
+    return (
+        len(tag.id)
+        + len(tag.title)
+        + sum(len(parent) for parent in tag.parent_ids)
+        + len(tag.from_id or "")
+    )
+
+
+def _take_budget[T](
+    rows: list[T], remain: int, cost: Callable[[T], int]
+) -> tuple[list[T], int, bool]:
+    kept: list[T] = []
+    for row in rows:
+        need = cost(row)
+        if remain < need:
+            return kept, remain, True
+        kept.append(row)
+        remain -= need
+    return kept, remain, False
+
+
+def _with_completeness(
+    fact: ItemFact,
+    *,
+    notes: str | None,
+    checklist: list[ChecklistFact],
+    direct: list[TagFact],
+    inherited: list[TagFact],
+    truncated: Sequence[str],
+) -> ItemFact:
+    truncated_fields = _truncated_fields(
+        notes="notes" in truncated,
+        checklist="checklist" in truncated,
+        tags="tags" in truncated,
+    )
+    return fact.model_copy(
+        update={
+            "notes_markdown": notes,
+            "checklist": checklist,
+            "direct_tags": direct,
+            "inherited_tags": inherited,
+            "truncated_fields": truncated_fields,
+            "signals": _signals_with_truncation(list(fact.signals), truncated_fields),
+        }
+    )
+
+
+def _slim_tag(tag: TagFact) -> TagFact:
+    return tag.model_copy(update={"parent_ids": [], "parents_truncated": False})
+
+
+def _hoist_bulk_tags(facts: list[ItemFact]) -> tuple[list[ItemFact], list[TagFact]]:
+    registry: dict[str, TagFact] = {}
+    for fact in facts:
+        for tag in (*fact.direct_tags, *fact.inherited_tags):
+            current = registry.get(tag.id)
+            if current is None or len(tag.parent_ids) > len(current.parent_ids):
+                registry[tag.id] = tag.model_copy(update={"from_id": None})
+    hoisted = [registry[key] for key in sorted(registry)]
+    overflow = {tag.id for tag in hoisted[_TAG_REGISTRY_LIMIT:]}
+    hoisted = hoisted[:_TAG_REGISTRY_LIMIT]
+    kept = {tag.id for tag in hoisted}
+    slim = [
+        _with_completeness(
+            fact,
+            notes=fact.notes_markdown,
+            checklist=list(fact.checklist),
+            direct=[
+                _slim_tag(tag) for tag in fact.direct_tags if tag.id in kept
+            ],
+            inherited=[
+                _slim_tag(tag) for tag in fact.inherited_tags if tag.id in kept
+            ],
+            truncated=[
+                *fact.truncated_fields,
+                *(["tags"] if overflow.intersection(
+                    tag.id for tag in (*fact.direct_tags, *fact.inherited_tags)
+                ) else []),
+            ],
+        )
+        for fact in facts
+    ]
+    return slim, hoisted
+
+
+def _structured_bytes(
+    instruction: str, facts: list[ItemFact], tags: list[TagFact]
+) -> int:
+    payload = Result(
+        next="done",
+        status="ok",
+        instruction=instruction,
+        items=facts,
+        tags=tags,
+    ).model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    return len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+
+def _trim_bulk_wire(
+    facts: list[ItemFact], tags: list[TagFact], instruction: str
+) -> tuple[list[ItemFact], list[TagFact]]:
+    facts = list(facts)
+    tags = list(tags)
+    while _structured_bytes(instruction, facts, tags) > _BULK_WIRE_BUDGET:
+        reduced = False
+        for index in range(len(facts) - 1, -1, -1):
+            fact = facts[index]
+            if fact.inherited_tags:
+                facts[index] = _with_completeness(
+                    fact,
+                    notes=fact.notes_markdown,
+                    checklist=list(fact.checklist),
+                    direct=list(fact.direct_tags),
+                    inherited=[],
+                    truncated=[*fact.truncated_fields, "tags"],
+                )
+                reduced = True
+                break
+            notes = fact.notes_markdown or ""
+            if len(notes) > _NOTE_RESERVE:
+                facts[index] = _with_completeness(
+                    fact,
+                    notes=notes[:_NOTE_RESERVE],
+                    checklist=list(fact.checklist),
+                    direct=list(fact.direct_tags),
+                    inherited=list(fact.inherited_tags),
+                    truncated=[*fact.truncated_fields, "notes"],
+                )
+                reduced = True
+                break
+            if fact.checklist:
+                facts[index] = _with_completeness(
+                    fact,
+                    notes=fact.notes_markdown,
+                    checklist=[],
+                    direct=list(fact.direct_tags),
+                    inherited=list(fact.inherited_tags),
+                    truncated=[*fact.truncated_fields, "checklist"],
+                )
+                reduced = True
+                break
+            if fact.direct_tags:
+                facts[index] = _with_completeness(
+                    fact,
+                    notes=fact.notes_markdown,
+                    checklist=list(fact.checklist),
+                    direct=[],
+                    inherited=list(fact.inherited_tags),
+                    truncated=[*fact.truncated_fields, "tags"],
+                )
+                reduced = True
+                break
+            if notes:
+                facts[index] = _with_completeness(
+                    fact,
+                    notes=None,
+                    checklist=list(fact.checklist),
+                    direct=list(fact.direct_tags),
+                    inherited=list(fact.inherited_tags),
+                    truncated=[*fact.truncated_fields, "notes"],
+                )
+                reduced = True
+                break
+        if reduced:
+            tags = _prune_unused_tags(facts, tags)
+            continue
+        if any(tag.parent_ids for tag in tags):
+            tags = [
+                tag.model_copy(update={"parent_ids": [], "parents_truncated": True})
+                if tag.parent_ids
+                else tag
+                for tag in tags
+            ]
+            for index, fact in enumerate(facts):
+                if fact.direct_tags or fact.inherited_tags:
+                    facts[index] = _with_completeness(
+                        fact,
+                        notes=fact.notes_markdown,
+                        checklist=list(fact.checklist),
+                        direct=list(fact.direct_tags),
+                        inherited=list(fact.inherited_tags),
+                        truncated=[*fact.truncated_fields, "tags"],
+                    )
+            continue
+        if tags:
+            dropped = {tag.id for tag in tags[-1:]}
+            tags = tags[:-1]
+            for index, fact in enumerate(facts):
+                if any(
+                    tag.id in dropped
+                    for tag in (*fact.direct_tags, *fact.inherited_tags)
+                ):
+                    facts[index] = _with_completeness(
+                        fact,
+                        notes=fact.notes_markdown,
+                        checklist=list(fact.checklist),
+                        direct=[
+                            tag for tag in fact.direct_tags if tag.id not in dropped
+                        ],
+                        inherited=[
+                            tag
+                            for tag in fact.inherited_tags
+                            if tag.id not in dropped
+                        ],
+                        truncated=[*fact.truncated_fields, "tags"],
+                    )
+            continue
+        break
+    return facts, tags
+
+
+def _prune_unused_tags(
+    facts: list[ItemFact], tags: list[TagFact]
+) -> list[TagFact]:
+    used = {
+        tag.id
+        for fact in facts
+        for tag in (*fact.direct_tags, *fact.inherited_tags)
+    }
+    return [tag for tag in tags if tag.id in used]
 
 
 def _truncated_fields(

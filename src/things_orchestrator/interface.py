@@ -1329,7 +1329,7 @@ class Result(StrictModel):
     status: ResultStatus
     instruction: str = Field(min_length=1, max_length=1000)
     items: list[ItemFact] = Field(default_factory=list, max_length=120)
-    tags: list[TagFact] = Field(default_factory=list, max_length=40)
+    tags: list[TagFact] = Field(default_factory=list, max_length=400)
     diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
     layouts: list[LayoutFact] = Field(default_factory=list, max_length=10)
@@ -2035,7 +2035,7 @@ RESULT_OUT: dict[str, Any] = {
         },
         "instruction": {"type": "string", "minLength": 1, "maxLength": 1000},
         "items": {"type": "array", "maxItems": 120, "items": _ITEM_FACT},
-        "tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
+        "tags": {"type": "array", "maxItems": 400, "items": _TAG_FACT},
         "diagnostics": {"type": "array", "maxItems": 40, "items": _DIAGNOSTIC},
         "sections": {"type": "array", "maxItems": 40, "items": _SECTION},
         "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
@@ -2079,10 +2079,28 @@ _SUMMARY_ITEMS: dict[str, Any] = {
     "maxItems": 120,
     "items": _ITEM_SUMMARY,
 }
+_READ_ITEM: dict[str, Any] = {
+    **_ITEM_SUMMARY,
+    "additionalProperties": True,
+    "properties": {
+        **_ITEM_SUMMARY["properties"],
+        "signals": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "maxLength": 1600},
+        },
+        "truncated_fields": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {"enum": ["notes", "checklist", "tags"]},
+        },
+    },
+}
 _READ_ITEMS: dict[str, Any] = {
     "type": "array",
     "maxItems": 120,
-    "items": {**_ITEM_SUMMARY, "additionalProperties": True},
+    "items": _READ_ITEM,
 }
 
 READ_OUT: dict[str, Any] = {
@@ -2142,7 +2160,7 @@ READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
     "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids share a 100,000-character budget across notes, checklist titles, and tag titles. truncated_fields names omitted notes, checklist, or tags; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags first, reserve a 400-character note prefix per item, then spend remaining budget on checklist titles, then tag ids and titles, then the rest of each note. The structured result stays under 256 KB. If still large, later items drop inherited tags, extra notes, checklists, then remaining tags. truncated_fields and signals name omitted notes, checklist, or tags; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "

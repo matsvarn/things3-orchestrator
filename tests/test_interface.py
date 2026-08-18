@@ -1257,6 +1257,11 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert "area" in READ_IN["properties"]["view"]["enum"]
     assert "audit" in READ_IN["properties"]["view"]["enum"]
     assert "diagnostics" in READ_IN["properties"]["view"]["enum"]
+    read_item = READ_OUT["properties"]["items"]["items"]
+    assert read_item["additionalProperties"] is True
+    assert "truncated_fields" in read_item["properties"]
+    assert "signals" in read_item["properties"]
+    assert RESULT_OUT["properties"]["tags"]["maxItems"] == 400
 
 
 def test_manual_schema_contracts_match_the_runtime_models() -> None:
