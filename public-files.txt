@@ -10,6 +10,7 @@ deploy/Caddyfile
 deploy/serve-http.service
 docs/adr/0001-revisioned-workspace-behind-three-tools.md
 docs/adr/0002-contextual-desired-state.md
+docs/adr/0003-review-completeness-behind-three-tools.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md
@@ -35,8 +36,10 @@ scripts/setup
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
 src/things_orchestrator/cloud.py
+src/things_orchestrator/consistency.py
 src/things_orchestrator/context.py
 src/things_orchestrator/contextual.py
+src/things_orchestrator/deployment.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
@@ -47,6 +50,7 @@ tests/__init__.py
 tests/test_capability_proof.py
 tests/test_cli.py
 tests/test_cloud.py
+tests/test_consistency.py
 tests/test_context.py
 tests/test_contextual.py
 tests/test_interface.py

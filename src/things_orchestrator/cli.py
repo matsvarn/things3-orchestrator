@@ -512,7 +512,7 @@ def _probe_health(url: str, *, timeout: float = 2.0) -> str:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return "fail"
-    if payload == {"ok": True}:
+    if isinstance(payload, dict) and payload.get("ok") is True:
         return "ok"
     return "fail"
 

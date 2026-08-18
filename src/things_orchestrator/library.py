@@ -325,6 +325,8 @@ class Library(Protocol):
     def inbox(self, limit: int = 15) -> list[Record]: ...
     def week(self, *, today: date, limit: int = 15) -> list[Record]: ...
     def trash(self) -> list[Record]: ...
+    def area(self, value: str) -> list[Record]: ...
+    def audit(self) -> list[Record]: ...
     def project(self, value: str) -> list[Record]: ...
     def heading_title(self, item: Record) -> str | None: ...
     def next_index(self, write: Write) -> int: ...
@@ -448,6 +450,31 @@ class MemoryLibrary:
     def trash(self) -> list[Record]:
         hits = [item for item in self.records.values() if item.trashed]
         return sorted(hits, key=lambda item: (item.kind, item.sort_index, item.title))
+
+    def area(self, value: str) -> list[Record]:
+        root = self.get(value)
+        if root is None or root.kind != "area":
+            return []
+        return [root, *self.children_in_area(root.uuid)]
+
+    def audit(self) -> list[Record]:
+        kind_order = {"area": 0, "project": 1, "heading": 2, "task": 3}
+        items = [
+            item
+            for item in self.records.values()
+            if not item.trashed
+            and item.status == "open"
+            and item.recurrence.role != "template"
+        ]
+        items.sort(
+            key=lambda item: (
+                kind_order.get(item.public_kind, 9),
+                item.sort_index,
+                item.title.casefold(),
+                item.uuid,
+            )
+        )
+        return items
 
     def project(self, value: str) -> list[Record]:
         root = self.get(value)
@@ -1161,9 +1188,14 @@ class _MutationVerifier(_MutationHandler[bool]):
             write.deadline is None or item.deadline == write.deadline,
             not write.clear_deadline or item.deadline is None,
             write.start is None or item.start == write.start,
-            not write.clear_start or item.start is None,
             write.start is None or item.tonight == write.tonight,
-            not write.clear_start or not item.tonight,
+            not write.clear_start
+            or (
+                item.start is None
+                and not item.someday
+                and not item.tonight
+                and item.remind is None
+            ),
             write.remind is None or item.remind == write.remind,
             not write.clear_remind or item.remind is None,
             not write.someday or (item.someday and not item.tonight),

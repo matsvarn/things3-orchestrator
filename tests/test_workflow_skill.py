@@ -256,7 +256,8 @@ def test_skill_teaches_weak_model_selector_and_dependency_rules() -> None:
 
     for instruction in (
         "select one view",
-        "only a project view uses `within`",
+        "a project view uses `within`",
+        "an area view uses `within`",
         "never combine a view with id or find",
         "search named existing items and edit them",
         "create only when asked to add",

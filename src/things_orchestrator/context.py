@@ -16,7 +16,17 @@ from typing import Literal, Protocol, cast
 
 Purpose = Literal["review", "change", "organize", "recurrence"]
 View = Literal[
-    "today", "inbox", "week", "system", "project", "logbook", "trash", "tags"
+    "today",
+    "inbox",
+    "week",
+    "system",
+    "project",
+    "area",
+    "audit",
+    "diagnostics",
+    "logbook",
+    "trash",
+    "tags",
 ]
 
 _CONTEXT_ID = re.compile(r"^ctx_[A-Za-z0-9_-]{8,120}$")
@@ -104,8 +114,8 @@ class ReadSelector:
     def __post_init__(self) -> None:
         if not 1 <= self.limit <= 500:
             raise ValueError("selector limit must be between 1 and 500")
-        if len(self.includes) > 10:
-            raise ValueError("selector includes cannot exceed 10")
+        if len(self.includes) > 40:
+            raise ValueError("selector includes cannot exceed 40")
         if len({entry for entry in self.includes}) != len(self.includes):
             raise ValueError("selector includes must be unique")
         if self.purpose != "change" and self.includes:

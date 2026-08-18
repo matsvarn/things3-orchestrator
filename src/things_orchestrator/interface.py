@@ -34,8 +34,21 @@ ResultStatus = Literal[
     "internal_error",
 ]
 View = Literal[
-    "today", "inbox", "week", "system", "project", "logbook", "trash", "tags"
+    "today",
+    "inbox",
+    "week",
+    "system",
+    "project",
+    "area",
+    "audit",
+    "diagnostics",
+    "logbook",
+    "trash",
+    "tags",
 ]
+INCLUDE_LIMIT = 40
+BULK_ID_LIMIT = 10
+START_PATTERN = r"^(today|evening|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
 Purpose = Literal["review", "change", "organize", "recurrence"]
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
@@ -150,7 +163,8 @@ class ReadCall(StrictModel):
     to_date: str | None = Field(default=None, alias="to", max_length=10)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
     limit: int = Field(default=20, ge=1, le=40)
-    include: list[ReadInclude] = Field(default_factory=list, max_length=10)
+    include: list[ReadInclude] = Field(default_factory=list, max_length=INCLUDE_LIMIT)
+    ids: list[str] = Field(default_factory=list, max_length=BULK_ID_LIMIT)
 
     @field_validator("from_date")
     @classmethod
@@ -161,6 +175,15 @@ class ReadCall(StrictModel):
     @classmethod
     def valid_to_date(cls, value: str | None) -> str | None:
         return _validate_date(value, name="to")
+
+    @field_validator("ids")
+    @classmethod
+    def valid_ids(cls, value: list[str]) -> list[str]:
+        if any(re.fullmatch(_ITEM_ID, item) is None for item in value):
+            raise ValueError("ids need exact item IDs")
+        if _duplicates(value):
+            raise ValueError("ids cannot contain duplicates")
+        return value
 
     @model_validator(mode="after")
     def valid_selector(self) -> Self:
@@ -176,15 +199,35 @@ class ReadCall(StrictModel):
             )
         ):
             raise ValueError("cursor cannot combine with another selector")
-        if self.cursor is not None and self.include:
-            raise ValueError("cursor cannot combine with include")
+        if self.cursor is not None and (self.include or self.ids):
+            raise ValueError("cursor cannot combine with include or ids")
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
+        if self.ids:
+            selectors += 1
         if selectors > 1:
-            raise ValueError("use only one of view, id, or find")
-        if self.within is not None and self.find is None and self.view != "project":
-            raise ValueError("within needs find or view project")
-        if self.view == "project" and self.within is None:
-            raise ValueError("view project needs within")
+            raise ValueError("use only one of view, id, find, or ids")
+        if self.ids and self.purpose != "review":
+            raise ValueError("ids is only available for review purpose")
+        if self.ids and (
+            self.within is not None
+            or self.from_date is not None
+            or self.to_date is not None
+            or self.include
+        ):
+            raise ValueError("ids cannot combine with another selector")
+        if self.within is not None and self.find is None and self.view not in {
+            "project",
+            "area",
+        }:
+            raise ValueError("within needs find, view project, or view area")
+        if self.view == "project" and (
+            self.within is None or not self.within.startswith("project:")
+        ):
+            raise ValueError("view project needs within as an exact Project id")
+        if self.view == "area" and (
+            self.within is None or not self.within.startswith("area:")
+        ):
+            raise ValueError("view area needs within as an exact Area id")
         has_range = self.from_date is not None or self.to_date is not None
         if has_range and self.view != "logbook":
             raise ValueError("from and to need view logbook")
@@ -274,7 +317,7 @@ class CreateEntry(StrictModel):
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
-    start: str | None = Field(default=None, max_length=32)
+    start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     waiting: bool | None = None
@@ -437,7 +480,7 @@ class ChangeEntry(StrictModel):
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
-    start: str | None = Field(default=None, max_length=32)
+    start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     waiting: bool | None = None
@@ -1110,7 +1153,7 @@ class ItemFact(StrictModel):
     checklist: list[ChecklistFact] = Field(default_factory=list, max_length=100)
     direct_tags: list[TagFact] = Field(default_factory=list, max_length=40)
     inherited_tags: list[TagFact] = Field(default_factory=list, max_length=40)
-    start: str | None = Field(default=None, max_length=32)
+    start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     recurrence: RecurrenceFact | None = None
@@ -1345,6 +1388,9 @@ READ_IN: dict[str, Any] = {
                 "week",
                 "system",
                 "project",
+                "area",
+                "audit",
+                "diagnostics",
                 "logbook",
                 "trash",
                 "tags",
@@ -1357,7 +1403,8 @@ READ_IN: dict[str, Any] = {
         "to": {"type": "string", "format": "date", "maxLength": 10},
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
-        "include": {"type": "array", "maxItems": 10, "items": _READ_INCLUDE},
+        "include": {"type": "array", "maxItems": INCLUDE_LIMIT, "items": _READ_INCLUDE},
+        "ids": {"type": "array", "maxItems": BULK_ID_LIMIT, "items": _EXACT_ITEM},
     },
 }
 
@@ -1404,7 +1451,11 @@ _CREATE: dict[str, Any] = {
             "items": {"type": "string", "minLength": 1, "maxLength": 1000},
         },
         "into": _CONTEXT_HOME_SCHEMA,
-        "start": {"type": ["string", "null"], "maxLength": 32},
+        "start": {
+            "type": ["string", "null"],
+            "maxLength": 32,
+            "pattern": START_PATTERN,
+        },
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
         "waiting": {"type": ["boolean", "null"]},
@@ -1474,7 +1525,11 @@ _CHANGE: dict[str, Any] = {
             "items": {**_STRING, "pattern": _CHECK_REFERENCE},
         },
         "into": _CONTEXT_HOME_SCHEMA,
-        "start": {"type": ["string", "null"], "maxLength": 32},
+        "start": {
+            "type": ["string", "null"],
+            "maxLength": 32,
+            "pattern": START_PATTERN,
+        },
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
         "waiting": {"type": "boolean"},
@@ -1704,7 +1759,11 @@ _ITEM_FACT: dict[str, Any] = {
         "checklist": {"type": "array", "maxItems": 100, "items": _CHECKLIST_FACT},
         "direct_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
         "inherited_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
-        "start": {"type": ["string", "null"], "maxLength": 32},
+        "start": {
+            "type": ["string", "null"],
+            "maxLength": 32,
+            "pattern": START_PATTERN,
+        },
         "deadline": _DATE,
         "remind_at": _DATE_TIME,
         "recurrence": _RECURRENCE,
@@ -1921,6 +1980,7 @@ COMMIT_OUT: dict[str, Any] = {
         **_CONTROL_PROPERTIES,
         "items": _SUMMARY_ITEMS,
         "tags": RESULT_OUT["properties"]["tags"],
+        "sections": RESULT_OUT["properties"]["sections"],
         "signals": RESULT_OUT["properties"]["signals"],
         "recovery": _RECOVERY,
         "plan": _PLAN,
@@ -1943,12 +2003,14 @@ APPROVE_OUT: dict[str, Any] = {
 
 READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
-    "Select exactly one view, exact id, or find query. A view stands alone; project view also needs within. Never combine view with id or find. Logbook needs from and to. Trash returns recoverable items. Send a cursor without selectors. "
+    "Select exactly one view, exact id, find query, or ids list. A view stands alone; project view needs within as project:<id>; area view needs within as area:<id>. Never combine view with id or find. Logbook needs from and to. "
+    "view=audit lists every active item once. view=diagnostics lists native-state conflicts. ids reads up to 10 exact items at full fidelity. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "start is today, evening, someday, an ISO date, or null. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
-    "remind_at, recurrence, order, today_order, and signals. "
+    "remind_at, recurrence, order, today_order, and signals. Compact reviews add has_notes and has_checklist when those exist. "
     "For a Project purpose change, the context also includes short refs for active Areas. "
-    "For a Task or Project after anchor, or a heading order anchor, outside the target's returned facts, add up to 10 compact include lookups to the same change read. Use today_after only for a Task on Today. Each include uses one exact id or one unique active find; use within only with find. An ambiguous or missing include returns candidates and creates no context. "
+    "For a Task or Project after anchor, or a heading order anchor, outside the target's returned facts, add up to 40 compact include lookups to the same change read. Use today_after for a Task that is on Today now or is moved to Today earlier in the same commit. Each include uses one exact id or one unique active find; use within only with find. An ambiguous or missing include returns candidates and creates no context. "
     "Use the returned context_id and item ref in change; use an Area ref as into for a Project move. Do not send id or if_revision with ref. "
     "Review reads can use returned IDs and revisions for legacy changes. Follow next and instruction."
 )

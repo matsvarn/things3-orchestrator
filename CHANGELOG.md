@@ -2,8 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- `view=area` expands one Area: the Area, loose tasks, and Projects.
+- `view=audit` lists every active item once. Compact rows include
+  `has_notes` and `has_checklist`.
+- `view=diagnostics` lists native-state conflicts.
+- `ids` reads up to 10 exact items at full fidelity.
+- Change contexts accept 40 include lookups.
+- Approval plans add grouped counts and ID sections.
+- `/health` reports version, cache version, capabilities, and optional
+  commit. The MCP initialize version matches the package.
+
 ### Fixed
 
+- `start: null` now clears Someday on an ordinary Task and keeps its
+  Project or Area. The previous desired-state check treated Someday as
+  already unscheduled.
+- `today_after` can follow a sibling moved to Today in the same commit.
+- Repeating the same Project home no longer stale-locks a sibling repair
+  batch. List revisions bind only when membership, heading, or order
+  changes.
+- Trash review serializes untitled and malformed records instead of
+  returning `internal_error`.
+- Area-only Project reads are rejected at the schema. Use `view=area`.
+- Unexpected exceptions log a correlation ID. Validation errors lead
+  with the field that failed, not a capture example.
 - Moving a task from Inbox into a Project or Area now leaves Inbox.
   Native Things used to keep it there after a successful-looking
   move. Repeating the same move repairs already-stuck items.

@@ -1,10 +1,12 @@
 # Review, merge, and organize
 
-Select one view, one exact id, or one find; only a Project view uses `within`, and never combine a view with id or find. Search named existing items and edit them; create only when asked to add. Define local refs before use and parent tags before children. Do not copy revisions.
+Select one view, one exact id, one find, or one `ids` list; never combine a view with id or find. A Project view uses `within` as `project:<id>`. An Area view uses `within` as `area:<id>` for the Area, loose tasks, and Projects. `view=audit` lists every active item once. `view=diagnostics` lists conflicts. Search named existing items and edit them; create only when asked to add. Define local refs before use and parent tags before children. Do not copy revisions.
+
+`start=null` clears Today, Evening, Someday, and reminders and keeps the current Project or Area. `into=anytime` moves the item to root Anytime. `today_after` may follow a sibling moved to Today in the same commit.
 
 ## Weekly review or Area redesign
 
-Review the full requested range. Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
+Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. Use `ids` for full notes and checklists on up to 10 exact items. Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
 
 Repair tag names and parent relationships when they reduce duplicate filters. Tag deletion uses `change_tags.delete_permanently`. Preserve rich notes unless the owner accepts a full Markdown replacement. Restore accidental cleanup.
 

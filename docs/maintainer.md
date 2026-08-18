@@ -10,6 +10,10 @@ Keep one production server and one stable model Interface.
   the `Result` model.
 - `workspace.py` is the deep Module behind Read, Commit, and Approve. It owns
   revisions, task meaning, plans, idempotency, and verified outcomes.
+- `consistency.py` owns native-state conflict detection for diagnostics
+  and review signals.
+- `deployment.py` owns package version, cache version, and `/health`
+  capabilities.
 - `journal.py` stores intent receipts and approval plans in SQLite. It makes
   retries safe across process restarts. Its compare-and-set claims an intent
   before Cloud I/O. The journal path is namespaced by account.

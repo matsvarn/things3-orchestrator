@@ -122,6 +122,43 @@ def test_unexpected_commit_failure_stops_without_a_false_write_receipt() -> None
     assert result.structured_content["status"] == "internal_error"
     assert "receipt" not in result.structured_content
     assert "Do not assume" in result.structured_content["instruction"]
+    assert "err_" in result.structured_content["instruction"]
+
+
+def test_validation_errors_prefer_field_specific_repair() -> None:
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    result = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "area-no-scope",
+                "create": [{"kind": "area", "title": "Health"}],
+            },
+        )
+    )
+    assert result.is_error is True
+    text = result.content[0].text
+    assert "scope_revision from a fresh view=system read" in text
+    assert "Renew password" not in text
+
+    start = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "bad-start",
+                "create": [{"title": "Later", "start": "anytime"}],
+            },
+        )
+    )
+    assert start.is_error is True
+    assert "today, evening, someday" in start.content[0].text
+
+
+def test_mcp_server_version_matches_the_package() -> None:
+    from things_orchestrator.deployment import package_version
+
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    assert server._tools_only_server.version == package_version()  # noqa: SLF001
 
 
 def test_each_tool_emits_only_fields_accepted_by_its_output_schema() -> None:
@@ -193,7 +230,12 @@ def test_health_is_open_without_bearer() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["version"]
+        assert payload["cache_version"] == 4
+        assert payload["capabilities"]["clear_someday"] is True
+        assert payload["capabilities"]["area_view"] is True
 
 
 def test_mcp_returns_401_without_authorization() -> None:
