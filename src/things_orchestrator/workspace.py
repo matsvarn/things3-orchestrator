@@ -312,12 +312,7 @@ class ThingsWorkspace:
             instruction = (
                 "These records have native-state conflicts. Repair the listed signals."
             )
-            result_signals = [
-                f"{signal}:{conflict.item_id}"
-                for conflict in diagnose(self._library)
-                for signal in conflict.signals
-                if conflict.item_id.startswith("tag:")
-            ][:40]
+            result_signals = self._diagnostic_tag_signals()
         elif view == "area":
             instruction = (
                 "This Area, its loose tasks, and its Projects. "
@@ -332,6 +327,24 @@ class ThingsWorkspace:
             public_scope=(self._area_scope_revision() if view == "system" else None),
             result_signals=result_signals,
         )
+
+    def _diagnostic_items(self) -> list[Record]:
+        items: list[Record] = []
+        for conflict in diagnose(self._library):
+            if conflict.item_id.startswith("tag:"):
+                continue
+            item = self._exact_item(conflict.item_id)
+            if item is not None:
+                items.append(item)
+        return items
+
+    def _diagnostic_tag_signals(self) -> list[str]:
+        return [
+            f"{signal}:{conflict.item_id}"
+            for conflict in diagnose(self._library)
+            for signal in conflict.signals
+            if conflict.item_id.startswith("tag:")
+        ][:40]
 
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
@@ -1239,15 +1252,7 @@ class ThingsWorkspace:
         if view == "audit":
             return self._library.audit()
         if view == "diagnostics":
-            return [
-                item
-                for item in self._library.audit()
-                if item_conflicts(item, self._library)
-            ] + [
-                item
-                for item in self._library.trash()
-                if item_conflicts(item, self._library)
-            ]
+            return self._diagnostic_items()
         if view == "project":
             assert call.within is not None
             project = self._exact_item(call.within)
@@ -1451,12 +1456,16 @@ class ThingsWorkspace:
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
         sections = self._sections(saved.view, facts) if saved.view is not None else []
+        result_signals = (
+            self._diagnostic_tag_signals() if saved.view == "diagnostics" else []
+        )
         return Result(
             next="done",
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
             sections=sections,
+            signals=result_signals,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
             truncated=next_cursor is not None,
@@ -1810,15 +1819,20 @@ class ThingsWorkspace:
                 if item.start == self._clock().date() or item.tonight
                 else None
             ),
-            signals=[
-                *self._signals(
-                    item,
-                    checklist_truncated=checklist_truncated,
-                    tags_truncated=tags_truncated,
-                    notes_truncated=notes_truncated,
+            signals=self._item_signals(
+                item,
+                checklist_truncated=checklist_truncated,
+                tags_truncated=tags_truncated,
+                notes_truncated=(
+                    notes_truncated
+                    or (
+                        full
+                        and include_notes
+                        and note_offset + _NOTES_LIMIT < len(item.notes)
+                    )
                 ),
-                *(["recurrence_links_truncated"] if len(linked_ids) > 40 else []),
-            ],
+                links_truncated=len(linked_ids) > 40,
+            ),
         )
 
     def _tag_sources(self, item: Record) -> list[Record]:
@@ -1852,13 +1866,14 @@ class ThingsWorkspace:
             ]
         )
 
-    def _signals(
+    def _item_signals(
         self,
         item: Record,
         *,
         checklist_truncated: bool,
         tags_truncated: bool,
         notes_truncated: bool,
+        links_truncated: bool = False,
     ) -> list[str]:
         today = self._clock().date()
         signals: list[str] = []
@@ -1892,6 +1907,8 @@ class ThingsWorkspace:
             signals.append("tags_truncated")
         if notes_truncated:
             signals.append("notes_truncated")
+        if links_truncated:
+            signals.append("recurrence_links_truncated")
         return list(dict.fromkeys(signals))[:20]
 
     def _reminder(self, item: Record) -> str | None:
@@ -4427,7 +4444,16 @@ class ThingsWorkspace:
                 )
             ):
                 add("inbox", "Inbox", item.id)
-            if item is not None and write.into_uuid and write.into_kind:
+            dest = (
+                "Anytime"
+                if write.anytime
+                else "Inbox"
+                if write.inbox
+                else f"{write.into_kind}:{write.into_uuid}"
+                if write.into_uuid and write.into_kind
+                else None
+            )
+            if item is not None and dest is not None:
                 source = (
                     "Inbox"
                     if item.inbox
@@ -4436,11 +4462,6 @@ class ThingsWorkspace:
                     else f"area:{item.area_uuid}"
                     if item.area_uuid
                     else "Anytime"
-                )
-                dest = (
-                    "Anytime"
-                    if write.anytime
-                    else f"{write.into_kind}:{write.into_uuid}"
                 )
                 if source != dest:
                     move_key = f"move:{source}->{dest}"[:80]

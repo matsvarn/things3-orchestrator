@@ -297,11 +297,16 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
                     if key in location or key in message:
                         field_repair = text
                         break
-    repair_text = field_repair or repair
-    if repair_text is not None:
-        message = f"Invalid tool request. {repair_text}. Details: " + "; ".join(details)
-    else:
+    if field_repair is not None:
+        message = (
+            f"Invalid tool request. {field_repair}. Details: " + "; ".join(details)
+        )
+    elif details:
         message = "Invalid tool request: " + "; ".join(details)
+    elif repair is not None:
+        message = f"Invalid tool request. {repair}."
+    else:
+        message = "Invalid tool request."
     return message if len(message) <= 997 else message[:997] + "..."
 
 

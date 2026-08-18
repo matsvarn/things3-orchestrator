@@ -4205,6 +4205,42 @@ def test_diagnostics_view_exposes_inbox_hybrids() -> None:
     assert "inbox_with_project" in result.items[0].signals
 
 
+def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None:
+    both = Record(
+        uuid="both",
+        kind="task",
+        title="Both homes",
+        parent_uuid="launch",
+        area_uuid="home",
+        status="done",
+    )
+    orphan = Record(
+        uuid="orphan",
+        kind="task",
+        title="Orphan heading",
+        heading_uuid="missing-heading",
+        parent_uuid="launch",
+    )
+    library = MemoryLibrary(
+        [
+            Record(uuid="launch", kind="project", title="Launch"),
+            both,
+            orphan,
+        ]
+    )
+    library.tags["child"] = "Child"
+    library.tag_parents["child"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    by_id = {item.id: item.signals for item in result.items}
+    assert "both_project_and_area" in by_id[both.id]
+    assert "orphaned_heading" in by_id[orphan.id]
+    assert "dangling_tag_parent:tag:child" in result.signals
+
+
 def test_bulk_ids_return_full_exact_facts() -> None:
     first = Record(
         uuid="one",
@@ -4327,3 +4363,44 @@ def test_approval_plan_groups_source_to_destination_moves() -> None:
         task.id in section.item_ids and "Inbox" in section.title
         for section in result.sections
     )
+
+
+def test_approval_plan_groups_anytime_destination() -> None:
+    task = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        parent_uuid="launch",
+    )
+    extra = Record(uuid="old", kind="task", title="Old draft", inbox=True)
+    module = workspace(
+        [
+            Record(uuid="launch", kind="project", title="Launch"),
+            task,
+            extra,
+        ]
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "anytime-manifest-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "into": "anytime",
+                    },
+                    {
+                        "id": extra.id,
+                        "if_revision": detail(module, extra.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("project:launch → Anytime" in line for line in result.plan.summary)

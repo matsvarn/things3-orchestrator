@@ -153,6 +153,16 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
     assert start.is_error is True
     assert "today, evening, someday" in start.content[0].text
 
+    unknown = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {"create": [{"title": "Call bank"}]},
+        )
+    )
+    assert unknown.is_error is True
+    assert "intent_id" in unknown.content[0].text
+    assert "Renew password" not in unknown.content[0].text
+
 
 def test_mcp_server_version_matches_the_package() -> None:
     from things_orchestrator.deployment import package_version
