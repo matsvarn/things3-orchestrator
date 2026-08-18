@@ -68,6 +68,7 @@ from .library import (
     Write,
     new_uuid,
     parse_id,
+    template_uuid_of,
 )
 from .recurrence import RepeatMode, new_rule
 
@@ -914,12 +915,7 @@ class ThingsWorkspace:
 
     def _context_detail_is_complete(self, item: Record) -> bool:
         checklist, direct, inherited = self._detail_lists(item)
-        linked = [
-            candidate
-            for candidate in self._library.records.values()
-            if item.uuid in candidate.recurrence.links
-            or candidate.recurrence.template_uuid == item.uuid
-        ]
+        linked = self._library.recurrence_instances(item.uuid)
         return (
             len(item.notes) <= _NOTES_LIMIT
             and len(checklist) <= 100
@@ -945,19 +941,13 @@ class ThingsWorkspace:
         if target.kind == "project":
             for area in self._library.areas():
                 add(area)
-        template = self._library.records.get(target.recurrence.template_uuid or "")
+        template = self._library.records.get(template_uuid_of(target) or "")
         if template is not None:
             add(template)
             add_place(template)
         if target.recurrence.role == "template":
-            for candidate in sorted(
-                self._library.records.values(), key=lambda item: item.id
-            ):
-                if (
-                    candidate.recurrence.template_uuid == target.uuid
-                    or target.uuid in candidate.recurrence.links
-                ):
-                    add(candidate)
+            for candidate in self._library.recurrence_instances(target.uuid):
+                add(candidate)
         return records
 
     def _context_refs(
@@ -1676,11 +1666,7 @@ class ThingsWorkspace:
         if expected_revision is not None and revision != expected_revision:
             return self._stale("That item changed. Read it again.")
         checklist, direct, inherited = self._detail_lists(item)
-        linked = [
-            candidate.id
-            for candidate in self._library.records.values()
-            if item.uuid in candidate.recurrence.links
-        ]
+        linked = [candidate.id for candidate in self._library.recurrence_instances(item.uuid)]
         page_start = row_offset
         page_end = row_offset + min(limit, _READ_LIMIT)
 
@@ -2001,8 +1987,7 @@ class ThingsWorkspace:
         computed_links = (
             [
                 candidate.id
-                for candidate in self._library.records.values()
-                if item.uuid in candidate.recurrence.links
+                for candidate in self._library.recurrence_instances(item.uuid)
             ]
             if full and item.recurrence.role == "template"
             else []
@@ -2015,8 +2000,8 @@ class ThingsWorkspace:
         recurrence = RecurrenceFact(
             kind=self._recurrence_kind(item),
             template_id=(
-                f"task:{item.recurrence.template_uuid}"
-                if item.recurrence.template_uuid
+                f"task:{template}"
+                if (template := template_uuid_of(item))
                 else None
             ),
             mode=(
@@ -2124,6 +2109,11 @@ class ThingsWorkspace:
                 self._revision(item),
                 [[source.id, source.tag_uuids] for source in sources],
                 [[uuid, self._library.tags.get(uuid)] for uuid in tag_ids],
+                (
+                    self._recurrence_scope_revision(item.uuid)
+                    if item.recurrence.role == "template"
+                    else None
+                ),
             ]
         )
 
@@ -2568,8 +2558,10 @@ class ThingsWorkspace:
         if change.repeat_interval is not None or repeat_edit is not None:
             if repeat_edit is not None and repeat_edit.remove:
                 target = item
-                if item.recurrence.role == "instance" and item.recurrence.template_uuid:
-                    template = self._library.records.get(item.recurrence.template_uuid)
+                if item.recurrence.role == "instance" and (
+                    source := template_uuid_of(item)
+                ):
+                    template = self._library.records.get(source)
                     if template is not None:
                         target = template
                 if any(
@@ -2581,11 +2573,7 @@ class ThingsWorkspace:
                     target.recurrence.validate_interval_template(kind=target.kind)
                 except ValueError as error:
                     raise _Abort(self._unsupported(str(error))) from error
-                linked = [
-                    candidate
-                    for candidate in self._library.records.values()
-                    if target.uuid in candidate.recurrence.links
-                ]
+                linked = self._library.recurrence_instances(target.uuid)
                 for candidate in linked:
                     preconditions[candidate.id] = self._revision(candidate)
                     writes.append(
@@ -2623,8 +2611,10 @@ class ThingsWorkspace:
                 context.risky = True
                 return True
             target = item
-            if item.recurrence.role == "instance" and item.recurrence.template_uuid:
-                template = self._library.records.get(item.recurrence.template_uuid)
+            if item.recurrence.role == "instance" and (
+                source := template_uuid_of(item)
+            ):
+                template = self._library.records.get(source)
                 if template is not None:
                     target = template
             try:
@@ -5183,33 +5173,27 @@ class ThingsWorkspace:
         return ordered
 
     def _recurrence_scope_revision(self, uuid: str) -> str:
-        rows = [
-            [item.id, self._revision(item)]
-            for item in sorted(self._library.records.values(), key=lambda item: item.id)
-            if item.uuid == uuid or uuid in item.recurrence.links
-        ]
-        return "s_" + _digest(rows)
+        items: list[Record] = []
+        template = self._library.records.get(uuid)
+        if template is not None:
+            items.append(template)
+        items.extend(self._library.recurrence_instances(uuid))
+        return "s_" + _digest([[item.id, self._revision(item)] for item in items])
 
     def _recurrence_relationship_is_valid(self, target: Record) -> bool:
         """Check the native one-way link before exposing repeat mutation facts."""
         recurrence = target.recurrence
         if recurrence.role == "none":
-            return not any(
-                candidate.recurrence.template_uuid == target.uuid
-                or target.uuid in candidate.recurrence.links
-                for candidate in self._library.records.values()
-                if candidate.uuid != target.uuid
-            )
+            return not self._library.recurrence_instances(target.uuid)
         if recurrence.role == "template":
             return all(
                 candidate.recurrence.role == "instance"
-                and candidate.recurrence.template_uuid == target.uuid
-                for candidate in self._library.records.values()
-                if candidate.recurrence.template_uuid == target.uuid
+                for candidate in self._library.recurrence_instances(target.uuid)
             )
-        if recurrence.role != "instance" or recurrence.template_uuid is None:
+        template_uuid = template_uuid_of(target)
+        if recurrence.role != "instance" or template_uuid is None:
             return False
-        template = self._library.records.get(recurrence.template_uuid)
+        template = self._library.records.get(template_uuid)
         return (
             template is not None
             and template.recurrence.role == "template"

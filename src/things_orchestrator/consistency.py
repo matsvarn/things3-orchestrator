@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import time
 
-from .library import MemoryLibrary, Record
+from .library import MemoryLibrary, Record, template_uuid_of
 
 _REPAIR = {
     "inbox_with_project": "repeat the current Project placement",
@@ -151,7 +151,7 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
     if item.area_uuid and (home_signal := _area_home_conflict(item, area)):
         signals.append(home_signal)
     if item.recurrence.role == "instance":
-        template = library.records.get(item.recurrence.template_uuid or "")
+        template = library.records.get(template_uuid_of(item) or "")
         if (
             template is None
             or template.recurrence.role != "template"

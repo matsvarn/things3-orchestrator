@@ -337,8 +337,27 @@ class Library(Protocol):
     def resolve_into(self, value: str) -> Record | None | list[Record]: ...
     def tag_uuid(self, title: str) -> str | None: ...
     def waiting_tag(self) -> str: ...
+    def recurrence_instances(self, template_uuid: str) -> list[Record]: ...
     def apply(self, writes: list[Write]) -> ApplyResult: ...
     def matches(self, writes: list[Write]) -> bool: ...
+
+
+def template_uuid_of(item: Record) -> str | None:
+    """Return the stored template UUID for an instance, from either representation."""
+
+    if item.recurrence.template_uuid:
+        return item.recurrence.template_uuid
+    if item.recurrence.links:
+        return item.recurrence.links[0]
+    return None
+
+
+def linked_to_template(item: Record, template_uuid: str) -> bool:
+    """Return whether a record is a recurrence instance of this template."""
+
+    if item.uuid == template_uuid:
+        return False
+    return template_uuid_of(item) == template_uuid or template_uuid in item.recurrence.links
 
 
 class MemoryLibrary:
@@ -615,6 +634,16 @@ class MemoryLibrary:
         if "waiting" in names:
             return names["waiting"]
         return "Waiting"
+
+    def recurrence_instances(self, template_uuid: str) -> list[Record]:
+        return sorted(
+            (
+                item
+                for item in self.records.values()
+                if linked_to_template(item, template_uuid)
+            ),
+            key=lambda item: (item.sort_index, item.uuid),
+        )
 
     def apply(self, writes: list[Write]) -> ApplyResult:
         snapshot = (
