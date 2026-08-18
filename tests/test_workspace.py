@@ -1369,6 +1369,42 @@ def test_reminder_only_change_establishes_its_required_start_date() -> None:
     assert result.status == "applied"
     assert task.start == NOW.date() + timedelta(days=1)
     assert task.remind == "09:00"
+    assert task.tonight is False
+
+
+def test_reminder_only_change_keeps_existing_evening() -> None:
+    task = Record(
+        uuid="call",
+        kind="task",
+        title="Call Rowan",
+        start=NOW.date(),
+        tonight=True,
+    )
+    module = workspace([task])
+    current = detail(module, task.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "reminder-keep-evening-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "remind_at": "2026-08-15T18:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert task.start == NOW.date()
+    assert task.tonight is True
+    assert task.remind == "18:00"
+    fresh = detail(module, task.id)
+    assert fresh.remind_at == "2026-08-15T18:00:00+00:00"
+    assert "evening" in fresh.signals
 
 
 def test_read_back_must_prove_an_explicit_move_out_of_evening() -> None:
