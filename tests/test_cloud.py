@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from things_orchestrator.cloud import (
+    _CACHE_VERSION,
     CloudClient,
     CloudError,
     CloudLibrary,
@@ -171,7 +172,7 @@ def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
     assert library.records["template"].recurrence.role == "none"
 
 
-def test_fold_sparse_placement_clears_incompatible_home_and_inbox() -> None:
+def test_fold_sparse_placement_clears_incompatible_home() -> None:
     library = MemoryLibrary()
     fold_events(
         [
@@ -204,12 +205,12 @@ def test_fold_sparse_placement_clears_incompatible_home_and_inbox() -> None:
     assert task.area_uuid == "area"
     assert task.inbox is False
 
-    # An Inbox state cannot override a project or area relation in a sparse patch.
+    # Native Things lists st=0 in Inbox even when a project or area relation exists.
     fold_events(
         [{"uuid": "task", "e": "Task6", "t": 1, "p": {"st": 0}}],
         library=library,
     )
-    assert task.inbox is False
+    assert task.inbox is True
 
 
 def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
@@ -623,7 +624,7 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
     cache.write_text(
         json.dumps(
             {
-                "version": 3,
+                "version": _CACHE_VERSION,
                 "history_id": "hist",
                 "loaded_index": 9,
                 "server_index": 9,
@@ -967,6 +968,142 @@ def test_move_without_schedule_change_keeps_existing_schedule(tmp_path: Path) ->
     memory.apply(writes)
     assert memory.records["later"].someday is True
     assert memory.records["scheduled"].start == future
+
+
+def test_inbox_move_to_project_or_area_clears_inbox_list_state(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
+            "area": Record(uuid="area", kind="area", title="Work", entity="Area3"),
+            "inbox-project": Record(
+                uuid="inbox-project",
+                kind="task",
+                title="File this",
+                inbox=True,
+                entity="Task6",
+            ),
+            "inbox-area": Record(
+                uuid="inbox-area",
+                kind="task",
+                title="Park this",
+                inbox=True,
+                entity="Task6",
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid="inbox-project",
+                into_uuid="project",
+                into_kind="project",
+            ),
+            Write(
+                action="move",
+                uuid="inbox-area",
+                into_uuid="area",
+                into_kind="area",
+            ),
+        ]
+    )
+
+    envelopes = {item.uuid: item.payload for item in client.committed}
+    assert envelopes["inbox-project"]["pr"] == ["project"]
+    assert envelopes["inbox-project"]["st"] == 1
+    assert envelopes["inbox-area"]["ar"] == ["area"]
+    assert envelopes["inbox-area"]["st"] == 1
+    assert library.records["inbox-project"].inbox is False
+    assert library.records["inbox-area"].inbox is False
+    assert library.inbox() == []
+
+
+def test_inbox_project_move_repairs_masked_inbox_list_state(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
+            "stuck": Record(
+                uuid="stuck",
+                kind="task",
+                title="Still in Inbox",
+                parent_uuid="project",
+                inbox=False,
+                entity="Task6",
+            ),
+        }
+    )
+
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid="stuck",
+                into_uuid="project",
+                into_kind="project",
+            )
+        ]
+    )
+
+    payload = client.committed[0].payload
+    assert payload["pr"] == ["project"]
+    assert payload["st"] == 1
+
+
+def test_inbox_project_move_readback_fails_if_cloud_keeps_inbox_state(
+    tmp_path: Path,
+) -> None:
+    class StripListStateClient(_CaptureClient):
+        def commit(self, envelopes: list[Envelope]) -> None:
+            self.committed = envelopes
+            self.pending = [
+                {
+                    "uuid": item.uuid,
+                    "e": item.kind,
+                    "t": item.action,
+                    "p": {
+                        key: value for key, value in item.payload.items() if key != "st"
+                    },
+                }
+                for item in envelopes
+            ]
+
+    client = StripListStateClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
+            "inbox": Record(
+                uuid="inbox",
+                kind="task",
+                title="File this",
+                inbox=True,
+                entity="Task6",
+            ),
+        }
+    )
+
+    with pytest.raises(CloudError, match="read-back did not match"):
+        library.apply(
+            [
+                Write(
+                    action="update",
+                    uuid="inbox",
+                    into_uuid="project",
+                    into_kind="project",
+                )
+            ]
+        )
 
 
 def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
@@ -2168,6 +2305,7 @@ def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None
     assert envelope.payload["tt"] == "Send draft"
     assert envelope.payload["nt"]["v"] == "Ready"
     assert envelope.payload["ar"] == ["area"]
+    assert envelope.payload["st"] == 1
     assert envelope.payload["tg"] == ["important"]
     assert envelope.payload["ss"] == 3
     assert library.records["task"].status == "done"
