@@ -1732,6 +1732,15 @@ class ThingsWorkspace:
             checklist is None or direct_tags is None or inherited_tags is None
         ):
             checklist, direct_tags, inherited_tags = self._detail_lists(item)
+            if len(checklist) > 100:
+                checklist = checklist[:100]
+                checklist_truncated = True
+            if len(direct_tags) > 40:
+                direct_tags = direct_tags[:40]
+                tags_truncated = True
+            if len(inherited_tags) > 40:
+                inherited_tags = inherited_tags[:40]
+                tags_truncated = True
         checklist = checklist or []
         direct_tags = direct_tags or []
         inherited_tags = inherited_tags or []
@@ -1891,10 +1900,12 @@ class ThingsWorkspace:
         try:
             hour_text, minute_text = item.remind.split(":", 1)
             hour, minute = int(hour_text), int(minute_text)
+            tz = self._clock().tzinfo
+            return datetime.combine(
+                item.start, time(hour, minute), tzinfo=tz
+            ).isoformat()
         except (TypeError, ValueError):
             return None
-        tz = self._clock().tzinfo
-        return datetime.combine(item.start, time(hour, minute), tzinfo=tz).isoformat()
 
     def _prepare(
         self, call: CommitCall, *, contextual_commit: bool = False
@@ -4385,6 +4396,7 @@ class ThingsWorkspace:
             "checklist": "Checklist edits",
             "area_remove": "Remove empty Areas",
         }
+        move_titles: dict[str, str] = {}
         for write in prepared.writes:
             item = self._library.records.get(write.uuid)
             item_id = item.id if item is not None else f"{write.kind}:{write.uuid}"
@@ -4415,6 +4427,27 @@ class ThingsWorkspace:
                 )
             ):
                 add("inbox", "Inbox", item.id)
+            if item is not None and write.into_uuid and write.into_kind:
+                source = (
+                    "Inbox"
+                    if item.inbox
+                    else f"project:{item.parent_uuid}"
+                    if item.parent_uuid
+                    else f"area:{item.area_uuid}"
+                    if item.area_uuid
+                    else "Anytime"
+                )
+                dest = (
+                    "Anytime"
+                    if write.anytime
+                    else f"{write.into_kind}:{write.into_uuid}"
+                )
+                if source != dest:
+                    move_key = f"move:{source}->{dest}"[:80]
+                    move_title = f"{source} → {dest}"
+                    add(move_key, move_title, item.id)
+                    move_titles[move_key] = move_title
+                    titles[move_key] = move_title
         header = [
             f"{titles[key]}: {counts[key]}"
             for key in titles

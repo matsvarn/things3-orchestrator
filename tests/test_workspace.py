@@ -4231,7 +4231,7 @@ def test_trash_view_serializes_untitled_and_malformed_records() -> None:
         kind="task",
         title="   ",
         trashed=True,
-        remind="bad",
+        remind="25:00",
         start=NOW.date(),
     )
     orphan = Record(
@@ -4286,3 +4286,44 @@ def test_approval_plan_includes_grouped_summary_and_id_sections() -> None:
     assert result.sections
     trashed = next(section for section in result.sections if section.key == "trash")
     assert set(trashed.item_ids) == {first.id, second.id}
+
+
+def test_approval_plan_groups_source_to_destination_moves() -> None:
+    home = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=home.uuid,
+    )
+    task = Record(uuid="milk", kind="task", title="Buy milk", inbox=True)
+    extra = Record(uuid="old", kind="task", title="Old draft", inbox=True)
+    module = workspace([home, project, task, extra])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "move-manifest-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "into": project.id,
+                    },
+                    {
+                        "id": extra.id,
+                        "if_revision": detail(module, extra.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("Inbox → project:kitchen" in line for line in result.plan.summary)
+    assert any(
+        task.id in section.item_ids and "Inbox" in section.title
+        for section in result.sections
+    )

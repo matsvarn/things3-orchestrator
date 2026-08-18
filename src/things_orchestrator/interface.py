@@ -1404,7 +1404,12 @@ READ_IN: dict[str, Any] = {
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
         "include": {"type": "array", "maxItems": INCLUDE_LIMIT, "items": _READ_INCLUDE},
-        "ids": {"type": "array", "maxItems": BULK_ID_LIMIT, "items": _EXACT_ITEM},
+        "ids": {
+            "type": "array",
+            "maxItems": BULK_ID_LIMIT,
+            "uniqueItems": True,
+            "items": _EXACT_ITEM,
+        },
     },
 }
 
