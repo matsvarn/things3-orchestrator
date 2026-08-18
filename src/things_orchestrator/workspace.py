@@ -411,14 +411,12 @@ class ThingsWorkspace:
                 missing.append(item_id)
             else:
                 items.append(item)
-        missing_text = ", ".join(missing)
+        missing_text = _bounded_id_list(missing)
         if missing and not items:
             return Result(
                 next="read",
                 status="needs_input",
-                instruction=(
-                    f"I could not find {missing_text}. Read or search again."
-                ),
+                instruction=f"I could not find {missing_text}. Read or search again.",
             )
         result = self._page(
             items,
@@ -1801,14 +1799,18 @@ class ThingsWorkspace:
         bounded: list[ItemFact] = []
         for fact in facts:
             notes = fact.notes_markdown or ""
-            if used + len(notes) > _BULK_TEXT_BUDGET and notes:
+            extra = len(notes) + sum(len(row.title) for row in fact.checklist)
+            if used + extra > _BULK_TEXT_BUDGET and extra:
                 remain = max(_BULK_TEXT_BUDGET - used, 0)
                 notes = notes[:remain]
                 signals = list(dict.fromkeys([*fact.signals, "notes_truncated"]))[:20]
                 fact = fact.model_copy(
                     update={"notes_markdown": notes or None, "signals": signals}
                 )
-            used += len(fact.notes_markdown or "")
+                extra = len(fact.notes_markdown or "") + sum(
+                    len(row.title) for row in fact.checklist
+                )
+            used += extra
             bounded.append(fact)
         return bounded
 
@@ -5128,6 +5130,22 @@ def _fingerprint(value: object) -> str:
 
 def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
+
+
+def _bounded_id_list(ids: list[str]) -> str:
+    text = ", ".join(ids)
+    if len(text) <= 800:
+        return text
+    kept: list[str] = []
+    used = 0
+    for item_id in ids:
+        extra = len(item_id) + (2 if kept else 0)
+        if used + extra > 760:
+            kept.append("and more")
+            break
+        kept.append(item_id)
+        used += extra
+    return ", ".join(kept)
 
 
 def _bounded_title(title: str) -> str:

@@ -39,14 +39,26 @@ _REPAIR_KIND = {
     "inbox_with_project": "repeat_placement",
     "inbox_with_area": "repeat_placement",
     "both_project_and_area": "owner_choice",
+    "inbox_with_schedule": "clear_inbox_or_schedule",
+    "someday_with_start": "clear_someday_or_start",
+    "someday_with_evening": "clear_someday_or_evening",
+    "reminder_without_schedule": "clear_reminder",
+    "malformed_reminder": "clear_reminder",
     "orphaned_heading": "clear_heading",
-    "heading_without_project": "clear_heading",
     "heading_wrong_project": "clear_heading",
+    "heading_without_project": "clear_heading",
+    "heading_entity_without_project": "rehome_heading",
+    "missing_parent": "rehome_item",
+    "trashed_parent": "restore_or_move_child",
+    "parent_not_project": "rehome_item",
+    "missing_area": "rehome_or_clear_area",
+    "trashed_area": "restore_or_move_child",
+    "area_not_area": "rehome_or_clear_area",
+    "missing_repeat_template": "inspect_recurrence",
+    "malformed_repeat": "inspect_recurrence",
     "dangling_tag_parent": "clear_or_repair_tag_parent",
     "tag_parent_self_reference": "clear_tag_parent",
     "tag_parent_cycle": "clear_tag_parent",
-    "malformed_reminder": "clear_reminder",
-    "reminder_without_schedule": "clear_reminder",
     "project_with_project_parent": "rehome_project",
     "area_with_area_home": "clear_area_home",
     "area_with_project_parent": "clear_area_parent",
@@ -121,9 +133,9 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
             signals.append("heading_wrong_project")
     if item.kind == "project" and parent is not None and parent.kind == "project":
         signals.append("project_with_project_parent")
-    if item.kind == "area" and parent is not None:
+    if item.kind == "area" and parent is not None and parent.kind == "project":
         signals.append("area_with_project_parent")
-    if item.kind == "area" and item.area_uuid:
+    if item.kind == "area" and area is not None and area.kind == "area":
         signals.append("area_with_area_home")
     if item.parent_uuid and parent is None:
         signals.append("missing_parent")

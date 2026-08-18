@@ -216,8 +216,8 @@ class ReadCall(StrictModel):
             )
         ):
             raise ValueError("cursor cannot combine with another selector")
-        if self.cursor is not None and (self.include or self.ids):
-            raise ValueError("cursor cannot combine with include or ids")
+        if self.cursor is not None and (self.include or self.ids or self.signals_any):
+            raise ValueError("cursor cannot combine with include, ids, or signals_any")
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
             selectors += 1

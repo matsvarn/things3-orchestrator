@@ -23,9 +23,6 @@
 - Tag-only diagnostics no longer claim "no conflicts" while returning
   tag signals.
 - Unexpected internal exceptions set MCP `is_error`.
-
-### Added
-
 - Diagnostics cover heading-without-project, wrong parent/area kinds,
   malformed reminders, and tag-parent cycles, with repair hints.
 - Partial `ids` reads return the found items and name the missing IDs.
