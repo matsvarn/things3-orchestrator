@@ -22,13 +22,21 @@
 
 ### Fixed
 
+- Bulk `ids` reads reserve a 400-character note prefix for every
+  item before spending the shared remaining budget. Earlier items
+  can no longer consume later items' promised prefixes.
+- The 256 KB structured-result ceiling is enforced on the complete
+  `Result`, including `scope_revision`, cursor, and `missing_ids`.
+  Tag parent graphs are stripped before task-tag membership. If
+  core metadata still overflows, the page returns fewer items and a
+  cursor. `truncated_fields` can include `recurrence`.
+
 - Missing and trashed Area or Project parent/home relations recommend
   a kind-valid repair. An Area never gets "place in a Project"; a
   Project never gets `rehome_item` into another Project.
-- Bulk `ids` reads hoist unique tags first, reserve a 400-character
-  note prefix, then spend remaining budget on checklist titles, tag
-  ids and titles, and the rest of each note. The structured result
-  stays under 256 KB.
+- Bulk `ids` reads hoist unique tags, then allocate a shared
+  100,000-character budget in global passes. The complete structured
+  result stays under 256 KB.
 - Discovery `READ_OUT` items now declare `signals` and
   `truncated_fields`.
 

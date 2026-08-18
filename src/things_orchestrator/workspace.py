@@ -80,6 +80,7 @@ _TRUNCATION_SIGNALS = {
     "notes": "notes_truncated",
     "checklist": "checklist_truncated",
     "tags": "tags_truncated",
+    "recurrence": "recurrence_links_truncated",
 }
 _CONTEXT_LIMIT = 120
 _CHANGE_FIND_LIMIT = 40
@@ -463,13 +464,13 @@ class ThingsWorkspace:
                     f"Use these exact facts for the others. Missing: {missing_text}."
                 )
             ),
+            missing_ids=missing,
         )
         if missing:
             return result.model_copy(
                 update={
                     "next": "read",
                     "status": "needs_input",
-                    "missing_ids": missing,
                 }
             )
         return result
@@ -1474,18 +1475,17 @@ class ThingsWorkspace:
         public_scope: str | None = None,
         result_signals: list[str] | None = None,
         extra_truncated: bool = False,
+        missing_ids: list[str] | None = None,
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
-        tags: list[TagFact] = []
-        if full:
-            facts, tags = self._bound_bulk_page(facts, instruction)
         snapshot = self._scope_revision(items)
         scope = public_scope or snapshot
+        all_ids = [item.id for item in items]
         cursor = None
         if len(items) > limit:
             cursor = self._encode_cursor(
-                [item.id for item in items],
+                all_ids,
                 limit,
                 snapshot,
                 scope,
@@ -1504,18 +1504,28 @@ class ThingsWorkspace:
             else "No matching work is visible. Search with find and one title token."
         )
         visible = bool(facts or result_signals)
-        return Result(
+        result = Result(
             next="done",
             status="ok",
             instruction=instruction if visible else empty,
             items=facts,
-            tags=tags,
             sections=sections,
             signals=result_signals or [],
             scope_revision=scope,
             cursor=cursor,
+            missing_ids=missing_ids or [],
             truncated=cursor is not None or extra_truncated,
         )
+        if full:
+            result = self._enforce_bulk_result(
+                result,
+                all_ids=all_ids,
+                page_start=0,
+                snapshot=snapshot,
+                scope=scope,
+                view=view,
+            )
+        return result
 
     def _continue(self, cursor: str, limit: int) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -1581,26 +1591,30 @@ class ThingsWorkspace:
             else None
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
-        tags: list[TagFact] = []
-        if saved.full:
-            facts, tags = self._bound_bulk_page(
-                facts, "Continue with these current facts."
-            )
         sections = self._sections(saved.view, facts) if saved.view is not None else []
         extra_truncated = (
             saved.view == "audit" and self._audit_sections_truncated(facts)
         )
-        return Result(
+        result = Result(
             next="done",
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
-            tags=tags,
             sections=sections,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
             truncated=next_cursor is not None or extra_truncated,
         )
+        if saved.full:
+            result = self._enforce_bulk_result(
+                result,
+                all_ids=saved.ids,
+                page_start=saved.offset,
+                snapshot=saved.snapshot_revision,
+                scope=saved.public_scope_revision,
+                view=saved.view,
+            )
+        return result
 
     def _encode_cursor(
         self,
@@ -1662,13 +1676,19 @@ class ThingsWorkspace:
         if expected_revision is not None and revision != expected_revision:
             return self._stale("That item changed. Read it again.")
         checklist, direct, inherited = self._detail_lists(item)
+        linked = [
+            candidate.id
+            for candidate in self._library.records.values()
+            if item.uuid in candidate.recurrence.links
+        ]
         page_start = row_offset
         page_end = row_offset + min(limit, _READ_LIMIT)
 
         checklist_start = 0
         direct_start = len(checklist)
         inherited_start = direct_start + len(direct)
-        total = inherited_start + len(inherited)
+        linked_start = inherited_start + len(inherited)
+        total = linked_start + len(linked)
 
         def bounds(group_start: int, length: int) -> slice:
             start = max(page_start - group_start, 0)
@@ -1678,6 +1698,7 @@ class ThingsWorkspace:
         checklist_page = checklist[bounds(checklist_start, len(checklist))]
         direct_page = direct[bounds(direct_start, len(direct))]
         inherited_page = inherited[bounds(inherited_start, len(inherited))]
+        linked_page = linked[bounds(linked_start, len(linked))]
         next_row_offset = min(page_end, total)
         include_notes = note_offset < len(item.notes) or (
             note_offset == 0 and not item.notes
@@ -1721,8 +1742,10 @@ class ThingsWorkspace:
                     inherited_tags=inherited_page,
                     checklist_truncated=next_row_offset < len(checklist),
                     tags_truncated=bool(direct or inherited)
-                    and next_row_offset < total,
+                    and next_row_offset < linked_start,
                     notes_truncated=notes_remaining,
+                    linked_item_ids=linked_page,
+                    links_truncated=next_row_offset < linked_start + len(linked),
                 )
             ],
             scope_revision=revision,
@@ -1845,66 +1868,61 @@ class ThingsWorkspace:
         }
         return len(homes) > 40
 
-    def _bound_bulk_page(
-        self, facts: list[ItemFact], instruction: str
-    ) -> tuple[list[ItemFact], list[TagFact]]:
-        facts, tags = _hoist_bulk_tags(facts)
-        facts = self._bound_bulk_text(facts)
+    def _enforce_bulk_result(
+        self,
+        result: Result,
+        *,
+        all_ids: list[str],
+        page_start: int,
+        snapshot: str,
+        scope: str,
+        view: str | None,
+    ) -> Result:
+        facts, tags = _hoist_bulk_tags(list(result.items))
+        facts = _bound_bulk_text(facts)
         tags = _prune_unused_tags(facts, tags)
-        return _trim_bulk_wire(facts, tags, instruction)
-
-    def _bound_bulk_text(self, facts: list[ItemFact]) -> list[ItemFact]:
-        used = 0
-        bounded: list[ItemFact] = []
-        for fact in facts:
-            remain = max(_BULK_TEXT_BUDGET - used, 0)
-            truncated = list(fact.truncated_fields)
-            checklist = list(fact.checklist)
-            direct = list(fact.direct_tags)
-            inherited = list(fact.inherited_tags)
-            notes = fact.notes_markdown or ""
-            prefix = notes[: min(len(notes), _NOTE_RESERVE, remain)]
-            remain -= len(prefix)
-            rest = notes[len(prefix) :]
-
-            kept_checks, remain, checks_cut = _take_budget(
-                checklist, remain, lambda row: len(row.title)
+        result = result.model_copy(update={"items": facts, "tags": tags})
+        while _result_bytes(result) > _BULK_WIRE_BUDGET:
+            result = result.model_copy(
+                update={
+                    "signals": list(
+                        dict.fromkeys([*result.signals, "wire_trimmed"])
+                    )
+                }
             )
-            if checks_cut:
-                truncated.append("checklist")
-
-            kept_direct, remain, direct_cut = _take_budget(
-                direct, remain, _tag_cost
-            )
-            kept_inherited: list[TagFact] = []
-            inherited_cut = False
-            if not direct_cut:
-                kept_inherited, remain, inherited_cut = _take_budget(
-                    inherited, remain, _tag_cost
+            reduced = _trim_optional_detail(result)
+            if reduced is not None:
+                result = reduced
+                continue
+            if len(result.items) > 1:
+                kept = list(result.items[:-1])
+                offset = page_start + len(kept)
+                cursor = (
+                    self._encode_cursor(
+                        all_ids, offset, snapshot, scope, True, view
+                    )
+                    if offset < len(all_ids)
+                    else None
                 )
-            if direct_cut or inherited_cut:
-                truncated.append("tags")
-
-            if remain < len(rest):
-                notes = prefix + rest[:remain]
-                truncated.append("notes")
-                remain = 0
-            else:
-                notes = prefix + rest
-                remain -= len(rest)
-
-            bounded.append(
-                _with_completeness(
-                    fact,
-                    notes=notes or None,
-                    checklist=kept_checks,
-                    direct=kept_direct,
-                    inherited=kept_inherited,
-                    truncated=truncated,
+                result = result.model_copy(
+                    update={
+                        "items": kept,
+                        "tags": _prune_unused_tags(kept, list(result.tags)),
+                        "cursor": cursor,
+                        "truncated": True,
+                    }
                 )
+                continue
+            return Result(
+                next="read",
+                status="needs_input",
+                instruction=(
+                    "That item is too large for a bulk ids read. "
+                    f"Read {result.items[0].id} as an exact id."
+                ),
+                signals=["wire_trimmed"],
             )
-            used = _BULK_TEXT_BUDGET - remain
-        return bounded
+        return result
 
     def _detail_lists(
         self, item: Record
@@ -1961,6 +1979,8 @@ class ThingsWorkspace:
         checklist_truncated: bool = False,
         tags_truncated: bool = False,
         notes_truncated: bool = False,
+        linked_item_ids: list[str] | None = None,
+        links_truncated: bool = False,
     ) -> ItemFact:
         if full and (
             checklist is None or direct_tags is None or inherited_tags is None
@@ -1978,7 +1998,7 @@ class ThingsWorkspace:
         checklist = checklist or []
         direct_tags = direct_tags or []
         inherited_tags = inherited_tags or []
-        linked_ids = (
+        computed_links = (
             [
                 candidate.id
                 for candidate in self._library.records.values()
@@ -1987,6 +2007,11 @@ class ThingsWorkspace:
             if full and item.recurrence.role == "template"
             else []
         )
+        if linked_item_ids is None:
+            linked_ids = computed_links[:40]
+            links_truncated = links_truncated or len(computed_links) > 40
+        else:
+            linked_ids = linked_item_ids
         recurrence = RecurrenceFact(
             kind=self._recurrence_kind(item),
             template_id=(
@@ -2053,6 +2078,7 @@ class ThingsWorkspace:
                 ),
                 checklist=checklist_truncated,
                 tags=tags_truncated,
+                recurrence=links_truncated,
             ),
             signals=self._item_signals(
                 item,
@@ -2066,7 +2092,7 @@ class ThingsWorkspace:
                         and note_offset + _NOTES_LIMIT < len(item.notes)
                     )
                 ),
-                links_truncated=len(linked_ids) > 40,
+                links_truncated=links_truncated,
             ),
         )
 
@@ -5256,6 +5282,72 @@ def _take_budget[T](
     return kept, remain, False
 
 
+def _bound_bulk_text(facts: list[ItemFact]) -> list[ItemFact]:
+    remain = _BULK_TEXT_BUDGET
+    notes = [fact.notes_markdown or "" for fact in facts]
+    prefixes = [""] * len(facts)
+    for index, text in enumerate(notes):
+        take = min(len(text), _NOTE_RESERVE, remain)
+        prefixes[index] = text[:take]
+        remain -= take
+
+    kept_checks: list[list[ChecklistFact]] = []
+    cut_checks: list[bool] = []
+    for fact in facts:
+        kept, remain, cut = _take_budget(
+            list(fact.checklist), remain, lambda row: len(row.title)
+        )
+        kept_checks.append(kept)
+        cut_checks.append(cut)
+
+    kept_direct: list[list[TagFact]] = []
+    kept_inherited: list[list[TagFact]] = []
+    cut_tags: list[bool] = []
+    for fact in facts:
+        direct, remain, direct_cut = _take_budget(
+            list(fact.direct_tags), remain, _tag_cost
+        )
+        inherited: list[TagFact] = []
+        inherited_cut = False
+        if not direct_cut:
+            inherited, remain, inherited_cut = _take_budget(
+                list(fact.inherited_tags), remain, _tag_cost
+            )
+        kept_direct.append(direct)
+        kept_inherited.append(inherited)
+        cut_tags.append(direct_cut or inherited_cut)
+
+    kept_notes: list[str] = []
+    cut_notes: list[bool] = []
+    for index, text in enumerate(notes):
+        rest = text[len(prefixes[index]) :]
+        if remain < len(rest):
+            kept_notes.append(prefixes[index] + rest[:remain])
+            cut_notes.append(True)
+            remain = 0
+        else:
+            kept_notes.append(prefixes[index] + rest)
+            cut_notes.append(len(prefixes[index]) + len(rest) < len(text))
+            remain -= len(rest)
+
+    return [
+        _with_completeness(
+            fact,
+            notes=kept_notes[index] or None,
+            checklist=kept_checks[index],
+            direct=kept_direct[index],
+            inherited=kept_inherited[index],
+            truncated=[
+                *fact.truncated_fields,
+                *(["checklist"] if cut_checks[index] else []),
+                *(["tags"] if cut_tags[index] else []),
+                *(["notes"] if cut_notes[index] else []),
+            ],
+        )
+        for index, fact in enumerate(facts)
+    ]
+
+
 def _with_completeness(
     fact: ItemFact,
     *,
@@ -5264,11 +5356,19 @@ def _with_completeness(
     direct: list[TagFact],
     inherited: list[TagFact],
     truncated: Sequence[str],
+    linked_item_ids: list[str] | None = None,
 ) -> ItemFact:
     truncated_fields = _truncated_fields(
         notes="notes" in truncated,
         checklist="checklist" in truncated,
         tags="tags" in truncated,
+        recurrence="recurrence" in truncated,
+    )
+    recurrence = fact.recurrence
+    if linked_item_ids is not None and recurrence is not None:
+        recurrence = recurrence.model_copy(update={"linked_item_ids": linked_item_ids})
+    extras = (
+        ["recurrence_links_truncated"] if "recurrence" in truncated_fields else []
     )
     return fact.model_copy(
         update={
@@ -5276,8 +5376,11 @@ def _with_completeness(
             "checklist": checklist,
             "direct_tags": direct,
             "inherited_tags": inherited,
+            "recurrence": recurrence,
             "truncated_fields": truncated_fields,
-            "signals": _signals_with_truncation(list(fact.signals), truncated_fields),
+            "signals": _signals_with_truncation(
+                list(fact.signals), truncated_fields, *extras
+            ),
         }
     )
 
@@ -5320,132 +5423,110 @@ def _hoist_bulk_tags(facts: list[ItemFact]) -> tuple[list[ItemFact], list[TagFac
     return slim, hoisted
 
 
-def _structured_bytes(
-    instruction: str, facts: list[ItemFact], tags: list[TagFact]
-) -> int:
-    payload = Result(
-        next="done",
-        status="ok",
-        instruction=instruction,
-        items=facts,
-        tags=tags,
-    ).model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+def _result_bytes(result: Result) -> int:
+    payload = result.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    )
     return len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     )
 
 
-def _trim_bulk_wire(
-    facts: list[ItemFact], tags: list[TagFact], instruction: str
-) -> tuple[list[ItemFact], list[TagFact]]:
-    facts = list(facts)
-    tags = list(tags)
-    while _structured_bytes(instruction, facts, tags) > _BULK_WIRE_BUDGET:
-        reduced = False
-        for index in range(len(facts) - 1, -1, -1):
-            fact = facts[index]
-            if fact.inherited_tags:
-                facts[index] = _with_completeness(
-                    fact,
-                    notes=fact.notes_markdown,
-                    checklist=list(fact.checklist),
-                    direct=list(fact.direct_tags),
-                    inherited=[],
-                    truncated=[*fact.truncated_fields, "tags"],
-                )
-                reduced = True
-                break
-            notes = fact.notes_markdown or ""
-            if len(notes) > _NOTE_RESERVE:
-                facts[index] = _with_completeness(
-                    fact,
-                    notes=notes[:_NOTE_RESERVE],
-                    checklist=list(fact.checklist),
-                    direct=list(fact.direct_tags),
-                    inherited=list(fact.inherited_tags),
-                    truncated=[*fact.truncated_fields, "notes"],
-                )
-                reduced = True
-                break
-            if fact.checklist:
-                facts[index] = _with_completeness(
-                    fact,
-                    notes=fact.notes_markdown,
-                    checklist=[],
-                    direct=list(fact.direct_tags),
-                    inherited=list(fact.inherited_tags),
-                    truncated=[*fact.truncated_fields, "checklist"],
-                )
-                reduced = True
-                break
-            if fact.direct_tags:
-                facts[index] = _with_completeness(
-                    fact,
-                    notes=fact.notes_markdown,
-                    checklist=list(fact.checklist),
-                    direct=[],
-                    inherited=list(fact.inherited_tags),
-                    truncated=[*fact.truncated_fields, "tags"],
-                )
-                reduced = True
-                break
-            if notes:
-                facts[index] = _with_completeness(
-                    fact,
-                    notes=None,
-                    checklist=list(fact.checklist),
-                    direct=list(fact.direct_tags),
-                    inherited=list(fact.inherited_tags),
-                    truncated=[*fact.truncated_fields, "notes"],
-                )
-                reduced = True
-                break
-        if reduced:
-            tags = _prune_unused_tags(facts, tags)
-            continue
-        if any(tag.parent_ids for tag in tags):
-            tags = [
-                tag.model_copy(update={"parent_ids": [], "parents_truncated": True})
-                if tag.parent_ids
-                else tag
-                for tag in tags
-            ]
-            for index, fact in enumerate(facts):
-                if fact.direct_tags or fact.inherited_tags:
-                    facts[index] = _with_completeness(
-                        fact,
-                        notes=fact.notes_markdown,
-                        checklist=list(fact.checklist),
-                        direct=list(fact.direct_tags),
-                        inherited=list(fact.inherited_tags),
-                        truncated=[*fact.truncated_fields, "tags"],
+def _replace_item(facts: list[ItemFact], index: int, fact: ItemFact) -> list[ItemFact]:
+    updated = list(facts)
+    updated[index] = fact
+    return updated
+
+
+def _trim_optional_detail(result: Result) -> Result | None:
+    facts = list(result.items)
+    tags = list(result.tags)
+    if any(tag.parent_ids for tag in tags):
+        return result.model_copy(
+            update={
+                "tags": [
+                    tag.model_copy(
+                        update={"parent_ids": [], "parents_truncated": True}
                     )
+                    if tag.parent_ids
+                    else tag
+                    for tag in tags
+                ]
+            }
+        )
+    for index in range(len(facts) - 1, -1, -1):
+        fact = facts[index]
+        notes = fact.notes_markdown or ""
+        links = (
+            list(fact.recurrence.linked_item_ids)
+            if fact.recurrence is not None
+            else []
+        )
+        if len(notes) > _NOTE_RESERVE:
+            next_fact = _with_completeness(
+                fact,
+                notes=notes[:_NOTE_RESERVE],
+                checklist=list(fact.checklist),
+                direct=list(fact.direct_tags),
+                inherited=list(fact.inherited_tags),
+                truncated=[*fact.truncated_fields, "notes"],
+            )
+        elif fact.checklist:
+            next_fact = _with_completeness(
+                fact,
+                notes=fact.notes_markdown,
+                checklist=[],
+                direct=list(fact.direct_tags),
+                inherited=list(fact.inherited_tags),
+                truncated=[*fact.truncated_fields, "checklist"],
+            )
+        elif links:
+            next_fact = _with_completeness(
+                fact,
+                notes=fact.notes_markdown,
+                checklist=list(fact.checklist),
+                direct=list(fact.direct_tags),
+                inherited=list(fact.inherited_tags),
+                truncated=[*fact.truncated_fields, "recurrence"],
+                linked_item_ids=[],
+            )
+        elif notes:
+            next_fact = _with_completeness(
+                fact,
+                notes=None,
+                checklist=list(fact.checklist),
+                direct=list(fact.direct_tags),
+                inherited=list(fact.inherited_tags),
+                truncated=[*fact.truncated_fields, "notes"],
+            )
+        elif fact.inherited_tags:
+            next_fact = _with_completeness(
+                fact,
+                notes=fact.notes_markdown,
+                checklist=list(fact.checklist),
+                direct=list(fact.direct_tags),
+                inherited=[],
+                truncated=[*fact.truncated_fields, "tags"],
+            )
+        elif fact.direct_tags:
+            next_fact = _with_completeness(
+                fact,
+                notes=fact.notes_markdown,
+                checklist=list(fact.checklist),
+                direct=[],
+                inherited=list(fact.inherited_tags),
+                truncated=[*fact.truncated_fields, "tags"],
+            )
+        else:
             continue
-        if tags:
-            dropped = {tag.id for tag in tags[-1:]}
-            tags = tags[:-1]
-            for index, fact in enumerate(facts):
-                if any(
-                    tag.id in dropped
-                    for tag in (*fact.direct_tags, *fact.inherited_tags)
-                ):
-                    facts[index] = _with_completeness(
-                        fact,
-                        notes=fact.notes_markdown,
-                        checklist=list(fact.checklist),
-                        direct=[
-                            tag for tag in fact.direct_tags if tag.id not in dropped
-                        ],
-                        inherited=[
-                            tag
-                            for tag in fact.inherited_tags
-                            if tag.id not in dropped
-                        ],
-                        truncated=[*fact.truncated_fields, "tags"],
-                    )
-            continue
-        break
-    return facts, tags
+        facts = _replace_item(facts, index, next_fact)
+        return result.model_copy(
+            update={
+                "items": facts,
+                "tags": _prune_unused_tags(facts, tags),
+            }
+        )
+    return None
 
 
 def _prune_unused_tags(
@@ -5460,7 +5541,11 @@ def _prune_unused_tags(
 
 
 def _truncated_fields(
-    *, notes: bool = False, checklist: bool = False, tags: bool = False
+    *,
+    notes: bool = False,
+    checklist: bool = False,
+    tags: bool = False,
+    recurrence: bool = False,
 ) -> list[TruncatedField]:
     fields: list[TruncatedField] = []
     if notes:
@@ -5469,6 +5554,8 @@ def _truncated_fields(
         fields.append("checklist")
     if tags:
         fields.append("tags")
+    if recurrence:
+        fields.append("recurrence")
     return fields
 
 

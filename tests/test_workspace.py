@@ -4367,10 +4367,11 @@ def test_bulk_exact_read_truncates_checklist_text_in_the_shared_budget() -> None
     result = module.read(ReadCall(ids=[first.id, second.id]))
 
     assert result.status == "ok"
-    assert len(result.items[0].notes_markdown or "") == 40_000
+    assert len(result.items[0].notes_markdown or "") == 1_000
+    assert "notes" in result.items[0].truncated_fields
     assert "checklist_truncated" in result.items[1].signals
     assert "checklist" in result.items[1].truncated_fields
-    assert len(result.items[1].checklist) == 60
+    assert len(result.items[1].checklist) == 99
     total = sum(
         len(item.notes_markdown or "")
         + sum(len(row.title) for row in item.checklist)
@@ -4510,7 +4511,7 @@ def test_bulk_truncation_fields_survive_a_full_signal_list() -> None:
         title="Hog",
         notes="n" * 50_000,
         checklists=[
-            ChecklistLine(f"h{index}", "H" * 1000) for index in range(50)
+            ChecklistLine(f"h{index}", "H" * 1000) for index in range(100)
         ],
     )
     heading = Record(
@@ -4625,6 +4626,127 @@ def test_bulk_read_hoists_shared_tag_parents_under_the_wire_budget() -> None:
         for tag in (*item.direct_tags, *item.inherited_tags)
     )
     assert all(not item.truncated_fields for item in result.items)
+
+
+def test_bulk_note_reserve_is_shared_across_items() -> None:
+    first = Record(
+        uuid="one",
+        kind="task",
+        title="One",
+        notes="a" * 50_000,
+        checklists=[
+            ChecklistLine(f"a{index}", "C" * 1000) for index in range(50)
+        ],
+    )
+    second = Record(
+        uuid="two",
+        kind="task",
+        title="Two",
+        notes="b" * 50_000,
+        checklists=[
+            ChecklistLine(f"b{index}", "C" * 1000) for index in range(50)
+        ],
+    )
+    module = workspace([first, second])
+
+    result = module.read(ReadCall(ids=[first.id, second.id]))
+
+    assert len(result.items[0].notes_markdown or "") >= 400
+    assert len(result.items[1].notes_markdown or "") >= 400
+    assert result.items[0].truncated_fields
+    assert result.items[1].truncated_fields
+
+
+def test_bulk_read_keeps_tag_membership_when_parents_are_huge() -> None:
+    tag_uuids = [f"t{index:02d}" for index in range(40)]
+    parent_uuids = [
+        f"p{index:02d}-{slot}-" + "z" * 400
+        for index in range(40)
+        for slot in range(20)
+    ]
+    tasks = [
+        Record(
+            uuid=f"item{index}",
+            kind="task",
+            title=f"Item {index}",
+            tag_uuids=tag_uuids,
+        )
+        for index in range(10)
+    ]
+    library = MemoryLibrary(tasks)
+    library.tags = {uuid: uuid[:20] for uuid in [*tag_uuids, *parent_uuids]}
+    library.tag_parents = {
+        uuid: [f"p{index:02d}-{slot}-" + "z" * 400 for slot in range(20)]
+        for index, uuid in enumerate(tag_uuids)
+    }
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(ids=[task.id for task in tasks]))
+    payload = result.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    )
+    wire = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+    assert result.status == "ok"
+    assert wire <= 256_000
+    assert len(result.tags) == 40
+    assert all(not tag.parent_ids for tag in result.tags)
+    assert all(tag.parents_truncated for tag in result.tags)
+    assert all(len(item.direct_tags) == 40 for item in result.items)
+    assert all("tags" not in item.truncated_fields for item in result.items)
+
+
+def test_bulk_recurrence_links_do_not_exceed_the_wire_budget() -> None:
+    templates = []
+    instances = []
+    for index in range(10):
+        template_uuid = f"tmpl{index}"
+        templates.append(
+            Record(
+                uuid=template_uuid,
+                kind="task",
+                title="é" * 1000,
+                recurrence=RecurrenceState(role="template"),
+            )
+        )
+        for slot in range(40):
+            instances.append(
+                Record(
+                    uuid=f"i{index:02d}-{slot:02d}-" + "y" * 460,
+                    kind="task",
+                    title="copy",
+                    recurrence=RecurrenceState(
+                        role="instance", links=(template_uuid,)
+                    ),
+                )
+            )
+    module = workspace([*templates, *instances])
+
+    result = module.read(ReadCall(ids=[item.id for item in templates]))
+    payload = result.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    )
+    wire = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+    assert result.status == "ok"
+    assert wire <= 256_000
+    assert result.items
+    if result.cursor is not None:
+        assert result.truncated is True
+        assert "wire_trimmed" in result.signals
+    else:
+        assert all(
+            "recurrence" in item.truncated_fields
+            or (
+                item.recurrence is not None
+                and len(item.recurrence.linked_item_ids) <= 40
+            )
+            for item in result.items
+        )
 
 
 def test_bulk_tag_registry_caps_unique_tags_without_crashing() -> None:
