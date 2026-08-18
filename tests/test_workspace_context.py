@@ -694,6 +694,34 @@ def test_one_read_project_merge_moves_children_and_trashes_source_after_approval
     assert library.records[task.uuid].heading_uuid == heading.uuid
 
 
+def test_heading_into_another_project_is_rejected_without_merge() -> None:
+    source = Record(uuid="source", kind="project", title="Source")
+    destination = Record(uuid="destination", kind="project", title="Destination")
+    heading = Record(
+        uuid="heading",
+        kind="task",
+        title="Next",
+        parent_uuid=source.uuid,
+        heading=True,
+    )
+    workspace, library, _store = contextual_workspace([source, destination, heading])
+    read = workspace.read(ReadCall(purpose="organize", id=source.id))
+    assert read.context
+    refs = {item.id: item.ref for item in read.items}
+
+    result = workspace.commit(
+        CommitCall(
+            intent_id="heading-cross-project-001",
+            context_id=read.context.id,
+            change=[{"ref": refs[heading.id], "into": refs[destination.id]}],
+        )
+    )
+
+    assert result.status == "rejected"
+    assert "atomic Project merge" in result.instruction
+    assert library.records[heading.uuid].parent_uuid == source.uuid
+
+
 def test_organize_find_requires_one_project() -> None:
     first = Record(uuid="first", kind="project", title="Launch")
     second = Record(uuid="second", kind="project", title="Launch follow-up")

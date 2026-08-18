@@ -2330,6 +2330,109 @@ def test_trash_rejects_areas() -> None:
     assert area.trashed is False
 
 
+def test_heading_into_another_project_is_rejected_without_merge() -> None:
+    source = Record(uuid="heading-source", kind="project", title="Source")
+    destination = Record(uuid="heading-dest", kind="project", title="Destination")
+    heading = Record(
+        uuid="lonely-heading",
+        kind="task",
+        title="Section",
+        parent_uuid=source.uuid,
+        heading=True,
+    )
+    module = workspace([source, destination, heading])
+    current = detail(module, heading.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-cross-project-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": current.revision,
+                        "into": destination.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert "atomic Project merge" in result.instruction
+    assert heading.parent_uuid == source.uuid
+
+
+def test_heading_into_another_project_rejects_an_unrelated_source_trash() -> None:
+    source = Record(uuid="heading-keep", kind="project", title="Keep")
+    destination = Record(uuid="heading-other", kind="project", title="Other")
+    decoy = Record(uuid="heading-decoy", kind="project", title="Decoy")
+    heading = Record(
+        uuid="heading-stay",
+        kind="task",
+        title="Section",
+        parent_uuid=source.uuid,
+        heading=True,
+    )
+    module = workspace([source, destination, decoy, heading])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-unrelated-trash-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": detail(module, heading.id).revision,
+                        "into": destination.id,
+                    },
+                    {
+                        "id": decoy.id,
+                        "if_revision": detail(module, decoy.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert "atomic Project merge" in result.instruction
+    assert heading.parent_uuid == source.uuid
+    assert decoy.trashed is False
+
+
+def test_heading_into_its_current_project_is_not_a_cross_project_move() -> None:
+    project = Record(uuid="heading-home", kind="project", title="Home")
+    heading = Record(
+        uuid="heading-same",
+        kind="task",
+        title="Section",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    module = workspace([project, heading])
+    current = detail(module, heading.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-same-project-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": current.revision,
+                        "into": project.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "unchanged"
+    assert heading.parent_uuid == project.uuid
+
+
 def test_heading_create_rename_assignment_and_clear() -> None:
     project = Record(uuid="project", kind="project", title="Launch")
     task = Record(uuid="task", kind="task", title="Ship", parent_uuid=project.uuid)

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- A heading `into` a different Project is rejected unless the batch is
+  an atomic merge that also trashes the heading's source Project.
 - Pending Cloud read-back no longer returns `retry_same` forever.
   After three unsettled attempts, `things_commit` and `things_approve`
   stop with `unavailable` so the model can read current facts.
