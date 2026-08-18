@@ -18,7 +18,7 @@ class StrictModel(BaseModel):
 
 Kind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "completed", "canceled"]
-TruncatedField = Literal["notes", "checklist", "tags"]
+TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
 Next = Literal["done", "ask", "approve", "read", "retry_same", "stop"]
 ResultStatus = Literal[
     "ok",
@@ -1190,7 +1190,7 @@ class ItemFact(StrictModel):
     order: int = Field(ge=_ORDER_MIN, le=_ORDER_MAX)
     today_order: int | None = Field(default=None, ge=_ORDER_MIN, le=_ORDER_MAX)
     signals: list[str] = Field(default_factory=list, max_length=20)
-    truncated_fields: list[TruncatedField] = Field(default_factory=list, max_length=3)
+    truncated_fields: list[TruncatedField] = Field(default_factory=list, max_length=4)
 
     @field_validator("truncated_fields")
     @classmethod
@@ -1866,9 +1866,9 @@ _ITEM_FACT: dict[str, Any] = {
         },
         "truncated_fields": {
             "type": "array",
-            "maxItems": 3,
+            "maxItems": 4,
             "uniqueItems": True,
-            "items": {"enum": ["notes", "checklist", "tags"]},
+            "items": {"enum": ["notes", "checklist", "tags", "recurrence"]},
         },
     },
 }
@@ -2091,9 +2091,9 @@ _READ_ITEM: dict[str, Any] = {
         },
         "truncated_fields": {
             "type": "array",
-            "maxItems": 3,
+            "maxItems": 4,
             "uniqueItems": True,
-            "items": {"enum": ["notes", "checklist", "tags"]},
+            "items": {"enum": ["notes", "checklist", "tags", "recurrence"]},
         },
     },
 }
@@ -2160,7 +2160,7 @@ READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
     "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags first, reserve a 400-character note prefix per item, then spend remaining budget on checklist titles, then tag ids and titles, then the rest of each note. The structured result stays under 256 KB. If still large, later items drop inherited tags, extra notes, checklists, then remaining tags. truncated_fields and signals name omitted notes, checklist, or tags; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repairs; repair_kind is set only when one repair exists. ids returns bounded full-detail facts for 1 to 10 exact items. Bulk ids hoist unique tags to tags; join item tag ids to that registry. Every item first gets a 400-character note prefix, then remaining budget is spent in request order on checklist titles, tag ids and titles, then the rest of each note. The complete structured result stays under 256 KB. If still large, parent graphs go first, then extra notes, checklists, recurrence links, then tag membership; if core metadata still overflows, fewer items return with a cursor. truncated_fields and signals name omitted notes, checklist, tags, or recurrence; read that exact id for the rest. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
