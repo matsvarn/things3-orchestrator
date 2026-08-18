@@ -163,14 +163,15 @@ class ThingsMCPServer:
             else:
                 ApproveCall.model_validate(arguments)
         except ValidationError as error:
-            return CallToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=_safe_validation_error(error, repair=_REPAIR.get(name)),
-                    )
-                ],
-                is_error=True,
+            return _domain_result(
+                Result(
+                    next="ask",
+                    status="rejected",
+                    instruction=_safe_validation_error(
+                        error, repair=_REPAIR.get(name)
+                    ),
+                ),
+                full_items=name == "things_read",
             )
         try:
             async with self._lock:

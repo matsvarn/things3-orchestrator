@@ -222,7 +222,7 @@ def test_find_includes_active_headings_for_rename() -> None:
     assert review.items[0].id == "heading:prep"
 
 
-def test_review_find_excludes_completed_trashed_and_repeat_templates() -> None:
+def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:
     records = [
         Record(uuid="done", kind="task", title="Prep done", status="done"),
         Record(uuid="trash", kind="task", title="Prep trash", trashed=True),
@@ -236,7 +236,11 @@ def test_review_find_excludes_completed_trashed_and_repeat_templates() -> None:
     ]
 
     review = workspace(records).read(ReadCall(find="Prep"))
-    assert review.items == []
+    assert {item.id for item in review.items} == {"task:done", "task:trash"}
+    assert "not active" in review.instruction
+    assert "trashed" in next(
+        item.signals for item in review.items if item.id == "task:trash"
+    )
 
     change = workspace(records).read(ReadCall(purpose="change", find="invoice"))
     assert change.status == "needs_input"
@@ -5823,3 +5827,71 @@ def test_applied_receipt_echoes_heading_id() -> None:
 
     assert result.status == "applied"
     assert result.items[0].heading_id == heading.id
+
+
+def test_applied_receipt_echoes_checklist_parent_and_assigned_tags() -> None:
+    task = Record(
+        uuid="pack",
+        kind="task",
+        title="Pack",
+        checklists=[ChecklistLine("row", "Passport", status="open")],
+    )
+    library = MemoryLibrary([task])
+    library.tags["travel"] = "Travel"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "receipt-touched-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "checklist_change": [
+                            {"id": "check:row", "status": "completed"}
+                        ],
+                        "tags_add": ["tag:travel"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert [item.id for item in result.items] == [task.id]
+    assert [tag.id for tag in result.tags] == ["tag:travel"]
+
+
+def test_permanent_heading_delete_receipt_names_the_gone_id() -> None:
+    project = Record(uuid="home", kind="project", title="Home")
+    heading = Record(
+        uuid="gone",
+        kind="task",
+        title="Old",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    module = workspace([project, heading])
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "receipt-delete-heading-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": detail(module, heading.id).revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert applied.missing_ids == ["task:gone"]
+    assert heading.uuid not in module._library.records  # noqa: SLF001

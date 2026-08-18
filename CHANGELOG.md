@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-08-19
+
+The first release that can finish work. Neighborhood reads, Project
+teardown, and honest control fields from the unreleased 0.2.1 follow-up,
+plus honesty at the edges so a session can clean up after itself.
+
 ### Changed
 
 - Change and organize reads return the local neighborhood. Include a
@@ -18,6 +24,15 @@
   inherit the template rule.
 - MCP tool descriptions are the short call contract. Teardown, repeat,
   and organize details live in the skill references.
+- Invalid tool requests return a `rejected` Result on the MCP channel
+  instead of `is_error`. Expected schema misses no longer look like an
+  outage.
+- Review `find` that matches only Trash or completed work returns those
+  items instead of an empty living search.
+- Applied receipts prove checklist parents, assigned tags, and
+  permanently deleted ids. Organize recovery for a trashed Project
+  points at `purpose=change`, not the same dead organize id.
+- Live children of a trashed heading now carry `orphaned_heading`.
 
 ### Fixed
 

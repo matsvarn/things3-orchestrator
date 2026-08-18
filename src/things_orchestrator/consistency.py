@@ -140,7 +140,9 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
     if item.heading_uuid and not item.parent_uuid:
         signals.append("heading_without_project")
     if item.heading_uuid:
-        if heading is None or not heading.heading:
+        if heading is None or not heading.heading or (
+            heading.trashed and not item.trashed
+        ):
             signals.append("orphaned_heading")
         elif item.parent_uuid and heading.parent_uuid != item.parent_uuid:
             signals.append("heading_wrong_project")

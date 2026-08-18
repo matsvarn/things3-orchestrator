@@ -24,6 +24,28 @@ def test_diagnose_finds_inbox_hybrids_and_tag_orphans() -> None:
     assert item_conflicts(hybrid, library) == ["inbox_with_project"]
 
 
+def test_trashed_heading_is_an_orphaned_heading_for_live_children() -> None:
+    project = Record(uuid="home", kind="project", title="Home")
+    heading = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    child = Record(
+        uuid="repeat",
+        kind="task",
+        title="Repeat",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+    )
+    library = MemoryLibrary([project, heading, child])
+
+    assert "orphaned_heading" in item_conflicts(child, library)
+
+
 def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None:
     area = Record(uuid="home", kind="area", title="Home")
     heading = Record(uuid="loose-heading", kind="task", title="Loose", heading=True)
