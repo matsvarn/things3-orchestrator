@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- Recurrence templates list every valid instance, whether the
+  relationship is stored as `template_uuid`, `recurrence.links`, or
+  both. Exact-item cursors bind that set, so adding or removing an
+  instance stales continuation. Instances are ordered by sort index
+  then UUID.
+
 - Bulk `ids` reads reserve a 400-character note prefix for every
   item before spending the shared remaining budget. Earlier items
   can no longer consume later items' promised prefixes.

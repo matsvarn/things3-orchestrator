@@ -325,6 +325,148 @@ def test_exact_read_exposes_heading_repeat_pattern_and_linked_copy() -> None:
     assert item.recurrence.linked_item_ids == [copy.id]
 
 
+def test_template_lists_both_recurrence_relationship_forms_without_duplicates() -> None:
+    template = Record(
+        uuid="mix-template",
+        kind="task",
+        title="Template",
+        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule={"tp": 0}),
+    )
+    via_links = Record(
+        uuid="via-links",
+        kind="task",
+        title="Links",
+        sort_index=2,
+        recurrence=RecurrenceState(role="instance", links=(template.uuid,)),
+    )
+    via_uuid = Record(
+        uuid="via-uuid",
+        kind="task",
+        title="UUID",
+        sort_index=1,
+        recurrence=RecurrenceState(
+            role="instance", template_uuid=template.uuid
+        ),
+    )
+    both = Record(
+        uuid="via-both",
+        kind="task",
+        title="Both",
+        sort_index=0,
+        recurrence=RecurrenceState(
+            role="instance",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, via_links, via_uuid, both])
+
+    item = detail(module, template.id)
+    bulk = module.read(ReadCall(ids=[template.id]))
+
+    assert item.recurrence is not None
+    assert item.recurrence.linked_item_ids == [both.id, via_uuid.id, via_links.id]
+    assert bulk.items[0].recurrence is not None
+    assert bulk.items[0].recurrence.linked_item_ids == [
+        both.id,
+        via_uuid.id,
+        via_links.id,
+    ]
+    links_only = module.read(ReadCall(purpose="recurrence", id=via_links.id))
+    uuid_only = module.read(ReadCall(purpose="recurrence", id=via_uuid.id))
+    assert links_only.status == "ok"
+    assert uuid_only.status == "ok"
+    assert links_only.items[0].recurrence is not None
+    assert links_only.items[0].recurrence.template_id == template.id
+
+
+def test_template_detail_pages_mixed_recurrence_relationships() -> None:
+    template = Record(
+        uuid="page-template",
+        kind="task",
+        title="Template",
+        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule={"tp": 0}),
+    )
+    instances = []
+    for index in range(25):
+        instances.append(
+            Record(
+                uuid=f"link-{index:02d}",
+                kind="task",
+                title=f"Link {index}",
+                sort_index=index,
+                recurrence=RecurrenceState(role="instance", links=(template.uuid,)),
+            )
+        )
+        instances.append(
+            Record(
+                uuid=f"uuid-{index:02d}",
+                kind="task",
+                title=f"UUID {index}",
+                sort_index=index + 25,
+                recurrence=RecurrenceState(
+                    role="instance", template_uuid=template.uuid
+                ),
+            )
+        )
+    module = workspace([template, *instances])
+
+    result = module.read(ReadCall(id=template.id, limit=20))
+    found: list[str] = []
+    pages = 0
+    while True:
+        pages += 1
+        item = result.items[0]
+        assert item.recurrence is not None
+        found.extend(item.recurrence.linked_item_ids)
+        if result.cursor is None:
+            break
+        result = module.read(ReadCall(cursor=result.cursor, limit=20))
+
+    assert pages == 3
+    assert len(found) == 50
+    assert len(set(found)) == 50
+    assert {f"task:link-{index:02d}" for index in range(25)}.issubset(found)
+    assert {f"task:uuid-{index:02d}" for index in range(25)}.issubset(found)
+
+
+def test_template_detail_cursor_stales_when_an_instance_is_removed() -> None:
+    template = Record(
+        uuid="stale-template",
+        kind="task",
+        title="Template",
+        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule={"tp": 0}),
+    )
+    instances = [
+        Record(
+            uuid=f"c{index:02d}",
+            kind="task",
+            title=f"Copy {index}",
+            sort_index=index,
+            recurrence=RecurrenceState(
+                role="instance",
+                template_uuid=template.uuid,
+                links=(template.uuid,),
+            ),
+        )
+        for index in range(25)
+    ]
+    library = MemoryLibrary([template, *instances])
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    first = module.read(ReadCall(id=template.id, limit=10))
+    assert first.cursor is not None
+    assert first.items[0].recurrence is not None
+    assert first.items[0].recurrence.linked_item_ids == [
+        f"task:c{index:02d}" for index in range(10)
+    ]
+    del library.records["c00"]
+    stale = module.read(ReadCall(cursor=first.cursor, limit=10))
+
+    assert stale.status == "stale"
+    assert stale.next == "read"
+
+
 def test_recurrence_read_verifies_template_and_generated_copy_relationship() -> None:
     template = Record(
         uuid="inspect-template",
