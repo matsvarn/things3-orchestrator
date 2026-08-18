@@ -11,6 +11,7 @@ from secrets import token_urlsafe
 from typing import Callable, Literal, cast
 
 from .cloud import CloudError
+from .consistency import diagnose, item_conflicts
 from .context import (
     CompletenessFact,
     ContextConflict,
@@ -251,6 +252,8 @@ class ThingsWorkspace:
             return self._context_organize(call)
         if call.purpose == "recurrence":
             return self._recurrence_read(call)
+        if call.ids:
+            return self._bulk_exact(call)
 
         view = call.view or "today"
         if call.id is not None:
@@ -299,13 +302,64 @@ class ThingsWorkspace:
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
+        instruction = "Use this review as current evidence."
+        result_signals: list[str] = []
+        if view == "audit":
+            instruction = (
+                "This audit lists each active item once. Continue the cursor for the rest."
+            )
+        elif view == "diagnostics":
+            instruction = (
+                "These records have native-state conflicts. Repair the listed signals."
+            )
+            result_signals = self._diagnostic_tag_signals()
+        elif view == "area":
+            instruction = (
+                "This Area, its loose tasks, and its Projects. "
+                "Read a Project for its children."
+            )
         return self._page(
             visible,
             call.limit,
             full=False,
-            instruction="Use this review as current evidence.",
+            instruction=instruction,
             view=view,
             public_scope=(self._area_scope_revision() if view == "system" else None),
+            result_signals=result_signals,
+        )
+
+    def _diagnostic_items(self) -> list[Record]:
+        items: list[Record] = []
+        for conflict in diagnose(self._library):
+            if conflict.item_id.startswith("tag:"):
+                continue
+            item = self._exact_item(conflict.item_id)
+            if item is not None:
+                items.append(item)
+        return items
+
+    def _diagnostic_tag_signals(self) -> list[str]:
+        return [
+            f"{signal}:{conflict.item_id}"
+            for conflict in diagnose(self._library)
+            for signal in conflict.signals
+            if conflict.item_id.startswith("tag:")
+        ][:40]
+
+    def _bulk_exact(self, call: ReadCall) -> Result:
+        items: list[Record] = []
+        for item_id in call.ids:
+            item = self._exact_item(item_id)
+            if item is None:
+                return self._needs_input(
+                    f"I could not find that exact item ({item_id}). Read or search again."
+                )
+            items.append(item)
+        return self._page(
+            items,
+            call.limit,
+            full=True,
+            instruction="Use these exact facts.",
         )
 
     def _context_change(self, call: ReadCall) -> Result:
@@ -1189,6 +1243,16 @@ class ThingsWorkspace:
             return self._library.trash()
         if view == "system":
             return self._library.system()
+        if view == "area":
+            assert call.within is not None
+            area = self._exact_item(call.within)
+            if area is None or area.kind != "area":
+                return self._needs_input("I could not find that exact Area.")
+            return self._library.area(area.id)
+        if view == "audit":
+            return self._library.audit()
+        if view == "diagnostics":
+            return self._diagnostic_items()
         if view == "project":
             assert call.within is not None
             project = self._exact_item(call.within)
@@ -1298,6 +1362,7 @@ class ThingsWorkspace:
         instruction: str,
         view: str | None = None,
         public_scope: str | None = None,
+        result_signals: list[str] | None = None,
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
@@ -1314,20 +1379,20 @@ class ThingsWorkspace:
                 view,
             )
         sections = self._sections(view, facts) if view is not None else []
+        empty = (
+            "Nothing on Today. Search with find and one title token."
+            if view == "today"
+            else "No native-state conflicts are visible."
+            if view == "diagnostics"
+            else "No matching work is visible. Search with find and one title token."
+        )
         return Result(
             next="done",
             status="ok",
-            instruction=(
-                instruction
-                if facts
-                else (
-                    "Nothing on Today. Search with find and one title token."
-                    if view == "today"
-                    else "No matching work is visible. Search with find and one title token."
-                )
-            ),
+            instruction=instruction if facts else empty,
             items=facts,
             sections=sections,
+            signals=result_signals or [],
             scope_revision=scope,
             cursor=cursor,
             truncated=cursor is not None,
@@ -1391,12 +1456,16 @@ class ThingsWorkspace:
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
         sections = self._sections(saved.view, facts) if saved.view is not None else []
+        result_signals = (
+            self._diagnostic_tag_signals() if saved.view == "diagnostics" else []
+        )
         return Result(
             next="done",
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
             sections=sections,
+            signals=result_signals,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
             truncated=next_cursor is not None,
@@ -1593,10 +1662,21 @@ class ThingsWorkspace:
                     item_ids=[item.id for item in items],
                 )
             ]
+        titles = {
+            "area": "Area",
+            "audit": "Active items",
+            "diagnostics": "Conflicts",
+            "trash": "Trash",
+            "inbox": "Inbox",
+            "week": "Week",
+            "logbook": "Logbook",
+            "tags": "Tags",
+            "project": "Project",
+        }
         return [
             ReviewSection(
                 key=view,
-                title=view.title(),
+                title=titles.get(view, view.title()),
                 item_ids=[item.id for item in items],
             )
         ]
@@ -1661,6 +1741,15 @@ class ThingsWorkspace:
             checklist is None or direct_tags is None or inherited_tags is None
         ):
             checklist, direct_tags, inherited_tags = self._detail_lists(item)
+            if len(checklist) > 100:
+                checklist = checklist[:100]
+                checklist_truncated = True
+            if len(direct_tags) > 40:
+                direct_tags = direct_tags[:40]
+                tags_truncated = True
+            if len(inherited_tags) > 40:
+                inherited_tags = inherited_tags[:40]
+                tags_truncated = True
         checklist = checklist or []
         direct_tags = direct_tags or []
         inherited_tags = inherited_tags or []
@@ -1690,6 +1779,7 @@ class ThingsWorkspace:
             weekdays=[
                 cast(Weekday, _WEEKDAY_NAMES[code])
                 for code in item.recurrence.weekday_codes
+                if code in _WEEKDAY_NAMES
             ],
             linked_item_ids=linked_ids[:40],
         )
@@ -1729,15 +1819,20 @@ class ThingsWorkspace:
                 if item.start == self._clock().date() or item.tonight
                 else None
             ),
-            signals=[
-                *self._signals(
-                    item,
-                    checklist_truncated=checklist_truncated,
-                    tags_truncated=tags_truncated,
-                    notes_truncated=notes_truncated,
+            signals=self._item_signals(
+                item,
+                checklist_truncated=checklist_truncated,
+                tags_truncated=tags_truncated,
+                notes_truncated=(
+                    notes_truncated
+                    or (
+                        full
+                        and include_notes
+                        and note_offset + _NOTES_LIMIT < len(item.notes)
+                    )
                 ),
-                *(["recurrence_links_truncated"] if len(linked_ids) > 40 else []),
-            ],
+                links_truncated=len(linked_ids) > 40,
+            ),
         )
 
     def _tag_sources(self, item: Record) -> list[Record]:
@@ -1771,13 +1866,14 @@ class ThingsWorkspace:
             ]
         )
 
-    def _signals(
+    def _item_signals(
         self,
         item: Record,
         *,
         checklist_truncated: bool,
         tags_truncated: bool,
         notes_truncated: bool,
+        links_truncated: bool = False,
     ) -> list[str]:
         today = self._clock().date()
         signals: list[str] = []
@@ -1798,6 +1894,11 @@ class ThingsWorkspace:
             signals.append("someday")
         if item.trashed:
             signals.append("trashed")
+        if item.notes:
+            signals.append("has_notes")
+        if item.checklists:
+            signals.append("has_checklist")
+        signals.extend(item_conflicts(item, self._library))
         if item.recurrence.role != "none" and item.recurrence.repeat_type == "unknown":
             signals.append("recurrence_unknown")
         if checklist_truncated:
@@ -1806,14 +1907,22 @@ class ThingsWorkspace:
             signals.append("tags_truncated")
         if notes_truncated:
             signals.append("notes_truncated")
-        return signals
+        if links_truncated:
+            signals.append("recurrence_links_truncated")
+        return list(dict.fromkeys(signals))[:20]
 
     def _reminder(self, item: Record) -> str | None:
         if item.remind is None or item.start is None:
             return None
-        hour, minute = (int(part) for part in item.remind.split(":", 1))
-        tz = self._clock().tzinfo
-        return datetime.combine(item.start, time(hour, minute), tzinfo=tz).isoformat()
+        try:
+            hour_text, minute_text = item.remind.split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            tz = self._clock().tzinfo
+            return datetime.combine(
+                item.start, time(hour, minute), tzinfo=tz
+            ).isoformat()
+        except (TypeError, ValueError):
+            return None
 
     def _prepare(
         self, call: CommitCall, *, contextual_commit: bool = False
@@ -3145,12 +3254,13 @@ class ThingsWorkspace:
                 )
             if destination is not None:
                 context.preconditions[destination.id] = self._revision(destination)
-                # A destination Project's child membership and order are part
-                # of the merge contract. A concurrent child edit must stale
-                # the approval before any source move or trash is applied.
-                context.preconditions[f"scope:project:{destination.uuid}"] = (
-                    self._project_scope_revision(destination.uuid)
-                )
+                # Same-home repairs (Inbox list-state, notes, schedule) must
+                # not invalidate a sibling batch. Bind the child list only
+                # when membership, heading, or order actually changes.
+                if self._project_membership_changes(destination.uuid, context.writes):
+                    context.preconditions[f"scope:project:{destination.uuid}"] = (
+                        self._project_scope_revision(destination.uuid)
+                    )
 
             projected_exists = destination_exists
             lifecycle_conflict = False
@@ -4146,9 +4256,8 @@ class ThingsWorkspace:
             write.today_index
             for write in planned
             if write.uuid != moving_uuid
-            and write.action == "create"
-            and (write.start == today or write.tonight)
             and write.today_index is not None
+            and (write.start == today or write.tonight)
         )
         if not present:
             return max(indexes, default=-1024) + 1024 if new_item and on_today else None
@@ -4175,13 +4284,33 @@ class ThingsWorkspace:
             item = self._required_exact(reference)
             if item.uuid == moving_uuid:
                 raise _Abort(self._rejected("A Today item cannot follow itself."))
-            if not item.is_open() or not (item.start == today or item.tonight):
-                raise _Abort(
-                    self._rejected("A today_after reference must be on Today.")
+            companion = next(
+                (
+                    write
+                    for write in reversed(planned)
+                    if write.uuid == item.uuid
+                    and write.action == "update"
+                    and (write.start == today or write.tonight)
+                ),
+                None,
+            )
+            on_today = item.is_open() and (item.start == today or item.tonight)
+            if not on_today:
+                if companion is None:
+                    raise _Abort(
+                        self._rejected("A today_after reference must be on Today.")
+                    )
+                preconditions[item.id] = self._revision(item)
+                anchor_uuid = companion.uuid
+                anchor_index = (
+                    companion.today_index
+                    if companion.today_index is not None
+                    else item.today_index
                 )
-            preconditions[item.id] = self._revision(item)
-            anchor_uuid = item.uuid
-            anchor_index = item.today_index
+            else:
+                preconditions[item.id] = self._revision(item)
+                anchor_uuid = item.uuid
+                anchor_index = item.today_index
         later = sorted(index for index in indexes if index > anchor_index)
         if not later:
             return anchor_index + 1024
@@ -4200,11 +4329,19 @@ class ThingsWorkspace:
         moving_uuid: str | None,
     ) -> dict[str, int]:
         today = self._clock().date()
+        planned_today = {
+            write.uuid
+            for write in planned
+            if write.uuid != moving_uuid
+            and write.today_index is not None
+            and (write.start == today or write.tonight)
+        }
         existing = sorted(
             (
                 item
                 for item in self._library.records.values()
                 if item.uuid != moving_uuid
+                and item.uuid not in planned_today
                 and item.is_open()
                 and (item.start == today or item.tonight)
             ),
@@ -4215,7 +4352,7 @@ class ThingsWorkspace:
                 (index, write)
                 for index, write in enumerate(planned)
                 if write.uuid != moving_uuid
-                and write.action == "create"
+                and write.today_index is not None
                 and (write.start == today or write.tonight)
             ),
             key=lambda pair: (pair[1].today_index or 0, pair[1].uuid),
@@ -4250,9 +4387,112 @@ class ThingsWorkspace:
                 planned[index] = replace(planned[index], today_index=new_index)
         return positions
 
+    def _plan_manifest(
+        self, prepared: _Prepared
+    ) -> tuple[list[str], list[ReviewSection]]:
+        counts: dict[str, int] = {}
+        sections: dict[str, list[str]] = {}
+
+        def add(key: str, title: str, item_id: str | None = None) -> None:
+            counts[key] = counts.get(key, 0) + 1
+            if item_id is not None:
+                sections.setdefault(key, [])
+                if item_id not in sections[key] and len(sections[key]) < 40:
+                    sections[key].append(item_id)
+
+        titles = {
+            "create_area": "Areas created",
+            "create_project": "Projects created",
+            "create_task": "Tasks created",
+            "inbox": "Move from Inbox",
+            "someday": "Move to Someday",
+            "trash": "Move to recoverable Trash",
+            "restore": "Restore",
+            "permanent": "Permanent deletes",
+            "rename": "Rename",
+            "checklist": "Checklist edits",
+            "area_remove": "Remove empty Areas",
+        }
+        move_titles: dict[str, str] = {}
+        for write in prepared.writes:
+            item = self._library.records.get(write.uuid)
+            item_id = item.id if item is not None else f"{write.kind}:{write.uuid}"
+            if write.action == "create":
+                add(f"create_{write.kind}", write.title or write.kind, item_id)
+            elif write.action == "trash":
+                add("trash", "Trash", item_id)
+            elif write.action == "restore":
+                add("restore", "Restore", item_id)
+            elif write.action in {"permanent_delete", "delete_area", "delete_tag"}:
+                add("permanent", "Permanent", item_id)
+            elif write.action == "checklist":
+                add("checklist", "Checklist", item_id)
+            elif write.someday:
+                add("someday", "Someday", item_id)
+            elif write.title is not None and item is not None and write.title != item.title:
+                add("rename", "Rename", item_id)
+            if (
+                item is not None
+                and item.inbox
+                and (
+                    write.into_uuid is not None
+                    or write.anytime
+                    or write.someday
+                    or write.start is not None
+                    or write.tonight
+                    or write.clear_start
+                )
+            ):
+                add("inbox", "Inbox", item.id)
+            dest = (
+                "Anytime"
+                if write.anytime
+                else "Inbox"
+                if write.inbox
+                else f"{write.into_kind}:{write.into_uuid}"
+                if write.into_uuid and write.into_kind
+                else None
+            )
+            if item is not None and dest is not None:
+                source = (
+                    "Inbox"
+                    if item.inbox
+                    else f"project:{item.parent_uuid}"
+                    if item.parent_uuid
+                    else f"area:{item.area_uuid}"
+                    if item.area_uuid
+                    else "Anytime"
+                )
+                if source != dest:
+                    move_key = f"move:{source}->{dest}"[:80]
+                    move_title = f"{source} → {dest}"
+                    add(move_key, move_title, item.id)
+                    move_titles[move_key] = move_title
+                    titles[move_key] = move_title
+        header = [
+            f"{titles[key]}: {counts[key]}"
+            for key in titles
+            if key in counts
+        ]
+        detail = list(dict.fromkeys(prepared.summary))
+        summary = list(dict.fromkeys([*header, *detail]))[:40]
+        if not summary:
+            summary = ["Planned change"]
+        review = [
+            ReviewSection(
+                key=key,
+                title=titles.get(key, key),
+                item_ids=ids,
+            )
+            for key, ids in sections.items()
+            if ids
+        ][:20]
+        return summary, review
+
     def _stage(self, record: IntentRecord, prepared: _Prepared) -> Result:
         expires = self._clock() + timedelta(minutes=_PLAN_MINUTES)
         plan_id = f"plan_{token_urlsafe(12)}"
+        summary, sections = self._plan_manifest(prepared)
         result = Result(
             next="approve",
             status="needs_approval",
@@ -4261,10 +4501,11 @@ class ThingsWorkspace:
                 "important consequence. Keep plan IDs and control fields private. "
                 "Call things_approve only after a clear yes."
             ),
+            sections=sections,
             plan=PlanFact(
                 id=plan_id,
                 expires_at=expires.isoformat(),
-                summary=prepared.summary,
+                summary=summary,
                 preserves=["All unmentioned work and fields"],
                 warnings=prepared.warnings,
             ),
@@ -4613,6 +4854,38 @@ class ThingsWorkspace:
             )
         return "s_" + _digest(rows)
 
+    def _project_membership_changes(
+        self, project_uuid: str, writes: list[Write]
+    ) -> bool:
+        for write in writes:
+            current = self._library.records.get(write.uuid)
+            if write.into_kind == "project" and write.into_uuid == project_uuid:
+                if current is None or current.parent_uuid != project_uuid:
+                    return True
+                if (
+                    write.sort_index is not None
+                    and write.sort_index != current.sort_index
+                ):
+                    return True
+                if write.clear_heading and current.heading_uuid:
+                    return True
+                if (
+                    write.heading_uuid is not None
+                    and write.heading_uuid != current.heading_uuid
+                ):
+                    return True
+            if current is None or current.parent_uuid != project_uuid:
+                continue
+            if write.action in {"trash", "permanent_delete", "restore"}:
+                return True
+            if write.inbox or write.anytime:
+                return True
+            if write.into_kind == "area":
+                return True
+            if write.into_uuid is not None and write.into_uuid != project_uuid:
+                return True
+        return False
+
     def _project_scope_revision(self, uuid: str) -> str:
         project = self._library.records.get(uuid)
         rows = [] if project is None else [[project.id, self._revision(project)]]
@@ -4726,7 +4999,10 @@ def _bounded_tag_title(title: str) -> str:
 
 
 def _bounded_title(title: str) -> str:
-    return title if len(title) <= _TITLE_LIMIT else title[: _TITLE_LIMIT - 1] + "…"
+    cleaned = title.strip() if title else ""
+    if not cleaned:
+        return "(untitled)"
+    return cleaned if len(cleaned) <= _TITLE_LIMIT else cleaned[: _TITLE_LIMIT - 1] + "…"
 
 
 def _bounded_order(value: int) -> int:

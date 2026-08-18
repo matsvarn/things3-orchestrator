@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 from contextlib import asynccontextmanager
+from secrets import token_urlsafe
 from typing import Any
 
 import anyio
@@ -26,6 +28,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from .deployment import health_payload, package_version
 from .interface import (
     APPROVE_DESC,
     APPROVE_IN,
@@ -43,10 +46,36 @@ from .interface import (
 )
 from .workspace import ThingsWorkspace
 
+_LOGGER = logging.getLogger("things_orchestrator")
+
 _REPAIR = {
     "things_read": 'Use {} or {"find":"passport"}',
     "things_commit": 'Use {"intent_id":"capture-001","create":[{"title":"Renew password"}]}',
     "things_approve": 'Copy the returned plan ID, for example {"plan_id":"plan_12345678"}',
+}
+_FIELD_REPAIR = {
+    "scope_revision": (
+        "Area and registry changes need the scope_revision from a fresh "
+        "view=system read"
+    ),
+    "start": (
+        "start accepts today, evening, someday, an ISO date, or null to clear "
+        "scheduling while keeping the current Project or Area"
+    ),
+    "today_after": (
+        "today_after needs a Today item, including one moved to Today earlier "
+        "in this same commit"
+    ),
+    "within": (
+        "view project needs within as project:<id>; view area needs within as "
+        "area:<id>"
+    ),
+    "view": (
+        "Use one of today, inbox, week, system, project, area, audit, "
+        "diagnostics, logbook, trash, or tags"
+    ),
+    "ids": "ids is a review-only list of up to 10 exact item IDs",
+    "include": "include is only for purpose=change and accepts up to 40 compact lookups",
 }
 
 _READ_ONLY = ToolAnnotations(
@@ -95,7 +124,7 @@ class ThingsMCPServer:
         self._lock = anyio.Lock()
         self._tools_only_server: Server[object] = Server(
             name=self.name,
-            version="0.1.0",
+            version=package_version(),
             on_list_tools=self._list_wire_tools,
             on_call_tool=self._call_wire_tool,
         )
@@ -143,14 +172,24 @@ class ThingsMCPServer:
         try:
             async with self._lock:
                 result = await anyio.to_thread.run_sync(self._dispatch, name, arguments)
-        except Exception:
+        except Exception as error:
+            correlation_id = f"err_{token_urlsafe(9)}"
+            _LOGGER.exception(
+                "internal_error tool=%s correlation_id=%s version=%s error_type=%s",
+                name,
+                correlation_id,
+                package_version(),
+                type(error).__name__,
+            )
             return _domain_result(
                 Result(
                     next="stop",
                     status="internal_error",
                     instruction=(
-                        "The server stopped because of an internal error. "
-                        "Do not assume that a write started."
+                        "The server stopped because of an internal error "
+                        f"({correlation_id}). "
+                        "Do not assume that a write started. "
+                        "See server logs for this correlation ID."
                     ),
                 ),
                 full_items=name == "things_read",
@@ -211,7 +250,7 @@ class ThingsMCPServer:
             await manager.handle_request(scope, receive, send)
 
         async def health(_request: object) -> JSONResponse:
-            return JSONResponse({"ok": True})
+            return JSONResponse(health_payload())
 
         @asynccontextmanager
         async def lifespan(_app: Starlette) -> Any:
@@ -242,14 +281,32 @@ def bearer_matches(authorization: str | None, token: str) -> bool:
 def _safe_validation_error(error: ValidationError, *, repair: str | None = None) -> str:
     items = error.errors(include_input=False, include_url=False)
     details: list[str] = []
+    field_repair: str | None = None
     for item in items[:4]:
         location = ".".join(str(part) for part in item["loc"])
         message = str(item["msg"])
         details.append(f"{location}: {message}" if location else message)
-    if repair is not None:
-        message = f"Invalid tool request. {repair}. Details: " + "; ".join(details)
-    else:
+        if field_repair is None:
+            for part in item["loc"]:
+                key = str(part)
+                if key in _FIELD_REPAIR:
+                    field_repair = _FIELD_REPAIR[key]
+                    break
+            if field_repair is None:
+                for key, text in _FIELD_REPAIR.items():
+                    if key in location or key in message:
+                        field_repair = text
+                        break
+    if field_repair is not None:
+        message = (
+            f"Invalid tool request. {field_repair}. Details: " + "; ".join(details)
+        )
+    elif details:
         message = "Invalid tool request: " + "; ".join(details)
+    elif repair is not None:
+        message = f"Invalid tool request. {repair}."
+    else:
+        message = "Invalid tool request."
     return message if len(message) <= 997 else message[:997] + "..."
 
 

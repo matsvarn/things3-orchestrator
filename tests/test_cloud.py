@@ -1106,6 +1106,61 @@ def test_inbox_project_move_readback_fails_if_cloud_keeps_inbox_state(
         )
 
 
+def test_clear_start_emits_anytime_state_and_keeps_project(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "project": Record(
+                uuid="project", kind="project", title="Launch", entity="Task6"
+            ),
+            "later": Record(
+                uuid="later",
+                kind="task",
+                title="Later",
+                parent_uuid="project",
+                someday=True,
+                entity="Task6",
+            ),
+        }
+    )
+    write = Write(action="update", uuid="later", clear_start=True)
+
+    assert library.matches([write]) is False
+    library.apply([write])
+
+    envelope = client.committed[0].payload
+    assert envelope["st"] == 1
+    assert envelope["sr"] is None
+    assert envelope["rmd"] is None
+    assert envelope["sb"] == 0
+    assert "pr" not in envelope
+    assert library.records["later"].someday is False
+    assert library.records["later"].parent_uuid == "project"
+
+    memory = MemoryLibrary(
+        [
+            Record(uuid="project", kind="project", title="Launch"),
+            Record(
+                uuid="later",
+                kind="task",
+                title="Later",
+                parent_uuid="project",
+                someday=True,
+            ),
+        ]
+    )
+    assert memory.matches([write]) is False
+    memory.apply([write])
+    assert memory.records["later"].someday is False
+    assert memory.records["later"].parent_uuid == "project"
+    public = ThingsWorkspace(memory).read(ReadCall(id="task:later")).items[0]
+    assert public.start is None
+    assert "someday" not in public.signals
+
+
 def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]

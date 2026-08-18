@@ -3997,3 +3997,410 @@ def test_invalid_write_does_not_leave_a_pending_intent() -> None:
     assert result.status == "rejected"
     stored = journal.get(call.intent_id)
     assert stored is not None and stored.state == "prepared"
+
+
+def test_start_null_clears_ordinary_someday_without_moving_home() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        heading=True,
+        parent_uuid=project.uuid,
+    )
+    task = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        someday=True,
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        sort_index=2048,
+    )
+    module = workspace([project, heading, task])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "clear-someday-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "start": None,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert task.someday is False
+    assert task.start is None
+    assert task.tonight is False
+    assert task.remind is None
+    assert task.parent_uuid == project.uuid
+    assert task.heading_uuid == heading.uuid
+    fresh = detail(module, task.id)
+    assert fresh.start is None
+    assert "someday" not in fresh.signals
+
+
+def test_today_after_accepts_a_sibling_moved_to_today_in_the_same_batch() -> None:
+    first = Record(uuid="one", kind="task", title="One", inbox=True)
+    second = Record(uuid="two", kind="task", title="Two", inbox=True)
+    module = workspace([first, second])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "today-batch-order-001",
+                "change": [
+                    {
+                        "id": first.id,
+                        "if_revision": detail(module, first.id).revision,
+                        "start": "today",
+                    },
+                    {
+                        "id": second.id,
+                        "if_revision": detail(module, second.id).revision,
+                        "start": "today",
+                        "today_after": first.id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert first.start == NOW.date()
+    assert second.start == NOW.date()
+    assert first.today_index < second.today_index
+
+
+def test_same_home_inbox_repair_does_not_stale_a_sibling_project_batch() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    first = Record(
+        uuid="a",
+        kind="task",
+        title="A",
+        inbox=True,
+        parent_uuid=project.uuid,
+    )
+    second = Record(
+        uuid="b",
+        kind="task",
+        title="B",
+        inbox=True,
+        parent_uuid=project.uuid,
+    )
+    module = workspace([project, first, second])
+    first_rev = detail(module, first.id).revision
+    second_rev = detail(module, second.id).revision
+
+    first_result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repair-inbox-a",
+                "change": [
+                    {
+                        "id": first.id,
+                        "if_revision": first_rev,
+                        "into": project.id,
+                    }
+                ],
+            }
+        )
+    )
+    assert first_result.status == "applied"
+
+    second_result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "repair-inbox-b",
+                "change": [
+                    {
+                        "id": second.id,
+                        "if_revision": second_rev,
+                        "into": project.id,
+                    }
+                ],
+            }
+        )
+    )
+    assert second_result.status == "applied"
+    assert first.inbox is False
+    assert second.inbox is False
+    assert first.parent_uuid == project.uuid
+    assert second.parent_uuid == project.uuid
+
+
+def test_area_view_returns_the_area_loose_tasks_and_projects() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=area.uuid,
+    )
+    loose = Record(uuid="buy-milk", kind="task", title="Buy milk", area_uuid=area.uuid)
+    nested = Record(
+        uuid="tap",
+        kind="task",
+        title="Replace tap",
+        parent_uuid=project.uuid,
+    )
+    other = Record(uuid="work", kind="area", title="Work")
+    module = workspace([area, project, loose, nested, other])
+
+    result = module.read(ReadCall(view="area", within=area.id))
+
+    assert result.status == "ok"
+    assert {item.id for item in result.items} == {area.id, project.id, loose.id}
+    assert result.items[0].id == area.id
+    assert nested.id not in {item.id for item in result.items}
+
+
+def test_audit_view_lists_each_active_item_once() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=area.uuid,
+    )
+    task = Record(
+        uuid="milk",
+        kind="task",
+        title="Buy milk",
+        notes="semi",
+        area_uuid=area.uuid,
+    )
+    trashed = Record(uuid="old", kind="task", title="Old", trashed=True)
+    module = workspace([area, project, task, trashed])
+
+    result = module.read(ReadCall(view="audit", limit=40))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [area.id, project.id, task.id]
+    assert "has_notes" in result.items[2].signals
+
+
+def test_diagnostics_view_exposes_inbox_hybrids() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    hybrid = Record(
+        uuid="stuck",
+        kind="task",
+        title="Stuck",
+        inbox=True,
+        parent_uuid=project.uuid,
+    )
+    clean = Record(uuid="ok", kind="task", title="Clean", parent_uuid=project.uuid)
+    module = workspace([project, hybrid, clean])
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [hybrid.id]
+    assert "inbox_with_project" in result.items[0].signals
+
+
+def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None:
+    both = Record(
+        uuid="both",
+        kind="task",
+        title="Both homes",
+        parent_uuid="launch",
+        area_uuid="home",
+        status="done",
+    )
+    orphan = Record(
+        uuid="orphan",
+        kind="task",
+        title="Orphan heading",
+        heading_uuid="missing-heading",
+        parent_uuid="launch",
+    )
+    library = MemoryLibrary(
+        [
+            Record(uuid="launch", kind="project", title="Launch"),
+            both,
+            orphan,
+        ]
+    )
+    library.tags["child"] = "Child"
+    library.tag_parents["child"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    by_id = {item.id: item.signals for item in result.items}
+    assert "both_project_and_area" in by_id[both.id]
+    assert "orphaned_heading" in by_id[orphan.id]
+    assert "dangling_tag_parent:tag:child" in result.signals
+
+
+def test_bulk_ids_return_full_exact_facts() -> None:
+    first = Record(
+        uuid="one",
+        kind="task",
+        title="One",
+        notes="first note",
+        checklists=[ChecklistLine("row", "Check")],
+    )
+    second = Record(uuid="two", kind="task", title="Two", notes="second note")
+    module = workspace([first, second])
+
+    result = module.read(ReadCall(ids=[first.id, second.id]))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [first.id, second.id]
+    assert result.items[0].notes_markdown == "first note"
+    assert result.items[0].checklist[0].title == "Check"
+    assert result.items[1].notes_markdown == "second note"
+
+
+def test_trash_view_serializes_untitled_and_malformed_records() -> None:
+    untitled = Record(
+        uuid="blank",
+        kind="task",
+        title="   ",
+        trashed=True,
+        remind="25:00",
+        start=NOW.date(),
+    )
+    orphan = Record(
+        uuid="orphan",
+        kind="task",
+        title="Orphan",
+        trashed=True,
+        heading_uuid="missing-heading",
+        parent_uuid="missing-project",
+    )
+    module = workspace([untitled, orphan])
+
+    result = module.read(ReadCall(view="trash"))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [untitled.id, orphan.id]
+    assert result.items[0].title == "(untitled)"
+    assert result.items[0].remind_at is None
+    assert "trashed" in result.items[0].signals
+    assert "orphaned_heading" in result.items[1].signals
+
+
+def test_approval_plan_includes_grouped_summary_and_id_sections() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    first = Record(uuid="one", kind="task", title="One", parent_uuid=project.uuid)
+    second = Record(uuid="two", kind="task", title="Two", parent_uuid=project.uuid)
+    module = workspace([project, first, second])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "broad-trash-001",
+                "change": [
+                    {
+                        "id": first.id,
+                        "if_revision": detail(module, first.id).revision,
+                        "lifecycle": "trash",
+                    },
+                    {
+                        "id": second.id,
+                        "if_revision": detail(module, second.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("Trash" in line for line in result.plan.summary)
+    assert result.sections
+    trashed = next(section for section in result.sections if section.key == "trash")
+    assert set(trashed.item_ids) == {first.id, second.id}
+
+
+def test_approval_plan_groups_source_to_destination_moves() -> None:
+    home = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=home.uuid,
+    )
+    task = Record(uuid="milk", kind="task", title="Buy milk", inbox=True)
+    extra = Record(uuid="old", kind="task", title="Old draft", inbox=True)
+    module = workspace([home, project, task, extra])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "move-manifest-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "into": project.id,
+                    },
+                    {
+                        "id": extra.id,
+                        "if_revision": detail(module, extra.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("Inbox → project:kitchen" in line for line in result.plan.summary)
+    assert any(
+        task.id in section.item_ids and "Inbox" in section.title
+        for section in result.sections
+    )
+
+
+def test_approval_plan_groups_anytime_destination() -> None:
+    task = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        parent_uuid="launch",
+    )
+    extra = Record(uuid="old", kind="task", title="Old draft", inbox=True)
+    module = workspace(
+        [
+            Record(uuid="launch", kind="project", title="Launch"),
+            task,
+            extra,
+        ]
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "anytime-manifest-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "into": "anytime",
+                    },
+                    {
+                        "id": extra.id,
+                        "if_revision": detail(module, extra.id).revision,
+                        "lifecycle": "trash",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert any("project:launch → Anytime" in line for line in result.plan.summary)

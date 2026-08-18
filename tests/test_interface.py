@@ -62,6 +62,10 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
         {"view": "inbox", "within": "area:home"},
         {"find": "tax", "within": "task:one"},
         {"view": "project", "within": "task:one"},
+        {"view": "project", "within": "area:home"},
+        {"view": "area", "within": "project:one"},
+        {"view": "audit", "id": "task:one"},
+        {"ids": ["task:one"], "view": "today"},
         {"view": "logbook", "from": "2026-08-01"},
         {"view": "logbook", "from": "2026-08-15", "to": "2026-08-01"},
         {"find": "tax", "unknown": True},
@@ -1160,15 +1164,15 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    # The contextual interface adds one organize draft and compact context,
-    # layout, recovery, and recurrence facts. Keep the contract compact.
-    assert discovery_chars < 16_100
-    assert discovery_chars - 13_406 < 2_700
+    # Review completeness adds area/audit/diagnostics/ids and plan sections.
+    # Keep the contract compact, but allow that justified expansion.
+    assert discovery_chars < 16_600
+    assert discovery_chars - 13_406 < 3_200
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 16_100
+    assert wire_chars < 17_000
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
@@ -1205,7 +1209,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     for instruction in (
         "select exactly one view",
         "a view stands alone",
-        "project view also needs within",
+        "project view needs within as project:<id>",
         "never combine view with id or find",
         "search first",
         "recurrence with the exact task id",
@@ -1232,6 +1236,16 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
         "maxLength"
     ] >= len("evening")
+    start_pattern = COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
+        "pattern"
+    ]
+    assert "today" in start_pattern
+    assert "someday" in start_pattern
+    assert READ_IN["properties"]["ids"]["maxItems"] == 10
+    assert READ_IN["properties"]["include"]["maxItems"] == 40
+    assert "area" in READ_IN["properties"]["view"]["enum"]
+    assert "audit" in READ_IN["properties"]["view"]["enum"]
+    assert "diagnostics" in READ_IN["properties"]["view"]["enum"]
 
 
 def test_manual_schema_contracts_match_the_runtime_models() -> None:
