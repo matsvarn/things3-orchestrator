@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -4584,6 +4585,96 @@ def test_one_item_ids_read_uses_the_bulk_detail_budget() -> None:
     assert "notes_truncated" in item.signals
     assert len(item.notes_markdown or "") == 20_000
     assert len(item.checklist) == 80
+
+
+def test_bulk_read_hoists_shared_tag_parents_under_the_wire_budget() -> None:
+    tag_uuids = [f"t{index:02d}" for index in range(40)]
+    parent_uuids = [f"p{index:02d}-{slot}" for index in range(40) for slot in range(20)]
+    tasks = [
+        Record(
+            uuid=f"item{index}",
+            kind="task",
+            title=f"Item {index}",
+            tag_uuids=tag_uuids,
+        )
+        for index in range(10)
+    ]
+    library = MemoryLibrary(tasks)
+    library.tags = {uuid: uuid for uuid in [*tag_uuids, *parent_uuids]}
+    library.tag_parents = {
+        uuid: [f"p{index:02d}-{slot}" for slot in range(20)]
+        for index, uuid in enumerate(tag_uuids)
+    }
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(ids=[task.id for task in tasks]))
+    payload = result.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    )
+    wire = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+    assert result.status == "ok"
+    assert wire <= 256_000
+    assert {tag.id for tag in result.tags} == {f"tag:{uuid}" for uuid in tag_uuids}
+    assert all(len(tag.parent_ids) == 20 for tag in result.tags)
+    assert all(
+        not tag.parent_ids
+        for item in result.items
+        for tag in (*item.direct_tags, *item.inherited_tags)
+    )
+    assert all(not item.truncated_fields for item in result.items)
+
+
+def test_bulk_tag_registry_caps_unique_tags_without_crashing() -> None:
+    area_tags = [f"area-{index:03d}" for index in range(41)]
+    tasks = []
+    all_tags = list(area_tags)
+    area = Record(uuid="home", kind="area", title="Home", tag_uuids=area_tags)
+    for index in range(10):
+        direct = [f"d{index:02d}-{slot:02d}" for slot in range(40)]
+        all_tags.extend(direct)
+        tasks.append(
+            Record(
+                uuid=f"item{index}",
+                kind="task",
+                title=f"Item {index}",
+                area_uuid=area.uuid,
+                tag_uuids=direct,
+            )
+        )
+    library = MemoryLibrary([area, *tasks])
+    library.tags = {uuid: uuid for uuid in all_tags}
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(ids=[task.id for task in tasks]))
+
+    assert result.status == "ok"
+    assert len(result.tags) == 400
+    assert any("tags" in item.truncated_fields for item in result.items)
+
+
+def test_area_missing_relations_use_clear_repairs() -> None:
+    area = Record(
+        uuid="lost",
+        kind="area",
+        title="Lost",
+        parent_uuid="gone-project",
+        area_uuid="gone-area",
+    )
+    module = workspace([area])
+
+    result = module.read(ReadCall(view="diagnostics"))
+    row = next(item for item in result.diagnostics if item.id == area.id)
+    kinds = {repair.repair_kind for repair in row.repairs}
+    assert "area_missing_parent" in row.conflicts
+    assert "area_missing_home" in row.conflicts
+    assert "clear_area_parent" in kinds
+    assert "clear_area_home" in kinds
+    assert "rehome_item" not in kinds
+    assert "rehome_or_clear_area" not in kinds
+    assert row.repair_kind is None
 
 
 def test_audit_can_filter_by_signal() -> None:

@@ -24,10 +24,14 @@ _REPAIR = {
     "trashed_parent": "restore the parent or move the child",
     "parent_not_project": "place the item under a Project",
     "area_invalid_parent": "clear the invalid Area parent",
+    "area_missing_parent": "clear the invalid Area parent",
+    "project_missing_parent": "move the Project to an Area or to root Anytime",
+    "project_invalid_parent": "move the Project to an Area or to root Anytime",
     "missing_area": "place the item in an active Area or clear the Area home",
     "trashed_area": "restore the Area or move the child",
     "area_not_area": "clear the Area home or choose an Area",
     "area_invalid_home": "clear the invalid Area home",
+    "area_missing_home": "clear the invalid Area home",
     "missing_repeat_template": "inspect recurrence before changing it",
     "malformed_repeat": "inspect recurrence before changing it",
     "dangling_tag_parent": "clear or repair the tag parent",
@@ -54,10 +58,14 @@ _REPAIR_KIND = {
     "trashed_parent": "restore_or_move_child",
     "parent_not_project": "rehome_item",
     "area_invalid_parent": "clear_area_parent",
+    "area_missing_parent": "clear_area_parent",
+    "project_missing_parent": "rehome_project",
+    "project_invalid_parent": "rehome_project",
     "missing_area": "rehome_or_clear_area",
     "trashed_area": "restore_or_move_child",
     "area_not_area": "rehome_or_clear_area",
     "area_invalid_home": "clear_area_home",
+    "area_missing_home": "clear_area_home",
     "missing_repeat_template": "inspect_recurrence",
     "malformed_repeat": "inspect_recurrence",
     "dangling_tag_parent": "clear_or_repair_tag_parent",
@@ -136,28 +144,12 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
             signals.append("orphaned_heading")
         elif item.parent_uuid and heading.parent_uuid != item.parent_uuid:
             signals.append("heading_wrong_project")
-    if item.kind == "project" and parent is not None and parent.kind == "project":
-        signals.append("project_with_project_parent")
-    if item.kind == "area" and parent is not None and parent.kind == "project":
-        signals.append("area_with_project_parent")
-    if item.kind == "area" and area is not None and area.kind == "area":
-        signals.append("area_with_area_home")
-    if item.parent_uuid and parent is None:
-        signals.append("missing_parent")
-    elif parent is not None and parent.kind != "project":
-        signals.append(
-            "area_invalid_parent" if item.kind == "area" else "parent_not_project"
-        )
-    elif parent is not None and parent.trashed and not item.trashed:
-        signals.append("trashed_parent")
-    if item.area_uuid and area is None:
-        signals.append("missing_area")
-    elif area is not None and area.kind != "area":
-        signals.append(
-            "area_invalid_home" if item.kind == "area" else "area_not_area"
-        )
-    elif area is not None and area.trashed and not item.trashed:
-        signals.append("trashed_area")
+    if item.parent_uuid and (
+        parent_signal := _parent_conflict(item, parent)
+    ):
+        signals.append(parent_signal)
+    if item.area_uuid and (home_signal := _area_home_conflict(item, area)):
+        signals.append(home_signal)
     if item.recurrence.role == "instance":
         template = library.records.get(item.recurrence.template_uuid or "")
         if (
@@ -171,6 +163,44 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
     if item.recurrence.role == "instance" and item.recurrence.repeat_type == "unknown":
         signals.append("malformed_repeat")
     return signals
+
+
+def _parent_conflict(item: Record, parent: Record | None) -> str | None:
+    if item.kind == "area":
+        if parent is None:
+            return "area_missing_parent"
+        if parent.kind == "project":
+            return "area_with_project_parent"
+        return "area_invalid_parent"
+    if item.kind == "project":
+        if parent is None:
+            return "project_missing_parent"
+        if parent.kind == "project":
+            return "project_with_project_parent"
+        return "project_invalid_parent"
+    if parent is None:
+        return "missing_parent"
+    if parent.kind != "project":
+        return "parent_not_project"
+    if parent.trashed and not item.trashed:
+        return "trashed_parent"
+    return None
+
+
+def _area_home_conflict(item: Record, area: Record | None) -> str | None:
+    if item.kind == "area":
+        if area is None:
+            return "area_missing_home"
+        if area.kind == "area":
+            return "area_with_area_home"
+        return "area_invalid_home"
+    if area is None:
+        return "missing_area"
+    if area.kind != "area":
+        return "area_not_area"
+    if area.trashed and not item.trashed:
+        return "trashed_area"
+    return None
 
 
 def _conflict(item_id: str, signals: list[str]) -> Conflict:

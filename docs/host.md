@@ -86,7 +86,10 @@ uses that user's `uv` (`command -v uv`, often `~/.local/bin/uv`, not
 `git rev-parse HEAD` from that checkout so `/health` can tell builds
 apart. After a schema-changing deploy, reconnect the MCP client and
 start a fresh agent session so it picks up the new tool schema. Compare
-`/health` `commit` and `tool_schema_hash` with the previous values.
+`/health` `commit`, `tool_schema_hash`, and `tool_contract_hash` with
+the previous values. `tool_schema_hash` covers the six discovery
+schemas. `tool_contract_hash` also covers tool descriptions and the
+strict runtime `Result`.
 
 ```console
 # Run on VPS

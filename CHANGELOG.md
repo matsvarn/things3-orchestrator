@@ -4,6 +4,11 @@
 
 ### Added
 
+- `/health` publishes `tool_contract_hash` so description and runtime
+  `Result` changes are visible even when discovery schemas stay
+  compact. Compare it after a deploy as well as `tool_schema_hash`.
+- Bulk `ids` reads hoist unique tag facts to `tags` so parent graphs
+  are not repeated on every item.
 - Exact item facts include `truncated_fields` so omitted notes,
   checklist, or tags cannot disappear behind the 20-signal cap.
 - Diagnostics rows include a `repairs` list aligned to each conflict.
@@ -16,6 +21,16 @@
 - Audit sections can list up to 40 homes on a page.
 
 ### Fixed
+
+- Missing and trashed Area or Project parent/home relations recommend
+  a kind-valid repair. An Area never gets "place in a Project"; a
+  Project never gets `rehome_item` into another Project.
+- Bulk `ids` reads hoist unique tags first, reserve a 400-character
+  note prefix, then spend remaining budget on checklist titles, tag
+  ids and titles, and the rest of each note. The structured result
+  stays under 256 KB.
+- Discovery `READ_OUT` items now declare `signals` and
+  `truncated_fields`.
 
 - Diagnostics omit combined repair prose when it would exceed 400
   characters. `repairs` still lists every conflict.

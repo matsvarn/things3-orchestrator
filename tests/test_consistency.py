@@ -152,3 +152,71 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
     assert "tag_parent_self_reference" in conflicts["tag:self"]
     assert "tag_parent_cycle" in conflicts["tag:a"]
     assert any(row.repair for row in diagnose(library))
+
+
+def test_diagnose_uses_kind_aware_repairs_for_missing_and_trashed_relations() -> None:
+    task = Record(uuid="loose", kind="task", title="Loose")
+    project = Record(uuid="launch", kind="project", title="Launch", trashed=True)
+    area = Record(uuid="home", kind="area", title="Home", trashed=True)
+    area_missing_parent = Record(
+        uuid="area-missing-parent",
+        kind="area",
+        title="Missing parent",
+        parent_uuid="gone-project",
+    )
+    area_missing_home = Record(
+        uuid="area-missing-home",
+        kind="area",
+        title="Missing home",
+        area_uuid="gone-area",
+    )
+    area_trashed_parent = Record(
+        uuid="area-trashed-parent",
+        kind="area",
+        title="Trashed parent",
+        parent_uuid=project.uuid,
+    )
+    area_trashed_home = Record(
+        uuid="area-trashed-home",
+        kind="area",
+        title="Trashed home",
+        area_uuid=area.uuid,
+    )
+    project_missing_parent = Record(
+        uuid="project-missing-parent",
+        kind="project",
+        title="Missing parent",
+        parent_uuid="gone-project",
+    )
+    rows = {
+        row.item_id: row
+        for row in diagnose(
+            MemoryLibrary(
+                [
+                    task,
+                    project,
+                    area,
+                    area_missing_parent,
+                    area_missing_home,
+                    area_trashed_parent,
+                    area_trashed_home,
+                    project_missing_parent,
+                ]
+            )
+        )
+    }
+
+    assert rows["area:area-missing-parent"].signals == ("area_missing_parent",)
+    assert rows["area:area-missing-parent"].repair_kind == "clear_area_parent"
+    assert rows["area:area-missing-home"].signals == ("area_missing_home",)
+    assert rows["area:area-missing-home"].repair_kind == "clear_area_home"
+    assert rows["area:area-trashed-parent"].signals == ("area_with_project_parent",)
+    assert rows["area:area-trashed-parent"].repair_kind == "clear_area_parent"
+    assert "trashed_parent" not in rows["area:area-trashed-parent"].signals
+    assert rows["area:area-trashed-home"].signals == ("area_with_area_home",)
+    assert rows["area:area-trashed-home"].repair_kind == "clear_area_home"
+    assert "trashed_area" not in rows["area:area-trashed-home"].signals
+    assert rows["project:project-missing-parent"].signals == (
+        "project_missing_parent",
+    )
+    assert rows["project:project-missing-parent"].repair_kind == "rehome_project"
