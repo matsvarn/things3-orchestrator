@@ -4641,7 +4641,8 @@ def test_bulk_read_keeps_bounded_inherited_tags_when_already_truncated() -> None
 
     bulk = module.read(ReadCall(ids=[task.id, other.id]))
     item = next(row for row in bulk.items if row.id == task.id)
-    assert len(item.inherited_tags) == 40
+    assert len(item.inherited_tag_ids) == 40
+    assert item.inherited_tags == []
     assert "tags" in item.truncated_fields
     assert "tags_truncated" in item.signals
 
@@ -4681,7 +4682,7 @@ def test_bulk_truncation_fields_survive_a_full_signal_list() -> None:
         checklists=[
             ChecklistLine(f"r{index}", "C" * 300) for index in range(10)
         ],
-        tag_uuids=[f"t{index}" for index in range(10)],
+        tag_uuids=[f"t{index}-{'w' * 80}" for index in range(10)],
         recurrence=RecurrenceState(
             role="instance",
             repeat_type="unknown",
@@ -4689,7 +4690,7 @@ def test_bulk_truncation_fields_survive_a_full_signal_list() -> None:
         ),
     )
     library = MemoryLibrary([hog, heading, other, task])
-    library.tags = {f"t{index}": "T" * 50 for index in range(10)}
+    library.tags = {uuid: "T" * 50 for uuid in task.tag_uuids}
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
     result = module.read(ReadCall(ids=[hog.id, task.id]))
@@ -4702,7 +4703,7 @@ def test_bulk_truncation_fields_survive_a_full_signal_list() -> None:
     assert "tags_truncated" in item.signals
     assert item.notes_markdown != "m" * 5_000
     assert len(item.checklist) < 10
-    assert len(item.direct_tags) < 10
+    assert len(item.direct_tag_ids) < 10
 
 
 def test_one_item_ids_read_uses_the_bulk_detail_budget() -> None:
@@ -4762,11 +4763,8 @@ def test_bulk_read_hoists_shared_tag_parents_under_the_wire_budget() -> None:
     assert wire <= 256_000
     assert {tag.id for tag in result.tags} == {f"tag:{uuid}" for uuid in tag_uuids}
     assert all(len(tag.parent_ids) == 20 for tag in result.tags)
-    assert all(
-        not tag.parent_ids
-        for item in result.items
-        for tag in (*item.direct_tags, *item.inherited_tags)
-    )
+    assert all(not item.direct_tags and not item.inherited_tags for item in result.items)
+    assert all(len(item.direct_tag_ids) == 40 for item in result.items)
     assert all(not item.truncated_fields for item in result.items)
 
 
@@ -4836,7 +4834,8 @@ def test_bulk_read_keeps_tag_membership_when_parents_are_huge() -> None:
     assert len(result.tags) == 40
     assert all(not tag.parent_ids for tag in result.tags)
     assert all(tag.parents_truncated for tag in result.tags)
-    assert all(len(item.direct_tags) == 40 for item in result.items)
+    assert all(len(item.direct_tag_ids) == 40 for item in result.items)
+    assert all(not item.direct_tags for item in result.items)
     assert all("tags" not in item.truncated_fields for item in result.items)
 
 
@@ -5033,6 +5032,73 @@ def test_bulk_ids_return_full_exact_facts() -> None:
     assert result.items[0].notes_markdown == "first note"
     assert result.items[0].checklist[0].title == "Check"
     assert result.items[1].notes_markdown == "second note"
+
+
+def test_bulk_ids_can_omit_unrequested_detail_fields() -> None:
+    task = Record(
+        uuid="one",
+        kind="task",
+        title="One",
+        notes="secret note",
+        checklists=[ChecklistLine("row", "Check")],
+        tag_uuids=["focus"],
+    )
+    library = MemoryLibrary([task])
+    library.tags["focus"] = "Focus"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(ids=[task.id], fields=[]))
+
+    assert result.status == "ok"
+    item = result.items[0]
+    assert item.notes_markdown is None
+    assert item.checklist == []
+    assert item.direct_tag_ids == []
+    assert item.direct_tags == []
+    assert result.tags == []
+    assert item.recurrence is not None
+    assert item.recurrence.linked_item_ids == []
+
+
+def test_bulk_empty_fields_survive_a_continuation_page() -> None:
+    tasks = [
+        Record(uuid=f"item{index}", kind="task", title=f"Item {index}", notes="n" * 800)
+        for index in range(3)
+    ]
+    module = workspace(tasks)
+
+    first = module.read(ReadCall(ids=[task.id for task in tasks], fields=[], limit=1))
+    assert first.cursor is not None
+    assert first.items[0].notes_markdown is None
+    second = module.read(ReadCall(cursor=first.cursor, limit=1))
+
+    assert second.status == "ok"
+    assert second.items[0].notes_markdown is None
+    assert second.items[0].checklist == []
+
+
+def test_links_only_instance_resolves_repeat_type_after_apply() -> None:
+    template = Record(
+        uuid="tmpl",
+        kind="task",
+        title="Template",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+    )
+    instance = Record(
+        uuid="copy",
+        kind="task",
+        title="Copy",
+        recurrence=RecurrenceState(role="instance", links=(template.uuid,)),
+    )
+    library = MemoryLibrary([template, instance])
+
+    library.apply([])
+
+    assert library.records["copy"].recurrence.repeat_type == "fixed"
 
 
 def test_trash_view_serializes_untitled_and_malformed_records() -> None:

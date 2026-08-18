@@ -519,12 +519,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             raw if isinstance(raw, dict) else {},
             library,
         )
-    for item in library.records.values():
-        if item.recurrence.role == "instance" and item.recurrence.template_uuid:
-            template = library.records.get(item.recurrence.template_uuid)
-            item.recurrence = item.recurrence.resolve_instance_type(
-                template.recurrence.repeat_type if template else None
-            )
+    library.resolve_instance_types()
 
 
 def _fold_checklist(

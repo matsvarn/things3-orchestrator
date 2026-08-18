@@ -69,6 +69,8 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
         {"view": "audit", "id": "task:one"},
         {"ids": ["task:one"], "view": "today"},
         {"ids": []},
+        {"fields": ["notes"]},
+        {"ids": ["task:one"], "fields": ["notes", "notes"]},
         {"signals_any": ["someday"]},
         {
             "purpose": "change",
@@ -1175,8 +1177,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     )
     # Review completeness plus paginated DiagnosticFact. Keep the
     # contract compact, but allow that justified expansion.
-    assert discovery_chars < 18_000
-    assert discovery_chars - 13_406 < 4_600
+    assert discovery_chars < 18_500
+    assert discovery_chars - 13_406 < 5_200
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1261,6 +1263,13 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert read_item["additionalProperties"] is True
     assert "truncated_fields" in read_item["properties"]
     assert "signals" in read_item["properties"]
+    assert "direct_tag_ids" in read_item["properties"]
+    assert READ_IN["properties"]["fields"]["items"]["enum"] == [
+        "notes",
+        "checklist",
+        "tags",
+        "recurrence",
+    ]
     assert RESULT_OUT["properties"]["tags"]["maxItems"] == 400
 
 
