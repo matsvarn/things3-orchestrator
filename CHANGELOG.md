@@ -16,6 +16,8 @@
 - A cursor now returns `next=read`. Commit receipts echo `into_id`,
   `heading_id`, `start`, and `signals`. Instance recurrence facts
   inherit the template rule.
+- MCP tool descriptions are the short call contract. Teardown, repeat,
+  and organize details live in the skill references.
 
 ### Fixed
 

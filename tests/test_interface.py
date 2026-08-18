@@ -1241,32 +1241,13 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     )
     assert wire_chars < 22_000
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
+    assert len(READ_DESC) < 700
+    assert len(COMMIT_DESC) < 550
+    assert len(APPROVE_DESC) < 220
     assert "natural confirmation" in COMMIT_DESC
     assert "private" in COMMIT_DESC
-    assert "exact ordinary Task" in COMMIT_DESC
-    assert "future template" in COMMIT_DESC
-    assert "loses the response" in COMMIT_DESC
-    assert "byte-equivalent semantic payload" in COMMIT_DESC
-    assert "Do not read first, add scope_revision, or rebuild" in COMMIT_DESC
-    assert "destination Area ref" in COMMIT_DESC
-    assert "organize.delete_headings" in COMMIT_DESC
-    assert "change_tags.delete_permanently" in COMMIT_DESC
-    assert "Ordinary Task or Project Trash uses only lifecycle='trash'" in COMMIT_DESC
-    assert (
-        "delete_contents is only for permanent Project deletion with "
-        "lifecycle='delete_permanently'"
-    ) in COMMIT_DESC
-    assert "remove_if_empty and move_contents_to are Area-only" in COMMIT_DESC
-    assert (
-        "Every permanent Task or Project deletion target must already be in Trash, "
-        "including Tasks and empty Projects. Permanent deletion of a non-empty Project additionally "
-        "requires a complete Project read, lifecycle='delete_permanently' with "
-        "delete_contents=true, and approval"
-    ) in COMMIT_DESC
-    assert "Remaining descendants go to Trash with it" in COMMIT_DESC
-    assert "A heading can use into only to follow its source Project" in COMMIT_DESC
-    assert "do not move a heading into a different Project by itself" in COMMIT_DESC
-    assert "include the destination" in COMMIT_DESC
+    assert "retry the same intent_id" in COMMIT_DESC
+    assert "local neighborhood" in READ_DESC
     assert "private" in APPROVE_DESC
 
 
@@ -1276,20 +1257,18 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
 
     for instruction in (
         "select exactly one view",
-        "a view stands alone",
-        "project view needs within as project:<id>",
-        "never combine view with id, find, or ids",
-        "search first",
-        "recurrence with the exact task id",
-        "change only when editable context is needed",
+        "purpose=change is one item",
+        "organize is one project",
+        "recurrence is one task",
+        "local neighborhood",
+        "include a destination",
     ):
         assert instruction in read_lower
     for instruction in (
         "define local refs before use",
         "parent tags before children",
-        "use start=evening",
-        "organize.delete_headings",
-        "lifecycle=trash on a heading or project",
+        "natural confirmation",
+        "control fields private",
     ):
         assert instruction in commit_lower
 

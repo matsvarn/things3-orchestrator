@@ -66,4 +66,4 @@ Change nothing until the owner answers.
 
 Do not open Today or Inbox unless the owner asked to review a list.
 
-Read [form, headings, and repeats](references/task-system.md) when the Things form, a heading, or a repeat rule is the work. Read [reviewing the system](references/reconcile.md) for a weekly review, Area redesign, merge, or `purpose=organize`. Read [decision research](references/research.md) when current external facts can change what belongs in Things.
+Read [form, headings, and repeats](references/task-system.md) when the Things form, a heading, or a repeat rule is the work. Read [reviewing the system](references/reconcile.md) for a weekly review, Area redesign, merge, teardown, or `purpose=organize`. Read [decision research](references/research.md) when current external facts can change what belongs in Things.
