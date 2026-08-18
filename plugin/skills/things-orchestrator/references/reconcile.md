@@ -6,7 +6,7 @@ Select one view, one exact id, one find, or one `ids` list; never combine a view
 
 ## Weekly review or Area redesign
 
-Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. Use `ids` for full notes and checklists on up to 10 exact items. Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
+Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. Use `ids` for notes and checklists on up to 10 exact items; if `truncated_fields` is present, read that exact id. Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
 
 Repair tag names and parent relationships when they reduce duplicate filters. Tag deletion uses `change_tags.delete_permanently`. Preserve rich notes unless the owner accepts a full Markdown replacement. Restore accidental cleanup.
 

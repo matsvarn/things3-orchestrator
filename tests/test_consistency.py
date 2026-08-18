@@ -124,8 +124,8 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
         title="Area home project",
         area_uuid=project_parent.uuid,
     )
-    more = {
-        row.item_id: set(row.signals)
+    more_rows = {
+        row.item_id: row
         for row in diagnose(
             MemoryLibrary(
                 [
@@ -140,10 +140,15 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
             )
         )
     }
-    assert "parent_not_project" in more["area:area-under-task"]
-    assert "parent_not_project" in more["area:area-under-area"]
-    assert "area_not_area" in more["area:area-home-task"]
-    assert "area_not_area" in more["area:area-home-project"]
+    more = {item_id: set(row.signals) for item_id, row in more_rows.items()}
+    assert "area_invalid_parent" in more["area:area-under-task"]
+    assert "area_invalid_parent" in more["area:area-under-area"]
+    assert "area_invalid_home" in more["area:area-home-task"]
+    assert "area_invalid_home" in more["area:area-home-project"]
+    assert more_rows["area:area-under-task"].repair_kind == "clear_area_parent"
+    assert more_rows["area:area-home-project"].repair_kind == "clear_area_home"
+    assert more_rows["area:area-under-task"].repair == "clear the invalid Area parent"
+    assert more_rows["area:area-home-project"].repair == "clear the invalid Area home"
     assert "tag_parent_self_reference" in conflicts["tag:self"]
     assert "tag_parent_cycle" in conflicts["tag:a"]
     assert any(row.repair for row in diagnose(library))

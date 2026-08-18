@@ -4,6 +4,8 @@
 
 ### Added
 
+- Exact item facts include `truncated_fields` so omitted notes,
+  checklist, or tags cannot disappear behind the 20-signal cap.
 - Diagnostics rows include a `repairs` list aligned to each conflict.
 - `/health` publishes `tool_schema_hash` so clients can detect a stale
   cached schema.
@@ -15,8 +17,22 @@
 
 ### Fixed
 
-- Bulk exact reads keep a 100 KB notes, checklist, and tag budget.
-  Overflow sets the matching truncation signal.
+- Diagnostics omit combined repair prose when it would exceed 400
+  characters. `repairs` still lists every conflict.
+- Bulk completeness uses `truncated_fields` and keeps truncation
+  signals even when an item already has 20 state signals.
+- A pre-existing per-item `tags_truncated` signal no longer drops
+  already-bounded inherited tags from a multi-id read.
+- Area parent/home relations that point at the wrong kind recommend
+  clearing that relation instead of an invalid Project or Area home.
+- Diagnostics cursors include the rendered title, so a title-only
+  change makes continuation stale.
+- Singular `repair_kind` is set only when one repair exists.
+- The bulk detail budget applies to every `ids` read, including one
+  item.
+- Bulk exact reads keep a 100,000-character budget across notes,
+  checklist titles, and tag titles. Overflow sets `truncated_fields`
+  and the matching truncation signal.
 - All-missing `ids` name every missing ID and use `next=read`.
 - Diagnostics detect nested Projects and Areas.
 - `start: null` cannot combine with `remind_at`. The previous pair
