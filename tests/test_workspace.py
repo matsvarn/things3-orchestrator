@@ -4239,6 +4239,100 @@ def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None
     assert "both_project_and_area" in by_id[both.id]
     assert "orphaned_heading" in by_id[orphan.id]
     assert "dangling_tag_parent:tag:child" in result.signals
+    assert result.truncated is False
+    assert any(section.key == "repairs" for section in result.sections)
+
+
+def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
+    library = MemoryLibrary()
+    library.tags["child"] = "Child"
+    library.tag_parents["child"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    assert result.items == []
+    assert "dangling_tag_parent:tag:child" in result.signals
+    assert "No native-state conflicts" not in result.instruction
+    assert result.truncated is False
+
+
+def test_tag_diagnostics_set_truncated_when_more_than_forty() -> None:
+    library = MemoryLibrary()
+    for index in range(45):
+        library.tags[f"t{index}"] = f"Tag {index}"
+        library.tag_parents[f"t{index}"] = ["missing"]
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert result.status == "ok"
+    assert len(result.signals) == 40
+    assert result.truncated is True
+    assert "truncated" in result.instruction.lower()
+
+
+def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
+    first = Record(uuid="one", kind="task", title="One", notes="kept")
+    module = workspace([first])
+
+    result = module.read(ReadCall(ids=[first.id, "task:missing"]))
+
+    assert result.status == "needs_input"
+    assert [item.id for item in result.items] == [first.id]
+    assert result.items[0].notes_markdown == "kept"
+    assert "task:missing" in result.instruction
+
+
+def test_start_null_with_remind_at_is_rejected_before_a_write() -> None:
+    task = Record(uuid="later", kind="task", title="Later", someday=True)
+    scheduled = Record(
+        uuid="dated",
+        kind="task",
+        title="Dated",
+        start=NOW.date(),
+        remind="09:00",
+    )
+    module = workspace([task, scheduled])
+    before = (task.someday, task.start, task.remind, scheduled.start, scheduled.remind)
+
+    with pytest.raises(Exception, match="start=null cannot combine with remind_at"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "clear-and-remind-002",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "start": None,
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    with pytest.raises(Exception, match="start=null cannot combine with remind_at"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "clear-and-remind-003",
+                "change": [
+                    {
+                        "id": scheduled.id,
+                        "if_revision": detail(module, scheduled.id).revision,
+                        "start": None,
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    assert (task.someday, task.start, task.remind, scheduled.start, scheduled.remind) == (
+        True,
+        None,
+        None,
+        NOW.date(),
+        "09:00",
+    )
+    assert before == (task.someday, task.start, task.remind, scheduled.start, scheduled.remind)
 
 
 def test_bulk_ids_return_full_exact_facts() -> None:

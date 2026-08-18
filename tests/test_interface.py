@@ -66,6 +66,12 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
         {"view": "area", "within": "project:one"},
         {"view": "audit", "id": "task:one"},
         {"ids": ["task:one"], "view": "today"},
+        {"ids": []},
+        {
+            "purpose": "change",
+            "id": "task:one",
+            "include": [{"id": "task:two"}, {"id": "task:two"}],
+        },
         {"view": "logbook", "from": "2026-08-01"},
         {"view": "logbook", "from": "2026-08-15", "to": "2026-08-01"},
         {"find": "tax", "unknown": True},
@@ -1210,7 +1216,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "select exactly one view",
         "a view stands alone",
         "project view needs within as project:<id>",
-        "never combine view with id or find",
+        "never combine view with id, find, or ids",
         "search first",
         "recurrence with the exact task id",
         "change only when editable context is needed",
@@ -1242,7 +1248,9 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert "today" in start_pattern
     assert "someday" in start_pattern
     assert READ_IN["properties"]["ids"]["maxItems"] == 10
+    assert READ_IN["properties"]["ids"]["minItems"] == 1
     assert READ_IN["properties"]["include"]["maxItems"] == 40
+    assert READ_IN["properties"]["include"]["uniqueItems"] is True
     assert "area" in READ_IN["properties"]["view"]["enum"]
     assert "audit" in READ_IN["properties"]["view"]["enum"]
     assert "diagnostics" in READ_IN["properties"]["view"]["enum"]

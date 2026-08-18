@@ -25,7 +25,7 @@ def package_version() -> str:
     try:
         return version(PACKAGE_NAME)
     except PackageNotFoundError:
-        return "0.2.1"
+        return "unknown"
 
 
 def git_commit() -> str | None:

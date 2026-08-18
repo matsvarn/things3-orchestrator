@@ -304,15 +304,25 @@ class ThingsWorkspace:
             return visible
         instruction = "Use this review as current evidence."
         result_signals: list[str] = []
+        tag_truncated = False
         if view == "audit":
             instruction = (
                 "This audit lists each active item once. Continue the cursor for the rest."
             )
         elif view == "diagnostics":
-            instruction = (
-                "These records have native-state conflicts. Repair the listed signals."
-            )
-            result_signals = self._diagnostic_tag_signals()
+            result_signals, tag_truncated = self._diagnostic_tag_signals()
+            if visible or result_signals:
+                instruction = (
+                    "These records have native-state conflicts. "
+                    "Repair the listed signals."
+                )
+                if tag_truncated:
+                    instruction = (
+                        "These records have native-state conflicts. "
+                        "Tag conflict signals are truncated; more exist."
+                    )
+            else:
+                instruction = "No native-state conflicts are visible."
         elif view == "area":
             instruction = (
                 "This Area, its loose tasks, and its Projects. "
@@ -326,6 +336,7 @@ class ThingsWorkspace:
             view=view,
             public_scope=(self._area_scope_revision() if view == "system" else None),
             result_signals=result_signals,
+            extra_truncated=tag_truncated,
         )
 
     def _diagnostic_items(self) -> list[Record]:
@@ -338,29 +349,45 @@ class ThingsWorkspace:
                 items.append(item)
         return items
 
-    def _diagnostic_tag_signals(self) -> list[str]:
-        return [
+    def _diagnostic_tag_signals(self) -> tuple[list[str], bool]:
+        rows = [
             f"{signal}:{conflict.item_id}"
             for conflict in diagnose(self._library)
             for signal in conflict.signals
             if conflict.item_id.startswith("tag:")
-        ][:40]
+        ]
+        return rows[:40], len(rows) > 40
 
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
+        missing: list[str] = []
         for item_id in call.ids:
             item = self._exact_item(item_id)
             if item is None:
-                return self._needs_input(
-                    f"I could not find that exact item ({item_id}). Read or search again."
-                )
-            items.append(item)
-        return self._page(
+                missing.append(item_id)
+            else:
+                items.append(item)
+        if missing and not items:
+            return self._needs_input(
+                f"I could not find that exact item ({missing[0]}). Read or search again."
+            )
+        result = self._page(
             items,
             call.limit,
             full=True,
-            instruction="Use these exact facts.",
+            instruction=(
+                "Use these exact facts."
+                if not missing
+                else (
+                    "I could not find "
+                    + ", ".join(missing)
+                    + ". Use these exact facts for the others."
+                )
+            ),
         )
+        if missing:
+            return result.model_copy(update={"next": "ask", "status": "needs_input"})
+        return result
 
     def _context_change(self, call: ReadCall) -> Result:
         if call.id is not None:
@@ -1363,6 +1390,7 @@ class ThingsWorkspace:
         view: str | None = None,
         public_scope: str | None = None,
         result_signals: list[str] | None = None,
+        extra_truncated: bool = False,
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
         facts = [self._fact(item, full=full) for item in items[:limit]]
@@ -1379,6 +1407,11 @@ class ThingsWorkspace:
                 view,
             )
         sections = self._sections(view, facts) if view is not None else []
+        if view == "diagnostics":
+            sections = [
+                *sections,
+                *self._diagnostic_repair_sections(facts, result_signals or []),
+            ][:20]
         empty = (
             "Nothing on Today. Search with find and one title token."
             if view == "today"
@@ -1386,16 +1419,17 @@ class ThingsWorkspace:
             if view == "diagnostics"
             else "No matching work is visible. Search with find and one title token."
         )
+        visible = bool(facts or result_signals)
         return Result(
             next="done",
             status="ok",
-            instruction=instruction if facts else empty,
+            instruction=instruction if visible else empty,
             items=facts,
             sections=sections,
             signals=result_signals or [],
             scope_revision=scope,
             cursor=cursor,
-            truncated=cursor is not None,
+            truncated=cursor is not None or extra_truncated,
         )
 
     def _continue(self, cursor: str, limit: int) -> Result:
@@ -1456,9 +1490,14 @@ class ThingsWorkspace:
         )
         facts = [self._fact(item, full=saved.full) for item in page_items]
         sections = self._sections(saved.view, facts) if saved.view is not None else []
-        result_signals = (
-            self._diagnostic_tag_signals() if saved.view == "diagnostics" else []
-        )
+        result_signals: list[str] = []
+        extra_truncated = False
+        if saved.view == "diagnostics":
+            result_signals, extra_truncated = self._diagnostic_tag_signals()
+            sections = [
+                *sections,
+                *self._diagnostic_repair_sections(facts, result_signals),
+            ][:20]
         return Result(
             next="done",
             status="ok",
@@ -1468,7 +1507,7 @@ class ThingsWorkspace:
             signals=result_signals,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
-            truncated=next_cursor is not None,
+            truncated=next_cursor is not None or extra_truncated,
         )
 
     def _encode_cursor(
@@ -1662,6 +1701,26 @@ class ThingsWorkspace:
                     item_ids=[item.id for item in items],
                 )
             ]
+        if view == "audit":
+            homes: dict[str, list[str]] = {}
+            home_titles: dict[str, str] = {}
+            for item in items:
+                if item.kind in {"area", "project"}:
+                    home = item.id
+                    home_titles[home] = item.title
+                else:
+                    home = item.into_id or "unfiled"
+                    if home not in home_titles:
+                        home_titles[home] = self._audit_home_title(home)
+                homes.setdefault(home, []).append(item.id)
+            return [
+                ReviewSection(
+                    key=home[:80],
+                    title=home_titles[home][:200],
+                    item_ids=ids[:40],
+                )
+                for home, ids in homes.items()
+            ][:20]
         titles = {
             "area": "Area",
             "audit": "Active items",
@@ -1678,6 +1737,39 @@ class ThingsWorkspace:
                 key=view,
                 title=titles.get(view, view.title()),
                 item_ids=[item.id for item in items],
+            )
+        ]
+
+    def _audit_home_title(self, home: str) -> str:
+        if home == "unfiled":
+            return "Unfiled"
+        item = self._exact_item(home)
+        return item.title if item is not None else home
+
+    def _diagnostic_repair_sections(
+        self, items: list[ItemFact], tag_signals: list[str]
+    ) -> list[ReviewSection]:
+        hints: list[str] = []
+        by_id = {conflict.item_id: conflict for conflict in diagnose(self._library)}
+        for item in items:
+            conflict = by_id.get(item.id)
+            if conflict is None or conflict.repair is None:
+                continue
+            hints.append(f"{item.id}: {conflict.repair}")
+        for signal in tag_signals:
+            name, _, tag_id = signal.partition(":")
+            conflict = by_id.get(tag_id) if tag_id.startswith("tag:") else None
+            if conflict is None or conflict.repair is None:
+                continue
+            hints.append(f"{tag_id}: {conflict.repair}")
+        hints = list(dict.fromkeys(hints))[:40]
+        if not hints:
+            return []
+        return [
+            ReviewSection(
+                key="repairs",
+                title="Repair hints",
+                signals=hints,
             )
         ]
 
@@ -1876,40 +1968,41 @@ class ThingsWorkspace:
         links_truncated: bool = False,
     ) -> list[str]:
         today = self._clock().date()
-        signals: list[str] = []
+        conflicts = item_conflicts(item, self._library)
+        ordinary: list[str] = []
         waiting = self._library.tag_uuid(self._library.waiting_tag())
         if item.deadline and item.deadline < today:
-            signals.append("overdue")
+            ordinary.append("overdue")
         elif item.deadline == today:
-            signals.append("today")
+            ordinary.append("today")
         if item.inbox:
-            signals.append("inbox")
+            ordinary.append("inbox")
         if item.start == today:
-            signals.append("today")
+            ordinary.append("today")
         if item.tonight:
-            signals.append("evening")
+            ordinary.append("evening")
         if waiting and waiting in item.tag_uuids:
-            signals.append("waiting")
+            ordinary.append("waiting")
         if item.someday:
-            signals.append("someday")
+            ordinary.append("someday")
         if item.trashed:
-            signals.append("trashed")
+            ordinary.append("trashed")
         if item.notes:
-            signals.append("has_notes")
+            ordinary.append("has_notes")
         if item.checklists:
-            signals.append("has_checklist")
-        signals.extend(item_conflicts(item, self._library))
+            ordinary.append("has_checklist")
         if item.recurrence.role != "none" and item.recurrence.repeat_type == "unknown":
-            signals.append("recurrence_unknown")
+            ordinary.append("recurrence_unknown")
+        extras: list[str] = []
         if checklist_truncated:
-            signals.append("checklist_truncated")
+            extras.append("checklist_truncated")
         if tags_truncated:
-            signals.append("tags_truncated")
+            extras.append("tags_truncated")
         if notes_truncated:
-            signals.append("notes_truncated")
+            extras.append("notes_truncated")
         if links_truncated:
-            signals.append("recurrence_links_truncated")
-        return list(dict.fromkeys(signals))[:20]
+            extras.append("recurrence_links_truncated")
+        return list(dict.fromkeys([*conflicts, *ordinary, *extras]))[:20]
 
     def _reminder(self, item: Record) -> str | None:
         if item.remind is None or item.start is None:

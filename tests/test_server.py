@@ -116,7 +116,7 @@ def test_unexpected_commit_failure_stops_without_a_false_write_receipt() -> None
         )
     )
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["next"] == "stop"
     assert result.structured_content["status"] == "internal_error"
@@ -162,6 +162,73 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
     assert unknown.is_error is True
     assert "intent_id" in unknown.content[0].text
     assert "Renew password" not in unknown.content[0].text
+
+
+def test_duplicate_includes_are_a_validation_error_not_internal() -> None:
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    result = asyncio.run(
+        server.call_tool(
+            "things_read",
+            {
+                "purpose": "change",
+                "id": "task:a",
+                "include": [{"id": "task:b"}, {"id": "task:b"}],
+            },
+        )
+    )
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert "include" in result.content[0].text.lower()
+    assert "unique" in result.content[0].text.lower()
+    assert "internal_error" not in result.content[0].text
+
+
+def test_start_null_cannot_combine_with_remind_at() -> None:
+    task = Record(uuid="later", kind="task", title="Later", someday=True)
+    workspace = ThingsWorkspace(MemoryLibrary([task]))
+    server = ThingsMCPServer(workspace)
+    revision = workspace.read(ReadCall(id=task.id)).items[0].revision
+    result = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "clear-and-remind-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": revision,
+                        "start": None,
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                    }
+                ],
+            },
+        )
+    )
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert "start=null cannot combine with remind_at" in result.content[0].text
+    assert task.someday is True
+    assert task.start is None
+    assert task.remind is None
+
+    offset = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "remind-offset-001",
+                "create": [
+                    {
+                        "title": "Call bank",
+                        "start": "2026-08-20",
+                        "remind_at": "2026-08-20T09:00:00",
+                    }
+                ],
+            },
+        )
+    )
+    assert offset.is_error is True
+    assert "start=null cannot combine with remind_at" not in offset.content[0].text
+    assert "UTC offset" in offset.content[0].text
 
 
 def test_mcp_server_version_matches_the_package() -> None:
