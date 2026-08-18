@@ -2065,7 +2065,7 @@ _SUMMARY_ITEMS: dict[str, Any] = {
 _READ_ITEMS: dict[str, Any] = {
     "type": "array",
     "maxItems": 120,
-    "items": _ITEM_FACT,
+    "items": {**_ITEM_SUMMARY, "additionalProperties": True},
 }
 
 READ_OUT: dict[str, Any] = {
@@ -2125,7 +2125,7 @@ READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
     "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
     "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
-    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repair_kind. ids returns bounded full-detail facts for 1 to 10 exact items. Truncation signals identify items that need a separate exact read. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. After a schema-changing deploy, reconnect the MCP client so it picks up the new tool schema. "
+    "view=audit lists every active item once; add signals_any to keep only matching signals. view=diagnostics pages item and tag conflicts in diagnostics with repair_kind. ids returns bounded full-detail facts for 1 to 10 exact items. Truncation signals identify items that need a separate exact read. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
     "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
