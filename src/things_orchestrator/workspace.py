@@ -91,6 +91,7 @@ _TITLE_LIMIT = 1000
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 _PLAN_MINUTES = 30
+_PENDING_RETRY_LIMIT = 3
 _WEEKDAY_CODES = {
     "sunday": 0,
     "monday": 1,
@@ -4854,14 +4855,10 @@ class ThingsWorkspace:
             self._library.apply(writes)
         except CloudError as error:
             if _outcome_unknown(error):
-                result = Result(
-                    next="retry_same",
-                    status="pending",
-                    instruction="The Cloud outcome is not proven. Retry only this same receipt.",
-                    receipt=record.plan_id or record.intent_id,
+                return self._pending_outcome(
+                    record,
+                    "The Cloud outcome is not proven. Retry only this same receipt.",
                 )
-                self._save_result(record, "pending", result)
-                return result
             if "conflict" in str(error).casefold() or "HTTP 409" in str(error):
                 result = self._stale(
                     "Things changed during the commit. Read fresh facts."
@@ -4882,14 +4879,10 @@ class ThingsWorkspace:
             return self._rejected(str(error))
         failed = self._refresh(force=True)
         if failed is not None or not self._writes_match(writes):
-            result = Result(
-                next="retry_same",
-                status="pending",
-                instruction="Cloud accepted the request, but read-back is still pending.",
-                receipt=record.plan_id or record.intent_id,
+            return self._pending_outcome(
+                record,
+                "Cloud accepted the request, but read-back is still pending.",
             )
-            self._save_result(record, "pending", result)
-            return result
         result = self._settled(record.intent_id, writes, unchanged=False)
         self._save_result(record, "applied", result)
         return result
@@ -4912,12 +4905,39 @@ class ThingsWorkspace:
             return result
         if allow_apply:
             return self._apply(record)
-        return Result(
-            next="retry_same",
-            status="pending",
-            instruction="The Cloud outcome is still unknown. Retry only this same receipt.",
-            receipt=record.plan_id or record.intent_id,
+        return self._pending_outcome(
+            record,
+            "The Cloud outcome is still unknown. Retry only this same receipt.",
         )
+
+    def _pending_outcome(self, record: IntentRecord, instruction: str) -> Result:
+        attempts = _pending_attempts(record) + 1
+        receipt = record.plan_id or record.intent_id
+        if attempts > _PENDING_RETRY_LIMIT:
+            result = Result(
+                next="stop",
+                status="unavailable",
+                instruction=(
+                    "Cloud read-back did not settle after "
+                    f"{_PENDING_RETRY_LIMIT} attempts. Do not retry this receipt. "
+                    "Read current facts and start a new intent if the work is "
+                    "still needed."
+                ),
+                receipt=receipt,
+            )
+        else:
+            result = Result(
+                next="retry_same",
+                status="pending",
+                instruction=instruction,
+                receipt=receipt,
+            )
+        counted = replace(
+            record,
+            plan={**record.plan, "pending_attempts": attempts},
+        )
+        self._save_result(counted, "pending", result)
+        return result
 
     def _settled(
         self, intent_id: str, writes: list[Write], *, unchanged: bool
@@ -5699,6 +5719,11 @@ def _internal_status(status: str | None) -> Status | None:
         if status == "canceled"
         else "open"
     )
+
+
+def _pending_attempts(record: IntentRecord) -> int:
+    value = record.plan.get("pending_attempts")
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 def _outcome_unknown(error: CloudError) -> bool:

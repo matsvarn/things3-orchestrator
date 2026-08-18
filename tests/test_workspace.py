@@ -3969,6 +3969,104 @@ def test_risky_intent_is_reserved_only_as_needing_approval() -> None:
     assert stored is not None and stored.state == "needs_approval"
 
 
+def test_pending_approve_readback_stops_after_retry_cap() -> None:
+    class MissingReadback(MemoryLibrary):
+        def apply(self, writes):  # type: ignore[no-untyped-def]
+            return ApplyResult(verified=[], created={})
+
+    library = MissingReadback()
+    journal = MemoryJournal()
+    module = ThingsWorkspace(library, journal=journal, clock=lambda: NOW)
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-pending-cap-001",
+                "scope_revision": system_scope(module),
+                "create": [{"kind": "area", "title": "Health"}],
+            }
+        )
+    )
+    assert prepared.plan is not None
+    call = ApproveCall(plan_id=prepared.plan.id)
+
+    pending = [module.approve(call) for _ in range(3)]
+    stopped = module.approve(call)
+    repeated = module.approve(call)
+
+    assert [result.status for result in pending] == ["pending", "pending", "pending"]
+    assert [result.next for result in pending] == [
+        "retry_same",
+        "retry_same",
+        "retry_same",
+    ]
+    assert stopped.status == "unavailable"
+    assert stopped.next == "stop"
+    assert "do not retry" in stopped.instruction.casefold()
+    assert repeated.next == "stop"
+    assert repeated.status == "unavailable"
+    stored = journal.get("area-pending-cap-001")
+    assert stored is not None and stored.state == "pending"
+    assert stored.plan.get("pending_attempts") == 5
+
+
+def test_pending_commit_readback_stops_after_retry_cap() -> None:
+    class MissingReadback(MemoryLibrary):
+        def apply(self, writes):  # type: ignore[no-untyped-def]
+            return ApplyResult(verified=[], created={})
+
+    library = MissingReadback()
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    call = CommitCall.model_validate(
+        {"intent_id": "task-pending-cap-001", "create": [{"title": "Only once"}]}
+    )
+
+    pending = [module.commit(call) for _ in range(3)]
+    stopped = module.commit(call)
+
+    assert [result.status for result in pending] == ["pending", "pending", "pending"]
+    assert [result.next for result in pending] == [
+        "retry_same",
+        "retry_same",
+        "retry_same",
+    ]
+    assert stopped.status == "unavailable"
+    assert stopped.next == "stop"
+    assert library.records == {}
+
+
+def test_pending_approve_can_still_settle_after_the_retry_cap() -> None:
+    class MissingReadback(MemoryLibrary):
+        writes: list = []
+
+        def apply(self, writes):  # type: ignore[no-untyped-def]
+            self.writes = list(writes)
+            return ApplyResult(verified=[], created={})
+
+    library = MissingReadback()
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-pending-late-001",
+                "scope_revision": system_scope(module),
+                "create": [{"kind": "area", "title": "Health"}],
+            }
+        )
+    )
+    assert prepared.plan is not None
+    call = ApproveCall(plan_id=prepared.plan.id)
+    for _ in range(3):
+        assert module.approve(call).next == "retry_same"
+    assert module.approve(call).next == "stop"
+    MemoryLibrary.apply(library, library.writes)
+
+    settled = module.approve(call)
+
+    assert settled.status == "applied"
+    assert settled.next == "done"
+    assert any(item.title == "Health" for item in library.records.values())
+
+
 def test_pending_approval_returns_the_plan_id_for_retry() -> None:
     class UnknownOutcome(MemoryLibrary):
         attempts = 0

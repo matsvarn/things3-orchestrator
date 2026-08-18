@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Pending Cloud read-back no longer returns `retry_same` forever.
+  After three unsettled attempts, `things_commit` and `things_approve`
+  stop with `unavailable` so the model can read current facts.
 - Setting only `remind_at` on an Evening task keeps Evening. A reminder
   is a clock time, not a move out of Evening. Send `start=today` to
   leave Evening, or `start=evening` to set it.
