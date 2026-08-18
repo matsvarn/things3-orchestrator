@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from datetime import date, datetime
 from typing import Any, Literal, Self
 
@@ -123,7 +123,7 @@ def _validate_reminder(value: str | None) -> str | None:
     return value
 
 
-def _duplicates(values: Sequence[str]) -> bool:
+def _duplicates(values: Sequence[Hashable]) -> bool:
     return len(values) != len(set(values))
 
 
@@ -176,6 +176,14 @@ class ReadCall(StrictModel):
     def valid_to_date(cls, value: str | None) -> str | None:
         return _validate_date(value, name="to")
 
+    @field_validator("include")
+    @classmethod
+    def unique_includes(cls, value: list[ReadInclude]) -> list[ReadInclude]:
+        keys = [(row.id, row.find, row.within) for row in value]
+        if _duplicates(keys):
+            raise ValueError("include lookups must be unique")
+        return value
+
     @field_validator("ids")
     @classmethod
     def valid_ids(cls, value: list[str]) -> list[str]:
@@ -206,6 +214,8 @@ class ReadCall(StrictModel):
             selectors += 1
         if selectors > 1:
             raise ValueError("use only one of view, id, find, or ids")
+        if "ids" in self.model_fields_set and not self.ids:
+            raise ValueError("ids needs at least one exact item ID")
         if self.ids and self.purpose != "review":
             raise ValueError("ids is only available for review purpose")
         if self.ids and (
@@ -399,6 +409,12 @@ class CreateEntry(StrictModel):
             self.start is not None or self.remind_at is not None
         ):
             raise ValueError("Inbox or Anytime cannot combine with a schedule")
+        if (
+            "start" in self.model_fields_set
+            and self.start is None
+            and self.remind_at is not None
+        ):
+            raise ValueError("start=null cannot combine with remind_at")
         return self
 
 
@@ -629,6 +645,12 @@ class ChangeEntry(StrictModel):
             self.start is not None or self.remind_at is not None
         ):
             raise ValueError("Inbox or Anytime cannot combine with a schedule")
+        if (
+            "start" in self.model_fields_set
+            and self.start is None
+            and self.remind_at is not None
+        ):
+            raise ValueError("start=null cannot combine with remind_at")
         if self.move_contents_to is not None or self.remove_if_empty:
             allowed = {
                 "id",
@@ -1403,9 +1425,15 @@ READ_IN: dict[str, Any] = {
         "to": {"type": "string", "format": "date", "maxLength": 10},
         "cursor": _STRING,
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "default": 20},
-        "include": {"type": "array", "maxItems": INCLUDE_LIMIT, "items": _READ_INCLUDE},
+        "include": {
+            "type": "array",
+            "maxItems": INCLUDE_LIMIT,
+            "uniqueItems": True,
+            "items": _READ_INCLUDE,
+        },
         "ids": {
             "type": "array",
+            "minItems": 1,
             "maxItems": BULK_ID_LIMIT,
             "uniqueItems": True,
             "items": _EXACT_ITEM,
@@ -2008,9 +2036,10 @@ APPROVE_OUT: dict[str, Any] = {
 
 READ_DESC = (
     "Read Things. Empty input reviews Today. Use purpose change for one exact item or one unique active find match, organize for one exact Project id or one unique Project find, and recurrence for one exact Task before repeat changes. Use view system with the default review purpose for the Area and Project registry. "
-    "Select exactly one view, exact id, find query, or ids list. A view stands alone; project view needs within as project:<id>; area view needs within as area:<id>. Never combine view with id or find. Logbook needs from and to. "
-    "view=audit lists every active item once. view=diagnostics lists native-state conflicts. ids reads up to 10 exact items at full fidelity. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
-    "start is today, evening, someday, an ISO date, or null. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
+    "Select exactly one view, exact id, find query, or a non-empty ids list. A view stands alone; project view needs within as project:<id>, never an Area; area view needs within as area:<id>, never a Project. Never combine view with id, find, or ids. Logbook needs from and to. "
+    "ids is review-only. purpose=change cannot use ids. include lookups must be unique and are only for purpose=change. "
+    "view=audit lists every active item once. view=diagnostics lists native-state conflicts, including tag conflicts in signals. ids reads 1 to 10 exact items at full fidelity. Trash returns recoverable items, including untitled or malformed records. Send a cursor without selectors. "
+    "start is today, evening, someday, an ISO date, or null. start=null cannot combine with remind_at. into=anytime moves to root Anytime; start=null clears scheduling and keeps the current Project or Area. "
     "For repeat changes, search first, then use recurrence with the exact Task id, then change only when editable context is needed. "
     "Exact reads add notes_markdown, checklist, direct_tags, inherited_tags, start, deadline, "
     "remind_at, recurrence, order, today_order, and signals. Compact reviews add has_notes and has_checklist when those exist. "

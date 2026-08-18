@@ -82,7 +82,9 @@ that URL.
 Fill [deploy/serve-http.service](../deploy/serve-http.service): `User`
 is the login user, `WorkingDirectory` is this checkout, and `ExecStart`
 uses that user's `uv` (`command -v uv`, often `~/.local/bin/uv`, not
-`/usr/bin/uv`).
+`/usr/bin/uv`). Set `THINGS_ORCHESTRATOR_COMMIT` to
+`git rev-parse HEAD` from that checkout so `/health` can tell builds
+apart.
 
 ```console
 # Run on VPS

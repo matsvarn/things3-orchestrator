@@ -2,8 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- `start: null` cannot combine with `remind_at`. The previous pair
+  could schedule a date from the reminder while claiming to clear
+  start.
+- Duplicate change `include` lookups are a validation error, not
+  `internal_error`.
+- An explicit empty `ids` list is rejected instead of becoming Today.
+- Tag-only diagnostics no longer claim "no conflicts" while returning
+  tag signals. Extra tag conflicts set `truncated`.
+- Unexpected internal exceptions set MCP `is_error`.
+
 ### Added
 
+- Diagnostics cover heading-without-project, wrong parent/area kinds,
+  malformed reminders, and tag-parent cycles, with repair hints.
+- Partial `ids` reads return the found items and name the missing IDs.
+- Audit pages group items by home title.
 - `view=area` expands one Area: the Area, loose tasks, and Projects.
 - `view=audit` lists every active item once. Compact rows include
   `has_notes` and `has_checklist`.

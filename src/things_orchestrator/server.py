@@ -74,8 +74,12 @@ _FIELD_REPAIR = {
         "Use one of today, inbox, week, system, project, area, audit, "
         "diagnostics, logbook, trash, or tags"
     ),
-    "ids": "ids is a review-only list of up to 10 exact item IDs",
-    "include": "include is only for purpose=change and accepts up to 40 compact lookups",
+    "ids": "ids is a review-only list of 1 to 10 unique exact item IDs",
+    "include": (
+        "include is only for purpose=change, must be unique, and accepts "
+        "up to 40 compact lookups"
+    ),
+    "remind_at": "start=null cannot combine with remind_at",
 }
 
 _READ_ONLY = ToolAnnotations(
@@ -193,6 +197,7 @@ class ThingsMCPServer:
                     ),
                 ),
                 full_items=name == "things_read",
+                is_error=True,
             )
         return _domain_result(result, full_items=name == "things_read")
 
@@ -310,7 +315,9 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
     return message if len(message) <= 997 else message[:997] + "..."
 
 
-def _domain_result(result: Result, *, full_items: bool) -> CallToolResult:
+def _domain_result(
+    result: Result, *, full_items: bool, is_error: bool = False
+) -> CallToolResult:
     summary = f"Things result. status={result.status}; next={result.next}. {result.instruction}"
     if len(summary) > 300:
         summary = summary[:297] + "..."
@@ -324,5 +331,5 @@ def _domain_result(result: Result, *, full_items: bool) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
         structured_content=structured,
-        is_error=False,
+        is_error=is_error,
     )

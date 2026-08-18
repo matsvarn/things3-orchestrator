@@ -116,7 +116,7 @@ def test_unexpected_commit_failure_stops_without_a_false_write_receipt() -> None
         )
     )
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["next"] == "stop"
     assert result.structured_content["status"] == "internal_error"
@@ -162,6 +162,44 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
     assert unknown.is_error is True
     assert "intent_id" in unknown.content[0].text
     assert "Renew password" not in unknown.content[0].text
+
+
+def test_duplicate_includes_are_a_validation_error_not_internal() -> None:
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    result = asyncio.run(
+        server.call_tool(
+            "things_read",
+            {
+                "purpose": "change",
+                "id": "task:a",
+                "include": [{"id": "task:b"}, {"id": "task:b"}],
+            },
+        )
+    )
+    assert result.is_error is True
+    assert "include" in result.content[0].text.lower()
+    assert "unique" in result.content[0].text.lower()
+
+
+def test_start_null_cannot_combine_with_remind_at() -> None:
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary()))
+    result = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "clear-and-remind-001",
+                "create": [
+                    {
+                        "title": "Later",
+                        "start": None,
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                    }
+                ],
+            },
+        )
+    )
+    assert result.is_error is True
+    assert "start=null cannot combine with remind_at" in result.content[0].text
 
 
 def test_mcp_server_version_matches_the_package() -> None:

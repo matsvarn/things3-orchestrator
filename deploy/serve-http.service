@@ -19,6 +19,9 @@ After=network.target
 Type=simple
 User=YOUR-USER
 WorkingDirectory=/path/to/things-orchestrator
+# Set this to `git rev-parse HEAD` from the checkout so /health can
+# distinguish builds that share a package version.
+Environment=THINGS_ORCHESTRATOR_COMMIT=
 ExecStart=/usr/bin/uv run things-orchestrator serve-http --port 8787
 Restart=on-failure
 
