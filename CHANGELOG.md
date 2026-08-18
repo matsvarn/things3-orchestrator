@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-08-18
+
+Same three tools. Production dogfood of 0.2.0 hardened review completeness,
+diagnostics, and bulk reads so agents can keep using the server without
+crashing, hiding truncation, or overflowing context.
+
 ### Added
 
 - Bulk `ids` accepts `fields` to request only `notes`, `checklist`,
