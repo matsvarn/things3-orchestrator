@@ -59,7 +59,7 @@ RecurrenceKind = Literal[
 
 _ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 _DIAGNOSTIC_ID = r"^(task|project|area|heading|tag):[^\s:]+$"
-_CONTAINER_ID = r"^(project|area):[^\s:]+$"
+_CONTAINER_ID = r"^(trash|(project|area):[^\s:]+)$"
 _CHECK_ID = r"^check:[^\s:]+$"
 _TAG_ID = r"^tag:[^\s:]+$"
 _LOCAL_KEY = r"^\$[A-Za-z][A-Za-z0-9_-]{0,79}$"
@@ -151,6 +151,8 @@ class ReadInclude(StrictModel):
             raise ValueError("include needs exactly one id or find")
         if self.within is not None and self.find is None:
             raise ValueError("include within needs find")
+        if self.within == "trash":
+            raise ValueError("include within must identify an Area or Project")
         return self
 
 
@@ -250,7 +252,12 @@ class ReadCall(StrictModel):
             or self.include
         ):
             raise ValueError("ids cannot combine with another selector")
-        if self.within is not None and self.find is None and self.view not in {
+        if self.within == "trash":
+            if self.find is None:
+                raise ValueError("within trash needs find")
+            if self.view is not None:
+                raise ValueError("within trash cannot combine with view")
+        elif self.within is not None and self.find is None and self.view not in {
             "project",
             "area",
         }:
@@ -1374,9 +1381,9 @@ class Result(StrictModel):
     @classmethod
     def valid_missing_ids(cls, value: list[str]) -> list[str]:
         if _duplicates(value) or any(
-            re.fullmatch(_ITEM_ID, item) is None for item in value
+            re.fullmatch(_DIAGNOSTIC_ID, item) is None for item in value
         ):
-            raise ValueError("missing_ids need unique exact item IDs")
+            raise ValueError("missing_ids need unique exact item or tag IDs")
         return value
 
     @model_validator(mode="after")
@@ -2095,7 +2102,7 @@ RESULT_OUT: dict[str, Any] = {
             "type": "array",
             "maxItems": 10,
             "uniqueItems": True,
-            "items": _EXACT_ITEM,
+            "items": _EXACT_DIAGNOSTIC,
         },
         "truncated": {"type": "boolean", "default": False},
     },
@@ -2230,6 +2237,7 @@ READ_DESC = (
     "purpose=change is one item; organize is one Project; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change or organize read returns the local neighborhood. Include a destination to move or merge. "
+    "within=trash searches Trash by title. "
     "Send a cursor alone to continue. Follow next and instruction."
 )
 COMMIT_DESC = (

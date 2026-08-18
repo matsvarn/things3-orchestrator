@@ -68,7 +68,7 @@ _FIELD_REPAIR = {
     ),
     "within": (
         "view project needs within as project:<id>; view area needs within as "
-        "area:<id>"
+        "area:<id>; within=trash needs find"
     ),
     "view": (
         "Use one of today, inbox, week, system, project, area, audit, "

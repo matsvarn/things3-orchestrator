@@ -119,9 +119,14 @@ def test_read_purpose_selects_task_oriented_context() -> None:
         {"purpose": "recurrence"},
         {"purpose": "recurrence", "id": "task:repeat", "view": "today"},
         {"purpose": "review", "cursor": "cursor_12345678"},
+        {"within": "trash"},
+        {"view": "today", "within": "trash"},
     ):
         with pytest.raises(ValidationError):
             ReadCall.model_validate(payload)
+
+    trash = ReadCall.model_validate({"find": "Later", "within": "trash"})
+    assert trash.within == "trash"
 
 
 def test_change_include_is_compact_and_bounded() -> None:
@@ -1262,6 +1267,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "recurrence is one task",
         "local neighborhood",
         "include a destination",
+        "within=trash searches trash",
     ):
         assert instruction in read_lower
     for instruction in (
@@ -1273,7 +1279,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         assert instruction in commit_lower
 
     assert READ_IN["properties"]["view"]["enum"]
-    assert READ_IN["properties"]["within"]["pattern"].startswith("^(project|area):")
+    assert READ_IN["properties"]["within"]["pattern"].startswith("^(trash|(project|area):")
     assert COMMIT_IN["properties"]["organize"]["items"]["properties"][
         "delete_headings"
     ]["items"]["pattern"].startswith("^[a-z]")

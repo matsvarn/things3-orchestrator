@@ -266,6 +266,7 @@ def test_specialized_write_forms_live_in_disclosed_references() -> None:
     assert "create only when asked to add" in review
     assert "delete_headings" in review
     assert "remaining descendants go to trash with it" in review
+    assert "within=trash" in review
 
 
 def test_main_and_reference_files_stay_lean() -> None:

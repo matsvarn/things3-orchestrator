@@ -1,6 +1,6 @@
 # Review, merge, and organize
 
-Search named existing items and edit them; create only when asked to add. Do not copy revisions.
+Search named existing items and edit them; create only when asked to add. If a living notes-hit hides a Trash title, search with `within=trash`. Do not copy revisions.
 
 ## Weekly review or Area redesign
 
