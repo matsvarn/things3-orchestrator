@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.3 — 2026-08-19
+
+Tell the truth about truncated-page copy and trashed Project change.
+Same three tools.
+
+### Fixed
+
+- Truncated review copy keeps the period: `in one commit. Continue the cursor`.
+- `purpose=change` on a trashed Project lists the contained Trash
+  records that restore or purge will write.
+
 ## 0.3.2 — 2026-08-19
 
 Tell the truth about complete, teardown receipts, and diagnostics copy.

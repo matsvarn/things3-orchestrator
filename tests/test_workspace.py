@@ -4806,6 +4806,11 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
         )
     )
     assert filed.status == "applied"
+    assert (
+        ". Continue the cursor to add the rest to this same context."
+        in first.instruction
+    )
+    assert "commit Continue" not in first.instruction
 
 
 def test_truncated_audit_with_include_still_extends_the_same_context() -> None:

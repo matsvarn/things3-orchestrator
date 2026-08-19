@@ -658,9 +658,26 @@ class ThingsWorkspace:
                 read=self._selector_arguments(call),
                 status="unsupported",
             )
-        neighborhood = self._neighborhood_collect(target)
-        self._neighborhood_include(neighborhood, call)
+        try:
+            neighborhood = self._neighborhood_collect(target)
+            self._neighborhood_include(neighborhood, call)
+        except _Abort as error:
+            return error.result
         if len(neighborhood.records) > _CONTEXT_LIMIT:
+            if target.kind == "project" and target.trashed:
+                return self._context_recovery(
+                    code="context_incomplete",
+                    instruction=(
+                        f"This Project is in Trash with {len(neighborhood.records)} "
+                        "required items. "
+                        f"A safe context can contain at most {_CONTEXT_LIMIT}. "
+                        "Read the exact Project and restore or permanently delete "
+                        "with id and if_revision."
+                    ),
+                    retry="rebuild",
+                    read={"ids": [target.id]},
+                    status="needs_input",
+                )
             return self._oversized_context(call, len(neighborhood.records))
         refs, by_id = self._context_refs(neighborhood.records)
         context = self._create_context(
@@ -680,8 +697,21 @@ class ThingsWorkspace:
             "Use context_id and short refs for one coherent change. "
             "Omitted item fields remain unchanged. Include a destination to move."
         )
+        if target.kind == "project" and target.trashed:
+            contained = len(self._project_descendants(target.uuid))
+            instruction = (
+                f"{instruction} This Project is in Trash with {contained} contained records."
+                if contained
+                else f"{instruction} This Project is in Trash."
+            )
         if neighborhood.include_note:
             instruction = f"{instruction} {neighborhood.include_note}"
+        if target.kind == "area":
+            scope_revision = self._area_scope_revision()
+        elif target.kind == "project" and target.trashed:
+            scope_revision = self._project_scope_revision(target.uuid)
+        else:
+            scope_revision = self._detail_revision(target)
         return Result(
             next="done",
             status="ok",
@@ -689,11 +719,7 @@ class ThingsWorkspace:
             items=facts,
             signals=neighborhood.include_signals,
             context=self._public_context(context),
-            scope_revision=(
-                self._area_scope_revision()
-                if target.kind == "area"
-                else self._detail_revision(target)
-            ),
+            scope_revision=scope_revision,
             missing_ids=neighborhood.missing_ids,
         )
 
@@ -708,6 +734,9 @@ class ThingsWorkspace:
 
         neighborhood.add(target)
         place(target)
+        if target.kind == "project" and target.trashed:
+            for descendant in reversed(self._project_descendants(target.uuid)):
+                neighborhood.add(descendant)
         if target.kind == "task":
             parent = self._library.records.get(target.parent_uuid or "")
             if parent is not None and parent.kind == "project":
@@ -1283,7 +1312,7 @@ class ThingsWorkspace:
         if result.truncated and not finished:
             instruction = (
                 instruction.rstrip(".")
-                + " Continue the cursor to add the rest to this same context."
+                + ". Continue the cursor to add the rest to this same context."
             )
         return result.model_copy(
             update={
