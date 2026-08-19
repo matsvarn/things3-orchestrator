@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.3 — 2026-08-19
+
+Last honesty edges after v0.2.2 dogfood. Same three tools.
+
 ### Fixed
 
 - Permanently deleting a heading whose Project is already in Trash no
