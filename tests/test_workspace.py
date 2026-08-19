@@ -4791,6 +4791,27 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert filed.status == "applied"
 
 
+def test_truncated_audit_with_include_still_extends_the_same_context() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    destination = Record(uuid="home", kind="area", title="Home")
+    module = workspace([*records, destination])
+
+    first = module.read(
+        ReadCall(view="audit", limit=10, include=[{"id": destination.id}])
+    )
+    assert first.context is not None
+    assert first.context.complete is False
+    assert {item.id: item.ref for item in first.items}["area:home"]
+
+    second = module.read(ReadCall(cursor=first.cursor, limit=10))
+    assert second.context is not None
+    assert second.context.id == first.context.id
+    assert second.context.complete is False
+
+
 def test_review_include_overflow_recovers_instead_of_dropping_ids() -> None:
     inbox = Record(uuid="box", kind="task", title="File this", inbox=True)
     project = Record(uuid="fat", kind="project", title="Fat")

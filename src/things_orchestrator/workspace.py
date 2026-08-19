@@ -525,7 +525,6 @@ class ThingsWorkspace:
             result,
             call,
             records,
-            total=len(conflicts),
             existing_context_id=existing_context_id,
         )
 
@@ -1192,7 +1191,6 @@ class ThingsWorkspace:
         call: ReadCall | None,
         records: list[Record],
         *,
-        total: int | None = None,
         existing_context_id: str | None = None,
     ) -> Result:
         if (
@@ -1236,12 +1234,8 @@ class ThingsWorkspace:
             return self._oversized_context(call, len(existing) + len(bound))
         new_refs, by_id = self._context_refs(bound, existing=existing)
         scope = f"review:{call.within or call.id or view or call.find or 'page'}"
-        known_total = total if extra == [] else None
         seen_count = len(existing) + len(new_refs)
-        finished = (
-            not result.truncated
-            and (known_total is None or seen_count >= known_total)
-        )
+        finished = not result.truncated
         if existing_context_id is not None and existing:
             try:
                 context = self._context_store.extend(
@@ -1252,7 +1246,6 @@ class ThingsWorkspace:
                         CompletenessFact(
                             scope=scope,
                             seen=seen_count,
-                            total=known_total,
                             complete=finished,
                             next_cursor=None if finished else result.cursor,
                         ),
@@ -1265,7 +1258,6 @@ class ThingsWorkspace:
                     scopes=[scope],
                     complete=finished,
                     seen=seen_count,
-                    total=known_total,
                     next_cursor=result.cursor,
                 )
         else:
@@ -1277,7 +1269,6 @@ class ThingsWorkspace:
                 scopes=[scope],
                 complete=finished,
                 seen=seen_count,
-                total=known_total,
                 next_cursor=result.cursor,
             )
         if result.cursor is not None:
@@ -1899,9 +1890,7 @@ class ThingsWorkspace:
                 detail=detail,
             )
         result = self._follow_cursor(result)
-        return self._bind_review_context(
-            result, call, page_records, total=len(items)
-        )
+        return self._bind_review_context(result, call, page_records)
 
     def _continue(self, cursor: str, limit: int) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -2010,7 +1999,6 @@ class ThingsWorkspace:
             result,
             continued,
             page_items,
-            total=len(saved.ids),
             existing_context_id=saved.context_id,
         )
 
