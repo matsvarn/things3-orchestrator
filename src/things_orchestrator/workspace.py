@@ -354,7 +354,7 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction=(
-                        "These Trash matches. Use purpose=change to restore."
+                        "These Trash matches. Read one to restore or purge."
                         if matches
                         else "No Trash item matched that find."
                     ),
@@ -390,10 +390,10 @@ class ThingsWorkspace:
                 only_trash = all(item.trashed for item in closed)
                 instruction = (
                     "These matches are in Trash. "
-                    "Use purpose=change to restore, or view=trash."
+                    "Read one to restore or purge, or view=trash."
                     if only_trash
                     else "These matches are not active. "
-                    "Use purpose=change on the exact id, or view=trash."
+                    "Read the exact id, or view=trash."
                 )
                 return self._page(
                     closed,
@@ -456,6 +456,8 @@ class ThingsWorkspace:
                 "This Area, its loose tasks, and its Projects. "
                 "Read a Project for its layout and contents."
             )
+        elif view == "trash":
+            instruction = "This is Trash. Read an item to restore or purge."
         return self._page(
             visible,
             call.limit,
@@ -959,13 +961,11 @@ class ThingsWorkspace:
         neighborhood = _Neighborhood()
         neighborhood.add(project)
         neighborhood.add(self._library.records.get(project.area_uuid or ""))
-        source_records = [project]
         if project.trashed:
             for descendant in reversed(self._project_descendants(project.uuid)):
                 neighborhood.add(descendant)
         else:
-            source_records = self._library.project(project.id)
-            for record in source_records:
+            for record in self._library.project(project.id):
                 neighborhood.add(record)
             for record in self._hidden_project_occupants(project.uuid):
                 neighborhood.add(record)
@@ -979,8 +979,7 @@ class ThingsWorkspace:
                 for descendant in reversed(self._project_descendants(record.uuid)):
                     neighborhood.add(descendant)
                 continue
-            members = self._library.project(record.id)
-            for member in members:
+            for member in self._library.project(record.id):
                 neighborhood.add(member)
             for occupant in self._hidden_project_occupants(record.uuid):
                 neighborhood.add(occupant)
@@ -997,14 +996,18 @@ class ThingsWorkspace:
             ).model_copy(update={"ref": by_id[record.id]})
             for record in neighborhood.records
         ]
-        layouts: list[LayoutFact] = []
-        if not project.trashed:
-            layouts.append(self._project_layout(project, source_records, by_id))
-            layouts.extend(
-                self._project_layout(item, self._library.project(item.id), by_id)
-                for item in extra_projects
-                if not item.trashed
+        layouts = [
+            self._project_layout(
+                project, self._project_layout_records(project), by_id
             )
+        ]
+        layouts.extend(
+            self._project_layout(
+                item, self._project_layout_records(item), by_id
+            )
+            for item in extra_projects
+            if item.id in by_id
+        )
         instruction = (
             "Use this context to rename, date, trash, or send one organize draft. "
             "Listed work can move; unlisted work stays unchanged. "
@@ -1328,15 +1331,36 @@ class ThingsWorkspace:
             complete=context.complete,
         )
 
+    def _project_layout_records(self, project: Record) -> list[Record]:
+        """Direct members the layout can name, including Trash children."""
+        if not project.trashed:
+            return self._library.project(project.id)
+        children = [
+            item
+            for item in self._library.records.values()
+            if item.parent_uuid == project.uuid
+        ]
+        children.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
+        return [project, *children]
+
     def _project_layout(
         self, project: Record, records: list[Record], by_id: dict[str, str]
     ) -> LayoutFact:
+        listed = {record.uuid for record in records}
         headings = sorted(
-            [record for record in records if record.heading],
+            [
+                record
+                for record in records
+                if record.heading and record.parent_uuid == project.uuid
+            ],
             key=lambda item: (item.sort_index, item.uuid),
         )
         tasks = [
-            record for record in records if record.kind == "task" and not record.heading
+            record
+            for record in records
+            if record.kind == "task"
+            and not record.heading
+            and record.parent_uuid == project.uuid
         ]
         sections = [
             LayoutSectionFact(
@@ -1353,7 +1377,9 @@ class ThingsWorkspace:
                 hidden_signals=hidden[1],
             )
             for heading in headings
-            for hidden in [self._heading_hidden_occupancy(heading.uuid)]
+            for hidden in [
+                self._heading_hidden_occupancy(heading.uuid, listed=listed)
+            ]
         ]
         unheaded = sorted(
             [task for task in tasks if task.heading_uuid is None],
@@ -1367,11 +1393,15 @@ class ThingsWorkspace:
             project_ref=by_id[project.id], sections=sections, complete=True
         )
 
-    def _heading_hidden_occupancy(self, heading_uuid: str) -> tuple[int, list[str]]:
+    def _heading_hidden_occupancy(
+        self, heading_uuid: str, *, listed: set[str] | None = None
+    ) -> tuple[int, list[str]]:
         signals: list[str] = []
         count = 0
         for item in self._library.records.values():
             if item.heading_uuid != heading_uuid:
+                continue
+            if listed is not None and item.uuid in listed:
                 continue
             if (
                 not item.trashed

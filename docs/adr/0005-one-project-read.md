@@ -7,10 +7,11 @@ again after teardown.
 
 A Project id, a Project change, and `purpose=organize` now return the same
 writable neighborhood: Area, layout, hidden occupants, and if it is in Trash,
-the contained records. Organize drafts compile when that Project's
-completeness scope is complete. They do not require `purpose=organize`.
-Create entries may name a heading defined later in the same array; the
-commit interface orders local dependencies.
+the contained records with that same layout. Organize drafts compile when that
+Project's completeness scope is complete. They do not require
+`purpose=organize`. Create entries may name a heading defined later in the
+same array; the commit interface orders local dependencies.
 
-Task and Area change stay local. `view=trash` stays a list. The 120-item
-context cap stays. No fourth tool.
+Task and Area change stay local. `view=trash` stays a list. Read an item
+from that list to restore or purge. The 120-item context cap stays. No
+fourth tool.

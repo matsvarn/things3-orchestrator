@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-08-19
+
+Trash list copy and trashed Project layout. Same three tools.
+
+### Fixed
+
+- Trash list copy says read the item, not `purpose=change`.
+- A trashed Project read includes layout for the contained tree.
+
 ## 0.4.0 — 2026-08-19
 
 One Project read. Same three tools.
