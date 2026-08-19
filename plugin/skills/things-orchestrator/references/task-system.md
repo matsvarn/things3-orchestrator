@@ -31,4 +31,4 @@ Finish when each unclear choice has one supported reading or one concise questio
 
 ## Repeats
 
-Search first, then `purpose=recurrence` on the exact Task. Confirm the current copy and template. Change the repeating template for future copies and the generated copy for the current cycle. Change the generated copy for current work. Batch both changes when both must match. A complete repeat rule on an ordinary Task keeps it as the current copy and creates its future template. Stopping repetition keeps linked copies as Tasks.
+Search first, then `purpose=recurrence` on the exact Task. Confirm the current copy and template. Change the repeating template for future copies. Change the generated copy for the current cycle. Change the generated copy for current work. Batch both changes when both must match. A complete repeat rule on an ordinary Task keeps it as the current copy and creates its future template. Stopping repetition keeps linked copies as Tasks.

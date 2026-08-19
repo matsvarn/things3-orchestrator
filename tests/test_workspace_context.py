@@ -1020,6 +1020,169 @@ def test_organize_commit_assigns_existing_task_to_new_heading() -> None:
     assert library.records[task.uuid].heading_uuid == headings[0].uuid
 
 
+def test_organize_layout_names_hidden_heading_occupants() -> None:
+    project = Record(uuid="project", kind="project", title="KI")
+    heading = Record(
+        uuid="codex",
+        kind="task",
+        title="Codex",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    hidden = Record(
+        uuid="old",
+        kind="task",
+        title="Old Codex task",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    workspace, _library, _store = contextual_workspace([project, heading, hidden])
+    read = workspace.read(
+        ReadCall(purpose="organize", view="project", within=project.id)
+    )
+
+    assert read.layouts
+    section = next(
+        row for row in read.layouts[0].sections if row.heading_ref is not None
+    )
+    assert section.task_refs == []
+    assert section.hidden_count == 1
+    assert "trashed" in section.hidden_signals
+    heading_fact = next(item for item in read.items if item.id == heading.id)
+    assert "has_hidden_occupants" in heading_fact.signals
+    hidden_fact = next(item for item in read.items if item.id == hidden.id)
+    assert hidden_fact.ref is not None
+    assert "trashed" in hidden_fact.signals
+
+
+def test_organize_can_delete_empty_headings_without_rewriting_layout() -> None:
+    project = Record(uuid="project", kind="project", title="Launch")
+    heading = Record(
+        uuid="later",
+        kind="task",
+        title="Later",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    sibling = Record(
+        uuid="now",
+        kind="task",
+        title="Now",
+        parent_uuid=project.uuid,
+        heading=True,
+        sort_index=1024,
+    )
+    hidden = Record(
+        uuid="old",
+        kind="task",
+        title="Old",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        status="done",
+        today_index=4,
+    )
+    workspace, library, _store = contextual_workspace(
+        [project, heading, sibling, hidden]
+    )
+    read = workspace.read(
+        ReadCall(purpose="organize", view="project", within=project.id)
+    )
+    refs = {item.id: item.ref for item in read.items}
+    assert read.context is not None
+
+    prepared = workspace.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "organize-delete-headings-001",
+                "context_id": read.context.id,
+                "organize": [
+                    {
+                        "project_ref": refs[project.id],
+                        "delete_headings": [refs[heading.id]],
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    stored = workspace._journal.get("organize-delete-headings-001")  # noqa: SLF001
+    assert stored is not None
+    assert [write["action"] for write in stored.plan["writes"]] == ["permanent_delete"]
+    hidden.today_index = 99
+    applied = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in library.records
+    assert hidden.heading_uuid is None
+
+
+def test_organize_include_adds_a_second_complete_project_scope() -> None:
+    first = Record(uuid="alpha", kind="project", title="Alpha")
+    second = Record(uuid="beta", kind="project", title="Beta")
+    first_task = Record(
+        uuid="one", kind="task", title="Alpha next", parent_uuid=first.uuid
+    )
+    second_task = Record(
+        uuid="two", kind="task", title="Beta next", parent_uuid=second.uuid
+    )
+    workspace, library, _store = contextual_workspace(
+        [first, second, first_task, second_task]
+    )
+    read = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=first.id,
+            include=[{"id": second.id}],
+        )
+    )
+    assert read.context is not None
+    assert len(read.layouts) == 2
+    refs = {item.id: item.ref for item in read.items}
+
+    result = workspace.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "organize-two-projects-001",
+                "context_id": read.context.id,
+                "organize": [
+                    {
+                        "project_ref": refs[first.id],
+                        "sections": [
+                            {
+                                "heading_key": "$alpha",
+                                "heading_title": "Now",
+                                "task_refs": [refs[first_task.id]],
+                            }
+                        ],
+                    },
+                    {
+                        "project_ref": refs[second.id],
+                        "sections": [
+                            {
+                                "heading_key": "$beta",
+                                "heading_title": "Next",
+                                "task_refs": [refs[second_task.id]],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    headings = {
+        record.title: record
+        for record in library.records.values()
+        if record.heading
+    }
+    assert headings["Now"].parent_uuid == first.uuid
+    assert headings["Next"].parent_uuid == second.uuid
+    assert library.records[first_task.uuid].heading_uuid == headings["Now"].uuid
+    assert library.records[second_task.uuid].heading_uuid == headings["Next"].uuid
+
+
 def test_context_is_account_bound_and_expiry_has_structured_recovery() -> None:
     now = [NOW]
     store = MemoryContextStore(

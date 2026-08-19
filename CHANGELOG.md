@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-08-19
+
+A weekly review can finish without fighting the tool. Same three tools.
+
+### Changed
+
+- Review pages mint a context and short refs. Inbox, Today, Week, Area,
+  Project, audit, logbook, trash, and diagnostics can commit listed
+  work with `context_id` and refs. No `if_revision` scavenger hunt.
+- An Area or Project `id` lists its children. `view=area` and
+  `view=project` accept `id` or `within`.
+- Heading delete is one native `permanent_delete`. Assigned work stays
+  in the Project, including completed and trashed occupants. Approve no
+  longer goes stale because Today order or a logbook row ticked.
+- Organize layouts report `hidden_count` and `hidden_signals` when a
+  heading still has completed, canceled, or trashed occupants.
+- `delete_headings` can stand alone. Include another Project on an
+  organize read to organize both in one commit.
+- `view=logbook` defaults to the last 14 days.
+- Approval summaries use owner titles (`Inbox → Kitchen`), not
+  `area:<uuid>`.
+- Exact `change` still needs `id` and `if_revision` unless a context
+  binds the item. Diagnostics label `__TO_PROBE__` and
+  `Things Orchestrator scoped` leftovers as `test_residue`.
+
 ## 0.2.3 — 2026-08-19
 
 Last honesty edges after v0.2.2 dogfood. Same three tools.

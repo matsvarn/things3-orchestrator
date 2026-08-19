@@ -2336,6 +2336,22 @@ def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
     assert client.committed[0].payload["agr"] == []
     assert library.records["task"].heading_uuid is None
 
+    library.records["logbook"] = Record(
+        uuid="logbook",
+        kind="task",
+        title="Done under heading",
+        parent_uuid="project",
+        heading_uuid="heading",
+        status="done",
+        entity="Task6",
+    )
+    library.apply(
+        [Write(action="update", uuid="logbook", kind="task", clear_heading=True)]
+    )
+    assert client.committed[0].payload == {"agr": [], "md": client.committed[0].payload["md"]}
+    assert "pr" not in client.committed[0].payload
+    assert "st" not in client.committed[0].payload
+
 
 def test_create_coalesces_update_move_tags_and_lifecycle(tmp_path: Path) -> None:
     client = _CaptureClient()

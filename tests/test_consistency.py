@@ -176,6 +176,29 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
     assert any(row.repair for row in diagnose(library))
 
 
+def test_diagnose_labels_probe_residue_for_one_commit_trash() -> None:
+    leftover = Record(
+        uuid="probe",
+        kind="task",
+        title="__TO_PROBE__20260819 leftover",
+    )
+    scoped = Record(
+        uuid="scoped",
+        kind="task",
+        title="Things Orchestrator scoped task A",
+    )
+    ordinary = Record(uuid="real", kind="task", title="Buy milk")
+    conflicts = {
+        row.item_id: row
+        for row in diagnose(MemoryLibrary([leftover, scoped, ordinary]))
+    }
+
+    assert "test_residue" in conflicts["task:probe"].signals
+    assert conflicts["task:probe"].repair_kind == "trash_item"
+    assert "test_residue" in conflicts["task:scoped"].signals
+    assert "task:real" not in conflicts
+
+
 def test_diagnose_uses_kind_aware_repairs_for_missing_and_trashed_relations() -> None:
     task = Record(uuid="loose", kind="task", title="Loose")
     project = Record(uuid="launch", kind="project", title="Launch", trashed=True)

@@ -11,6 +11,7 @@ deploy/serve-http.service
 docs/adr/0001-revisioned-workspace-behind-three-tools.md
 docs/adr/0002-contextual-desired-state.md
 docs/adr/0003-review-completeness-behind-three-tools.md
+docs/adr/0004-review-token-and-native-heading-delete.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md

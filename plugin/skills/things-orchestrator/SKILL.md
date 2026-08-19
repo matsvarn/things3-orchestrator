@@ -5,7 +5,7 @@ description: Manage an owner's work in Things 3. Use for capture, search, review
 
 # Things
 
-Say what you found, changed, or need the owner to choose.
+Say what you found. Say what changed. Ask when the owner has to choose.
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
 

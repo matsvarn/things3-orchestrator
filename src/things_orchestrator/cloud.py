@@ -1302,6 +1302,14 @@ def _needs_anytime_list_state(write: Write, current: Record | None) -> bool:
 
 def _placement(write: Write, current: Record | None = None) -> dict[str, Any]:
     payload: dict[str, Any]
+    if (
+        write.clear_heading
+        and write.into_uuid is None
+        and write.into_kind is None
+        and not write.inbox
+        and not write.anytime
+    ):
+        return {"agr": []}
     if write.into_kind == "project" and write.into_uuid:
         payload = {
             "pr": [write.into_uuid],

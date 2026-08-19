@@ -1,6 +1,6 @@
 {
   "name": "things-orchestrator",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Unofficial self-hosted Things Cloud MCP with Read, Commit, and Approve tools",
   "author": {
     "name": "Mats Varnskuhler"

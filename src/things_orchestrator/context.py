@@ -118,8 +118,10 @@ class ReadSelector:
             raise ValueError("selector includes cannot exceed 40")
         if len({entry for entry in self.includes}) != len(self.includes):
             raise ValueError("selector includes must be unique")
-        if self.purpose not in {"change", "organize"} and self.includes:
-            raise ValueError("selector includes are only available for change or organize")
+        if self.purpose not in {"review", "change", "organize"} and self.includes:
+            raise ValueError(
+                "selector includes are only available for review, change, or organize"
+            )
         selectors = sum(
             value is not None for value in (self.view, self.item_id, self.find)
         )
@@ -156,13 +158,19 @@ class ReadSelector:
                 raise ValueError("organize Project view needs a Project scope")
         if self.view == "project" and self.within is None:
             raise ValueError("Project selector needs within")
-        if self.within is not None and self.find is None and self.view != "project":
-            raise ValueError("within needs find or a Project selector")
+        if self.view == "area" and self.within is None:
+            raise ValueError("Area selector needs within")
+        if (
+            self.within is not None
+            and self.find is None
+            and self.view not in {"project", "area"}
+        ):
+            raise ValueError("within needs find or a Project or Area selector")
         has_range = self.from_date is not None or self.to_date is not None
         if has_range and self.view != "logbook":
             raise ValueError("date range needs a Logbook selector")
-        if self.view == "logbook" and (self.from_date is None or self.to_date is None):
-            raise ValueError("Logbook selector needs from_date and to_date")
+        if self.view == "logbook" and (self.from_date is None) != (self.to_date is None):
+            raise ValueError("Logbook selector needs both from_date and to_date, or neither")
         if self.from_date is not None and self.to_date is not None:
             try:
                 start = date.fromisoformat(self.from_date)
@@ -741,6 +749,9 @@ def _selector_from_data(data: dict[str, object]) -> ReadSelector:
         "week",
         "system",
         "project",
+        "area",
+        "audit",
+        "diagnostics",
         "logbook",
         "trash",
         "tags",
