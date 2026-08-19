@@ -327,6 +327,8 @@ def test_health_is_open_without_bearer() -> None:
         assert payload["capabilities"]["project_teardown"] is True
         assert payload["capabilities"]["neighborhood_reads"] is True
         assert payload["capabilities"]["in_band_validation"] is True
+        assert payload["capabilities"]["review_context"] is True
+        assert payload["capabilities"]["native_heading_delete"] is True
         assert payload["tool_schema_hash"].startswith("sha256:")
         assert payload["tool_contract_hash"].startswith("sha256:")
         assert payload["tool_contract_hash"] != payload["tool_schema_hash"]

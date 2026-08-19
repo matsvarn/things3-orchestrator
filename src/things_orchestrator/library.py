@@ -181,6 +181,7 @@ class Write:
     recurrence_links: list[str] | None = None
     recurrence_generated: bool = False
     tag_parent_uuids: list[str] | None = None
+    heading: bool = False
 
 
 @dataclass(frozen=True)

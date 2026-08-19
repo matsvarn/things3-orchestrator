@@ -197,6 +197,10 @@ def test_diagnose_labels_probe_residue_for_one_commit_trash() -> None:
     assert conflicts["task:probe"].repair_kind == "trash_item"
     assert "test_residue" in conflicts["task:scoped"].signals
     assert "task:real" not in conflicts
+    leftover.trashed = True
+    after_trash = {row.item_id: row for row in diagnose(MemoryLibrary([leftover, scoped]))}
+    assert "task:probe" not in after_trash
+    assert "test_residue" in after_trash["task:scoped"].signals
 
 
 def test_diagnose_uses_kind_aware_repairs_for_missing_and_trashed_relations() -> None:

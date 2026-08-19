@@ -37,6 +37,8 @@ CAPABILITIES = {
     "project_teardown": True,
     "neighborhood_reads": True,
     "in_band_validation": True,
+    "review_context": True,
+    "native_heading_delete": True,
 }
 
 
