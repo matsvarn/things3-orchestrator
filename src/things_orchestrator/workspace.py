@@ -658,13 +658,14 @@ class ThingsWorkspace:
                 read=self._selector_arguments(call),
                 status="unsupported",
             )
+        trashed_project = target.kind == "project" and target.trashed
         try:
             neighborhood = self._neighborhood_collect(target)
             self._neighborhood_include(neighborhood, call)
         except _Abort as error:
             return error.result
         if len(neighborhood.records) > _CONTEXT_LIMIT:
-            if target.kind == "project" and target.trashed:
+            if trashed_project:
                 return self._context_recovery(
                     code="context_incomplete",
                     instruction=(
@@ -697,7 +698,7 @@ class ThingsWorkspace:
             "Use context_id and short refs for one coherent change. "
             "Omitted item fields remain unchanged. Include a destination to move."
         )
-        if target.kind == "project" and target.trashed:
+        if trashed_project:
             contained = len(self._project_descendants(target.uuid))
             instruction = (
                 f"{instruction} This Project is in Trash with {contained} contained records."
@@ -708,7 +709,7 @@ class ThingsWorkspace:
             instruction = f"{instruction} {neighborhood.include_note}"
         if target.kind == "area":
             scope_revision = self._area_scope_revision()
-        elif target.kind == "project" and target.trashed:
+        elif trashed_project:
             scope_revision = self._project_scope_revision(target.uuid)
         else:
             scope_revision = self._detail_revision(target)
@@ -724,7 +725,11 @@ class ThingsWorkspace:
         )
 
     def _neighborhood_collect(self, target: Record) -> _Neighborhood:
-        """Collect the local neighborhood for one change target."""
+        """Collect the local neighborhood for one change target.
+
+        A trashed Project also includes the contained records restore or purge
+        will write.
+        """
         neighborhood = _Neighborhood()
 
         def place(item: Record) -> None:
