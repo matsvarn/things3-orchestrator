@@ -4791,6 +4791,32 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert filed.status == "applied"
 
 
+def test_review_include_overflow_recovers_instead_of_dropping_ids() -> None:
+    inbox = Record(uuid="box", kind="task", title="File this", inbox=True)
+    project = Record(uuid="fat", kind="project", title="Fat")
+    headings = [
+        Record(
+            uuid=f"head-{index:03d}",
+            kind="task",
+            title=f"Section {index:03d}",
+            parent_uuid=project.uuid,
+            heading=True,
+        )
+        for index in range(119)
+    ]
+    module = workspace([inbox, project, *headings])
+
+    result = module.read(
+        ReadCall(view="inbox", include=[{"id": project.id}])
+    )
+
+    assert result.status == "needs_input"
+    assert result.recovery is not None
+    assert result.recovery.code == "context_incomplete"
+    assert result.context is None
+    assert inbox.inbox is True
+
+
 def test_applied_receipt_names_every_purged_id() -> None:
     gone = [
         Record(uuid=f"gone-{index:02d}", kind="task", title=f"Gone {index:02d}", trashed=True)

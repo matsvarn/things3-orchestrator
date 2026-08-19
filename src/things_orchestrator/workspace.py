@@ -1233,10 +1233,7 @@ class ThingsWorkspace:
             except (ContextNotFound, ContextExpired, ContextCorrupt):
                 existing = ()
         if len(existing) + len(bound) > _CONTEXT_LIMIT:
-            room = _CONTEXT_LIMIT - len(existing)
-            if room <= 0:
-                return self._oversized_context(call, len(existing) + len(bound))
-            bound = bound[:room]
+            return self._oversized_context(call, len(existing) + len(bound))
         new_refs, by_id = self._context_refs(bound, existing=existing)
         scope = f"review:{call.within or call.id or view or call.find or 'page'}"
         known_total = total if extra == [] else None
