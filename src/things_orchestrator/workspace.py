@@ -56,6 +56,7 @@ from .interface import (
     TruncatedField,
     View,
     Weekday,
+    dump_result,
 )
 from .interface import (
     Status as PublicStatus,
@@ -508,13 +509,7 @@ class ThingsWorkspace:
             Result(
                 next="done",
                 status="ok",
-                instruction=(
-                    "These records have native-state conflicts. "
-                    "Use diagnostics and repairs. "
-                    "Trash test_residue with this context and short refs."
-                    if diagnostics
-                    else "No native-state conflicts are visible."
-                ),
+                instruction=_diagnostics_instruction(diagnostics),
                 items=items,
                 diagnostics=diagnostics,
                 cursor=cursor,
@@ -3037,13 +3032,7 @@ class ThingsWorkspace:
                             checklist_remove=True,
                         )
                     )
-                writes.append(
-                    Write(
-                        action="permanent_delete",
-                        uuid=target.uuid,
-                        kind="task",
-                    )
-                )
+                writes.append(_delete_write(target))
                 preconditions[target.id] = self._revision(target)
                 preconditions[f"scope:repeat:{target.uuid}"] = (
                     self._recurrence_scope_revision(target.uuid)
@@ -3541,14 +3530,7 @@ class ThingsWorkspace:
                     for child in self._library.records.values()
                     if child.heading_uuid == item.uuid
                 ]
-                writes.append(
-                    Write(
-                        action="permanent_delete",
-                        uuid=item.uuid,
-                        kind="task",
-                        heading=True,
-                    )
-                )
+                writes.append(_delete_write(item))
                 summary.append(f"Permanently delete heading: {item.title}")
                 if assigned:
                     hidden = [
@@ -3680,13 +3662,7 @@ class ThingsWorkspace:
                                 checklist_remove=True,
                             )
                         )
-                    writes.append(
-                        Write(
-                            action="permanent_delete",
-                            uuid=descendant.uuid,
-                            kind=descendant.kind,
-                        )
-                    )
+                    writes.append(_delete_write(descendant))
             for item_row in item.checklists:
                 writes.append(
                     Write(
@@ -3696,9 +3672,7 @@ class ThingsWorkspace:
                         checklist_remove=True,
                     )
                 )
-            writes.append(
-                Write(action="permanent_delete", uuid=item.uuid, kind=item.kind)
-            )
+            writes.append(_delete_write(item))
             summary.append(f"Permanently delete {item.kind}: {item.title}")
             warnings.append("This deletion cannot be undone.")
             if descendants:
@@ -6035,9 +6009,7 @@ def _normalize_bulk_tag_ids(facts: list[ItemFact]) -> list[ItemFact]:
 
 
 def _result_bytes(result: Result) -> int:
-    payload = result.model_dump(
-        mode="json", exclude_none=True, exclude_defaults=True
-    )
+    payload = dump_result(result)
     return len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     )
@@ -6291,8 +6263,25 @@ def _write_from_json(payload: dict[str, object]) -> Write:
     return Write(**values)  # type: ignore[arg-type]
 
 
-def _result_json(result: Result) -> JsonDict:
-    return cast(
-        JsonDict,
-        result.model_dump(mode="json", exclude_defaults=True, exclude_none=True),
+def _delete_write(record: Record) -> Write:
+    return Write(
+        action="permanent_delete",
+        uuid=record.uuid,
+        kind=record.kind,
+        heading=record.heading,
     )
+
+
+def _diagnostics_instruction(diagnostics: list[DiagnosticFact]) -> str:
+    if not diagnostics:
+        return "No native-state conflicts are visible."
+    instruction = (
+        "These records have native-state conflicts. Use diagnostics and repairs."
+    )
+    if any("test_residue" in row.conflicts for row in diagnostics):
+        instruction += " Trash test_residue with this context and short refs."
+    return instruction
+
+
+def _result_json(result: Result) -> JsonDict:
+    return cast(JsonDict, dump_result(result))

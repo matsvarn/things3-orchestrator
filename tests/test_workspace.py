@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from things_orchestrator.cloud import CloudError
-from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
+from things_orchestrator.interface import (
+    ApproveCall,
+    CommitCall,
+    ReadCall,
+    dump_result,
+)
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import (
     ApplyResult,
@@ -4145,6 +4150,11 @@ def test_trashed_project_can_purge_its_tree_in_one_approved_plan() -> None:
     applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
     assert applied.status == "applied"
     assert module._library.records == {}  # noqa: SLF001
+    assert applied.missing_ids == [
+        "task:purge-child",
+        "heading:purge-heading",
+        "project:purge-project",
+    ]
 
 
 def test_project_purge_walks_nested_imported_descendants_deepest_first() -> None:
@@ -4759,6 +4769,9 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert first.cursor is not None
     assert first.context is not None
     assert first.context.complete is False
+    first_wire = dump_result(first)
+    assert first_wire["truncated"] is True
+    assert first_wire["context"]["complete"] is False
     first_refs = {item.id: item.ref for item in first.items}
     assert len(first_refs) == 10
 
@@ -4766,6 +4779,7 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert second.context is not None
     assert second.context.id == first.context.id
     assert second.context.complete is False
+    assert dump_result(second)["context"]["complete"] is False
     second_refs = {item.id: item.ref for item in second.items}
     assert len(second_refs) == 10
     assert set(first_refs).isdisjoint(second_refs)
@@ -4775,6 +4789,9 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert third.context.id == first.context.id
     assert third.context.complete is True
     assert third.truncated is False
+    third_wire = dump_result(third)
+    assert third_wire["context"]["complete"] is True
+    assert "truncated" not in third_wire
 
     filed = module.commit(
         CommitCall.model_validate(
@@ -4992,7 +5009,31 @@ def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
     assert result.diagnostics[0].id == "tag:child"
     assert "dangling_tag_parent" in result.diagnostics[0].conflicts
     assert "No native-state conflicts" not in result.instruction
+    assert "test_residue" not in result.instruction
     assert result.truncated is False
+
+
+def test_diagnostics_instruction_names_residue_only_when_that_signal_is_on_the_page() -> None:
+    loose = Record(
+        uuid="loose",
+        kind="task",
+        title="Install /unslop Skill…",
+        heading_uuid="gone",
+    )
+    leftover = Record(
+        uuid="probe",
+        kind="task",
+        title="__TO_PROBE__ leftover",
+    )
+    only_heading = workspace([loose]).read(ReadCall(view="diagnostics"))
+    assert only_heading.status == "ok"
+    assert "heading_without_project" in only_heading.diagnostics[0].conflicts
+    assert "test_residue" not in only_heading.instruction
+
+    page = workspace([loose, leftover]).read(ReadCall(view="diagnostics"))
+    assert page.status == "ok"
+    assert any("test_residue" in row.conflicts for row in page.diagnostics)
+    assert "Trash test_residue with this context and short refs." in page.instruction
 
 
 def test_tag_diagnostics_page_beyond_the_first_forty() -> None:
@@ -5340,9 +5381,7 @@ def test_bulk_read_hoists_shared_tag_parents_under_the_wire_budget() -> None:
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
     result = module.read(ReadCall(ids=[task.id for task in tasks]))
-    payload = result.model_dump(
-        mode="json", exclude_none=True, exclude_defaults=True
-    )
+    payload = dump_result(result)
     wire = len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     )
@@ -5410,9 +5449,7 @@ def test_bulk_read_keeps_tag_membership_when_parents_are_huge() -> None:
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
     result = module.read(ReadCall(ids=[task.id for task in tasks]))
-    payload = result.model_dump(
-        mode="json", exclude_none=True, exclude_defaults=True
-    )
+    payload = dump_result(result)
     wire = len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     )
@@ -5454,9 +5491,7 @@ def test_bulk_recurrence_links_do_not_exceed_the_wire_budget() -> None:
     module = workspace([*templates, *instances])
 
     result = module.read(ReadCall(ids=[item.id for item in templates]))
-    payload = result.model_dump(
-        mode="json", exclude_none=True, exclude_defaults=True
-    )
+    payload = dump_result(result)
     wire = len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     )

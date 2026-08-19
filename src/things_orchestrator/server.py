@@ -43,6 +43,7 @@ from .interface import (
     CommitCall,
     ReadCall,
     Result,
+    dump_result,
 )
 from .workspace import ThingsWorkspace
 
@@ -326,7 +327,7 @@ def _domain_result(
     summary = f"Things result. status={result.status}; next={result.next}. {result.instruction}"
     if len(summary) > 300:
         summary = summary[:297] + "..."
-    structured = result.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    structured = dump_result(result)
     if not full_items and "items" in structured:
         summary_fields = {
             "id",

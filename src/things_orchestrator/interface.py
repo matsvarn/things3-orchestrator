@@ -1302,7 +1302,7 @@ class ContextFact(StrictModel):
     id: str = Field(pattern=_CONTEXT_ID, max_length=124)
     purpose: Purpose
     expires_at: str = Field(max_length=40)
-    complete: bool = False
+    complete: bool
 
     @field_validator("expires_at")
     @classmethod
@@ -1338,7 +1338,7 @@ class LayoutSectionFact(StrictModel):
 class LayoutFact(StrictModel):
     project_ref: str = Field(pattern=_SHORT_REF, max_length=12)
     sections: list[LayoutSectionFact] = Field(default_factory=list, max_length=120)
-    complete: bool = False
+    complete: bool
 
     @model_validator(mode="after")
     def unique_refs(self) -> Self:
@@ -1425,6 +1425,12 @@ class Result(StrictModel):
         if (refs or self.layouts) and self.context is None:
             raise ValueError("context refs and layouts need context")
         return self
+
+
+def dump_result(result: Result) -> dict[str, Any]:
+    """Compact JSON for MCP and the wire budget. Required fields still emit."""
+
+    return result.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
 
 
 # MCP discovery needs flat schemas without refs or unions. The contract-parity test
@@ -2012,12 +2018,12 @@ _DIAGNOSTIC: dict[str, Any] = {
 _CONTEXT_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "purpose", "expires_at"],
+    "required": ["id", "purpose", "expires_at", "complete"],
     "properties": {
         "id": {"type": "string", "pattern": _CONTEXT_ID},
         "purpose": {"enum": ["review", "change", "organize", "recurrence"]},
         "expires_at": {"type": "string"},
-        "complete": {"type": "boolean", "default": False},
+        "complete": {"type": "boolean"},
     },
 }
 
@@ -2054,7 +2060,7 @@ _LAYOUT_SECTION: dict[str, Any] = {
 _LAYOUT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["project_ref"],
+    "required": ["project_ref", "complete"],
     "properties": {
         "project_ref": {
             "type": "string",
@@ -2062,7 +2068,7 @@ _LAYOUT: dict[str, Any] = {
             "maxLength": 12,
         },
         "sections": {"type": "array", "maxItems": 120, "items": _LAYOUT_SECTION},
-        "complete": {"type": "boolean", "default": False},
+        "complete": {"type": "boolean"},
     },
 }
 
