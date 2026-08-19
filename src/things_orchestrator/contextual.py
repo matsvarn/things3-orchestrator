@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .context import ContextRef, ReadContext, UnknownReference
-from .interface import CommitCall, OrganizeDraft
+from .interface import CommitCall, OrganizeDraft, order_local_creates
 from .library import MemoryLibrary, Record, parse_id
 
 _SHORT_REF = re.compile(r"^[a-z][a-z0-9]{0,11}$")
@@ -429,8 +429,6 @@ class ContextualCommitCompiler:
         index: _Index,
         state: _CompileState,
     ) -> None:
-        if context.selector.purpose != "organize":
-            raise ContextualCompileError("organize drafts need an organize read")
         project = index.project(draft.project_ref)
         project_id = project.record.id
         if not context.is_complete(project_id):
@@ -593,36 +591,7 @@ def _set_create(payload: dict[str, Any], field: str, value: Any) -> None:
 
 def _ordered_creates(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Place local dependencies first while keeping unrelated input stable."""
-    key_to_index = {
-        value: index
-        for index, payload in enumerate(payloads)
-        if isinstance((value := payload.get("key")), str)
-    }
-    dependencies: list[set[int]] = []
-    for payload in payloads:
-        required: set[int] = set()
-        for field in ("into", "after", "today_after", "heading_id"):
-            value = payload.get(field)
-            if isinstance(value, str) and value.startswith("$"):
-                dependency = key_to_index.get(value)
-                if dependency is None:
-                    raise ContextualCompileError(
-                        f"unknown local create dependency: {value}"
-                    )
-                required.add(dependency)
-        dependencies.append(required)
-
-    remaining = set(range(len(payloads)))
-    emitted: set[int] = set()
-    output: list[dict[str, Any]] = []
-    while remaining:
-        available = sorted(
-            index for index in remaining if dependencies[index] <= emitted
-        )
-        if not available:
-            raise ContextualCompileError("local create references contain a cycle")
-        index = available[0]
-        output.append(payloads[index])
-        remaining.remove(index)
-        emitted.add(index)
-    return output
+    try:
+        return order_local_creates(payloads)
+    except ValueError as error:
+        raise ContextualCompileError(str(error)) from error

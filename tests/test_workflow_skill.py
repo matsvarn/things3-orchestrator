@@ -216,7 +216,8 @@ def test_skill_teaches_safe_delete_and_merge_forms() -> None:
     assert "include the destination" in lower
     assert "every permanent task or project deletion target must already be in trash" in lower
     assert "including tasks and empty projects" in lower
-    assert "for a non-empty project, `purpose=change` lists the contained trash records" in lower
+    assert "if it is in trash, the contained records" in lower
+    assert "do not use `view=trash` alone" in lower
     assert "lifecycle=delete_permanently` with `delete_contents=true`" in lower
     assert "then approve the plan" in lower
     assert "organize.delete_headings" in lower
@@ -257,6 +258,8 @@ def test_specialized_write_forms_live_in_disclosed_references() -> None:
     assert "start=evening" in skill
     assert "select one view" not in skill
     assert "local neighborhood" not in skill
+    assert "do not use `view=trash` alone" in skill
+    assert "if it is in trash, the contained records" in skill
 
     assert "search first" in form
     assert "purpose=recurrence" in form

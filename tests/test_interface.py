@@ -701,11 +701,11 @@ def test_existing_task_can_use_a_heading_created_in_the_same_commit() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "create, message",
-    [
-        (
-            [
+def test_task_create_accepts_a_heading_defined_later_in_the_array() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "heading-local-forward-001",
+            "create": [
                 {
                     "key": "$task",
                     "kind": "task",
@@ -720,34 +720,33 @@ def test_existing_task_can_use_a_heading_created_in_the_same_commit() -> None:
                     "into": "project:p",
                 },
             ],
-            "earlier heading create entry",
-        ),
-        (
-            [
-                {
-                    "key": "$other",
-                    "kind": "task",
-                    "title": "Other",
-                    "into": "project:p",
-                },
-                {
-                    "kind": "task",
-                    "title": "Ship",
-                    "into": "project:p",
-                    "heading_id": "$other",
-                },
-            ],
-            "earlier heading create entry",
-        ),
-    ],
-    ids=["forward-heading", "non-heading"],
-)
-def test_task_create_rejects_invalid_local_heading_references(
-    create: list[dict[str, object]], message: str
-) -> None:
-    with pytest.raises(ValidationError, match=message):
+        }
+    )
+
+    assert [entry.key for entry in call.create] == ["$section", "$task"]
+    assert call.create[1].heading_id == "$section"
+
+
+def test_task_create_rejects_a_non_heading_local_heading_reference() -> None:
+    with pytest.raises(ValidationError, match="heading create entry"):
         CommitCall.model_validate(
-            {"intent_id": "heading-local-invalid-001", "create": create}
+            {
+                "intent_id": "heading-local-invalid-001",
+                "create": [
+                    {
+                        "key": "$other",
+                        "kind": "task",
+                        "title": "Other",
+                        "into": "project:p",
+                    },
+                    {
+                        "kind": "task",
+                        "title": "Ship",
+                        "into": "project:p",
+                        "heading_id": "$other",
+                    },
+                ],
+            }
         )
 
 
@@ -787,17 +786,30 @@ def test_repeat_interval_change_is_explicit_and_isolated() -> None:
             )
 
 
-def test_commit_rejects_forward_local_order_anchors() -> None:
-    with pytest.raises(ValidationError, match="earlier create entries"):
+def test_commit_rejects_after_anchors_that_are_not_create_keys() -> None:
+    with pytest.raises(ValidationError, match="create entry"):
         CommitCall.model_validate(
             {
-                "intent_id": "forward-order-001",
-                "create": [
-                    {"title": "First", "after": "$later"},
-                    {"key": "$later", "title": "Later"},
-                ],
+                "intent_id": "after-tag-key-001",
+                "ensure_tags": [{"key": "$tag", "title": "Waiting"}],
+                "create": [{"title": "First", "after": "$tag"}],
             }
         )
+
+
+def test_commit_orders_forward_local_after_anchors() -> None:
+    call = CommitCall.model_validate(
+        {
+            "intent_id": "forward-order-001",
+            "create": [
+                {"title": "First", "after": "$later"},
+                {"key": "$later", "title": "Later"},
+            ],
+        }
+    )
+
+    assert [entry.title for entry in call.create] == ["Later", "First"]
+    assert call.create[1].after == "$later"
 
 
 def test_commit_rejects_cross_item_checklist_keys() -> None:
@@ -1282,15 +1294,16 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     for instruction in (
         "select exactly one view",
         "purpose=change is one item",
-        "organize is one project",
+        "organize is the draft",
         "recurrence is one task",
         "local neighborhood",
         "include a destination",
         "within=trash searches trash",
+        "writable neighborhood",
     ):
         assert instruction in read_lower
     for instruction in (
-        "define local refs before use",
+        "local create keys may appear in any order",
         "parent tags before children",
         "natural confirmation",
         "control fields private",

@@ -58,12 +58,12 @@ When two items match, or the target is not unique, ask one short question.
 
 If the owner asked for a Project but did not say what finished looks like, ask. Do not create that Project and do not invent next actions.
 
-If a permanent delete is not named as exact Trash items, list the candidates and ask. Do not start a permanent-delete plan.
-
 If a date is given without saying start or deadline, ask which it is. Do not set either.
 
 Change nothing until the owner answers.
 
 Do not open Today or Inbox unless the owner asked to review a list.
+
+A Project is one read: Area, layout, hidden occupants, and if it is in Trash, the contained records. Trash then permanent. Do not use `view=trash` alone. If a permanent delete is not named as exact Trash items, list the candidates and ask. Do not start a permanent-delete plan.
 
 Read [form, headings, and repeats](references/task-system.md) when the Things form, a heading, or a repeat rule is the work. Read [reviewing the system](references/reconcile.md) for a weekly review, Area redesign, merge, teardown, or `purpose=organize`. Read [decision research](references/research.md) when current external facts can change what belongs in Things.

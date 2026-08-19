@@ -4722,8 +4722,14 @@ def test_area_and_project_ids_expand_to_children_on_review() -> None:
     assert by_id.items[0].ref is not None
 
     project_read = module.read(ReadCall(id=project.id))
-    assert {item.id for item in project_read.items} == {project.id, nested.id}
+    assert {item.id for item in project_read.items} == {
+        project.id,
+        area.id,
+        nested.id,
+    }
     assert project_read.context is not None
+    assert project_read.layouts
+    assert project_read.layouts[0].complete
 
 
 def test_inbox_review_is_a_batch_commit_token() -> None:

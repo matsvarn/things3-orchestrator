@@ -879,6 +879,45 @@ class OrganizeDraft(StrictModel):
         return self
 
 
+def order_local_creates(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Place local dependencies first while keeping unrelated input stable."""
+    return [payloads[index] for index in _local_create_order(payloads)]
+
+
+def _local_create_order(payloads: Sequence[dict[str, Any]]) -> list[int]:
+    key_to_index = {
+        value: index
+        for index, payload in enumerate(payloads)
+        if isinstance((value := payload.get("key")), str)
+    }
+    dependencies: list[set[int]] = []
+    for payload in payloads:
+        required: set[int] = set()
+        for field in ("into", "after", "today_after", "heading_id"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.startswith("$"):
+                dependency = key_to_index.get(value)
+                if dependency is None:
+                    raise ValueError(f"unknown local create dependency: {value}")
+                required.add(dependency)
+        dependencies.append(required)
+
+    remaining = set(range(len(payloads)))
+    emitted: set[int] = set()
+    order: list[int] = []
+    while remaining:
+        available = sorted(
+            index for index in remaining if dependencies[index] <= emitted
+        )
+        if not available:
+            raise ValueError("local create references contain a cycle")
+        index = available[0]
+        order.append(index)
+        remaining.remove(index)
+        emitted.add(index)
+    return order
+
+
 class CommitCall(StrictModel):
     intent_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,120}$")
     context_id: str | None = Field(default=None, pattern=_CONTEXT_ID, max_length=124)
@@ -1078,17 +1117,7 @@ class CommitCall(StrictModel):
                 return "root", None
             return ("root", None) if home == "anytime" else ("inbox", None)
 
-        seen_create: set[str] = set()
         for create_entry in self.create:
-            for anchor in (create_entry.after, create_entry.today_after):
-                if (
-                    anchor is not None
-                    and anchor.startswith("$")
-                    and anchor not in seen_create
-                ):
-                    raise ValueError(
-                        "local after anchors must be earlier create entries"
-                    )
             if create_entry.into is not None and create_entry.into.startswith("$"):
                 target = create_by_key.get(create_entry.into)
                 if target is None or target.kind not in {"area", "project"}:
@@ -1102,22 +1131,24 @@ class CommitCall(StrictModel):
                 and create_entry.heading_id.startswith("$")
             ):
                 target = create_by_key.get(create_entry.heading_id)
-                if (
-                    target is None
-                    or target.kind != "heading"
-                    or create_entry.heading_id not in seen_create
-                ):
-                    raise ValueError(
-                        "a local heading must be an earlier heading create entry"
-                    )
+                if target is None or target.kind != "heading":
+                    raise ValueError("a local heading must be a heading create entry")
             if create_entry.after is not None and create_entry.after.startswith("$"):
-                anchor_entry = create_by_key[create_entry.after]
+                anchor_entry = create_by_key.get(create_entry.after)
+                if anchor_entry is None:
+                    raise ValueError("a local after anchor must be a create entry")
                 if anchor_entry.kind != create_entry.kind or create_scope(
                     anchor_entry
                 ) != create_scope(create_entry):
                     raise ValueError("a local after anchor must be in the same list")
-            if create_entry.key is not None:
-                seen_create.add(create_entry.key)
+        if self.create:
+            payloads = [
+                entry.model_dump(mode="python", exclude_unset=True)
+                for entry in self.create
+            ]
+            self.create = [
+                self.create[index] for index in _local_create_order(payloads)
+            ]
 
         for changed in self.change:
             for anchor in (changed.after, changed.today_after):
@@ -2284,20 +2315,20 @@ APPROVE_OUT: dict[str, Any] = {
 READ_DESC = (
     "Read Things. Empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. "
-    "An Area or Project id lists children. view=area and view=project may add that id. "
-    "purpose=change is one item; organize is one Project; include another to organize both; recurrence is one Task. "
+    "An Area id lists children. A Project id is the writable neighborhood: Area, layout, hidden occupants, and if Trash the contained records. "
+    "purpose=change is one item; organize is the draft; include another Project to organize both; recurrence is one Task. "
     "view=system is the Area and Project registry. "
-    "A change or organize read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return a context and short refs. A truncated page is incomplete; continue the cursor to add the rest to that context. "
+    "A change read returns the local neighborhood. Include a destination to move or merge. "
+    "Review pages return a context and short refs. A truncated page is incomplete; continue the cursor. "
     "view=logbook defaults to the last 14 days. "
     "within=trash searches Trash by title. "
-    "Send a cursor alone to continue. Follow next and instruction."
+    "Follow next and instruction."
 )
 COMMIT_DESC = (
     "Commit one decided batch with a durable intent_id. "
     "Prefer context_id and short refs from a review, change, or organize read. "
     "An exact change needs id and if_revision. "
-    "Define local refs before use and parent tags before children. "
+    "Local create keys may appear in any order. Parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "
     "If the response is lost or pending, retry the same intent_id and payload. "
     "Follow next and instruction."
