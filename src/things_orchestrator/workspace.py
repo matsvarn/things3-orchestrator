@@ -508,7 +508,8 @@ class ThingsWorkspace:
                 status="ok",
                 instruction=(
                     "These records have native-state conflicts. "
-                    "Use diagnostics and repairs."
+                    "Use diagnostics and repairs. "
+                    "Trash test_residue with this context and short refs."
                     if diagnostics
                     else "No native-state conflicts are visible."
                 ),
@@ -1187,14 +1188,12 @@ class ThingsWorkspace:
             seen.add(record.uuid)
             bound.append(record)
         if len(bound) > _CONTEXT_LIMIT:
-            bound = records
-        if not bound or len(bound) > _CONTEXT_LIMIT:
-            return result
+            return self._oversized_context(call, len(bound))
         refs, by_id = self._context_refs(bound)
-        scope = call.within or call.id or view or call.find or "review"
+        scope = f"review:{call.within or call.id or view or call.find or 'page'}"
         context = self._create_context(call, refs, scopes=[scope])
         items = [
-            item.model_copy(update={"ref": by_id[item.id]})
+            item.model_copy(update={"ref": by_id[item.id], "revision": None})
             if item.id in by_id
             else item
             for item in result.items
@@ -1629,12 +1628,7 @@ class ThingsWorkspace:
                 return self._needs_input("I could not find that exact Project.")
             return self._library.project(project.id)
         if view == "logbook":
-            if call.from_date is None or call.to_date is None:
-                end = self._clock().date()
-                start = end - timedelta(days=_LOGBOOK_DAYS - 1)
-            else:
-                start = date.fromisoformat(call.from_date)
-                end = date.fromisoformat(call.to_date)
+            start, end = self._logbook_range(call)
             return sorted(
                 [
                     item

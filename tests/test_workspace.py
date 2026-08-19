@@ -27,7 +27,7 @@ def workspace(records: list[Record] | None = None) -> ThingsWorkspace:
 
 
 def detail(module: ThingsWorkspace, item_id: str):
-    result = module.read(ReadCall(id=item_id))
+    result = module.read(ReadCall(ids=[item_id]))
     assert result.status == "ok"
     return result.items[0]
 
@@ -85,7 +85,7 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     library.tags["focus"] = "Focus"
     module = ThingsWorkspace(library, clock=lambda: NOW)
 
-    item = detail(module, "task:task1")
+    item = module.read(ReadCall(id="task:task1")).items[0]
 
     assert item.notes_markdown == "## Outcome\n\nShip it."
     assert item.checklist[0].id == "check:row1"
@@ -4726,6 +4726,7 @@ def test_inbox_review_is_a_batch_commit_token() -> None:
     assert inbox.context is not None
     refs = {item.title: item.ref for item in inbox.items}
     assert refs["File this"] and refs["Drop this"]
+    assert all(item.revision is None for item in inbox.items)
 
     result = module.commit(
         CommitCall.model_validate(

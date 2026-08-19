@@ -2278,8 +2278,8 @@ APPROVE_OUT: dict[str, Any] = {
 READ_DESC = (
     "Read Things. Empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. "
-    "An Area or Project id lists children. view=area and view=project also take within. "
-    "purpose=change is one item; organize is one Project; recurrence is one Task. "
+    "An Area or Project id lists children. view=area and view=project may add that id. "
+    "purpose=change is one item; organize is one Project; include another to organize both; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change or organize read returns the local neighborhood. Include a destination to move or merge. "
     "Review pages return a context and short refs. "

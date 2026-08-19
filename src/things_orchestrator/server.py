@@ -81,7 +81,7 @@ _FIELD_REPAIR = {
     ),
     "ids": "ids is a review-only list of 1 to 10 unique exact item IDs",
     "include": (
-        "include is only for purpose=change or organize, must be unique, "
+        "include is only for purpose=review, change, or organize, must be unique, "
         "and accepts up to 40 compact lookups"
     ),
 }
