@@ -509,6 +509,154 @@ def test_area_change_include_binds_a_destination_area() -> None:
     assert {item.id for item in included.items} == {current.id, destination.id}
 
 
+def test_living_project_change_does_not_list_children() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch", kind="project", title="Launch", area_uuid=area.uuid
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [area, project, heading, task]
+    )
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert {item.id for item in result.items} == {project.id, area.id}
+    assert "contained records" not in result.instruction
+
+
+def test_trashed_project_change_lists_contained_records() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch",
+        kind="project",
+        title="Launch",
+        area_uuid=area.uuid,
+        trashed=True,
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    task = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    nested = Record(
+        uuid="nested",
+        kind="project",
+        title="Nested",
+        parent_uuid=project.uuid,
+        trashed=True,
+    )
+    leaf = Record(
+        uuid="leaf",
+        kind="task",
+        title="Leaf",
+        parent_uuid=nested.uuid,
+        trashed=True,
+    )
+    workspace, library, _store = contextual_workspace(
+        [area, project, heading, task, nested, leaf]
+    )
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        nested.id,
+        leaf.id,
+    }
+    assert result.items[0].id == project.id
+    assert all(item.revision is None for item in result.items)
+    assert all(item.ref for item in result.items)
+    assert "trashed" in result.items[0].signals
+    assert "4 contained records" in result.instruction
+    assert heading.id.startswith("heading:")
+
+    refs = {item.id: item.ref for item in result.items}
+    prepared = workspace.commit(
+        CommitCall(
+            intent_id="trashed-project-purge-001",
+            context_id=result.context.id,
+            change=[
+                {
+                    "ref": refs[project.id],
+                    "lifecycle": "delete_permanently",
+                    "delete_contents": True,
+                }
+            ],
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    applied = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert applied.status == "applied"
+    assert set(library.records) == {area.uuid}
+    assert set(applied.missing_ids) == {
+        heading.id,
+        task.id,
+        nested.id,
+        leaf.id,
+        project.id,
+    }
+
+
+def test_trashed_project_change_overflow_points_at_exact_id() -> None:
+    project = Record(uuid="fat", kind="project", title="Fat", trashed=True)
+    children = [
+        Record(
+            uuid=f"child-{index}",
+            kind="task",
+            title=f"Child {index}",
+            parent_uuid=project.uuid,
+            trashed=True,
+        )
+        for index in range(120)
+    ]
+    workspace, _library, _store = contextual_workspace([project, *children])
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "needs_input"
+    assert result.next == "read"
+    assert result.context is None
+    assert result.items == []
+    assert result.recovery and result.recovery.code == "context_incomplete"
+    assert result.recovery.retry == "rebuild"
+    assert result.recovery.read == {"ids": [project.id]}
+    assert "if_revision" in result.instruction
+    assert "purpose" not in (result.recovery.read or {})
+
+
 def test_organize_read_returns_complete_project_layout() -> None:
     project = Record(uuid="project", kind="project", title="Launch")
     next_heading = Record(

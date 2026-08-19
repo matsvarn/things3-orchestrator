@@ -216,7 +216,7 @@ def test_skill_teaches_safe_delete_and_merge_forms() -> None:
     assert "include the destination" in lower
     assert "every permanent task or project deletion target must already be in trash" in lower
     assert "including tasks and empty projects" in lower
-    assert "for a non-empty project, read it completely" in lower
+    assert "for a non-empty project, `purpose=change` lists the contained trash records" in lower
     assert "lifecycle=delete_permanently` with `delete_contents=true`" in lower
     assert "then approve the plan" in lower
     assert "organize.delete_headings" in lower

@@ -16,9 +16,10 @@ existing three tools and all valid legacy requests.
 ## Decision
 
 `things_read` accepts a task purpose. `purpose=change` returns one exact target
-with the parent, heading, and repeat facts that the change can need. It accepts
-an exact ID or a narrow `find` selector, but creates a context only when the
-selector matches exactly one active item.
+with the parent, heading, and repeat facts that the change can need. A trashed
+Project also includes the contained records restore or purge will write. It
+accepts an exact ID or a narrow `find` selector, but creates a context only
+when the selector matches exactly one active item.
 `purpose=organize` returns one complete Project layout. Use the default review
 purpose with `view=system` for an exact Area and Project registry read.
 `purpose=recurrence` returns one exact Task and verifies the native template
