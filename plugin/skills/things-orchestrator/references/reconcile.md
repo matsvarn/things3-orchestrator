@@ -4,7 +4,7 @@ Search named existing items and edit them. Create only when asked to add. If a l
 
 ## Weekly review or Area redesign
 
-Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. An Area or Project `id` lists its children. `view=area` and `view=project` also take `within`. Review pages return a context and short refs. Commit keep, someday, trash, or file against that context in one batch. `view=logbook` defaults to the last 14 days. Use `ids` for notes and checklists on up to 10 exact items. If `truncated_fields` is present, read that exact id.
+Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. An Area or Project `id` lists its children. `view=area` and `view=project` also take `within`. Review pages return a context and short refs. A truncated page is not complete. Continue the same read to add the rest to that context, then commit keep, someday, trash, or file against it. `view=logbook` defaults to the last 14 days. Use `ids` for notes and checklists on up to 10 exact items. If `truncated_fields` is present, read that exact id.
 
 Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, harness leftovers (`test_residue`), and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
 

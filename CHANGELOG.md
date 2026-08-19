@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-08-19
+
+Pagination honesty after v0.3.0 dogfood. Same three tools.
+
+### Changed
+
+- A truncated review page marks its context incomplete. Continue the
+  cursor to add the rest to that same context, up to 120 items.
+- Applied receipts name every permanently deleted id, not only the
+  first ten. Heading deletes appear as `heading:<id>`.
+- Already-trashed harness leftovers leave diagnostics. Living
+  `__TO_PROBE__` and `Things Orchestrator scoped` titles still show
+  `test_residue`.
+- Organize and change includes no longer leak `revision`. The ref is
+  the write token.
+- `/health` capabilities include `review_context` and
+  `native_heading_delete`.
+
 ## 0.3.0 — 2026-08-19
 
 A weekly review can finish without fighting the tool. Same three tools.

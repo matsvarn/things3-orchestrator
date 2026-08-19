@@ -1405,7 +1405,7 @@ class Result(StrictModel):
     receipt: str | None = Field(default=None, min_length=1, max_length=512)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
-    missing_ids: list[str] = Field(default_factory=list, max_length=10)
+    missing_ids: list[str] = Field(default_factory=list, max_length=120)
     truncated: bool = False
 
     @field_validator("missing_ids")
@@ -2144,7 +2144,7 @@ RESULT_OUT: dict[str, Any] = {
         "cursor": _STRING,
         "missing_ids": {
             "type": "array",
-            "maxItems": 10,
+            "maxItems": 120,
             "uniqueItems": True,
             "items": _EXACT_DIAGNOSTIC,
         },
@@ -2282,7 +2282,7 @@ READ_DESC = (
     "purpose=change is one item; organize is one Project; include another to organize both; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change or organize read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return a context and short refs. "
+    "Review pages return a context and short refs. A truncated page is incomplete; continue the cursor to add the rest to that context. "
     "view=logbook defaults to the last 14 days. "
     "within=trash searches Trash by title. "
     "Send a cursor alone to continue. Follow next and instruction."

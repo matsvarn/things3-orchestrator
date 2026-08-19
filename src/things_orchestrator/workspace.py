@@ -242,6 +242,7 @@ class _ItemCursor:
     item_id: str | None = None
     from_date: str | None = None
     to_date: str | None = None
+    context_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -472,6 +473,7 @@ class ThingsWorkspace:
         expected_ids: list[str] | None = None,
         expected_digest: str | None = None,
         call: ReadCall | None = None,
+        existing_context_id: str | None = None,
     ) -> Result:
         conflicts = diagnose(self._library)
         ids = [row.item_id for row in conflicts]
@@ -519,7 +521,13 @@ class ThingsWorkspace:
                 truncated=cursor is not None,
             )
         )
-        return self._bind_review_context(result, call, records)
+        return self._bind_review_context(
+            result,
+            call,
+            records,
+            total=len(conflicts),
+            existing_context_id=existing_context_id,
+        )
 
     def _diagnostic_title(self, conflict: Conflict) -> str:
         if conflict.item_id.startswith("tag:"):
@@ -670,7 +678,7 @@ class ThingsWorkspace:
             self._fact(
                 record,
                 full=record.uuid == target.uuid,
-                include_revision=record.uuid in neighborhood.placement_ids,
+                include_revision=False,
             ).model_copy(update={"ref": by_id[record.id]})
             for record in neighborhood.records
         ]
@@ -975,7 +983,7 @@ class ThingsWorkspace:
             self._fact(
                 record,
                 full=False,
-                include_revision=record.uuid in neighborhood.placement_ids,
+                include_revision=False,
             ).model_copy(update={"ref": by_id[record.id]})
             for record in neighborhood.records
         ]
@@ -1048,13 +1056,21 @@ class ThingsWorkspace:
         )
 
     def _context_refs(
-        self, records: list[Record]
+        self, records: list[Record], *, existing: Sequence[ContextRef] = ()
     ) -> tuple[list[ContextRef], dict[str, str]]:
         counters = {"task": 0, "project": 0, "area": 0, "heading": 0}
         prefixes = {"task": "t", "project": "p", "area": "a", "heading": "h"}
+        by_id = {entry.exact_id: entry.ref for entry in existing}
+        for entry in existing:
+            kind = entry.exact_id.partition(":")[0]
+            if kind in counters:
+                counters[kind] = max(
+                    counters[kind], self._ref_index(entry.ref, prefixes[kind])
+                )
         refs: list[ContextRef] = []
-        by_id: dict[str, str] = {}
         for record in records:
+            if record.id in by_id:
+                continue
             kind = record.public_kind
             counters[kind] += 1
             short = f"{prefixes[kind]}{counters[kind]}"
@@ -1068,10 +1084,27 @@ class ThingsWorkspace:
             by_id[record.id] = short
         return refs, by_id
 
+    @staticmethod
+    def _ref_index(ref: str, prefix: str) -> int:
+        if not ref.startswith(prefix):
+            return 0
+        tail = ref[len(prefix) :]
+        return int(tail) if tail.isdigit() else 0
+
     def _create_context(
-        self, call: ReadCall, refs: list[ContextRef], *, scopes: Sequence[str]
+        self,
+        call: ReadCall,
+        refs: list[ContextRef],
+        *,
+        scopes: Sequence[str],
+        complete: bool = True,
+        seen: int | None = None,
+        total: int | None = None,
+        next_cursor: str | None = None,
     ) -> ReadContext:
         view, item_id, within, from_date, to_date = self._selector_fields(call)
+        count = seen if seen is not None else len(refs)
+        known_total = total if total is not None else (count if complete else None)
         return self._context_store.create(
             account_id=self._account_id,
             selector=ReadSelector(
@@ -1096,9 +1129,10 @@ class ThingsWorkspace:
             completeness=tuple(
                 CompletenessFact(
                     scope=scope,
-                    seen=len(refs),
-                    total=len(refs),
-                    complete=True,
+                    seen=count,
+                    total=known_total,
+                    complete=complete,
+                    next_cursor=None if complete else next_cursor,
                 )
                 for scope in scopes
             ),
@@ -1157,6 +1191,9 @@ class ThingsWorkspace:
         result: Result,
         call: ReadCall | None,
         records: list[Record],
+        *,
+        total: int | None = None,
+        existing_context_id: str | None = None,
     ) -> Result:
         if (
             call is None
@@ -1187,11 +1224,69 @@ class ThingsWorkspace:
                 continue
             seen.add(record.uuid)
             bound.append(record)
-        if len(bound) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(bound))
-        refs, by_id = self._context_refs(bound)
+        existing: tuple[ContextRef, ...] = ()
+        if existing_context_id is not None:
+            try:
+                existing = self._context_store.get(
+                    existing_context_id, account_id=self._account_id
+                ).refs
+            except (ContextNotFound, ContextExpired, ContextCorrupt):
+                existing = ()
+        if len(existing) + len(bound) > _CONTEXT_LIMIT:
+            room = _CONTEXT_LIMIT - len(existing)
+            if room <= 0:
+                return self._oversized_context(call, len(existing) + len(bound))
+            bound = bound[:room]
+        new_refs, by_id = self._context_refs(bound, existing=existing)
         scope = f"review:{call.within or call.id or view or call.find or 'page'}"
-        context = self._create_context(call, refs, scopes=[scope])
+        known_total = total if extra == [] else None
+        seen_count = len(existing) + len(new_refs)
+        finished = (
+            not result.truncated
+            and (known_total is None or seen_count >= known_total)
+        )
+        if existing_context_id is not None and existing:
+            try:
+                context = self._context_store.extend(
+                    existing_context_id,
+                    account_id=self._account_id,
+                    refs=new_refs,
+                    completeness=(
+                        CompletenessFact(
+                            scope=scope,
+                            seen=seen_count,
+                            total=known_total,
+                            complete=finished,
+                            next_cursor=None if finished else result.cursor,
+                        ),
+                    ),
+                )
+            except (ContextNotFound, ContextExpired, ContextCorrupt, ContextConflict):
+                context = self._create_context(
+                    call,
+                    [*existing, *new_refs],
+                    scopes=[scope],
+                    complete=finished,
+                    seen=seen_count,
+                    total=known_total,
+                    next_cursor=result.cursor,
+                )
+        else:
+            if len(bound) > _CONTEXT_LIMIT:
+                return self._oversized_context(call, len(bound))
+            context = self._create_context(
+                call,
+                new_refs,
+                scopes=[scope],
+                complete=finished,
+                seen=seen_count,
+                total=known_total,
+                next_cursor=result.cursor,
+            )
+        if result.cursor is not None:
+            saved = self._cursors.get(result.cursor)
+            if saved is not None:
+                self._cursors[result.cursor] = replace(saved, context_id=context.id)
         items = [
             item.model_copy(update={"ref": by_id[item.id], "revision": None})
             if item.id in by_id
@@ -1203,6 +1298,11 @@ class ThingsWorkspace:
             instruction = (
                 instruction.rstrip(".")
                 + ". Use this context and short refs to change listed work in one commit."
+            )
+        if result.truncated and not finished:
+            instruction = (
+                instruction.rstrip(".")
+                + " Continue the cursor to add the rest to this same context."
             )
         return result.model_copy(
             update={
@@ -1802,7 +1902,9 @@ class ThingsWorkspace:
                 detail=detail,
             )
         result = self._follow_cursor(result)
-        return self._bind_review_context(result, call, page_records)
+        return self._bind_review_context(
+            result, call, page_records, total=len(items)
+        )
 
     def _continue(self, cursor: str, limit: int) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -1844,6 +1946,7 @@ class ThingsWorkspace:
                 expected_ids=saved.ids,
                 expected_digest=saved.snapshot_revision,
                 call=continued,
+                existing_context_id=saved.context_id,
             )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
@@ -1906,7 +2009,13 @@ class ThingsWorkspace:
             )
         result = self._follow_cursor(result)
         continued = self._call_from_cursor(saved, limit)
-        return self._bind_review_context(result, continued, page_items)
+        return self._bind_review_context(
+            result,
+            continued,
+            page_items,
+            total=len(saved.ids),
+            existing_context_id=saved.context_id,
+        )
 
     def _encode_cursor(
         self,
@@ -3450,7 +3559,12 @@ class ThingsWorkspace:
                     if child.heading_uuid == item.uuid
                 ]
                 writes.append(
-                    Write(action="permanent_delete", uuid=item.uuid, kind="task")
+                    Write(
+                        action="permanent_delete",
+                        uuid=item.uuid,
+                        kind="task",
+                        heading=True,
+                    )
                 )
                 summary.append(f"Permanently delete heading: {item.title}")
                 if assigned:
@@ -5382,7 +5496,8 @@ class ThingsWorkspace:
                 continue
             if write.action in {"permanent_delete", "delete_area"}:
                 if self._library.records.get(write.uuid) is None:
-                    missing_ids.append(f"{write.kind}:{write.uuid}")
+                    kind = "heading" if write.heading else write.kind
+                    missing_ids.append(f"{kind}:{write.uuid}")
                 else:
                     add_id(write.uuid)
                 continue
@@ -5396,7 +5511,7 @@ class ThingsWorkspace:
             for uuid in ids
             if (item := self._library.records.get(uuid)) is not None
         ][:_CONTEXT_LIMIT]
-        missing_ids = list(dict.fromkeys(missing_ids))[:10]
+        missing_ids = list(dict.fromkeys(missing_ids))[:_CONTEXT_LIMIT]
         return Result(
             next="done",
             status="unchanged" if unchanged else "applied",

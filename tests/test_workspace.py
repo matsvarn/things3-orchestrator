@@ -4747,6 +4747,79 @@ def test_inbox_review_is_a_batch_commit_token() -> None:
     assert second.someday is True
 
 
+def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    module = workspace(records)
+
+    first = module.read(ReadCall(view="audit", limit=10))
+    assert first.truncated is True
+    assert first.cursor is not None
+    assert first.context is not None
+    assert first.context.complete is False
+    first_refs = {item.id: item.ref for item in first.items}
+    assert len(first_refs) == 10
+
+    second = module.read(ReadCall(cursor=first.cursor, limit=10))
+    assert second.context is not None
+    assert second.context.id == first.context.id
+    assert second.context.complete is False
+    second_refs = {item.id: item.ref for item in second.items}
+    assert len(second_refs) == 10
+    assert set(first_refs).isdisjoint(second_refs)
+
+    third = module.read(ReadCall(cursor=second.cursor, limit=10))
+    assert third.context is not None
+    assert third.context.id == first.context.id
+    assert third.context.complete is True
+    assert third.truncated is False
+
+    filed = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "audit-batch-001",
+                "context_id": first.context.id,
+                "change": [
+                    {"ref": first_refs["task:item-00"], "start": "someday"},
+                    {"ref": second_refs["task:item-10"], "start": "someday"},
+                ],
+            }
+        )
+    )
+    assert filed.status == "applied"
+
+
+def test_applied_receipt_names_every_purged_id() -> None:
+    gone = [
+        Record(uuid=f"gone-{index:02d}", kind="task", title=f"Gone {index:02d}", trashed=True)
+        for index in range(11)
+    ]
+    module = workspace(gone)
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "purge-eleven-001",
+                "change": [
+                    {
+                        "id": item.id,
+                        "if_revision": detail(module, item.id).revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                    for item in gone
+                ],
+            }
+        )
+    )
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert len(applied.missing_ids) == 11
+    assert set(applied.missing_ids) == {item.id for item in gone}
+
+
 def test_logbook_defaults_to_the_last_fourteen_days() -> None:
     recent = Record(
         uuid="recent",
@@ -6043,7 +6116,7 @@ def test_permanent_heading_delete_receipt_names_the_gone_id() -> None:
     assert prepared.plan is not None
     applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
     assert applied.status == "applied"
-    assert applied.missing_ids == ["task:gone"]
+    assert applied.missing_ids == ["heading:gone"]
     assert heading.uuid not in module._library.records  # noqa: SLF001
 
 

@@ -167,7 +167,9 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
         signals.append("malformed_repeat")
     if item.recurrence.role == "instance" and item.recurrence.repeat_type == "unknown":
         signals.append("malformed_repeat")
-    if any(item.title.startswith(prefix) for prefix in _TEST_RESIDUE_PREFIXES):
+    if not item.trashed and any(
+        item.title.startswith(prefix) for prefix in _TEST_RESIDUE_PREFIXES
+    ):
         signals.append("test_residue")
     return signals
 

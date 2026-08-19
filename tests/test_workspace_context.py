@@ -142,8 +142,7 @@ def test_task_change_context_moves_across_projects_in_one_commit(
     refs = {item.id: item.ref for item in read.items}
     assert refs[destination.id] is not None
     assert refs[destination_heading.id] is not None
-    assert next(item for item in read.items if item.id == destination.id).revision
-    assert next(item for item in read.items if item.id == destination_heading.id).revision
+    assert all(item.revision is None for item in read.items)
 
     change: dict[str, str] = {
         "ref": refs[task.id],
@@ -672,9 +671,7 @@ def test_organize_read_accepts_exact_project_id_and_exposes_merge_registry() -> 
     assert result.status == "ok"
     assert result.context and result.context.complete
     facts = {item.id: item for item in result.items}
-    assert facts[destination.id].revision is not None
-    assert facts[destination_area.id].revision is not None
-    assert facts[source.id].revision is None
+    assert all(item.revision is None for item in result.items)
     assert result.layouts[0].project_ref == facts[source.id].ref
     assert result.layouts[0].sections[0].task_refs == [facts[task.id].ref]
 
@@ -1138,6 +1135,7 @@ def test_organize_include_adds_a_second_complete_project_scope() -> None:
     )
     assert read.context is not None
     assert len(read.layouts) == 2
+    assert all(item.revision is None for item in read.items)
     refs = {item.id: item.ref for item in read.items}
 
     result = workspace.commit(
