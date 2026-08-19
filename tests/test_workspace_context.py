@@ -643,6 +643,22 @@ def test_trashed_project_change_lists_contained_records() -> None:
     assert "trashed" in result.items[0].signals
     assert "4 contained records" in result.instruction
     assert heading.id.startswith("heading:")
+    assert result.layouts
+    assert [layout.complete for layout in result.layouts] == [True, True]
+    facts = {item.id: item.ref for item in result.items}
+    root_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[project.id]
+    )
+    assert [section.heading_ref for section in root_layout.sections] == [
+        facts[heading.id]
+    ]
+    assert root_layout.sections[0].task_refs == [facts[task.id]]
+    assert root_layout.sections[0].hidden_count == 0
+    nested_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[nested.id]
+    )
+    assert nested_layout.sections[0].heading_ref is None
+    assert nested_layout.sections[0].task_refs == [facts[leaf.id]]
 
     refs = {item.id: item.ref for item in result.items}
     prepared = workspace.commit(
@@ -1031,7 +1047,11 @@ def test_trashed_project_organize_returns_the_contained_tree(selector: str) -> N
     assert result.status == "ok"
     assert result.context is not None
     assert {item.id for item in result.items} == {project.id, child.id}
-    assert result.layouts == []
+    assert result.layouts
+    assert result.layouts[0].complete
+    facts = {item.id: item.ref for item in result.items}
+    assert result.layouts[0].project_ref == facts[project.id]
+    assert result.layouts[0].sections[0].task_refs == [facts[child.id]]
     assert "contained records" in result.instruction
 
 

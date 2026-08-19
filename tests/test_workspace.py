@@ -560,6 +560,8 @@ def test_trash_view_returns_recoverable_exact_items() -> None:
 
     assert [item.id for item in result.items] == [trashed.id]
     assert "trashed" in result.items[0].signals
+    assert "Read an item to restore or purge." in result.instruction
+    assert "purpose=change" not in result.instruction
 
 
 def test_exact_read_bounds_external_text_and_order_facts() -> None:
@@ -6317,3 +6319,5 @@ def test_find_within_trash_ignores_living_notes_hits() -> None:
     trash_hit = module.read(ReadCall(find="Later", within="trash"))
     assert [item.id for item in trash_hit.items] == [heading.id]
     assert "trashed" in trash_hit.items[0].signals
+    assert "Read one to restore or purge." in trash_hit.instruction
+    assert "purpose=change" not in trash_hit.instruction
