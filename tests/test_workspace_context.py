@@ -509,7 +509,7 @@ def test_area_change_include_binds_a_destination_area() -> None:
     assert {item.id for item in included.items} == {current.id, destination.id}
 
 
-def test_living_project_change_does_not_list_children() -> None:
+def test_living_project_change_is_the_writable_neighborhood() -> None:
     area = Record(uuid="work", kind="area", title="Work")
     project = Record(
         uuid="launch", kind="project", title="Launch", area_uuid=area.uuid
@@ -528,15 +528,57 @@ def test_living_project_change_does_not_list_children() -> None:
         parent_uuid=project.uuid,
         heading_uuid=heading.uuid,
     )
-    workspace, _library, _store = contextual_workspace(
-        [area, project, heading, task]
+    hidden = Record(
+        uuid="gone",
+        kind="task",
+        title="Gone",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    workspace, library, _store = contextual_workspace(
+        [area, project, heading, task, hidden]
     )
 
     result = workspace.read(ReadCall(purpose="change", id=project.id))
 
     assert result.status == "ok"
-    assert {item.id for item in result.items} == {project.id, area.id}
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        hidden.id,
+    }
+    assert result.layouts
+    assert result.layouts[0].complete
+    section = next(
+        row for row in result.layouts[0].sections if row.heading_ref is not None
+    )
+    assert section.hidden_count == 1
     assert "contained records" not in result.instruction
+    refs = {item.id: item.ref for item in result.items}
+    drafted = workspace.commit(
+        CommitCall(
+            intent_id="living-project-draft-001",
+            context_id=result.context.id,
+            organize=[
+                {
+                    "project_ref": refs[project.id],
+                    "delete_headings": [refs[heading.id]],
+                }
+            ],
+        )
+    )
+    assert drafted.status == "needs_approval"
+    assert drafted.plan is not None
+    applied = workspace.approve(ApproveCall(plan_id=drafted.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in library.records
+    assert library.records[task.uuid].parent_uuid == project.uuid
+    assert library.records[task.uuid].heading_uuid is None
 
 
 def test_trashed_project_change_lists_contained_records() -> None:
@@ -937,20 +979,45 @@ def test_organize_find_requires_one_project() -> None:
     assert "2 active Projects" in result.instruction
 
 
-@pytest.mark.parametrize("selector", ["id", "view", "find"])
+@pytest.mark.parametrize("selector", ["id", "view"])
 @pytest.mark.parametrize(
     "state",
     [
         {"status": "done"},
-        {"trashed": True},
         {"recurrence": RecurrenceState(role="template")},
     ],
 )
-def test_organize_rejects_non_active_visible_projects_without_context(
+def test_organize_of_a_closed_project_returns_the_writable_neighborhood(
     selector: str, state: dict[str, object]
 ) -> None:
     project = Record(uuid="closed", kind="project", title="Closed Project", **state)
     workspace, _library, _store = contextual_workspace([project])
+    call_data: dict[str, object] = {"purpose": "organize"}
+    if selector == "id":
+        call_data["id"] = project.id
+    else:
+        call_data.update({"view": "project", "within": project.id})
+
+    result = workspace.read(ReadCall(**call_data))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert {item.id for item in result.items} == {project.id}
+
+
+@pytest.mark.parametrize("selector", ["id", "view", "find"])
+def test_trashed_project_organize_returns_the_contained_tree(selector: str) -> None:
+    project = Record(
+        uuid="closed", kind="project", title="Closed Project", trashed=True
+    )
+    child = Record(
+        uuid="inside",
+        kind="task",
+        title="Inside",
+        parent_uuid=project.uuid,
+        trashed=True,
+    )
+    workspace, _library, _store = contextual_workspace([project, child])
     call_data: dict[str, object] = {"purpose": "organize"}
     if selector == "id":
         call_data["id"] = project.id
@@ -961,18 +1028,11 @@ def test_organize_rejects_non_active_visible_projects_without_context(
 
     result = workspace.read(ReadCall(**call_data))
 
-    assert result.status == "needs_input"
-    assert result.context is None
-    assert result.recovery and result.recovery.code == "context_required"
-    if state.get("trashed"):
-        assert result.recovery.read == {"purpose": "change", "id": project.id}
-        assert result.next == "read"
-        assert "Trash" in result.instruction
-    else:
-        assert result.recovery.read != {
-            "purpose": "organize",
-            "id": project.id,
-        }
+    assert result.status == "ok"
+    assert result.context is not None
+    assert {item.id for item in result.items} == {project.id, child.id}
+    assert result.layouts == []
+    assert "contained records" in result.instruction
 
 
 def test_organize_read_uses_context_budget_not_normal_read_limit() -> None:
@@ -1025,11 +1085,8 @@ def test_organize_read_guides_recovery_above_context_budget() -> None:
     assert result.context is None
     assert result.recovery and result.recovery.code == "context_incomplete"
     assert result.recovery.retry == "rebuild"
-    assert result.recovery.read == {
-        "view": "project",
-        "within": project.id,
-        "limit": 40,
-    }
+    assert result.recovery.read == {"ids": [project.id]}
+    assert "if_revision" in result.instruction
 
 
 def test_system_review_stays_an_exact_registry_read() -> None:

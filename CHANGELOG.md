@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-19
+
+One Project read. Same three tools.
+
+### Changed
+
+- A Project id, a Project change, and `purpose=organize` return the
+  writable neighborhood: Area, layout, hidden occupants, and if it is
+  in Trash, the contained records. Organize drafts compile from that
+  complete Project scope. They do not require `purpose=organize` on
+  the read.
+- Create entries may name a heading defined later in the same array.
+  The commit interface orders local dependencies.
+- The main skill names teardown: do not use `view=trash` alone.
+
 ## 0.3.3 — 2026-08-19
 
 Tell the truth about truncated-page copy and trashed Project change.

@@ -322,24 +322,17 @@ class ThingsWorkspace:
                 and item.kind in {"area", "project"}
                 and not item.heading
             ):
-                container_view: View = "area" if item.kind == "area" else "project"
-                children = (
-                    self._library.area(item.id)
-                    if item.kind == "area"
-                    else self._library.project(item.id)
-                )
-                instruction = (
-                    "This Area, its loose tasks, and its Projects. "
-                    "Read a Project for its children."
-                    if item.kind == "area"
-                    else "Use this review as current evidence."
-                )
+                if item.kind == "project":
+                    return self._writable_project(item, call)
                 return self._page(
-                    children,
+                    self._library.area(item.id),
                     call.limit,
                     full=False,
-                    instruction=instruction,
-                    view=container_view,
+                    instruction=(
+                        "This Area, its loose tasks, and its Projects. "
+                        "Read a Project for its layout and contents."
+                    ),
+                    view="area",
                     call=call,
                 )
             return self._detail_page(
@@ -429,6 +422,13 @@ class ThingsWorkspace:
 
         if view == "diagnostics":
             return self._diagnostics_page(call.limit, call=call)
+        if view == "project":
+            container = call.within or call.id
+            assert container is not None
+            project = self._exact_item(container)
+            if project is None or project.kind != "project" or project.heading:
+                return self._needs_input("I could not find that exact Project.")
+            return self._writable_project(project, call)
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
@@ -454,7 +454,7 @@ class ThingsWorkspace:
         elif view == "area":
             instruction = (
                 "This Area, its loose tasks, and its Projects. "
-                "Read a Project for its children."
+                "Read a Project for its layout and contents."
             )
         return self._page(
             visible,
@@ -647,6 +647,8 @@ class ThingsWorkspace:
                     ],
                 )
             target = matches[0]
+        if target.kind == "project" and not target.heading:
+            return self._writable_project(target, call)
         if not self._context_detail_is_complete(target):
             return self._context_recovery(
                 code="context_incomplete",
@@ -658,27 +660,12 @@ class ThingsWorkspace:
                 read=self._selector_arguments(call),
                 status="unsupported",
             )
-        trashed_project = target.kind == "project" and target.trashed
         try:
             neighborhood = self._neighborhood_collect(target)
             self._neighborhood_include(neighborhood, call)
         except _Abort as error:
             return error.result
         if len(neighborhood.records) > _CONTEXT_LIMIT:
-            if trashed_project:
-                return self._context_recovery(
-                    code="context_incomplete",
-                    instruction=(
-                        f"This Project is in Trash with {len(neighborhood.records)} "
-                        "required items. "
-                        f"A safe context can contain at most {_CONTEXT_LIMIT}. "
-                        "Read the exact Project and restore or permanently delete "
-                        "with id and if_revision."
-                    ),
-                    retry="rebuild",
-                    read={"ids": [target.id]},
-                    status="needs_input",
-                )
             return self._oversized_context(call, len(neighborhood.records))
         refs, by_id = self._context_refs(neighborhood.records)
         context = self._create_context(
@@ -698,19 +685,10 @@ class ThingsWorkspace:
             "Use context_id and short refs for one coherent change. "
             "Omitted item fields remain unchanged. Include a destination to move."
         )
-        if trashed_project:
-            contained = len(self._project_descendants(target.uuid))
-            instruction = (
-                f"{instruction} This Project is in Trash with {contained} contained records."
-                if contained
-                else f"{instruction} This Project is in Trash."
-            )
         if neighborhood.include_note:
             instruction = f"{instruction} {neighborhood.include_note}"
         if target.kind == "area":
             scope_revision = self._area_scope_revision()
-        elif trashed_project:
-            scope_revision = self._project_scope_revision(target.uuid)
         else:
             scope_revision = self._detail_revision(target)
         return Result(
@@ -725,11 +703,7 @@ class ThingsWorkspace:
         )
 
     def _neighborhood_collect(self, target: Record) -> _Neighborhood:
-        """Collect the local neighborhood for one change target.
-
-        A trashed Project also includes the contained records restore or purge
-        will write.
-        """
+        """Collect the local neighborhood for one Task, Area, or heading change."""
         neighborhood = _Neighborhood()
 
         def place(item: Record) -> None:
@@ -855,11 +829,7 @@ class ThingsWorkspace:
         project: Record | None = None
         if call.id is not None:
             project = self._exact_item(call.id)
-            if (
-                project is None
-                or project.kind != "project"
-                or not project.is_open()
-            ):
+            if project is None or project.kind != "project" or project.heading:
                 return self._organize_unavailable(project)
         elif call.find is not None:
             within = self._exact_item(call.within) if call.within else None
@@ -926,7 +896,7 @@ class ThingsWorkspace:
                         and item.trashed
                     ]
                     if len(closed_projects) == 1:
-                        return self._organize_unavailable(closed_projects[0])
+                        return self._writable_project(closed_projects[0], call)
                     orphans = [
                         item
                         for item in self._library.records.values()
@@ -977,61 +947,83 @@ class ThingsWorkspace:
         elif call.view == "project":
             assert call.within is not None
             project = self._exact_item(call.within)
-            if (
-                project is None
-                or project.kind != "project"
-                or not project.is_open()
-            ):
+            if project is None or project.kind != "project" or project.heading:
                 return self._organize_unavailable(project)
         else:
             raise AssertionError("organize selector must identify a Project")
         assert project is not None
-        source_records = self._library.project(project.id)
+        return self._writable_project(project, call)
+
+    def _writable_project(self, project: Record, call: ReadCall) -> Result:
+        """Return the one writable Project neighborhood."""
         neighborhood = _Neighborhood()
-        for record in source_records:
-            neighborhood.add(record)
-        hidden = self._hidden_project_occupants(project.uuid)
-        if len(source_records) + len(hidden) <= _CONTEXT_LIMIT:
-            for record in hidden:
+        neighborhood.add(project)
+        neighborhood.add(self._library.records.get(project.area_uuid or ""))
+        source_records = [project]
+        if project.trashed:
+            for descendant in reversed(self._project_descendants(project.uuid)):
+                neighborhood.add(descendant)
+        else:
+            source_records = self._library.project(project.id)
+            for record in source_records:
+                neighborhood.add(record)
+            for record in self._hidden_project_occupants(project.uuid):
                 neighborhood.add(record)
         self._neighborhood_include(neighborhood, call)
         extra_projects: list[Record] = []
         for record in list(neighborhood.records):
-            if record.kind == "project" and record.uuid != project.uuid:
-                members = self._library.project(record.id)
-                extra_projects.append(record)
-                for member in members:
-                    neighborhood.add(member)
+            if record.kind != "project" or record.uuid == project.uuid:
+                continue
+            extra_projects.append(record)
+            if record.trashed:
+                for descendant in reversed(self._project_descendants(record.uuid)):
+                    neighborhood.add(descendant)
+                continue
+            members = self._library.project(record.id)
+            for member in members:
+                neighborhood.add(member)
+            for occupant in self._hidden_project_occupants(record.uuid):
+                neighborhood.add(occupant)
         if len(neighborhood.records) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(neighborhood.records))
+            return self._project_overflow(call, project, len(neighborhood.records))
         refs, by_id = self._context_refs(neighborhood.records)
         scopes = [project.id, *[item.id for item in extra_projects]]
         context = self._create_context(call, refs, scopes=scopes)
         facts = [
             self._fact(
                 record,
-                full=False,
+                full=record.uuid == project.uuid,
                 include_revision=False,
             ).model_copy(update={"ref": by_id[record.id]})
             for record in neighborhood.records
         ]
+        layouts: list[LayoutFact] = []
+        if not project.trashed:
+            layouts.append(self._project_layout(project, source_records, by_id))
+            layouts.extend(
+                self._project_layout(item, self._library.project(item.id), by_id)
+                for item in extra_projects
+                if not item.trashed
+            )
         instruction = (
-            "Use one organize draft with this context. Listed work can move; "
-            "unlisted work stays unchanged. Name new headings from the groups "
-            "the tasks already form. Include a destination Project to merge. "
+            "Use this context to rename, date, trash, or send one organize draft. "
+            "Listed work can move; unlisted work stays unchanged. "
             "Empty open sections can still have hidden occupants."
         )
+        if project.trashed:
+            contained = len(self._project_descendants(project.uuid))
+            instruction = (
+                f"This Project is in Trash with {contained} contained records. "
+                "Restore or permanently delete with this context."
+                if contained
+                else "This Project is in Trash. Restore or permanently delete with this context."
+            )
         if extra_projects:
             instruction = (
                 f"{instruction} Included Projects can be organized in this same commit."
             )
         if neighborhood.include_note:
             instruction = f"{instruction} {neighborhood.include_note}"
-        layouts = [self._project_layout(project, source_records, by_id)]
-        layouts.extend(
-            self._project_layout(item, self._library.project(item.id), by_id)
-            for item in extra_projects
-        )
         return Result(
             next="done",
             status="ok",
@@ -1044,23 +1036,23 @@ class ThingsWorkspace:
             missing_ids=neighborhood.missing_ids,
         )
 
-    def _organize_unavailable(self, project: Record | None) -> Result:
+    def _project_overflow(
+        self, call: ReadCall, project: Record, count: int
+    ) -> Result:
+        return self._context_recovery(
+            code="context_incomplete",
+            instruction=(
+                f"This Project has {count} required items. A safe context can contain "
+                f"at most {_CONTEXT_LIMIT}. Search within it, or change the Project "
+                "with id and if_revision."
+            ),
+            retry="rebuild",
+            read={"ids": [project.id]},
+            status="needs_input",
+        )
+
+    def _organize_unavailable(self, _project: Record | None) -> Result:
         """Point organize recovery at a live look, never the same dead selector."""
-        if project is not None and project.kind == "project" and project.trashed:
-            return Result(
-                next="read",
-                status="needs_input",
-                instruction=(
-                    "This Project is in Trash. "
-                    "Restore it with purpose=change, or read view=trash."
-                ),
-                items=[self._fact(project, full=False, include_revision=False)],
-                recovery=RecoveryFact(
-                    code="context_required",
-                    retry="read",
-                    read={"purpose": "change", "id": project.id},
-                ),
-            )
         return self._context_recovery(
             code="context_required",
             instruction=(
