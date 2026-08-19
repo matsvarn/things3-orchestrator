@@ -191,10 +191,13 @@ class ContextualCommitCompiler:
                 # contextual seam to write an unrelated exact item. Keep this
                 # form tolerant: callers that already have an exact id and
                 # revision need not spend another turn converting to a ref.
+                # An id without if_revision is bound from the context snapshot.
                 assert isinstance(change.id, str)
-                assert isinstance(change.if_revision, str)
                 bound = index.exact(change.id)
-                if change.if_revision != bound.context.revision:
+                if (
+                    change.if_revision is not None
+                    and change.if_revision != bound.context.revision
+                ):
                     raise ContextualInputError(
                         "The exact item revision does not match this context. "
                         "Read the item again."
@@ -392,7 +395,22 @@ class ContextualCommitCompiler:
                     f"{_kind_phrase({str(created_kind)}, article=False)}"
                 )
             return value
-        bound = index.ref(value) if _SHORT_REF.fullmatch(value) else index.exact(value)
+        if _SHORT_REF.fullmatch(value):
+            bound = index.ref(value)
+        else:
+            try:
+                bound = index.exact(value)
+            except ContextualCompileError:
+                record = _exact_record(index._library, value)
+                if record is None:
+                    raise
+                if record.public_kind not in allowed:
+                    expected = _kind_phrase(allowed)
+                    raise ContextualInputError(
+                        f"{label} must identify {expected}; got "
+                        f"{_kind_phrase({record.public_kind}, article=False)}"
+                    ) from None
+                return record.id
         if bound.record.public_kind not in allowed:
             expected = _kind_phrase(allowed)
             raise ContextualInputError(
@@ -418,10 +436,6 @@ class ContextualCommitCompiler:
         if not context.is_complete(project_id):
             raise ContextualCompileError(
                 f"organize needs complete Project scope: {project_id}"
-            )
-        if context.selector.view == "project" and context.selector.within != project_id:
-            raise ContextualCompileError(
-                "organize Project differs from the read context scope"
             )
         index.members(project)
 

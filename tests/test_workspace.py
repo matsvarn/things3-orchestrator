@@ -2711,6 +2711,70 @@ def test_heading_delete_clears_trashed_assigned_tasks_in_one_plan() -> None:
     assert task.heading_uuid is None
 
 
+def test_heading_delete_plan_is_one_write_and_ignores_hidden_child_ticks() -> None:
+    project = Record(uuid="heading-project", kind="project", title="Plan")
+    heading = Record(
+        uuid="heading-used",
+        kind="task",
+        title="Codex",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    hidden = Record(
+        uuid="heading-trashed-task",
+        kind="task",
+        title="Hidden",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+        today_index=10,
+    )
+    completed = Record(
+        uuid="heading-done-task",
+        kind="task",
+        title="Done",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        status="done",
+        today_index=20,
+    )
+    module = workspace([project, heading, hidden, completed])
+    current = detail(module, heading.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-delete-native-001",
+                "change": [
+                    {
+                        "id": heading.id,
+                        "if_revision": current.revision,
+                        "lifecycle": "delete_permanently",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    stored = module._journal.get("heading-delete-native-001")  # noqa: SLF001
+    assert stored is not None
+    writes = stored.plan["writes"]
+    assert [write["action"] for write in writes] == ["permanent_delete"]
+    assert writes[0]["uuid"] == heading.uuid
+    assert set(stored.plan["preconditions"]) == {heading.id}
+    assert any("stay in the Project" in warning for warning in result.plan.warnings)
+
+    hidden.today_index = 99
+    completed.today_index = 88
+    applied = module.approve(ApproveCall(plan_id=result.plan.id))
+    assert applied.status == "applied"
+    assert heading.uuid not in module._library.records  # noqa: SLF001
+    assert hidden.heading_uuid is None
+    assert completed.heading_uuid is None
+
+
 def test_project_heading_and_task_create_together_with_local_heading() -> None:
     module = workspace()
 
@@ -4622,6 +4686,91 @@ def test_area_view_returns_the_area_loose_tasks_and_projects() -> None:
     assert nested.id not in {item.id for item in result.items}
 
 
+def test_area_and_project_ids_expand_to_children_on_review() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=area.uuid,
+    )
+    loose = Record(uuid="buy-milk", kind="task", title="Buy milk", area_uuid=area.uuid)
+    nested = Record(
+        uuid="tap",
+        kind="task",
+        title="Replace tap",
+        parent_uuid=project.uuid,
+    )
+    module = workspace([area, project, loose, nested])
+
+    by_id = module.read(ReadCall(id=area.id))
+    by_view = module.read(ReadCall(view="area", id=area.id))
+
+    assert {item.id for item in by_id.items} == {area.id, project.id, loose.id}
+    assert {item.id for item in by_view.items} == {area.id, project.id, loose.id}
+    assert by_id.context is not None
+    assert by_id.items[0].ref is not None
+
+    project_read = module.read(ReadCall(id=project.id))
+    assert {item.id for item in project_read.items} == {project.id, nested.id}
+    assert project_read.context is not None
+
+
+def test_inbox_review_is_a_batch_commit_token() -> None:
+    first = Record(uuid="one", kind="task", title="File this", inbox=True)
+    second = Record(uuid="two", kind="task", title="Drop this", inbox=True)
+    area = Record(uuid="home", kind="area", title="Home")
+    module = workspace([first, second, area])
+
+    inbox = module.read(ReadCall(view="inbox"))
+    assert inbox.context is not None
+    refs = {item.title: item.ref for item in inbox.items}
+    assert refs["File this"] and refs["Drop this"]
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "inbox-walk-001",
+                "context_id": inbox.context.id,
+                "change": [
+                    {"ref": refs["File this"], "into": area.id},
+                    {"ref": refs["Drop this"], "start": "someday"},
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert first.area_uuid == area.uuid
+    assert first.inbox is False
+    assert second.someday is True
+
+
+def test_logbook_defaults_to_the_last_fourteen_days() -> None:
+    recent = Record(
+        uuid="recent",
+        kind="task",
+        title="Recent",
+        status="done",
+        completed_at=NOW - timedelta(days=2),
+    )
+    old = Record(
+        uuid="old",
+        kind="task",
+        title="Old",
+        status="done",
+        completed_at=NOW - timedelta(days=20),
+    )
+    module = workspace([recent, old])
+
+    result = module.read(ReadCall(view="logbook"))
+
+    assert result.status == "ok"
+    assert [item.id for item in result.items] == [recent.id]
+    assert "2026-08-02" in result.instruction
+    assert "2026-08-15" in result.instruction
+
+
 def test_audit_view_lists_each_active_item_once() -> None:
     area = Record(uuid="home", kind="area", title="Home")
     project = Record(
@@ -5516,7 +5665,7 @@ def test_approval_plan_groups_source_to_destination_moves() -> None:
 
     assert result.status == "needs_approval"
     assert result.plan is not None
-    assert any("Inbox → project:kitchen" in line for line in result.plan.summary)
+    assert any("Inbox → Kitchen" in line for line in result.plan.summary)
     assert any(
         task.id in section.item_ids and "Inbox" in section.title
         for section in result.sections
@@ -5561,7 +5710,7 @@ def test_approval_plan_groups_anytime_destination() -> None:
 
     assert result.status == "needs_approval"
     assert result.plan is not None
-    assert any("project:launch → Anytime" in line for line in result.plan.summary)
+    assert any("Launch → Anytime" in line for line in result.plan.summary)
 
 
 def test_project_restore_returns_the_trashed_subtree() -> None:

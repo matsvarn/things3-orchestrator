@@ -231,7 +231,14 @@ class ReadCall(StrictModel):
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
             selectors += 1
-        if selectors > 1:
+        container_address = (
+            self.view in {"area", "project"}
+            and self.id is not None
+            and self.id.startswith(f"{self.view}:")
+            and self.find is None
+            and not self.ids
+        )
+        if selectors > 1 and not container_address:
             raise ValueError("use only one of view, id, find, or ids")
         if "ids" in self.model_fields_set and not self.ids:
             raise ValueError("ids needs at least one exact item ID")
@@ -262,26 +269,32 @@ class ReadCall(StrictModel):
             "area",
         }:
             raise ValueError("within needs find, view project, or view area")
-        if self.view == "project" and (
-            self.within is None or not self.within.startswith("project:")
-        ):
-            raise ValueError("view project needs within as an exact Project id")
-        if self.view == "area" and (
-            self.within is None or not self.within.startswith("area:")
-        ):
-            raise ValueError("view area needs within as an exact Area id")
+        if self.view == "project":
+            container = self.within or (
+                self.id if self.id is not None and self.id.startswith("project:") else None
+            )
+            if container is None or not container.startswith("project:"):
+                raise ValueError(
+                    "view project needs id or within as an exact Project id"
+                )
+        if self.view == "area":
+            container = self.within or (
+                self.id if self.id is not None and self.id.startswith("area:") else None
+            )
+            if container is None or not container.startswith("area:"):
+                raise ValueError("view area needs id or within as an exact Area id")
         has_range = self.from_date is not None or self.to_date is not None
         if has_range and self.view != "logbook":
             raise ValueError("from and to need view logbook")
-        if self.view == "logbook" and (self.from_date is None or self.to_date is None):
-            raise ValueError("view logbook needs from and to")
+        if self.view == "logbook" and (self.from_date is None) != (self.to_date is None):
+            raise ValueError("view logbook needs both from and to, or neither")
         if self.from_date is not None and self.to_date is not None:
             if self.from_date > self.to_date:
                 raise ValueError("from must not be after to")
         if self.purpose == "change" and self.id is None and self.find is None:
             raise ValueError("change purpose needs an exact id or unique find")
-        if self.include and self.purpose not in {"change", "organize"}:
-            raise ValueError("include is only available for change or organize")
+        if self.include and self.purpose not in {"review", "change", "organize"}:
+            raise ValueError("include is only available for review, change, or organize")
         if self.purpose == "recurrence" and self.id is None:
             raise ValueError("recurrence purpose needs an exact Task id")
         if self.purpose == "recurrence" and any(
@@ -614,13 +627,14 @@ class ChangeEntry(StrictModel):
     @model_validator(mode="after")
     def valid_change(self) -> Self:
         exact = self.id is not None or self.if_revision is not None
-        if self.ref is None and exact and (self.id is None or self.if_revision is None):
+        if self.ref is None and self.if_revision is not None and self.id is None:
             raise ValueError("an exact change needs id and if_revision")
         # A model can copy the exact identity from the contextual result while
         # also sending its short ref.  Keep that request valid, then let the
         # contextual compiler prove that both identities match.  This keeps
         # ref-only changes the normal path without turning a mismatch into a
-        # silent overwrite.
+        # silent overwrite. An id without if_revision is valid only when a
+        # context binds that id; CommitCall enforces the context_id.
         if self.ref is None and not exact:
             raise ValueError("a change needs an exact id or context ref")
         meaningful = any(
@@ -828,7 +842,7 @@ class OrganizeSection(StrictModel):
 
 class OrganizeDraft(StrictModel):
     project_ref: str = Field(pattern=_SHORT_REF, max_length=12)
-    sections: list[OrganizeSection] = Field(min_length=1, max_length=120)
+    sections: list[OrganizeSection] = Field(default_factory=list, max_length=120)
     delete_headings: list[str] = Field(default_factory=list, max_length=120)
     unlisted: Literal["keep"] = "keep"
 
@@ -860,6 +874,8 @@ class OrganizeDraft(StrictModel):
             raise ValueError("each heading can appear in one organize section")
         if set(headings).intersection(self.delete_headings):
             raise ValueError("a heading cannot be kept and deleted")
+        if not self.sections and not self.delete_headings:
+            raise ValueError("an organize draft needs sections or headings to delete")
         return self
 
 
@@ -882,8 +898,14 @@ class CommitCall(StrictModel):
         context_refs = [entry.ref for entry in self.change if entry.ref is not None]
         if _duplicates(context_refs):
             raise ValueError("each context item can change once")
-        if (context_refs or self.organize) and self.context_id is None:
-            raise ValueError("context refs need context_id")
+        needs_context = bool(context_refs or self.organize) or any(
+            entry.id is not None and entry.if_revision is None and entry.ref is None
+            for entry in self.change
+        )
+        if needs_context and self.context_id is None:
+            raise ValueError(
+                "context refs need context_id; an exact change needs id and if_revision"
+            )
         project_refs = [draft.project_ref for draft in self.organize]
         if _duplicates(project_refs):
             raise ValueError("each Project can have one organize draft")
@@ -1293,6 +1315,8 @@ class ContextFact(StrictModel):
 class LayoutSectionFact(StrictModel):
     heading_ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
     task_refs: list[str] = Field(default_factory=list, max_length=120)
+    hidden_count: int = Field(default=0, ge=0, le=10_000)
+    hidden_signals: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("task_refs")
     @classmethod
@@ -1301,6 +1325,13 @@ class LayoutSectionFact(StrictModel):
             re.fullmatch(_SHORT_REF, item) is None for item in value
         ):
             raise ValueError("layout task_refs need unique context refs")
+        return value
+
+    @field_validator("hidden_signals")
+    @classmethod
+    def unique_hidden_signals(cls, value: list[str]) -> list[str]:
+        if _duplicates(value):
+            raise ValueError("hidden_signals cannot contain duplicates")
         return value
 
 
@@ -1742,7 +1773,7 @@ _ORGANIZE_SECTION: dict[str, Any] = {
 _ORGANIZE: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["project_ref", "sections"],
+    "required": ["project_ref"],
     "properties": {
         "project_ref": {
             "type": "string",
@@ -1751,9 +1782,9 @@ _ORGANIZE: dict[str, Any] = {
         },
         "sections": {
             "type": "array",
-            "minItems": 1,
             "maxItems": 120,
             "items": _ORGANIZE_SECTION,
+            "default": [],
         },
         "delete_headings": {
             "type": "array",
@@ -2004,6 +2035,19 @@ _LAYOUT_SECTION: dict[str, Any] = {
             "maxItems": 120,
             "items": {"type": "string", "pattern": _SHORT_REF},
         },
+        "hidden_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10_000,
+            "default": 0,
+        },
+        "hidden_signals": {
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+            "default": [],
+        },
     },
 }
 
@@ -2234,22 +2278,26 @@ APPROVE_OUT: dict[str, Any] = {
 READ_DESC = (
     "Read Things. Empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. "
+    "An Area or Project id lists children. view=area and view=project also take within. "
     "purpose=change is one item; organize is one Project; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change or organize read returns the local neighborhood. Include a destination to move or merge. "
+    "Review pages return a context and short refs. "
+    "view=logbook defaults to the last 14 days. "
     "within=trash searches Trash by title. "
     "Send a cursor alone to continue. Follow next and instruction."
 )
 COMMIT_DESC = (
     "Commit one decided batch with a durable intent_id. "
-    "Prefer context_id and short refs from a change or organize read. "
+    "Prefer context_id and short refs from a review, change, or organize read. "
+    "An exact change needs id and if_revision. "
     "Define local refs before use and parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "
     "If the response is lost or pending, retry the same intent_id and payload. "
     "Follow next and instruction."
 )
 APPROVE_DESC = (
-    "After clear owner confirmation, apply the exact returned plan. Send only plan_id and keep "
+    "After a clear yes from the owner, apply that plan. Send only plan_id. Keep "
     "that ID private. "
     "If it is stale, read and prepare again. Follow next and instruction."
 )

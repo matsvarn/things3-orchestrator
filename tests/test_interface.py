@@ -54,6 +54,10 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
     )
     assert call.from_date == "2026-08-01"
     assert call.model_dump(by_alias=True)["from"] == "2026-08-01"
+    assert ReadCall.model_validate({"view": "logbook"}).to_date is None
+    area = ReadCall.model_validate({"view": "area", "id": "area:home"})
+    assert area.id == "area:home"
+    assert ReadCall.model_validate({"id": "area:home"}).id == "area:home"
 
 
 @pytest.mark.parametrize(
@@ -145,9 +149,13 @@ def test_change_include_is_compact_and_bounded() -> None:
         ReadCall.model_validate(
             {"purpose": "change", "id": "task:target", "include": [{}]}
         )
+    review_include = ReadCall.model_validate(
+        {"purpose": "review", "view": "inbox", "include": [{"id": "area:home"}]}
+    )
+    assert review_include.include[0].id == "area:home"
     with pytest.raises(ValidationError, match="only available"):
         ReadCall.model_validate(
-            {"purpose": "review", "include": [{"id": "task:anchor"}]}
+            {"purpose": "recurrence", "id": "task:repeat", "include": [{"id": "task:anchor"}]}
         )
     assert (
         ReadCall.model_validate(
@@ -434,6 +442,16 @@ def test_organize_draft_supports_existing_new_and_unheaded_sections() -> None:
     assert draft.unlisted == "keep"
     assert draft.sections[1].heading_title == "Later"
     assert draft.sections[2].heading_ref is None
+    delete_only = CommitCall.model_validate(
+        {
+            "intent_id": "organize-delete-only-001",
+            "context_id": "ctx_12345678",
+            "organize": [
+                {"project_ref": "p1", "delete_headings": ["h2"]},
+            ],
+        }
+    )
+    assert delete_only.organize[0].sections == []
 
     with pytest.raises(ValidationError, match="context refs need context_id"):
         CommitCall.model_validate(

@@ -67,9 +67,14 @@ _FIELD_REPAIR = {
         "in this same commit"
     ),
     "within": (
-        "view project needs within as project:<id>; view area needs within as "
-        "area:<id>; within=trash needs find"
+        "view project needs id or within as project:<id>; view area needs id or "
+        "within as area:<id>; within=trash needs find"
     ),
+    "if_revision": (
+        "an exact change needs id and if_revision, or a context_id that binds the item"
+    ),
+    "from": "view=logbook defaults to the last 14 days; send both from and to to override",
+    "to": "view=logbook defaults to the last 14 days; send both from and to to override",
     "view": (
         "Use one of today, inbox, week, system, project, area, audit, "
         "diagnostics, logbook, trash, or tags"

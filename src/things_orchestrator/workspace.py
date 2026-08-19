@@ -54,6 +54,7 @@ from .interface import (
     ReviewSection,
     TagFact,
     TruncatedField,
+    View,
     Weekday,
 )
 from .interface import (
@@ -92,6 +93,18 @@ _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 _PLAN_MINUTES = 30
 _PENDING_RETRY_LIMIT = 3
+_LOGBOOK_DAYS = 14
+_REVIEW_CONTEXT_VIEWS = {
+    "today",
+    "inbox",
+    "week",
+    "area",
+    "project",
+    "audit",
+    "logbook",
+    "trash",
+    "diagnostics",
+}
 _WEEKDAY_CODES = {
     "sunday": 0,
     "monday": 1,
@@ -225,6 +238,10 @@ class _ItemCursor:
     view: str | None
     detail: tuple[str, ...]
     expires_at: datetime
+    within: str | None = None
+    item_id: str | None = None
+    from_date: str | None = None
+    to_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +315,31 @@ class ThingsWorkspace:
                 return self._needs_input(
                     "I could not find that exact item. Read or search again."
                 )
+            if (
+                call.purpose == "review"
+                and item.kind in {"area", "project"}
+                and not item.heading
+            ):
+                container_view: View = "area" if item.kind == "area" else "project"
+                children = (
+                    self._library.area(item.id)
+                    if item.kind == "area"
+                    else self._library.project(item.id)
+                )
+                instruction = (
+                    "This Area, its loose tasks, and its Projects. "
+                    "Read a Project for its children."
+                    if item.kind == "area"
+                    else "Use this review as current evidence."
+                )
+                return self._page(
+                    children,
+                    call.limit,
+                    full=False,
+                    instruction=instruction,
+                    view=container_view,
+                    call=call,
+                )
             return self._detail_page(
                 item,
                 row_offset=0,
@@ -322,6 +364,7 @@ class ThingsWorkspace:
                         else "No Trash item matched that find."
                     ),
                     view="trash",
+                    call=call,
                 )
             within = self._exact_item(call.within) if call.within else None
             if call.within and within is None:
@@ -341,6 +384,7 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction="Use an exact ID for a change.",
+                    call=call,
                 )
             closed = [
                 item
@@ -361,12 +405,14 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction=instruction,
+                    call=call,
                 )
             return self._page(
                 matches,
                 call.limit,
                 full=False,
                 instruction="Use an exact ID for a change.",
+                call=call,
             )
 
         if view == "tags":
@@ -380,7 +426,7 @@ class ThingsWorkspace:
             return self._tag_page(rows, offset=0, limit=call.limit)
 
         if view == "diagnostics":
-            return self._diagnostics_page(call.limit)
+            return self._diagnostics_page(call.limit, call=call)
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
@@ -415,6 +461,7 @@ class ThingsWorkspace:
             instruction=instruction,
             view=view,
             public_scope=(self._area_scope_revision() if view == "system" else None),
+            call=call,
         )
 
     def _diagnostics_page(
@@ -424,6 +471,7 @@ class ThingsWorkspace:
         offset: int = 0,
         expected_ids: list[str] | None = None,
         expected_digest: str | None = None,
+        call: ReadCall | None = None,
     ) -> Result:
         conflicts = diagnose(self._library)
         ids = [row.item_id for row in conflicts]
@@ -448,12 +496,13 @@ class ThingsWorkspace:
                 "diagnostics",
             )
         diagnostics = [self._diagnostic_fact(row) for row in page]
-        items = [
-            self._fact(item, full=False)
+        records = [
+            item
             for row in page
             if (item := self._exact_item(row.item_id)) is not None
         ]
-        return self._follow_cursor(
+        items = [self._fact(item, full=False) for item in records]
+        result = self._follow_cursor(
             Result(
                 next="done",
                 status="ok",
@@ -469,6 +518,7 @@ class ThingsWorkspace:
                 truncated=cursor is not None,
             )
         )
+        return self._bind_review_context(result, call, records)
 
     def _diagnostic_title(self, conflict: Conflict) -> str:
         if conflict.item_id.startswith("tag:"):
@@ -613,7 +663,7 @@ class ThingsWorkspace:
         context = self._create_context(
             call,
             refs,
-            scope=f"change:{target.id}",
+            scopes=[f"change:{target.id}"],
         )
         facts = [
             self._fact(
@@ -903,11 +953,23 @@ class ThingsWorkspace:
         neighborhood = _Neighborhood()
         for record in source_records:
             neighborhood.add(record)
+        hidden = self._hidden_project_occupants(project.uuid)
+        if len(source_records) + len(hidden) <= _CONTEXT_LIMIT:
+            for record in hidden:
+                neighborhood.add(record)
         self._neighborhood_include(neighborhood, call)
+        extra_projects: list[Record] = []
+        for record in list(neighborhood.records):
+            if record.kind == "project" and record.uuid != project.uuid:
+                members = self._library.project(record.id)
+                extra_projects.append(record)
+                for member in members:
+                    neighborhood.add(member)
         if len(neighborhood.records) > _CONTEXT_LIMIT:
             return self._oversized_context(call, len(neighborhood.records))
         refs, by_id = self._context_refs(neighborhood.records)
-        context = self._create_context(call, refs, scope=project.id)
+        scopes = [project.id, *[item.id for item in extra_projects]]
+        context = self._create_context(call, refs, scopes=scopes)
         facts = [
             self._fact(
                 record,
@@ -919,16 +981,26 @@ class ThingsWorkspace:
         instruction = (
             "Use one organize draft with this context. Listed work can move; "
             "unlisted work stays unchanged. Name new headings from the groups "
-            "the tasks already form. Include a destination Project to merge."
+            "the tasks already form. Include a destination Project to merge. "
+            "Empty open sections can still have hidden occupants."
         )
+        if extra_projects:
+            instruction = (
+                f"{instruction} Included Projects can be organized in this same commit."
+            )
         if neighborhood.include_note:
             instruction = f"{instruction} {neighborhood.include_note}"
+        layouts = [self._project_layout(project, source_records, by_id)]
+        layouts.extend(
+            self._project_layout(item, self._library.project(item.id), by_id)
+            for item in extra_projects
+        )
         return Result(
             next="done",
             status="ok",
             instruction=instruction,
             items=facts,
-            layouts=[self._project_layout(project, source_records, by_id)],
+            layouts=layouts,
             signals=neighborhood.include_signals,
             context=self._public_context(context),
             scope_revision=self._project_scope_revision(project.uuid),
@@ -996,18 +1068,19 @@ class ThingsWorkspace:
         return refs, by_id
 
     def _create_context(
-        self, call: ReadCall, refs: list[ContextRef], *, scope: str
+        self, call: ReadCall, refs: list[ContextRef], *, scopes: Sequence[str]
     ) -> ReadContext:
+        view, item_id, within, from_date, to_date = self._selector_fields(call)
         return self._context_store.create(
             account_id=self._account_id,
             selector=ReadSelector(
                 purpose=call.purpose,
-                view=call.view,
-                item_id=call.id,
+                view=view,
+                item_id=item_id,
                 find=call.find,
-                within=call.within,
-                from_date=call.from_date,
-                to_date=call.to_date,
+                within=within,
+                from_date=from_date,
+                to_date=to_date,
                 limit=call.limit,
                 includes=tuple(
                     ReadIncludeSelector(
@@ -1019,14 +1092,125 @@ class ThingsWorkspace:
                 ),
             ),
             refs=refs,
-            completeness=(
+            completeness=tuple(
                 CompletenessFact(
                     scope=scope,
                     seen=len(refs),
                     total=len(refs),
                     complete=True,
-                ),
+                )
+                for scope in scopes
             ),
+        )
+
+    def _selector_fields(
+        self, call: ReadCall
+    ) -> tuple[View | None, str | None, str | None, str | None, str | None]:
+        view: View | None = call.view
+        item_id = call.id
+        within = call.within
+        if call.purpose == "review" and call.id is not None:
+            if call.id.startswith("area:"):
+                view = view or "area"
+                within = within or call.id
+                if view == "area":
+                    item_id = None
+            elif call.id.startswith("project:"):
+                view = view or "project"
+                within = within or call.id
+                if view == "project":
+                    item_id = None
+        elif call.view in {"area", "project"} and call.id is not None and within is None:
+            within = call.id
+            item_id = None
+        from_date = call.from_date
+        to_date = call.to_date
+        if call.view == "logbook" and from_date is None and to_date is None:
+            start, end = self._logbook_range(call)
+            from_date = start.isoformat()
+            to_date = end.isoformat()
+        return view, item_id, within, from_date, to_date
+
+    def _logbook_range(self, call: ReadCall) -> tuple[date, date]:
+        if call.from_date is not None and call.to_date is not None:
+            return date.fromisoformat(call.from_date), date.fromisoformat(call.to_date)
+        end = self._clock().date()
+        return end - timedelta(days=_LOGBOOK_DAYS - 1), end
+
+    def _call_from_cursor(self, saved: _ItemCursor, limit: int) -> ReadCall:
+        payload: dict[str, object] = {"limit": limit}
+        if saved.view is not None:
+            payload["view"] = saved.view
+        if saved.within is not None:
+            payload["within"] = saved.within
+        elif saved.item_id is not None:
+            payload["id"] = saved.item_id
+        if saved.from_date is not None:
+            payload["from"] = saved.from_date
+        if saved.to_date is not None:
+            payload["to"] = saved.to_date
+        return ReadCall.model_validate(payload)
+
+    def _bind_review_context(
+        self,
+        result: Result,
+        call: ReadCall | None,
+        records: list[Record],
+    ) -> Result:
+        if (
+            call is None
+            or call.purpose != "review"
+            or call.ids
+            or not records
+            or result.context is not None
+        ):
+            return result
+        view = call.view or (
+            "today"
+            if call.id is None and call.find is None
+            else None
+        )
+        if view is not None and view not in _REVIEW_CONTEXT_VIEWS:
+            return result
+        if view is None and call.find is None and call.id is None:
+            view = "today"
+        extra: list[Record] = []
+        if call.include:
+            neighborhood = _Neighborhood()
+            self._neighborhood_include(neighborhood, call)
+            extra.extend(neighborhood.records)
+        bound: list[Record] = []
+        seen: set[str] = set()
+        for record in [*records, *extra]:
+            if record.uuid in seen:
+                continue
+            seen.add(record.uuid)
+            bound.append(record)
+        if len(bound) > _CONTEXT_LIMIT:
+            bound = records
+        if not bound or len(bound) > _CONTEXT_LIMIT:
+            return result
+        refs, by_id = self._context_refs(bound)
+        scope = call.within or call.id or view or call.find or "review"
+        context = self._create_context(call, refs, scopes=[scope])
+        items = [
+            item.model_copy(update={"ref": by_id[item.id]})
+            if item.id in by_id
+            else item
+            for item in result.items
+        ]
+        instruction = result.instruction
+        if items and "short ref" not in instruction.casefold():
+            instruction = (
+                instruction.rstrip(".")
+                + ". Use this context and short refs to change listed work in one commit."
+            )
+        return result.model_copy(
+            update={
+                "items": items,
+                "context": self._public_context(context),
+                "instruction": instruction,
+            }
         )
 
     @staticmethod
@@ -1038,9 +1222,8 @@ class ThingsWorkspace:
             complete=context.complete,
         )
 
-    @staticmethod
     def _project_layout(
-        project: Record, records: list[Record], by_id: dict[str, str]
+        self, project: Record, records: list[Record], by_id: dict[str, str]
     ) -> LayoutFact:
         headings = sorted(
             [record for record in records if record.heading],
@@ -1058,9 +1241,13 @@ class ThingsWorkspace:
                         [task for task in tasks if task.heading_uuid == heading.uuid],
                         key=lambda item: (item.sort_index, item.uuid),
                     )
+                    if task.id in by_id
                 ],
+                hidden_count=hidden[0],
+                hidden_signals=hidden[1],
             )
             for heading in headings
+            for hidden in [self._heading_hidden_occupancy(heading.uuid)]
         ]
         unheaded = sorted(
             [task for task in tasks if task.heading_uuid is None],
@@ -1073,6 +1260,42 @@ class ThingsWorkspace:
         return LayoutFact(
             project_ref=by_id[project.id], sections=sections, complete=True
         )
+
+    def _heading_hidden_occupancy(self, heading_uuid: str) -> tuple[int, list[str]]:
+        signals: list[str] = []
+        count = 0
+        for item in self._library.records.values():
+            if item.heading_uuid != heading_uuid:
+                continue
+            if (
+                not item.trashed
+                and item.status == "open"
+                and item.recurrence.role != "template"
+            ):
+                continue
+            count += 1
+            if item.trashed:
+                signals.append("trashed")
+            elif item.recurrence.role == "template":
+                signals.append("template")
+            elif item.status == "done":
+                signals.append("completed")
+            elif item.status == "dropped":
+                signals.append("canceled")
+        return count, list(dict.fromkeys(signals))
+
+    def _hidden_project_occupants(self, project_uuid: str) -> list[Record]:
+        return [
+            item
+            for item in self._library.records.values()
+            if item.parent_uuid == project_uuid
+            and not item.heading
+            and (
+                item.trashed
+                or item.status != "open"
+                or item.recurrence.role == "template"
+            )
+        ]
 
     def _oversized_context(self, call: ReadCall, count: int) -> Result:
         read = self._selector_arguments(call)
@@ -1245,7 +1468,20 @@ class ThingsWorkspace:
                     touched_refs.add(reference)
                 elif reference in context_ids:
                     touched_refs.add(context_ids[reference])
-        if call.organize or context.is_complete("system"):
+        if call.organize:
+            for draft in call.organize:
+                if draft.project_ref in context_refs:
+                    touched_refs.add(draft.project_ref)
+                touched_refs.update(
+                    ref for ref in draft.delete_headings if ref in context_refs
+                )
+                for section in draft.sections:
+                    if section.heading_ref in context_refs:
+                        touched_refs.add(section.heading_ref)
+                    touched_refs.update(
+                        ref for ref in section.task_refs if ref in context_refs
+                    )
+        if context.is_complete("system"):
             touched_refs.update(entry.ref for entry in context.refs)
         for entry in context.refs:
             if entry.ref not in touched_refs:
@@ -1377,23 +1613,28 @@ class ThingsWorkspace:
         if view == "system":
             return self._library.system()
         if view == "area":
-            assert call.within is not None
-            area = self._exact_item(call.within)
+            container = call.within or call.id
+            assert container is not None
+            area = self._exact_item(container)
             if area is None or area.kind != "area":
                 return self._needs_input("I could not find that exact Area.")
             return self._library.area(area.id)
         if view == "audit":
             return self._library.audit()
         if view == "project":
-            assert call.within is not None
-            project = self._exact_item(call.within)
+            container = call.within or call.id
+            assert container is not None
+            project = self._exact_item(container)
             if project is None or project.kind != "project":
                 return self._needs_input("I could not find that exact Project.")
             return self._library.project(project.id)
         if view == "logbook":
-            assert call.from_date is not None and call.to_date is not None
-            start = date.fromisoformat(call.from_date)
-            end = date.fromisoformat(call.to_date)
+            if call.from_date is None or call.to_date is None:
+                end = self._clock().date()
+                start = end - timedelta(days=_LOGBOOK_DAYS - 1)
+            else:
+                start = date.fromisoformat(call.from_date)
+                end = date.fromisoformat(call.to_date)
             return sorted(
                 [
                     item
@@ -1501,10 +1742,12 @@ class ThingsWorkspace:
         extra_truncated: bool = False,
         missing_ids: list[str] | None = None,
         detail: tuple[str, ...] = DETAIL_FIELDS,
+        call: ReadCall | None = None,
     ) -> Result:
         limit = min(limit, _READ_LIMIT)
+        page_records = items[:limit]
         facts = [
-            self._fact(item, full=full, detail=detail) for item in items[:limit]
+            self._fact(item, full=full, detail=detail) for item in page_records
         ]
         snapshot = self._scope_revision(items)
         scope = public_scope or snapshot
@@ -1519,6 +1762,10 @@ class ThingsWorkspace:
                 full,
                 view,
                 detail,
+                within=call.within if call is not None else None,
+                item_id=call.id if call is not None else None,
+                from_date=call.from_date if call is not None else None,
+                to_date=call.to_date if call is not None else None,
             )
         sections = self._sections(view, facts) if view is not None else []
         extra_truncated = extra_truncated or (
@@ -1529,8 +1776,15 @@ class ThingsWorkspace:
             "week": "Nothing on the week.",
             "inbox": "Inbox is empty.",
             "diagnostics": "No native-state conflicts are visible.",
+            "logbook": "Nothing in the Logbook for that range.",
         }.get(view or "", "No matching work is visible. Search with find and one title token.")
         visible = bool(facts or result_signals)
+        if view == "logbook" and visible and call is not None:
+            start, end = self._logbook_range(call)
+            instruction = (
+                f"{instruction.rstrip('.')} from {start.isoformat()} to "
+                f"{end.isoformat()}."
+            )
         result = Result(
             next="done",
             status="ok",
@@ -1553,7 +1807,8 @@ class ThingsWorkspace:
                 view=view,
                 detail=detail,
             )
-        return self._follow_cursor(result)
+        result = self._follow_cursor(result)
+        return self._bind_review_context(result, call, page_records)
 
     def _continue(self, cursor: str, limit: int) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -1586,11 +1841,15 @@ class ThingsWorkspace:
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
         if saved.view == "diagnostics":
+            continued = ReadCall.model_validate(
+                {"view": "diagnostics", "limit": limit}
+            )
             return self._diagnostics_page(
                 limit,
                 offset=saved.offset,
                 expected_ids=saved.ids,
                 expected_digest=saved.snapshot_revision,
+                call=continued,
             )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
@@ -1615,6 +1874,10 @@ class ThingsWorkspace:
                 saved.full,
                 saved.view,
                 saved.detail,
+                within=saved.within,
+                item_id=saved.item_id,
+                from_date=saved.from_date,
+                to_date=saved.to_date,
             )
             if next_offset < len(items)
             else None
@@ -1647,7 +1910,9 @@ class ThingsWorkspace:
                 view=saved.view,
                 detail=saved.detail,
             )
-        return self._follow_cursor(result)
+        result = self._follow_cursor(result)
+        continued = self._call_from_cursor(saved, limit)
+        return self._bind_review_context(result, continued, page_items)
 
     def _encode_cursor(
         self,
@@ -1658,6 +1923,11 @@ class ThingsWorkspace:
         full: bool,
         view: str | None,
         detail: tuple[str, ...] = (),
+        *,
+        within: str | None = None,
+        item_id: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> str:
         self._prune_cursors()
         token = f"cursor_{token_urlsafe(18)}"
@@ -1670,6 +1940,10 @@ class ThingsWorkspace:
             view=view,
             detail=detail,
             expires_at=self._clock() + timedelta(minutes=10),
+            within=within,
+            item_id=item_id,
+            from_date=from_date,
+            to_date=to_date,
         )
         return token
 
@@ -2228,6 +2502,8 @@ class ThingsWorkspace:
             ordinary.append("someday")
         if item.trashed:
             ordinary.append("trashed")
+        if item.heading and self._heading_hidden_occupancy(item.uuid)[0]:
+            ordinary.append("has_hidden_occupants")
         if item.notes:
             ordinary.append("has_notes")
         if item.checklists:
@@ -3179,23 +3455,42 @@ class ThingsWorkspace:
                     for child in self._library.records.values()
                     if child.heading_uuid == item.uuid
                 ]
-                for child in assigned:
-                    preconditions[child.id] = self._revision(child)
-                    writes.append(
-                        Write(
-                            action="update",
-                            uuid=child.uuid,
-                            kind=child.kind,
-                            clear_heading=True,
-                        )
-                    )
                 writes.append(
                     Write(action="permanent_delete", uuid=item.uuid, kind="task")
                 )
                 summary.append(f"Permanently delete heading: {item.title}")
                 if assigned:
-                    summary.append(
-                        f"Clear the heading from {len(assigned)} assigned Tasks"
+                    hidden = [
+                        child
+                        for child in assigned
+                        if child.trashed
+                        or child.status != "open"
+                        or child.recurrence.role == "template"
+                    ]
+                    open_assigned = len(assigned) - len(hidden)
+                    parts: list[str] = []
+                    if open_assigned:
+                        parts.append(f"{open_assigned} open")
+                    trashed = sum(1 for child in hidden if child.trashed)
+                    completed = sum(
+                        1
+                        for child in hidden
+                        if not child.trashed and child.status == "done"
+                    )
+                    canceled = sum(
+                        1
+                        for child in hidden
+                        if not child.trashed and child.status == "dropped"
+                    )
+                    if trashed:
+                        parts.append(f"{trashed} trashed")
+                    if completed:
+                        parts.append(f"{completed} completed")
+                    if canceled:
+                        parts.append(f"{canceled} canceled")
+                    warnings.append(
+                        f"{len(assigned)} assigned Tasks stay in the Project "
+                        f"without this heading ({', '.join(parts)})."
                     )
                 warnings.append("This heading deletion cannot be undone.")
                 context.risky = True
@@ -4393,16 +4688,13 @@ class ThingsWorkspace:
                 index for index, row in enumerate(ordered) if row.uuid == anchor_uuid
             )
             ordered.insert(position + 1, moving)
-        preconditions[f"scope:project:{project_uuid}"] = self._project_scope_revision(
-            project_uuid
-        )
         writes: list[Write] = []
         for index, row in enumerate(ordered):
             wanted = index * 1024
             if row.record is not None:
-                preconditions[row.record.id] = self._revision(row.record)
                 if row.sort_index == wanted:
                     continue
+                preconditions[row.record.id] = self._revision(row.record)
                 writes.append(
                     Write(
                         action="update",
@@ -4849,7 +5141,7 @@ class ThingsWorkspace:
                 if write.anytime
                 else "Inbox"
                 if write.inbox
-                else f"{write.into_kind}:{write.into_uuid}"
+                else self._home_title(write.into_kind, write.into_uuid)
                 if write.into_uuid and write.into_kind
                 else None
             )
@@ -4857,11 +5149,7 @@ class ThingsWorkspace:
                 source = (
                     "Inbox"
                     if item.inbox
-                    else f"project:{item.parent_uuid}"
-                    if item.parent_uuid
-                    else f"area:{item.area_uuid}"
-                    if item.area_uuid
-                    else "Anytime"
+                    else self._record_home_title(item)
                 )
                 if source != dest:
                     move_key = f"move:{source}->{dest}"[:80]
@@ -4888,6 +5176,21 @@ class ThingsWorkspace:
             if ids
         ][:20]
         return summary, review
+
+    def _record_home_title(self, item: Record) -> str:
+        if item.parent_uuid:
+            parent = self._library.records.get(item.parent_uuid)
+            return parent.title if parent is not None else "Project"
+        if item.area_uuid:
+            area = self._library.records.get(item.area_uuid)
+            return area.title if area is not None else "Area"
+        return "Anytime"
+
+    def _home_title(self, kind: str | None, uuid: str | None) -> str:
+        if uuid is None:
+            return "Anytime" if kind == "project" else kind or "home"
+        item = self._library.records.get(uuid)
+        return item.title if item is not None else kind or "home"
 
     def _stage(self, record: IntentRecord, prepared: _Prepared) -> Result:
         expires = self._clock() + timedelta(minutes=_PLAN_MINUTES)

@@ -1238,6 +1238,8 @@ class _MutationVerifier(_MutationHandler[bool]):
             write.sort_index is None or item.sort_index == write.sort_index,
             write.today_index is None or item.today_index == write.today_index,
         ]
+        if write.clear_heading:
+            checks.append(item.heading_uuid is None)
         if placement or any(
             (
                 write.into_uuid is not None,

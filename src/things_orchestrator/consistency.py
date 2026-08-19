@@ -40,6 +40,7 @@ _REPAIR = {
     "project_with_project_parent": "move the Project to an Area or to root Anytime",
     "area_with_area_home": "clear the nested Area home",
     "area_with_project_parent": "clear the Area parent",
+    "test_residue": "trash this harness leftover",
 }
 _REPAIR_KIND = {
     "inbox_with_project": "repeat_placement",
@@ -74,7 +75,9 @@ _REPAIR_KIND = {
     "project_with_project_parent": "rehome_project",
     "area_with_area_home": "clear_area_home",
     "area_with_project_parent": "clear_area_parent",
+    "test_residue": "trash_item",
 }
+_TEST_RESIDUE_PREFIXES = ("__TO_PROBE__", "Things Orchestrator scoped")
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,8 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
         signals.append("malformed_repeat")
     if item.recurrence.role == "instance" and item.recurrence.repeat_type == "unknown":
         signals.append("malformed_repeat")
+    if any(item.title.startswith(prefix) for prefix in _TEST_RESIDUE_PREFIXES):
+        signals.append("test_residue")
     return signals
 
 
