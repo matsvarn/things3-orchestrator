@@ -1261,8 +1261,6 @@ class ThingsWorkspace:
                     next_cursor=result.cursor,
                 )
         else:
-            if len(bound) > _CONTEXT_LIMIT:
-                return self._oversized_context(call, len(bound))
             context = self._create_context(
                 call,
                 new_refs,
