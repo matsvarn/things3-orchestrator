@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from things_orchestrator.context import MemoryContextStore, SQLiteContextStore
-from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
+from things_orchestrator.interface import (
+    ApproveCall,
+    CommitCall,
+    ReadCall,
+    dump_result,
+)
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import ChecklistLine, MemoryLibrary, Record
 from things_orchestrator.recurrence import RecurrenceState
@@ -558,6 +563,9 @@ def test_organize_read_returns_complete_project_layout() -> None:
     assert result.status == "ok"
     assert result.context and result.context.complete
     assert result.layouts[0].complete
+    wire = dump_result(result)
+    assert wire["context"]["complete"] is True
+    assert wire["layouts"][0]["complete"] is True
     assert all(item.revision is None for item in result.items)
     facts = {item.id: item.ref for item in result.items}
     assert result.layouts[0].project_ref == facts[project.id]

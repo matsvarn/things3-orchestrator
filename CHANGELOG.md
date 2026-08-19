@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.3.2 — 2026-08-19
+
+Tell the truth about complete, teardown receipts, and diagnostics copy.
+Same three tools.
+
+### Fixed
+
+- Incomplete review pages include `context.complete: false` on the wire.
+  Compact dumps cannot omit a required control field.
+- Permanently deleting a Project with `delete_contents` names contained
+  headings as `heading:<id>` in `missing_ids`.
+- Diagnostics instruction mentions `test_residue` only when that signal
+  is on the page.
+
 ## 0.3.1 — 2026-08-19
 
 Pagination honesty after v0.3.0 dogfood. Same three tools.

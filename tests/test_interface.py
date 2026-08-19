@@ -44,6 +44,7 @@ from things_orchestrator.interface import (
     Result,
     ReviewSection,
     TagFact,
+    dump_result,
 )
 
 
@@ -1331,6 +1332,24 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "recurrence",
     ]
     assert RESULT_OUT["properties"]["tags"]["maxItems"] == 400
+
+
+def test_dump_result_keeps_complete_false() -> None:
+    result = Result(
+        next="read",
+        status="ok",
+        instruction="Continue the cursor.",
+        context=ContextFact(
+            id="ctx_abcdefgh",
+            purpose="review",
+            expires_at="2026-08-19T12:00:00+00:00",
+            complete=False,
+        ),
+        truncated=True,
+    )
+    payload = dump_result(result)
+    assert payload["context"]["complete"] is False
+    assert payload["truncated"] is True
 
 
 def test_manual_schema_contracts_match_the_runtime_models() -> None:

@@ -310,6 +310,38 @@ def test_each_tool_emits_only_fields_accepted_by_its_output_schema() -> None:
     }
 
 
+def test_truncated_review_dumps_complete_false_on_the_wire() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary(records)))
+
+    first = asyncio.run(
+        server.call_tool("things_read", {"view": "audit", "limit": 10})
+    )
+    assert first.structured_content is not None
+    validate(instance=first.structured_content, schema=READ_OUT)
+    assert first.structured_content["truncated"] is True
+    assert first.structured_content["context"]["complete"] is False
+    cursor = first.structured_content["cursor"]
+    assert isinstance(cursor, str)
+
+    second = asyncio.run(
+        server.call_tool("things_read", {"cursor": cursor, "limit": 10})
+    )
+    assert second.structured_content is not None
+    third_cursor = second.structured_content["cursor"]
+    assert isinstance(third_cursor, str)
+    last = asyncio.run(
+        server.call_tool("things_read", {"cursor": third_cursor, "limit": 10})
+    )
+    assert last.structured_content is not None
+    validate(instance=last.structured_content, schema=READ_OUT)
+    assert last.structured_content["context"]["complete"] is True
+    assert "truncated" not in last.structured_content
+
+
 def test_health_is_open_without_bearer() -> None:
     from starlette.testclient import TestClient
 
