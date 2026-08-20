@@ -29,7 +29,7 @@ Example: "Remind me to renew my passport." → create `Renew passport` in Inbox.
 
 If they named a reusable filter, same commit `ensure_tags` with that exact title and `tag_ids` as that `$key`. Do not invent a second tag name. Do not open tags first. `waiting=true` already reuses Waiting. If they named an existing Area or Project, send `into_title` in that same commit. Unnamed stays Inbox.
 
-If they already named a Project and its next actions, keep those exact titles.
+If they already named a Project and its next actions, keep those exact titles. A sitting that needs a path or URL gets notes on that Task in the same commit. Do not file Read after sources were already gathered.
 
 Do not search first unless a matching item is likely already there. If it is, bind that item instead of creating a second copy.
 

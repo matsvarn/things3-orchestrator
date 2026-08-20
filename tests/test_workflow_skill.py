@@ -109,6 +109,8 @@ def test_form_choice_lives_in_form() -> None:
     assert "finish criteria" in lower
     assert "put a source url on the task" in lower
     assert "do not require" in lower
+    assert "startable" in lower
+    assert "do not file read after sources" in lower
 
     planning_stop = lower.split("stop planning", 1)[1].split("##", 1)[0]
     assert "start" in planning_stop

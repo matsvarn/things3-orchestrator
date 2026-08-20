@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.4.5 — 2026-08-20
+
+Project next actions can carry notes. Same three tools.
+
+### Changed
+
+- `next_actions` is title plus optional notes. Title-only strings still
+  coerce. A sitting that needs a path or URL keeps that packet on the
+  Task, not a five-link dump on the Project.
+- Form and research: a Task is startable without opening the Project.
+  Do not file Read after sources were already gathered. Optional or
+  continual work is not this Project.
+
 ## 0.4.4 — 2026-08-20
 
 Named Project create with distilled notes applies. Same three tools.
