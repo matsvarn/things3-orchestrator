@@ -27,9 +27,9 @@ plugin/.mcp.json
 plugin/bin/things-orchestrator
 plugin/skills/things-orchestrator/SKILL.md
 plugin/skills/things-orchestrator/agents/openai.yaml
-plugin/skills/things-orchestrator/references/reconcile.md
+plugin/skills/things-orchestrator/references/form.md
 plugin/skills/things-orchestrator/references/research.md
-plugin/skills/things-orchestrator/references/task-system.md
+plugin/skills/things-orchestrator/references/review.md
 public-files.txt
 pyproject.toml
 scripts/check_release.py

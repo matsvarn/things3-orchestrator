@@ -68,10 +68,7 @@ def test_empty_read_returns_bounded_today_sections() -> None:
     assert result.status == "ok"
     assert [section.key for section in result.sections] == ["overdue", "evening"]
     assert [item.id for item in result.items] == ["task:late", "task:tonight"]
-    assert [section.item_ids for section in result.sections] == [
-        ["task:late"],
-        ["task:tonight"],
-    ]
+    assert [section.item_ids for section in result.sections] == [[], []]
     inbox = module.read(ReadCall(view="inbox"))
     assert [item.id for item in inbox.items] == ["task:box"]
     assert result.scope_revision and result.scope_revision.startswith("s_")
@@ -1240,6 +1237,94 @@ def test_project_next_actions_use_the_compact_create_shape() -> None:
     assert all(item.parent_uuid == project.uuid for item in actions)
 
 
+def test_routine_capture_still_applies_with_short_notes() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "capture-distill-001",
+                "create": [
+                    {
+                        "title": "Renew passport",
+                        "notes_markdown": (
+                            "Done when submitted.\nhttps://www.gov.uk/renew-adult-passport"
+                        ),
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.next == "done"
+    task = next(iter(module._library.records.values()))  # noqa: SLF001
+    assert task.title == "Renew passport"
+
+
+def test_dump_create_asks_and_writes_nothing() -> None:
+    module = workspace()
+    brief = "\n".join(
+        [
+            "Source thread: https://x.com/poteto/status/1",
+            "Cursor changelog, 19 Aug 2026: https://cursor.com/changelog",
+            "pstack is the factory. Outer loop. Inner loop. Planning playbook.",
+            "Intent: audit current Hermes skills, assess pstack, then write Mats Mode.",
+        ]
+        * 8
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "dump-create-001",
+                "create": [
+                    {
+                        "title": "Audit skills and create Mats Mode",
+                        "notes_markdown": brief,
+                        "checklist": [
+                            "Audit currently used local skills",
+                            "Review pstack thoroughly",
+                            "Decide what to adopt vs skip",
+                            "Draft Mats Mode",
+                            "Adopt the useful workflows",
+                            "Read her planning playbook",
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert "dump" in (result.instruction or "").lower()
+    assert "distill" in (result.instruction or "").lower()
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_fake_next_action_row_asks_and_writes_nothing() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "fake-row-001",
+                "create": [
+                    {
+                        "title": "Ship Mats Mode",
+                        "checklist": ["Decide what to adopt vs skip", "Draft the skill"],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert module._library.records == {}  # noqa: SLF001
+
+
 def test_all_scheduled_create_forms_settle() -> None:
     module = workspace()
 
@@ -1489,7 +1574,7 @@ def test_thirty_today_items_page_without_loss() -> None:
     ids: list[str] = []
     while True:
         ids.extend(item.id for item in result.items)
-        assert result.sections[0].item_ids == [item.id for item in result.items]
+        assert result.sections[0].item_ids == []
         if result.cursor is None:
             break
         result = module.read(ReadCall(cursor=result.cursor, limit=10))
@@ -1525,7 +1610,7 @@ def test_system_pages_keep_one_scope_revision_and_section_shape() -> None:
         ids.extend(item.id for item in result.items)
         assert result.scope_revision == revision
         assert [section.key for section in result.sections] == ["system"]
-        assert result.sections[0].item_ids == [item.id for item in result.items]
+        assert result.sections[0].item_ids == []
         if result.cursor is None:
             break
         result = module.read(ReadCall(cursor=result.cursor, limit=10))
@@ -4696,6 +4781,14 @@ def test_area_view_returns_the_area_loose_tasks_and_projects() -> None:
     assert {item.id for item in result.items} == {area.id, project.id, loose.id}
     assert result.items[0].id == area.id
     assert nested.id not in {item.id for item in result.items}
+    assert result.sections[0].title == "Home"
+    assert result.sections[0].item_ids == []
+    assert any(
+        item.id == project.id and item.into_title == "Home" for item in result.items
+    )
+    assert any(
+        item.id == loose.id and item.into_title == "Home" for item in result.items
+    )
 
 
 def test_area_and_project_ids_expand_to_children_on_review() -> None:
@@ -5692,8 +5785,7 @@ def test_bulk_ids_can_omit_unrequested_detail_fields() -> None:
     assert item.direct_tag_ids == []
     assert item.direct_tags == []
     assert result.tags == []
-    assert item.recurrence is not None
-    assert item.recurrence.linked_item_ids == []
+    assert item.recurrence is None
 
 
 def test_bulk_empty_fields_survive_a_continuation_page() -> None:
@@ -6112,8 +6204,12 @@ def test_applied_receipt_echoes_placement() -> None:
     assert result.items
     fact = result.items[0]
     assert fact.into_id == project.id
+    assert fact.into_title == "Home"
     assert fact.start == NOW.date().isoformat()
     assert "today" in fact.signals
+    assert fact.order is None
+    assert fact.recurrence is None
+    assert "Updated Buy milk in Home." in result.instruction
 
 
 def test_applied_receipt_echoes_heading_id() -> None:
@@ -6145,6 +6241,7 @@ def test_applied_receipt_echoes_heading_id() -> None:
 
     assert result.status == "applied"
     assert result.items[0].heading_id == heading.id
+    assert result.items[0].heading_title == "Later"
 
 
 def test_applied_receipt_echoes_checklist_parent_and_assigned_tags() -> None:
@@ -6179,6 +6276,9 @@ def test_applied_receipt_echoes_checklist_parent_and_assigned_tags() -> None:
     assert result.status == "applied"
     assert [item.id for item in result.items] == [task.id]
     assert [tag.id for tag in result.tags] == ["tag:travel"]
+    assert result.items[0].direct_tag_ids == ["tag:travel"]
+    payload = dump_result(result)
+    assert payload["items"][0]["direct_tag_ids"] == ["tag:travel"]
 
 
 def test_permanent_heading_delete_receipt_names_the_gone_id() -> None:
@@ -6321,3 +6421,178 @@ def test_find_within_trash_ignores_living_notes_hits() -> None:
     assert "trashed" in trash_hit.items[0].signals
     assert "Read one to restore or purge." in trash_hit.instruction
     assert "purpose=change" not in trash_hit.instruction
+
+
+def test_compact_today_names_homes_and_omits_inert_defaults() -> None:
+    home = Record(uuid="kitchen", kind="project", title="Kitchen")
+    task = Record(
+        uuid="milk",
+        kind="task",
+        title="Buy milk",
+        parent_uuid=home.uuid,
+        start=NOW.date(),
+    )
+    module = workspace([home, task])
+
+    result = module.read(ReadCall(view="today"))
+    payload = dump_result(result)
+
+    assert result.status == "ok"
+    assert "into_title" in result.instruction
+    assert result.items[0].into_title == "Kitchen"
+    assert result.items[0].order is None
+    assert result.items[0].recurrence is None
+    dumped = payload["items"][0]
+    assert dumped["into_title"] == "Kitchen"
+    assert "order" not in dumped
+    assert "recurrence" not in dumped
+    assert result.sections[0].item_ids == []
+    assert "item_ids" not in payload["sections"][0]
+
+
+def test_exact_id_keeps_order_and_omits_none_recurrence() -> None:
+    task = Record(uuid="desk", kind="task", title="Clear desk", sort_index=2048)
+    module = workspace([task])
+
+    item = detail(module, task.id)
+    payload = dump_result(module.read(ReadCall(ids=[task.id])))
+
+    assert item.order == 2048
+    assert item.recurrence is None
+    assert payload["items"][0]["order"] == 2048
+    assert "recurrence" not in payload["items"][0]
+
+
+def test_create_into_title_places_in_the_named_home() -> None:
+    kitchen = Record(uuid="kitchen", kind="project", title="Kitchen")
+    module = workspace([kitchen])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "into-title-unique-001",
+                "create": [{"title": "Buy milk", "into_title": "Kitchen"}],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.items[0].into_id == kitchen.id
+    assert result.items[0].into_title == "Kitchen"
+    assert "Created Buy milk in Kitchen." in result.instruction
+    created = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Buy milk"
+    )
+    assert created.parent_uuid == kitchen.uuid
+
+
+def test_create_into_title_asks_when_the_home_is_missing_or_ambiguous() -> None:
+    first = Record(uuid="one", kind="project", title="Kitchen")
+    second = Record(uuid="two", kind="project", title="kitchen")
+    module = workspace([first, second])
+
+    missing = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "into-title-missing-001",
+                "create": [{"title": "Buy milk", "into_title": "Garden"}],
+            }
+        )
+    )
+    assert missing.status == "needs_input"
+    assert "Garden" in missing.instruction
+
+    clash = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "into-title-ambiguous-001",
+                "create": [{"title": "Buy milk", "into_title": "Kitchen"}],
+            }
+        )
+    )
+    assert clash.status == "needs_input"
+    assert first.id in clash.instruction
+    assert second.id in clash.instruction
+
+
+def test_duplicate_open_project_and_area_titles_ask() -> None:
+    project = Record(uuid="tap", kind="project", title="Replace kitchen tap")
+    area = Record(uuid="health", kind="area", title="Health")
+    module = workspace([project, area])
+
+    project_twin = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-twin-001",
+                "create": [{"kind": "project", "title": "Replace kitchen tap"}],
+            }
+        )
+    )
+    assert project_twin.status == "needs_input"
+    assert "already exists" in project_twin.instruction
+    assert "Project" in project_twin.instruction
+
+    area_twin = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-twin-001",
+                "scope_revision": system_scope(module),
+                "create": [{"kind": "area", "title": "Health"}],
+            }
+        )
+    )
+    assert area_twin.status == "needs_input"
+    assert "already exists" in area_twin.instruction
+    assert "Area" in area_twin.instruction
+
+
+def test_tags_page_instruction_is_the_catalog() -> None:
+    library = MemoryLibrary()
+    library.tags["errands"] = "Errands"
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+
+    result = module.read(ReadCall(view="tags"))
+
+    assert result.status == "ok"
+    assert "catalog" in result.instruction
+    assert "tag_ids" in result.instruction
+    assert "change_tags" in result.instruction
+
+
+def test_system_review_copy_names_area_scope() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=area.uuid,
+    )
+    module = workspace([area, project])
+
+    result = module.read(ReadCall(view="system"))
+
+    assert result.context is None
+    assert "scope_revision" in result.instruction
+    assert "Area" in result.instruction
+    kitchen = next(item for item in result.items if item.id == project.id)
+    assert kitchen.into_title == "Home"
+
+
+def test_inbox_create_keeps_the_cloud_applied_sentence() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "inbox-applied-001",
+                "create": [{"title": "Renew passport"}],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.instruction == "Cloud read-back matched the requested state."
+    assert result.items[0].into_id is None
+    assert result.items[0].into_title is None

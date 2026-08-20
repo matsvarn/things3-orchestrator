@@ -1,7 +1,7 @@
 """Product skill contract for the A2-product package.
 
-Winning first-action rules stay in SKILL.md. Form, review, merge, and
-research live in the three disclosed references.
+Winning first-action rules stay in SKILL.md. Research, form, and
+review live in the three disclosed references.
 """
 
 from __future__ import annotations
@@ -73,6 +73,8 @@ def test_main_skill_keeps_winning_first_actions() -> None:
     lower = SKILL.read_text(encoding="utf-8").lower()
 
     assert "view=tags" in lower
+    assert "ensure_tags" in lower
+    assert "into_title" in lower
     assert "start=evening" in lower
     assert "distinctive title token" in lower
     assert "do not create that project" in lower
@@ -80,11 +82,13 @@ def test_main_skill_keeps_winning_first_actions() -> None:
     assert "renew passport" in lower
 
 
-def test_form_choice_lives_in_task_system() -> None:
-    source = (REFERENCES / "task-system.md").read_text(encoding="utf-8")
+def test_form_choice_lives_in_form() -> None:
+    source = (REFERENCES / "form.md").read_text(encoding="utf-8")
     lower = source.lower()
 
     assert "smallest useful form" in lower
+    assert "walk these questions in order" in lower
+    assert "will one sitting finish it" in lower
     for native_form in (
         "task",
         "things checklist",
@@ -166,16 +170,16 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     source = SKILL.read_text(encoding="utf-8")
     links = set(re.findall(r"\(references/([^)]+)\)", source))
 
-    assert links == {"research.md", "reconcile.md", "task-system.md"}
+    assert links == {"research.md", "form.md", "review.md"}
     assert {path.name for path in REFERENCES.iterdir()} == links
 
-    clarify = (REFERENCES / "task-system.md").read_text(encoding="utf-8").lower()
-    review = (REFERENCES / "reconcile.md").read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "review.md").read_text(encoding="utf-8").lower()
     research = (REFERENCES / "research.md").read_text(encoding="utf-8").lower()
 
     for concept in ("broad task", "vague project", "waiting", "someday", "area"):
-        assert concept in clarify
-    assert "one concise question" in clarify
+        assert concept in form
+    assert "one concise question" in form
 
     for concept in ("inbox", "next action", "duplicates", "waiting", "someday", "area"):
         assert concept in review
@@ -185,6 +189,18 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     for concept in ("direct", "sources", "uncertainty", "owner", "markdown notes", "tasks"):
         assert concept in research
     assert "every accepted things change" in research
+    assert "first token" in research
+    assert "do not create" in research
+    assert "gather" in research
+    assert "leave undecided work outside active tasks" in research
+
+    assert "view=inbox" in form
+    assert "distill" in form
+
+    assert "empty your head" in review
+    skill = source.lower()
+    assert "overdue" in skill
+    assert "today_after" in skill
 
 
 def test_skill_teaches_the_proven_write_forms() -> None:
@@ -252,17 +268,17 @@ def test_skill_teaches_the_contextual_short_path() -> None:
 
 def test_specialized_write_forms_live_in_disclosed_references() -> None:
     skill = SKILL.read_text(encoding="utf-8").lower()
-    form = (REFERENCES / "task-system.md").read_text(encoding="utf-8").lower()
-    review = (REFERENCES / "reconcile.md").read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "review.md").read_text(encoding="utf-8").lower()
 
     assert "start=evening" in skill
+    assert "purpose=recurrence" in skill
+    assert "search first" in skill
     assert "select one view" not in skill
     assert "local neighborhood" not in skill
     assert "do not use `view=trash` alone" in skill
     assert "if it is in trash, the contained records" in skill
 
-    assert "search first" in form
-    assert "purpose=recurrence" in form
     assert "lifecycle=trash` is recoverable teardown" in form
 
     assert "search named existing items and edit them" in review
@@ -273,6 +289,53 @@ def test_specialized_write_forms_live_in_disclosed_references() -> None:
 
 
 def test_main_and_reference_files_stay_lean() -> None:
-    assert len(SKILL.read_text(encoding="utf-8").splitlines()) < 70
+    assert len(SKILL.read_text(encoding="utf-8").splitlines()) < 110
     for reference in REFERENCES.glob("*.md"):
-        assert len(reference.read_text(encoding="utf-8").splitlines()) < 40
+        assert len(reference.read_text(encoding="utf-8").splitlines()) < 70
+
+
+def test_capture_stops_illegal_first_writes() -> None:
+    skill = SKILL.read_text(encoding="utf-8")
+    lower = skill.lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "review.md").read_text(encoding="utf-8").lower()
+    research = (REFERENCES / "research.md").read_text(encoding="utf-8").lower()
+
+    assert "split" in lower
+    assert "distill" in lower
+    assert "do not paste" in lower
+    assert "brief" in lower
+    assert "thread" in lower
+    assert "changelog" in lower
+    assert "from this" in lower
+    assert "adopt vs skip" in lower
+    assert "decide" in lower
+    assert "think about" in lower
+    assert "write nothing" in lower
+    assert "(references/research.md)" in skill
+    assert "do not create" in lower
+    assert "today" in lower and "focus" in lower
+    assert "(references/review.md)" in skill
+    assert "process inbox" in lower
+    assert "(references/form.md)" in skill
+    assert "## write" not in lower
+    assert "## route" not in lower
+    assert "before any create" not in lower
+    assert "one sitting" in lower
+    assert "one project or two" in lower
+
+    assert "first token" in research
+    assert "do not create" in research
+    assert "gather" in research
+    assert "leave undecided work outside active tasks" in research
+    assert "form.md" in research
+
+    assert "decide" in form
+    assert "distill" in form
+    assert "view=inbox" in form
+
+    assert "overdue" in lower
+    assert "today_after" in lower
+    assert "postpone" in lower
+    assert "empty your head" in review
+    assert "capture" in review

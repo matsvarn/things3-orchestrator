@@ -713,7 +713,7 @@ wheels = [
 
 [[package]]
 name = "things-orchestrator"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

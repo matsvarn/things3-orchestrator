@@ -1,11 +1,18 @@
-# Research before adding work
+# Research
 
-Use this sequence when current external facts can change what belongs in Things.
+Write nothing this turn. Gather facts, split finishes, ask what finished looks like.
 
-1. State the decision the research must support.
-2. Gather current facts from direct, suitable sources.
-3. Summarize the facts, the material uncertainty, and the choices. Keep them separate.
-4. Ask the owner for the one choice that changes the work.
-5. Add only accepted work to Things. Put durable sources and context in Markdown notes. Put executable work in Tasks.
+1. First token is not Capture. Write nothing. Do not create one dump Task.
+2. State the decision the research must support.
+3. Gather current facts now from direct, suitable sources. Read the given URLs in this turn. Do not file Read as work.
+4. If a matching item is likely already there, read with one distinctive title token per named finish. Never send the owner sentence as find.
+5. Summarize the facts, the material uncertainty, and the choices. Keep them separate. Split mashed finishes.
+6. Ask the one choice that changes the work: what finished looks like; one Project or two; or an ongoing hat vs a finite Project. If they already named the finish and next actions, read [form](form.md) and write those exact titles. Change nothing while that choice is open.
 
-Finish when the owner has a sourced answer and every accepted Things change is accounted for. Leave undecided work outside active Tasks.
+If they still must read a source, that Task is first.
+
+When they name the plan, read [form](form.md) before you create. Keep those exact titles. Example: replace the kitchen tap → project `Replace kitchen tap` with `Find three suitable taps`, `Measure the sink`, `Order one`.
+
+Chat already has the brief. Leave undecided work outside active Tasks. Put durable sources and context in Markdown notes. Put executable work in Tasks.
+
+Done when the owner has a sourced answer and every accepted Things change is accounted for.

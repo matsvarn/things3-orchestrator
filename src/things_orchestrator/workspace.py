@@ -39,6 +39,7 @@ from .interface import (
     ChecklistFact,
     CommitCall,
     ContextFact,
+    CreateEntry,
     DiagnosticFact,
     DiagnosticRepair,
     ItemFact,
@@ -118,6 +119,21 @@ _WEEKDAY_CODES = {
 _WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
 _SEARCH_ARTICLES = frozenset({"a", "an", "the"})
 _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+_FAKE_ACTION_ROW = re.compile(
+    r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs)\b"
+)
+_JOINED_FINISHES = re.compile(
+    r"(?i)\b(audit|create|make|build|write|review|draft|adopt)\b"
+    r".+\band\b.+"
+    r"\b(audit|create|make|build|write|review|draft|adopt)\b"
+)
+_DISTILL_NOTE_CHARS = 800
+_DISTILL_NOTE_LINES = 8
+_DUMP_CREATE_INSTRUCTION = (
+    "That create is a dump. Split finishes into separate titles. "
+    "Distill notes to done-when, constraints, and full URLs. "
+    "Chat already has the brief. Write one visible action, not Decide or Think about."
+)
 
 
 @dataclass(frozen=True)
@@ -126,6 +142,20 @@ class _NormalizedSearchText:
 
     folded: str
     tokens: tuple[str, ...]
+
+
+def _undistilled_create(entry: CreateEntry) -> str | None:
+    """Return ask-copy when a create is a brief dump, not a next action."""
+    notes = entry.notes_markdown or ""
+    rows = [*entry.checklist, *entry.next_actions]
+    fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
+    long_notes = len(notes) > _DISTILL_NOTE_CHARS or notes.count("\n") >= _DISTILL_NOTE_LINES
+    mashed = _JOINED_FINISHES.search(entry.title) is not None and (
+        bool(rows) or long_notes
+    )
+    if fake or long_notes or mashed:
+        return _DUMP_CREATE_INSTRUCTION
+    return None
 
 
 def _normalize_search_text(text: str) -> _NormalizedSearchText:
@@ -447,7 +477,16 @@ class ThingsWorkspace:
                 )
             ]
         instruction = "Use this review as current evidence."
-        if view == "audit":
+        if view in {"today", "inbox", "week"}:
+            instruction = (
+                "Each into_id is the Area or Project home. Titles are on into_title."
+            )
+        elif view == "system":
+            instruction = (
+                "This registry is grouped by Area only as prose. "
+                "Send this scope_revision only when creating or renaming an Area."
+            )
+        elif view == "audit":
             instruction = (
                 "This audit lists each active item once. Continue the cursor for the rest."
             )
@@ -2103,7 +2142,11 @@ class ThingsWorkspace:
             Result(
                 next="done",
                 status="ok",
-                instruction="Send this scope_revision as tags_revision with change_tags. Use exact tag IDs.",
+                instruction=(
+                    "These TagFact titles and ids are the catalog to reuse on "
+                    "tag_ids and tags_add. Send this scope_revision as "
+                    "tags_revision only with change_tags."
+                ),
                 tags=page_rows,
                 truncated=cursor is not None,
                 cursor=cursor,
@@ -2258,7 +2301,6 @@ class ThingsWorkspace:
                         ReviewSection(
                             key=signal,
                             title=title,
-                            item_ids=[item.id for item in selected],
                         )
                     )
                     used.update(item.id for item in selected)
@@ -2268,7 +2310,6 @@ class ThingsWorkspace:
                 ReviewSection(
                     key="system",
                     title="Areas and Projects",
-                    item_ids=[item.id for item in items],
                 )
             ]
         if view == "audit":
@@ -2292,7 +2333,10 @@ class ThingsWorkspace:
                 for home, ids in homes.items()
             ][:40]
         titles = {
-            "area": "Area",
+            "area": next(
+                (item.title[:200] for item in items if item.kind == "area"),
+                "Area",
+            ),
             "audit": "Active items",
             "diagnostics": "Conflicts",
             "trash": "Trash",
@@ -2306,7 +2350,6 @@ class ThingsWorkspace:
             ReviewSection(
                 key=view,
                 title=titles.get(view, view.title()),
-                item_ids=[item.id for item in items],
             )
         ]
 
@@ -2483,46 +2526,57 @@ class ThingsWorkspace:
             links_truncated = links_truncated or len(computed_links) > 40
         else:
             linked_ids = linked_item_ids
-        rule = item.recurrence
-        if item.recurrence.role == "instance":
-            template_record = self._library.records.get(template_uuid_of(item) or "")
-            if template_record is not None and template_record.recurrence.rule:
-                rule = template_record.recurrence
-        recurrence = RecurrenceFact(
-            kind=self._recurrence_kind(item),
-            template_id=(
-                f"task:{template}"
-                if (template := template_uuid_of(item))
-                else None
-            ),
-            mode=(
-                cast(RepeatMode, rule.repeat_type)
-                if rule.repeat_type in {"fixed", "after_completion"}
-                else None
-            ),
-            unit=rule.unit,
-            interval=rule.interval,
-            weekdays=[
-                cast(Weekday, _WEEKDAY_NAMES[code])
-                for code in rule.weekday_codes
-                if code in _WEEKDAY_NAMES
-            ],
-            linked_item_ids=linked_ids[:40],
+        recurrence_kind = self._recurrence_kind(item)
+        recurrence = None
+        if recurrence_kind != "none":
+            rule = item.recurrence
+            if item.recurrence.role == "instance":
+                template_record = self._library.records.get(
+                    template_uuid_of(item) or ""
+                )
+                if template_record is not None and template_record.recurrence.rule:
+                    rule = template_record.recurrence
+            recurrence = RecurrenceFact(
+                kind=recurrence_kind,
+                template_id=(
+                    f"task:{template}"
+                    if (template := template_uuid_of(item))
+                    else None
+                ),
+                mode=(
+                    cast(RepeatMode, rule.repeat_type)
+                    if rule.repeat_type in {"fixed", "after_completion"}
+                    else None
+                ),
+                unit=rule.unit,
+                interval=rule.interval,
+                weekdays=[
+                    cast(Weekday, _WEEKDAY_NAMES[code])
+                    for code in rule.weekday_codes
+                    if code in _WEEKDAY_NAMES
+                ],
+                linked_item_ids=linked_ids[:40],
+            )
+        into_id = (
+            f"project:{item.parent_uuid}"
+            if item.parent_uuid
+            else f"area:{item.area_uuid}"
+            if item.area_uuid
+            else None
         )
+        heading_id = f"heading:{item.heading_uuid}" if item.heading_uuid else None
+        parent_name = self._library.parent_title(item) if into_id else None
+        heading_name = self._library.heading_title(item) if heading_id else None
         return ItemFact(
             id=item.id,
             revision=self._revision(item) if include_revision else None,
             kind=item.public_kind,
             title=_bounded_title(item.title),
             status=_public_status(item.status),
-            into_id=(
-                f"project:{item.parent_uuid}"
-                if item.parent_uuid
-                else f"area:{item.area_uuid}"
-                if item.area_uuid
-                else None
-            ),
-            heading_id=(f"heading:{item.heading_uuid}" if item.heading_uuid else None),
+            into_id=into_id,
+            into_title=_bounded_title(parent_name) if parent_name else None,
+            heading_id=heading_id,
+            heading_title=_bounded_title(heading_name) if heading_name else None,
             notes_markdown=(
                 item.notes[note_offset : note_offset + _NOTES_LIMIT]
                 if full and include_notes and want_notes
@@ -2539,7 +2593,7 @@ class ThingsWorkspace:
             deadline=item.deadline.isoformat() if item.deadline else None,
             remind_at=self._reminder(item),
             recurrence=recurrence,
-            order=_bounded_order(item.sort_index),
+            order=_bounded_order(item.sort_index) if full else None,
             today_order=(
                 _bounded_order(item.today_index)
                 if item.start == self._clock().date() or item.tonight
@@ -2706,25 +2760,42 @@ class ThingsWorkspace:
         summary = context.summary
         warnings = context.warnings
         for entry in call.create:
+            if entry.kind in {"task", "project"}:
+                dump = _undistilled_create(entry)
+                if dump is not None:
+                    raise _Abort(self._needs_input(dump))
             uuid = local[entry.key][0] if entry.key else new_uuid()
-            if entry.kind == "task":
+            if entry.kind in {"task", "project", "area"}:
                 twins = [
                     item
                     for item in self._library.records.values()
-                    if item.kind == "task"
-                    and not item.heading
+                    if item.kind == entry.kind
                     and item.is_open()
                     and item.title.casefold() == entry.title.casefold()
                 ]
                 if len(twins) == 1:
+                    label = {"task": "Task", "project": "Project", "area": "Area"}[
+                        entry.kind
+                    ]
+                    reminder = (
+                        " If this is a reminder, ask for the clock time."
+                        if entry.kind == "task"
+                        else ""
+                    )
                     raise _Abort(
                         self._needs_input(
-                            f"{twins[0].title} already exists. Change that Task. "
-                            "If this is a reminder, ask for the clock time."
+                            f"{twins[0].title} already exists. Change that {label}."
+                            f"{reminder}"
                         )
                     )
             if entry.kind == "heading":
-                home = self._home(entry.into, "task", local, new_item=True)
+                home = self._home(
+                    entry.into,
+                    "task",
+                    local,
+                    new_item=True,
+                    into_title=entry.into_title,
+                )
                 if home[1] != "project" or home[0] is None:
                     raise _Abort(self._rejected("A heading needs a Project."))
                 project = self._library.records.get(home[0])
@@ -2774,7 +2845,13 @@ class ThingsWorkspace:
                     )
                 summary.append(f"Create heading: {entry.title}")
                 continue
-            home = self._home(entry.into, entry.kind, local, new_item=True)
+            home = self._home(
+                entry.into,
+                entry.kind,
+                local,
+                new_item=True,
+                into_title=entry.into_title,
+            )
             start, someday, tonight, remind = self._schedule_input(
                 entry.start,
                 entry.remind_at,
@@ -3196,8 +3273,15 @@ class ThingsWorkspace:
     ) -> _DesiredItemChange:
         """Project one change for both its current item and a future template."""
         home = (
-            self._home(change.into, item.kind, local, new_item=False)
+            self._home(
+                change.into,
+                item.kind,
+                local,
+                new_item=False,
+                into_title=change.into_title,
+            )
             if "into" in change.model_fields_set
+            or "into_title" in change.model_fields_set
             else self._record_home(item)
         )
         start, someday, tonight, remind = self._schedule_input(
@@ -3208,9 +3292,10 @@ class ThingsWorkspace:
         )
         start_present = "start" in change.model_fields_set
         remind_present = "remind_at" in change.model_fields_set
-        placement_clears_schedule = "into" in change.model_fields_set and (
-            home[2] or home[3]
-        )
+        placement_clears_schedule = (
+            "into" in change.model_fields_set
+            or "into_title" in change.model_fields_set
+        ) and (home[2] or home[3])
         if placement_clears_schedule:
             desired_start = None
             desired_someday = False
@@ -4492,22 +4577,28 @@ class ThingsWorkspace:
         local: dict[str, tuple[str, Kind | str]],
         *,
         new_item: bool,
+        into_title: str | None = None,
     ) -> tuple[str | None, Kind | None, bool, bool]:
-        if kind == "area" and reference is not None:
+        if kind == "area" and (reference is not None or into_title is not None):
             raise _Abort(self._rejected("Areas stay in the top-level registry."))
         if reference == "inbox":
             if kind == "project":
                 raise _Abort(self._rejected("Projects cannot enter Inbox."))
             return None, None, True, False
-        if reference == "anytime" or (reference is None and kind == "project"):
+        if reference == "anytime" or (
+            reference is None and into_title is None and kind == "project"
+        ):
             return None, None, False, True
-        if reference is None:
+        if reference is None and into_title is None:
             return (
                 (None, None, kind == "task", False)
                 if new_item
                 else (None, None, False, True)
             )
-        if reference.startswith("$"):
+        if reference is None:
+            assert into_title is not None
+            uuid, target = self._resolve_into_title(into_title)
+        elif reference.startswith("$"):
             uuid, target_kind = local[reference]
             if target_kind not in {"project", "area"}:
                 raise _Abort(self._rejected("A home must be an Area or Project."))
@@ -4520,6 +4611,21 @@ class ThingsWorkspace:
         if target not in {"project", "area"}:
             raise _Abort(self._rejected("A home must be an Area or Project."))
         return uuid, target, False, False
+
+    def _resolve_into_title(self, title: str) -> tuple[str, Kind]:
+        resolved = self._library.resolve_into(title)
+        if resolved is None or resolved == []:
+            raise _Abort(
+                self._needs_input(f"No Area or Project named {title}.")
+            )
+        if isinstance(resolved, list):
+            pairs = ", ".join(f"{item.id} {item.title}" for item in resolved[:8])
+            raise _Abort(
+                self._needs_input(
+                    f"Several homes match {title}: {pairs}. Use an exact id."
+                )
+            )
+        return resolved.uuid, resolved.kind
 
     def _tag_ids(
         self,
@@ -5476,6 +5582,7 @@ class ThingsWorkspace:
         ids: list[str] = []
         missing_ids: list[str] = []
         tags: list[TagFact] = []
+        assigned: dict[str, list[str]] = {}
 
         def add_id(uuid: str | None) -> None:
             if uuid and uuid not in ids:
@@ -5515,27 +5622,58 @@ class ThingsWorkspace:
                     add_id(write.uuid)
                 continue
             add_id(write.uuid)
-            if write.tag_uuids is not None:
+            if write.tag_uuids:
+                assigned[write.uuid] = list(write.tag_uuids)
                 for tag_uuid in write.tag_uuids:
                     add_tag(tag_uuid)
 
-        items = [
-            self._fact(item, full=False)
-            for uuid in ids
-            if (item := self._library.records.get(uuid)) is not None
-        ][:_CONTEXT_LIMIT]
+        items: list[ItemFact] = []
+        for uuid in ids:
+            item = self._library.records.get(uuid)
+            if item is None:
+                continue
+            fact = self._fact(item, full=False)
+            tag_ids = assigned.get(uuid)
+            if tag_ids:
+                fact = fact.model_copy(
+                    update={
+                        "direct_tag_ids": [f"tag:{tag_uuid}" for tag_uuid in tag_ids]
+                    }
+                )
+            items.append(fact)
+            if len(items) >= _CONTEXT_LIMIT:
+                break
         missing_ids = list(dict.fromkeys(missing_ids))[:_CONTEXT_LIMIT]
+        created = {
+            write.uuid
+            for write in writes
+            if write.action in {"create", "create_heading"}
+        }
         return Result(
             next="done",
             status="unchanged" if unchanged else "applied",
             instruction="The requested state was already true."
             if unchanged
-            else "Cloud read-back matched the requested state.",
+            else self._applied_instruction(items, created),
             items=items,
             tags=tags,
             receipt=intent_id,
             missing_ids=missing_ids,
         )
+
+    def _applied_instruction(
+        self, items: list[ItemFact], created: set[str]
+    ) -> str:
+        parts: list[str] = []
+        for item in items:
+            if not item.into_title:
+                continue
+            verb = "Created" if parse_id(item.id)[1] in created else "Updated"
+            parts.append(f"{verb} {item.title} in {item.into_title}.")
+        text = " ".join(parts)
+        if not text or len(text) > 1000:
+            return "Cloud read-back matched the requested state."
+        return text
 
     def _plan_payload(self, prepared: _Prepared) -> JsonDict:
         return {

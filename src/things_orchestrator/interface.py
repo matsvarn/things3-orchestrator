@@ -138,6 +138,20 @@ def _reject_cleared_start_with_reminder(
         raise ValueError("start=null cannot combine with remind_at")
 
 
+def _reject_combined_into(into: str | None, into_title: str | None) -> None:
+    if into is not None and into_title is not None:
+        raise ValueError("into and into_title cannot combine")
+
+
+def _clean_optional_title(value: str | None, *, name: str) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{name} cannot be blank")
+    return cleaned
+
+
 class ReadInclude(StrictModel):
     """One bounded item lookup to add to a change context."""
 
@@ -372,6 +386,7 @@ class CreateEntry(StrictModel):
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
+    into_title: str | None = Field(default=None, min_length=1, max_length=1000)
     start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
@@ -394,6 +409,11 @@ class CreateEntry(StrictModel):
         if not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("into_title")
+    @classmethod
+    def clean_into_title(cls, value: str | None) -> str | None:
+        return _clean_optional_title(value, name="into_title")
 
     @field_validator("checklist", "next_actions")
     @classmethod
@@ -428,18 +448,20 @@ class CreateEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_kind_fields(self) -> Self:
+        _reject_combined_into(self.into, self.into_title)
         if self.kind == "heading":
-            allowed = {"key", "kind", "title", "into", "after"}
-            if self.into is None:
+            allowed = {"key", "kind", "title", "into", "into_title", "after"}
+            if self.into is None and self.into_title is None:
                 raise ValueError("a heading needs a Project")
-            if not (
+            if self.into is not None and not (
                 self.into.startswith(("project:", "$"))
                 or re.fullmatch(_SHORT_REF, self.into) is not None
             ):
                 raise ValueError("a heading needs a Project")
             if self.model_fields_set - allowed:
                 raise ValueError(
-                    "a heading accepts only key, kind, title, into, and after"
+                    "a heading accepts only key, kind, title, into, "
+                    "into_title, and after"
                 )
             return self
         if self.checklist and self.kind != "task":
@@ -538,6 +560,7 @@ class ChangeEntry(StrictModel):
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
+    into_title: str | None = Field(default=None, min_length=1, max_length=1000)
     start: str | None = Field(default=None, max_length=32, pattern=START_PATTERN)
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
@@ -570,6 +593,11 @@ class ChangeEntry(StrictModel):
         if value is not None and not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("into_title")
+    @classmethod
+    def clean_into_title(cls, value: str | None) -> str | None:
+        return _clean_optional_title(value, name="into_title")
 
     @field_validator("start")
     @classmethod
@@ -626,6 +654,7 @@ class ChangeEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_change(self) -> Self:
+        _reject_combined_into(self.into, self.into_title)
         exact = self.id is not None or self.if_revision is not None
         if self.ref is None and self.if_revision is not None and self.id is None:
             raise ValueError("an exact change needs id and if_revision")
@@ -647,6 +676,7 @@ class ChangeEntry(StrictModel):
                 bool(self.checklist_remove),
                 self.checklist_order is not None and bool(self.checklist_order),
                 "into" in self.model_fields_set,
+                "into_title" in self.model_fields_set,
                 "start" in self.model_fields_set,
                 "deadline" in self.model_fields_set,
                 "remind_at" in self.model_fields_set,
@@ -1254,7 +1284,9 @@ class ItemFact(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     status: Status
     into_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    into_title: str | None = Field(default=None, min_length=1, max_length=1000)
     heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
+    heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[ChecklistFact] = Field(default_factory=list, max_length=100)
     direct_tags: list[TagFact] = Field(default_factory=list, max_length=40)
@@ -1265,7 +1297,7 @@ class ItemFact(StrictModel):
     deadline: str | None = Field(default=None, max_length=10)
     remind_at: str | None = Field(default=None, max_length=40)
     recurrence: RecurrenceFact | None = None
-    order: int = Field(ge=_ORDER_MIN, le=_ORDER_MAX)
+    order: int | None = Field(default=None, ge=_ORDER_MIN, le=_ORDER_MAX)
     today_order: int | None = Field(default=None, ge=_ORDER_MIN, le=_ORDER_MAX)
     signals: list[str] = Field(default_factory=list, max_length=20)
     truncated_fields: list[TruncatedField] = Field(default_factory=list, max_length=4)
@@ -1645,6 +1677,7 @@ _CREATE: dict[str, Any] = {
             "items": {"type": "string", "minLength": 1, "maxLength": 1000},
         },
         "into": _CONTEXT_HOME_SCHEMA,
+        "into_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "start": {
             "type": ["string", "null"],
             "maxLength": 32,
@@ -1719,6 +1752,7 @@ _CHANGE: dict[str, Any] = {
             "items": {**_STRING, "pattern": _CHECK_REFERENCE},
         },
         "into": _CONTEXT_HOME_SCHEMA,
+        "into_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "start": {
             "type": ["string", "null"],
             "maxLength": 32,
@@ -1939,7 +1973,7 @@ _RECURRENCE: dict[str, Any] = {
 _ITEM_FACT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "kind", "title", "status", "order"],
+    "required": ["id", "kind", "title", "status"],
     "properties": {
         "ref": {"type": "string", "pattern": _SHORT_REF, "maxLength": 12},
         "id": _EXACT_ITEM,
@@ -1948,7 +1982,9 @@ _ITEM_FACT: dict[str, Any] = {
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "into_id": _EXACT_ITEM,
+        "into_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "heading_id": {**_STRING, "pattern": _HEADING_ID},
+        "heading_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {"type": "array", "maxItems": 100, "items": _CHECKLIST_FACT},
         "direct_tags": {"type": "array", "maxItems": 40, "items": _TAG_FACT},
@@ -2201,8 +2237,16 @@ _ITEM_SUMMARY: dict[str, Any] = {
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "status": {"enum": ["open", "completed", "canceled"]},
         "into_id": _EXACT_ITEM,
+        "into_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "heading_id": {**_STRING, "pattern": _HEADING_ID},
+        "heading_title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "start": {"type": "string", "maxLength": 32, "pattern": START_PATTERN},
+        "direct_tag_ids": {
+            "type": "array",
+            "maxItems": 40,
+            "uniqueItems": True,
+            "items": _EXACT_TAG,
+        },
         "signals": {
             "type": "array",
             "maxItems": 20,

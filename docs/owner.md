@@ -16,6 +16,7 @@ chat. If the model shows a tool id, answer in words.
 ## Say
 
 - “Remind me to renew my passport.”
+- “Tag Buy milk Errands and put it in Kitchen.”
 - “Project: Replace kitchen tap. Next: Find three taps, Measure the sink, Order one.”
 - “What should I focus on in Things today?”
 - “Start the contract on 4 September.” / “Deadline for the contract is 4 September.”
@@ -36,7 +37,9 @@ X. It will not invent a second copy of the same title.
 - a date is not named as start or deadline
 - a reminder has no clock time
 - two items match
-- a new Project has no stated outcome
+- a new Project has no stated finish
+- a mashed title, pasted brief, or Decide / Think about row
+- more than one sitting, until you name the finish and whether it is one Project or two
 - a permanent delete does not name exact Trash items
 
 ## It will ask you to confirm before

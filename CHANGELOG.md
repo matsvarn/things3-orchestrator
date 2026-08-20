@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.4.2 — 2026-08-20
+
+Named homes and tags in one capture. Leaner review bytes. Same three tools.
+
+### Changed
+
+- Disclosed skill files are `research.md`, `form.md`, and `review.md`.
+  Capture, Today, and repeats live in `SKILL.md`. A dump loads research,
+  not form. `things_commit` asks and writes nothing when a new Task or
+  Project is still a dump.
+- Create and change may send `into_title` for a unique Area or Project.
+  Open Project and Area title twins ask, like Tasks already did.
+- Compact items name `into_title` and `heading_title`. They omit sibling
+  `order`, empty recurrence, and section `item_ids` that replay the list.
+- Applied receipts bind assigned `direct_tag_ids` and name the home.
+  Tag pages are a catalog. Capture may `ensure_tags` in the same commit.
+
 ## 0.4.1 — 2026-08-19
 
 Trash list copy and trashed Project layout. Same three tools.
