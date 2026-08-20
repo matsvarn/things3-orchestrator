@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.4.4 — 2026-08-20
+
+Named Project create with distilled notes applies. Same three tools.
+
+### Fixed
+
+- A new Project with one to three next actions and distilled notes is
+  not a dump. Dump is a mashed title, Decide / Think about / Work on /
+  Assess, or a pasted brief. The form note template is not a brief.
+- Form notes stay short and plain. A source URL that one Task must
+  open lives on that Task.
+
 ## 0.4.3 — 2026-08-20
 
 Applied receipts name unique homes. Exact `into` wins. Same three tools.

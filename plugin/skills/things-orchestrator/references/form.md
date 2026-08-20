@@ -9,18 +9,15 @@ If this turn is a thread, changelog, or dump, research owns it. Write nothing.
 Walk these questions in order. Stop when the form is named.
 
 1. More than one sitting, and they have not said what finished looks like? Ask one Project or two. Do not create it.
-2. Will one sitting finish it? Yes: a Task. Title starts with the visible action and names the object. Known sub-steps of that sitting, packing, a shopping list, a known process: a Things checklist. Rows share that finish. Write call, draft, open, buy, list. Do not write Decide, Think about, or Work on. A blocking step goes first.
+2. Will one sitting finish it? Yes: a Task. Title starts with the visible action and names the object. Known sub-steps of that sitting, packing, a shopping list, a known process: a Things checklist. Rows share that finish. Write call, draft, open, buy, list, read. Do not write Decide, Think about, Work on, or Assess. A blocking step goes first.
 3. No: a Project. Several actions that finish separately. Next one to three useful actions unless they supplied a plan. Projects cannot enter Inbox. Two named finishes are two Projects, or one after they say they share a finish. Independent finishes are Project Tasks, not checklist rows.
-4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. Later sequential steps may live in notes until they are current. Notes `- [ ]` is not Today. Do not use it as a list of current work.
+4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. Prefer short plain notes. Do not require `# Done when` headings on a small note. Put a source URL on the Task that must open it. Shared finish and constraints stay on the Project. Later sequential steps may live in notes until they are current. Notes `- [ ]` is not Today. Do not use it as a list of current work.
 
 ```
-# Done when
 One kitchen tap is ordered.
 
-# Links
 https://example.com/shortlist
 
-# Constraints
 Measure the sink first.
 ```
 

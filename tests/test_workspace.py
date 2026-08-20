@@ -1303,6 +1303,87 @@ def test_dump_create_asks_and_writes_nothing() -> None:
     assert module._library.records == {}  # noqa: SLF001
 
 
+def test_named_project_create_with_form_notes_applies() -> None:
+    module = workspace()
+    notes = (
+        "# Done when\n"
+        "Mats Mode is pinned in Cursor as a custom mode.\n"
+        "\n"
+        "# Links\n"
+        "https://x.com/poteto/status/2090141955695198633\n"
+        "https://cursor.com/changelog\n"
+        "https://github.com/cursor/plugins/tree/main/pstack\n"
+        "https://github.com/0xSero/ai-data-extraction/blob/main/README.md\n"
+        "https://x.com/poteto/status/2089067865098113024\n"
+        "\n"
+        "# Constraints\n"
+        "Adopt only what fits.\n"
+        "Correction ladder: architecture, then lint or test, then skill or rule, "
+        "then human review last.\n"
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "mats-mode-create-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Create Mats Mode",
+                        "notes_markdown": notes,
+                        "next_actions": [
+                            "Audit currently used local skills (MacBook Pro)",
+                            "Read pstack poteto-mode",
+                            "Write Mats Mode as a pin-able Cursor custom mode",
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    records = list(module._library.records.values())  # noqa: SLF001
+    titles = {item.title for item in records}
+    assert "Create Mats Mode" in titles
+    assert "Audit currently used local skills (MacBook Pro)" in titles
+    assert "Read pstack poteto-mode" in titles
+    assert "Write Mats Mode as a pin-able Cursor custom mode" in titles
+
+
+def test_mashed_title_alone_asks_and_writes_nothing() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "mashed-title-001",
+                "create": [{"title": "Audit skills and create Mats Mode"}],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert "dump" in (result.instruction or "").lower()
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_assess_title_asks_and_writes_nothing() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "assess-title-001",
+                "create": [{"title": "Assess pstack"}],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert module._library.records == {}  # noqa: SLF001
+
+
 def test_fake_next_action_row_asks_and_writes_nothing() -> None:
     module = workspace()
 
