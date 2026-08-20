@@ -3048,6 +3048,9 @@ def test_risky_area_change_needs_approval_and_is_revision_bound() -> None:
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
     assert "natural confirmation" in prepared.instruction
+    assert "exact before-and-after manifest" in prepared.instruction
+    assert "permanent deletion" in prepared.instruction
+    assert "note replacement" in prepared.instruction
     assert "Keep plan IDs" in prepared.instruction
     assert module._library.records["work"].title == "Work"  # noqa: SLF001
 
@@ -3077,6 +3080,132 @@ def test_new_area_settles_after_approval() -> None:
     area = next(iter(module._library.records.values()))  # noqa: SLF001
     assert area.kind == "area"
     assert area.inbox is False
+
+
+@pytest.mark.parametrize("step", [1024, 1])
+def test_chained_area_reorder_uses_each_planned_anchor(step: int) -> None:
+    titles = ["Arbeit", "Studium", "Privat", "Finanzen", "Gesundheit", "Systeme"]
+    records = [
+        Record(uuid=title.lower(), kind="area", title=title, sort_index=index * step)
+        for index, title in enumerate(titles, start=1)
+    ]
+    module = workspace(records)
+    module._library.tags.update(  # noqa: SLF001
+        {
+            "anstehend": "Anstehend",
+            "besorgung": "Besorgung",
+            "buero": "Büro",
+            "privat": "Privat",
+            "warten": "Warten",
+            "wichtig": "Wichtig",
+            "waiting": "Waiting",
+        }
+    )
+    current = {record.title: detail(module, record.id) for record in records}
+    tag_scope = module.read(ReadCall(view="tags")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-chain-order-001",
+                "scope_revision": system_scope(module),
+                "tags_revision": tag_scope,
+                "ensure_tags": [
+                    {"key": "$admin", "title": "Admin"},
+                    {"key": "$call", "title": "Call"},
+                    {"key": "$errand", "title": "Errand"},
+                    {"key": "$focus", "title": "Focus"},
+                ],
+                "change_tags": [
+                    {"id": f"tag:{uuid}", "delete_permanently": True}
+                    for uuid in (
+                        "anstehend",
+                        "besorgung",
+                        "buero",
+                        "privat",
+                        "warten",
+                        "wichtig",
+                    )
+                ],
+                "create": [
+                    {
+                        "kind": "area",
+                        "key": "$products",
+                        "title": "Products",
+                        "after": current["Arbeit"].id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": current["Arbeit"].id,
+                        "if_revision": current["Arbeit"].revision,
+                        "title": "Job",
+                        "after": None,
+                    },
+                    {
+                        "id": current["Systeme"].id,
+                        "if_revision": current["Systeme"].revision,
+                        "title": "Stack",
+                        "after": "$products",
+                    },
+                    {
+                        "id": current["Studium"].id,
+                        "if_revision": current["Studium"].revision,
+                        "title": "Study",
+                        "after": current["Systeme"].id,
+                    },
+                    {
+                        "id": current["Finanzen"].id,
+                        "if_revision": current["Finanzen"].revision,
+                        "title": "Money",
+                        "after": current["Studium"].id,
+                    },
+                    {
+                        "id": current["Gesundheit"].id,
+                        "if_revision": current["Gesundheit"].revision,
+                        "title": "Health",
+                        "after": current["Finanzen"].id,
+                    },
+                    {
+                        "id": current["Privat"].id,
+                        "if_revision": current["Privat"].revision,
+                        "title": "Private",
+                        "after": current["Gesundheit"].id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    actual = [
+        record.title
+        for record in sorted(
+            (
+                record
+                for record in module._library.records.values()  # noqa: SLF001
+                if record.kind == "area"
+            ),
+            key=lambda record: record.sort_index,
+        )
+    ]
+    assert actual == ["Job", "Products", "Stack", "Study", "Money", "Health", "Private"]
+    assert "7 Area changes" in settled.instruction
+    assert "10 tag changes" in settled.instruction
+    assert (
+        "Final Area order: Job, Products, Stack, Study, Money, Health, Private."
+        in settled.instruction
+    )
+    assert "Final tag catalog: Admin, Call, Errand, Focus, Waiting." in (
+        settled.instruction
+    )
+    assert all(
+        item.order is not None for item in settled.items if item.kind == "area"
+    )
 
 
 def test_area_create_rejects_a_stale_system_scope_before_staging() -> None:
@@ -7778,6 +7907,24 @@ def test_inbox_create_keeps_the_cloud_applied_sentence() -> None:
     assert result.instruction == "Cloud read-back matched the requested state."
     assert result.items[0].into_id is None
     assert result.items[0].into_title is None
+
+
+def test_inbox_create_with_a_new_tag_keeps_the_capture_receipt() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "inbox-tagged-applied-001",
+                "ensure_tags": [{"key": "$focus", "title": "Focus"}],
+                "create": [{"title": "Renew passport", "tag_ids": ["$focus"]}],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.instruction == "Cloud read-back matched the requested state."
+    assert result.tags[0].title == "Focus"
 
 
 def test_exact_into_wins_when_into_title_also_is_sent() -> None:

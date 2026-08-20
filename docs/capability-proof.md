@@ -84,6 +84,23 @@ durable public artifacts.
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
 
+### Full reorganization behavior gate
+
+Run the natural request in `tests/fixtures/full_reorg_owner_prompt.txt` against
+a realistic isolated library. The library must include several Areas, active
+and Someday Projects, a thin Area, an empty Area, assigned tags, rich notes,
+and at least one known Project inconsistency.
+
+The release passes when the agent performs one complete audit and reads
+affected details in batches. It asks only material owner questions. It then
+shows one exact before-and-after manifest. The accepted reorganization uses
+one commit and one approval unless structured recovery requires a split.
+
+The applied result must prove the final Area order, final tag catalog, mutation
+counts, and read-back. The agent must not claim success while a requested state
+differs or a known incoherent Project remains. The trace must omit tool-loading,
+lookup, and retry narration. Measure duplicate work, not a fixed call count.
+
 ### v0.4.8 derivation run
 
 On 2026-08-20, Cursor Agent and Codex each ran three paraphrases against an

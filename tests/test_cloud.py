@@ -2422,6 +2422,103 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
     ]
 
 
+def test_chained_area_reorder_round_trips_through_cloud(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    titles = ["Arbeit", "Studium", "Privat", "Finanzen", "Gesundheit", "Systeme"]
+    records = [
+        Record(
+            uuid=title.lower(),
+            kind="area",
+            title=title,
+            sort_index=index * 1024,
+            entity="Area3",
+        )
+        for index, title in enumerate(titles, start=1)
+    ]
+    library.records.update({record.uuid: record for record in records})
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    current = {
+        item.title: item
+        for item in module.read(ReadCall(ids=[record.id for record in records])).items
+    }
+    scope_revision = module.read(ReadCall(view="system")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "cloud-area-chain-order-001",
+                "scope_revision": scope_revision,
+                "create": [
+                    {
+                        "kind": "area",
+                        "key": "$products",
+                        "title": "Products",
+                        "after": current["Arbeit"].id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": current["Arbeit"].id,
+                        "if_revision": current["Arbeit"].revision,
+                        "title": "Job",
+                        "after": None,
+                    },
+                    {
+                        "id": current["Systeme"].id,
+                        "if_revision": current["Systeme"].revision,
+                        "title": "Stack",
+                        "after": "$products",
+                    },
+                    {
+                        "id": current["Studium"].id,
+                        "if_revision": current["Studium"].revision,
+                        "title": "Study",
+                        "after": current["Systeme"].id,
+                    },
+                    {
+                        "id": current["Finanzen"].id,
+                        "if_revision": current["Finanzen"].revision,
+                        "title": "Money",
+                        "after": current["Studium"].id,
+                    },
+                    {
+                        "id": current["Gesundheit"].id,
+                        "if_revision": current["Gesundheit"].revision,
+                        "title": "Health",
+                        "after": current["Finanzen"].id,
+                    },
+                    {
+                        "id": current["Privat"].id,
+                        "if_revision": current["Privat"].revision,
+                        "title": "Private",
+                        "after": current["Gesundheit"].id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert prepared.plan is not None
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+    assert settled.status == "applied"
+    assert [
+        record.title
+        for record in sorted(
+            (record for record in library.records.values() if record.kind == "area"),
+            key=lambda record: record.sort_index,
+        )
+    ] == ["Job", "Products", "Stack", "Study", "Money", "Health", "Private"]
+    assert "Final Area order: Job, Products, Stack, Study, Money, Health, Private." in (
+        settled.instruction
+    )
+    assert all(
+        envelope.payload.get("ix", 1) > 0
+        for envelope in client.committed
+        if envelope.kind == "Area3"
+    )
+
+
 def test_source_document_finishes_round_trip_through_cloud(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]

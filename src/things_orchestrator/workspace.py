@@ -4186,6 +4186,7 @@ class ThingsWorkspace:
         """Apply batch-wide invariants after all planners finish."""
         if not context.writes:
             raise _Abort(self._rejected("The request did not produce a change."))
+        context.writes = self._collapse_order_updates(context.writes)
         self._validate_project_destinations(context)
         self._plan_project_teardown(context)
         if any(write.action == "delete_area" for write in context.writes):
@@ -4198,6 +4199,48 @@ class ThingsWorkspace:
         if len(context.writes) > 20 or len(call.change) > 5:
             context.risky = True
             context.warnings.append("This is a broad batch change.")
+
+    @staticmethod
+    def _collapse_order_updates(writes: list[Write]) -> list[Write]:
+        """Fold compiler-only order writes into the final update for each item."""
+
+        def is_order_only_update(write: Write) -> bool:
+            return replace(
+                write,
+                sort_index=None,
+                today_index=None,
+                owner_today=None,
+            ) == Write(action="update", uuid=write.uuid, kind=write.kind)
+
+        collapsed = list(writes)
+        removed: set[int] = set()
+        for index, write in enumerate(collapsed):
+            if write.action != "update" or not is_order_only_update(write):
+                continue
+            later_index = next(
+                (
+                    candidate
+                    for candidate in range(index + 1, len(collapsed))
+                    if collapsed[candidate].action == "update"
+                    and collapsed[candidate].uuid == write.uuid
+                ),
+                None,
+            )
+            if later_index is None:
+                continue
+            later = collapsed[later_index]
+            collapsed[later_index] = replace(
+                later,
+                sort_index=later.sort_index
+                if later.sort_index is not None
+                else write.sort_index,
+                today_index=later.today_index
+                if later.today_index is not None
+                else write.today_index,
+                owner_today=later.owner_today or write.owner_today,
+            )
+            removed.add(index)
+        return [write for index, write in enumerate(collapsed) if index not in removed]
 
     def _validate_project_destinations(
         self, context: _PreparationContext
@@ -4856,23 +4899,29 @@ class ThingsWorkspace:
         preconditions[self._list_scope_key(kind, wanted_scope)] = (
             self._list_scope_revision(kind, wanted_scope)
         )
-        indexes = [
-            item.sort_index
+        projected_indexes = {
+            item.uuid: item.sort_index
             for item in self._library.records.values()
             if item.uuid != moving_uuid
             and item.is_open()
             and item.kind == kind
             and self._record_scope(item) == wanted_scope
-        ]
-        indexes.extend(
-            write.sort_index
-            for write in planned
-            if write.uuid != moving_uuid
-            and write.action == "create"
-            and write.kind == kind
-            and write.sort_index is not None
-            and self._write_scope(write) == wanted_scope
-        )
+        }
+        for write in planned:
+            if write.uuid == moving_uuid or write.kind != kind:
+                continue
+            if write.action == "create":
+                if (
+                    write.sort_index is not None
+                    and self._write_scope(write) == wanted_scope
+                ):
+                    projected_indexes[write.uuid] = write.sort_index
+                continue
+            if write.action == "update" and write.sort_index is not None:
+                projected_indexes.pop(write.uuid, None)
+                if self._write_scope(write) == wanted_scope:
+                    projected_indexes[write.uuid] = write.sort_index
+        indexes = list(projected_indexes.values())
         if not present:
             return max(indexes, default=0) + 1024 if moving_uuid is None else None
         if reference is None:
@@ -4922,16 +4971,19 @@ class ThingsWorkspace:
                     if write.uuid == item.uuid
                     and write.action == "update"
                     and write.kind == kind
-                    and self._write_scope(write) == wanted_scope
                 ),
                 None,
             )
-            if item.kind != kind or self._record_scope(item) != wanted_scope:
-                if companion is None:
+            if item.kind != kind:
+                raise _Abort(
+                    self._rejected("An after reference must be in the same list.")
+                )
+            preconditions[item.id] = self._revision(item)
+            if companion is not None:
+                if self._write_scope(companion) != wanted_scope:
                     raise _Abort(
                         self._rejected("An after reference must be in the same list.")
                     )
-                preconditions[item.id] = self._revision(item)
                 anchor_uuid = companion.uuid
                 anchor_index = (
                     companion.sort_index
@@ -4939,7 +4991,10 @@ class ThingsWorkspace:
                     else item.sort_index
                 )
             else:
-                preconditions[item.id] = self._revision(item)
+                if self._record_scope(item) != wanted_scope:
+                    raise _Abort(
+                        self._rejected("An after reference must be in the same list.")
+                    )
                 anchor_uuid = item.uuid
                 anchor_index = item.sort_index
         later = sorted(index for index in indexes if index > anchor_index)
@@ -5088,11 +5143,27 @@ class ThingsWorkspace:
         *,
         moving_uuid: str | None,
     ) -> dict[str, int]:
+        planned_by_uuid: dict[str, tuple[int, Write]] = {}
+        projected_uuids: set[str] = set()
+        for index, write in enumerate(planned):
+            if (
+                write.uuid == moving_uuid
+                or write.kind != kind
+                or write.action not in {"create", "update"}
+                or write.sort_index is None
+            ):
+                continue
+            projected_uuids.add(write.uuid)
+            if self._write_scope(write) == scope:
+                planned_by_uuid[write.uuid] = (index, write)
+            else:
+                planned_by_uuid.pop(write.uuid, None)
         existing = sorted(
             (
                 item
                 for item in self._library.records.values()
                 if item.uuid != moving_uuid
+                and item.uuid not in projected_uuids
                 and item.is_open()
                 and item.kind == kind
                 and self._record_scope(item) == scope
@@ -5100,14 +5171,7 @@ class ThingsWorkspace:
             key=lambda item: (item.sort_index, item.uuid),
         )
         planned_rows = sorted(
-            (
-                (index, write)
-                for index, write in enumerate(planned)
-                if write.uuid != moving_uuid
-                and write.action == "create"
-                and write.kind == kind
-                and self._write_scope(write) == scope
-            ),
+            planned_by_uuid.values(),
             key=lambda pair: (pair[1].sort_index or 0, pair[1].uuid),
         )
         positions: dict[str, int] = {}
@@ -5587,9 +5651,11 @@ class ThingsWorkspace:
             next="approve",
             status="needs_approval",
             instruction=(
-                "Ask one short, natural confirmation about the visible change and its "
-                "important consequence. Keep plan IDs and control fields private. "
-                "Call things_approve only after a clear yes."
+                "Show one exact before-and-after manifest for the visible change. "
+                "Name every permanent deletion, Trash move, cancellation, note "
+                "replacement, and date change in the plan. Ask one short, natural "
+                "confirmation about that complete manifest. Keep plan IDs and control "
+                "fields private. Call things_approve only after a clear yes."
             ),
             sections=sections,
             plan=PlanFact(
@@ -5788,11 +5854,16 @@ class ThingsWorkspace:
                     add_tag(tag_uuid)
 
         items: list[ItemFact] = []
+        ordered_uuids = {
+            write.uuid for write in writes if write.sort_index is not None
+        }
         for uuid in ids:
             item = self._library.records.get(uuid)
             if item is None:
                 continue
             fact = self._fact(item, full=False)
+            if uuid in ordered_uuids:
+                fact = fact.model_copy(update={"order": item.sort_index})
             tag_ids = assigned.get(uuid)
             if tag_ids:
                 fact = fact.model_copy(
@@ -5824,6 +5895,9 @@ class ThingsWorkspace:
     def _applied_instruction(
         self, items: list[ItemFact], created: set[str], writes: list[Write]
     ) -> str:
+        registry_instruction = self._registry_applied_instruction(writes)
+        if registry_instruction is not None:
+            return registry_instruction
         project_creates = [
             write
             for write in writes
@@ -5905,6 +5979,66 @@ class ThingsWorkspace:
         if len(text) > 1000:
             return "Cloud read-back matched the requested state."
         return text
+
+    def _registry_applied_instruction(self, writes: list[Write]) -> str | None:
+        area_uuids = {
+            write.uuid
+            for write in writes
+            if write.kind == "area"
+            and write.action in {"create", "update", "rename_area", "delete_area"}
+        }
+        tag_actions = {"ensure_tag", "rename_tag", "reparent_tag", "delete_tag"}
+        tag_uuids = {write.uuid for write in writes if write.action in tag_actions}
+        tag_registry_changed = any(
+            write.action in {"rename_tag", "reparent_tag", "delete_tag"}
+            for write in writes
+        )
+        if not area_uuids and not tag_registry_changed:
+            return None
+
+        def count_phrase(count: int, label: str) -> str:
+            suffix = "" if count == 1 else "s"
+            return f"{count} {label}{suffix} applied."
+
+        parts: list[str] = []
+        if area_uuids:
+            parts.append(count_phrase(len(area_uuids), "Area change"))
+        if tag_uuids:
+            parts.append(count_phrase(len(tag_uuids), "tag change"))
+
+        item_uuids = {
+            write.uuid
+            for write in writes
+            if write.kind in {"task", "project"}
+            and write.action
+            not in {"checklist", "repeat", "repeat_link", *tag_actions}
+        }
+        if item_uuids:
+            parts.append(count_phrase(len(item_uuids), "Task or Project change"))
+
+        if area_uuids:
+            areas = sorted(
+                (
+                    record
+                    for record in self._library.records.values()
+                    if record.kind == "area" and record.is_open()
+                ),
+                key=lambda record: (record.sort_index, record.uuid),
+            )
+            parts.append(
+                "Final Area order: " + ", ".join(area.title for area in areas) + "."
+            )
+        if tag_uuids:
+            tag_titles = sorted(self._library.tags.values(), key=str.casefold)
+            parts.append("Final tag catalog: " + ", ".join(tag_titles) + ".")
+
+        parts.append("All requested changes passed read-back. Report this result and stop.")
+        instruction = " ".join(parts)
+        return (
+            instruction
+            if len(instruction) <= 1000
+            else "All requested registry changes passed read-back. Report this result and stop."
+        )
 
     def _plan_payload(self, prepared: _Prepared) -> JsonDict:
         return {

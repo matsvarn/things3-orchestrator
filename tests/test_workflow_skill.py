@@ -435,3 +435,36 @@ def test_source_capture_writes_a_human_things_document() -> None:
     assert "my chats" in form
     assert "each source is `{label, location}`" in form
     assert "write nothing this turn" not in f"{skill}\n{research}"
+
+
+def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
+    skill = SKILL.read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "review.md").read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+
+    assert "one opening sentence" in review
+    assert "`limit=40`" in review
+    assert "audit replaces separate area and inbox scans" in review
+    assert "include all small affected projects" in review
+    assert "one exact before-and-after manifest" in review
+    assert "one commit and one approval" in review
+    assert "do not stage intermediate states" in review
+    assert "permanent deletion, trash, cancellation, note replacement" in review
+    assert "preserve notes unless" in review
+    assert "receipt proves" in review
+    assert "do not report success" in review
+    assert "known incoherent project" in review
+
+    assert "owner may keep any tag" in review
+    assert "at least two real items" in review
+    assert "cross-area use is evidence, not a requirement" in review
+    assert "provisional starter set" in review
+    assert "first useful weekly review" in review
+    assert "empty or thin area" in review
+    assert "ongoing responsibility" in review
+
+    assert "project title names the finished outcome" in form
+    assert "task title names a visible action" in form
+    assert "active task inside a someday project" in form
+    assert "extract the task or reactivate the project" in form
+    assert "one opening sentence" not in skill
