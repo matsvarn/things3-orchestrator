@@ -45,6 +45,7 @@ src/things_orchestrator/deployment.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
+src/things_orchestrator/preferences.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
 src/things_orchestrator/source_document.py
@@ -60,8 +61,11 @@ tests/test_contextual.py
 tests/test_interface.py
 tests/test_journal.py
 tests/test_plugin_secret_scan.py
+tests/test_preferences.py
 tests/test_recurrence.py
+tests/test_release.py
 tests/test_server.py
+tests/test_source_document.py
 tests/test_workflow_skill.py
 tests/test_workspace.py
 tests/test_workspace_context.py

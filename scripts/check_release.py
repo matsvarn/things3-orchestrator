@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import json
 import re
 import subprocess
@@ -124,11 +125,40 @@ def strip_archive_root(names: list[str]) -> list[PurePosixPath]:
     return [PurePosixPath(*path.parts[1:]) for path in paths]
 
 
+def archive_versions(sdist: Path, wheel: Path) -> tuple[str | None, str | None]:
+    with tarfile.open(sdist) as archive:
+        pkg_info = next(
+            (member for member in archive.getmembers() if member.name.endswith("/PKG-INFO")),
+            None,
+        )
+        extracted = archive.extractfile(pkg_info) if pkg_info is not None else None
+        sdist_version = (
+            email.parser.BytesParser().parsebytes(extracted.read()).get("Version")
+            if extracted is not None
+            else None
+        )
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            (name for name in archive.namelist() if name.endswith(".dist-info/METADATA")),
+            None,
+        )
+        wheel_version = (
+            email.parser.BytesParser().parsebytes(archive.read(metadata_name)).get("Version")
+            if metadata_name is not None
+            else None
+        )
+    return sdist_version, wheel_version
+
+
 def archives() -> None:
     sdists = sorted((ROOT / "dist").glob("*.tar.gz"))
     wheels = sorted((ROOT / "dist").glob("*.whl"))
     if len(sdists) != 1 or len(wheels) != 1:
         raise SystemExit("dist must contain exactly one sdist and one wheel")
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    expected_version = project["version"]
+    sdist_version, wheel_version = archive_versions(sdists[0], wheels[0])
 
     with tarfile.open(sdists[0]) as archive:
         sdist_paths = strip_archive_root(archive.getnames())
@@ -149,6 +179,14 @@ def archives() -> None:
 
     errors = [f"sdist contains an unapproved file: {path}" for path in bad_sdist]
     errors += [f"wheel contains an unapproved file: {path}" for path in bad_wheel]
+    if sdist_version != expected_version:
+        errors.append(
+            f"sdist version {sdist_version!r} differs from pyproject.toml {expected_version!r}"
+        )
+    if wheel_version != expected_version:
+        errors.append(
+            f"wheel version {wheel_version!r} differs from pyproject.toml {expected_version!r}"
+        )
     fail(errors)
     print("Release archives contain only approved files.")
 

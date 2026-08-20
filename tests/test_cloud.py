@@ -1177,6 +1177,79 @@ def test_batch_creates_get_distinct_ix(tmp_path: Path) -> None:
     assert indexes == [1024, 2048]
 
 
+def test_create_after_legacy_negative_siblings_starts_at_a_positive_ix(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["legacy"] = Record(
+        uuid="legacy",
+        kind="task",
+        title="Legacy",
+        inbox=True,
+        sort_index=-2048,
+        entity="Task6",
+    )
+
+    library.apply([Write(action="create", uuid="new", title="New")])
+
+    assert client.committed[0].payload["ix"] == 1024
+
+
+def test_create_without_an_explicit_ix_matches_after_apply(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    write = Write(action="create", uuid="new", title="New")
+
+    library.apply([write])
+
+    assert library.records["new"].sort_index == 1024
+    assert library.matches([write]) is True
+
+
+def test_create_without_an_explicit_ix_does_not_match_a_nonpositive_row(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["new"] = Record(
+        uuid="new",
+        kind="task",
+        title="New",
+        inbox=True,
+        sort_index=0,
+        entity="Task6",
+    )
+
+    assert library.matches([Write(action="create", uuid="new", title="New")]) is False
+
+
+def test_task6_envelopes_never_use_a_non_positive_ix(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="project",
+                kind="project",
+                title="Project",
+                sort_index=0,
+            ),
+            Write(
+                action="create",
+                uuid="task",
+                kind="task",
+                title="Task",
+                sort_index=-1024,
+            ),
+        ]
+    )
+
+    indexes = {item.uuid: item.payload["ix"] for item in client.committed}
+    assert indexes == {"project": 1, "task": 1}
+
+
 def test_area_rename_keeps_stored_entity(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
@@ -2327,7 +2400,10 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
     assert [
         envelopes[title].payload["ix"]
         for title in ("Check notes", "Build package", "Publish package")
-    ] == [0, 1024, 2048]
+    ] == [1024, 2048, 3072]
+    assert [
+        envelopes[title].payload["ix"] for title in ("Prepare", "Release")
+    ] == [1024, 2048]
 
     project = next(item for item in library.records.values() if item.kind == "project")
     visible = library.project(project.id)
@@ -2370,11 +2446,9 @@ def test_source_document_finishes_round_trip_through_cloud(tmp_path: Path) -> No
                         "kind": "project",
                         "document": "source",
                         "title": "Build one Agent Skill",
-                        "notes_markdown": (
-                            "## Result\n\nOne reusable skill.\n\n"
-                            "## Done when\n\nThe skill passes one real test.\n\n"
-                            "## Guardrails\n\nUse observed evidence."
-                        ),
+                        "outcome": "One reusable skill.",
+                        "finished_when": ["The skill passes one real test."],
+                        "keep_in_mind": ["Use observed evidence."],
                         "tasks": [
                             {
                                 "title": title,
@@ -2392,14 +2466,19 @@ def test_source_document_finishes_round_trip_through_cloud(tmp_path: Path) -> No
     assert result.status == "applied"
     envelopes = {item.payload.get("tt"): item for item in client.committed}
     for title in titles:
-        assert envelopes[title].payload["nt"]["v"].startswith("## Leave with\n\n")
+        assert envelopes[title].payload["nt"]["v"].startswith(
+            "## Done when\n\nA visible result"
+        )
     tasks = [
         item
         for item in library.records.values()
         if item.kind == "task" and not item.heading
     ]
     assert len(tasks) == 7
-    assert all((task.notes or "").startswith("## Leave with\n\n") for task in tasks)
+    assert all(
+        (task.notes or "").startswith("## Done when\n\nA visible result")
+        for task in tasks
+    )
     assert "all 7 Task notes passed read-back" in result.instruction
 
 

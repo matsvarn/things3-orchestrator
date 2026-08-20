@@ -260,6 +260,7 @@ restart and run `doctor --wait`.
 `XDG_STATE_HOME` equivalents):
 
 - `~/.config/things-orchestrator/credentials.json`
+- `~/.config/things-orchestrator/preferences.json` (if configured)
 - `~/.local/state/things-orchestrator/state.json`
 - `~/.local/state/things-orchestrator/journal-*.sqlite3`
 - `~/.local/state/things-orchestrator/contexts-*.sqlite3`
@@ -268,6 +269,12 @@ restart and run `doctor --wait`.
 `uv run things-orchestrator login --rotate-token --show-secrets`.
 Then update every client with the new bearer. A 401 is a bearer
 mismatch, not a Cloud-password problem. [recovery.md](recovery.md).
+
+**Choose the note style.** Run
+`uv run things-orchestrator configure --note-style natural`.
+Replace `natural` with `visual` to use visual notes. Updates,
+rollbacks, login, token rotation, and snippet generation do not change
+this preference.
 
 **After reboot.** On the VPS: `uv run things-orchestrator doctor --wait`.
 

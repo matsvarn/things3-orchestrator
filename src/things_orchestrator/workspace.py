@@ -74,11 +74,15 @@ from .library import (
     parse_id,
     template_uuid_of,
 )
+from .preferences import Preferences, PreferencesError
 from .recurrence import RepeatMode, new_rule
 from .source_document import (
     SourceDocumentError,
     compile_project_document,
+    has_project_meaning,
+    has_task_meaning,
     is_source_document,
+    is_stripped_source_skeleton,
     prose_chars,
 )
 
@@ -155,11 +159,13 @@ class _NormalizedSearchText:
 
 def _undistilled_create(entry: CreateEntry) -> str | None:
     """Return ask-copy when a create is a mashed title, fake action, or pasted brief."""
-    notes = [
-        entry.notes_markdown or "",
-        *[(task.notes_markdown or "") for task in entry.tasks],
-        *[(task.heading_title or "") for task in entry.tasks],
-    ]
+    notes = [] if has_project_meaning(entry) else [entry.notes_markdown or ""]
+    notes.extend(
+        task.notes_markdown or ""
+        for task in entry.tasks
+        if not has_task_meaning(task)
+    )
+    notes.extend(task.heading_title or "" for task in entry.tasks)
     action_rows = [
         entry.title,
         *entry.checklist,
@@ -354,6 +360,7 @@ class ThingsWorkspace:
         clock: Callable[[], datetime] | None = None,
         context_store: ContextStore | None = None,
         account_id: str | None = None,
+        preferences: Callable[[], Preferences] | None = None,
     ) -> None:
         self._library = library
         self._journal = journal or MemoryJournal()
@@ -363,6 +370,7 @@ class ThingsWorkspace:
             token_factory=lambda: token_urlsafe(18),
         )
         self._account_id = account_id or f"workspace:{token_urlsafe(18)}"
+        self._preferences = preferences or Preferences
         self._contextual_compiler = ContextualCommitCompiler()
         self._cursors: dict[str, _ItemCursor] = {}
         self._tag_cursors: dict[str, _TagCursor] = {}
@@ -2772,6 +2780,14 @@ class ThingsWorkspace:
     def _prepare(
         self, call: CommitCall, *, contextual_commit: bool = False
     ) -> _Prepared:
+        if any(is_stripped_source_skeleton(entry) for entry in call.create):
+            raise _Abort(
+                self._revise(
+                    "Revise this source-shaped Project before writing. Send "
+                    "document=source with semantic Project fields and a finish for "
+                    "every Task. Do not ask the owner."
+                )
+            )
         source_entries = [entry for entry in call.create if is_source_document(entry)]
         if source_entries and (
             len(call.create) != 1
@@ -2786,15 +2802,33 @@ class ThingsWorkspace:
                     "mutation in one things_commit. Do not ask the owner."
                 )
             )
+        preferences = Preferences()
+        if any(entry.kind == "project" for entry in call.create):
+            try:
+                preferences = self._preferences()
+            except PreferencesError as error:
+                raise _Abort(
+                    self._rejected(
+                        f"Saved Project preferences are invalid: {error}. Fix the "
+                        "serving host preferences file or run things-orchestrator "
+                        "configure again, then retry this commit."
+                    )
+                ) from error
         context = self._preparation_context(
             call, contextual_commit=contextual_commit
         )
         self._prepare_tag_registry(call, context)
-        self._prepare_items(call, context)
+        self._prepare_items(call, context, preferences=preferences)
         self._finish_preparation(call, context)
         return context.result()
 
-    def _prepare_items(self, call: CommitCall, context: _PreparationContext) -> None:
+    def _prepare_items(
+        self,
+        call: CommitCall,
+        context: _PreparationContext,
+        *,
+        preferences: Preferences,
+    ) -> None:
         # Pre-index heading moves. A Task that follows its heading in the same
         # merge must retain that heading UUID after both records enter the
         # destination Project.
@@ -2810,10 +2844,16 @@ class ThingsWorkspace:
             context.project_heading_moves[item.uuid] = (
                 self._require_heading_destination(item, change, call, context)
             )
-        self._prepare_creates(call, context)
+        self._prepare_creates(call, context, preferences=preferences)
         self._prepare_changes(call, context)
 
-    def _prepare_creates(self, call: CommitCall, context: _PreparationContext) -> None:
+    def _prepare_creates(
+        self,
+        call: CommitCall,
+        context: _PreparationContext,
+        *,
+        preferences: Preferences,
+    ) -> None:
         """Plan all create entries, including generated copies and children."""
         local = context.local
         writes = context.writes
@@ -2822,7 +2862,11 @@ class ThingsWorkspace:
         warnings = context.warnings
         for entry in call.create:
             try:
-                entry = compile_project_document(entry)
+                entry = compile_project_document(
+                    entry,
+                    style=entry.note_style or preferences.note_style,
+                    allowed_source_schemes=preferences.source_schemes,
+                )
             except SourceDocumentError as error:
                 raise _Abort(self._revise(str(error))) from error
             if entry.kind in {"task", "project"}:
@@ -2902,7 +2946,7 @@ class ThingsWorkspace:
                         into_uuid=home[0],
                         into_kind="project",
                         anytime=True,
-                        sort_index=max(heading_indexes, default=-1024) + 1024,
+                        sort_index=max(heading_indexes, default=0) + 1024,
                     )
                 )
                 if "after" in entry.model_fields_set:
@@ -3066,7 +3110,7 @@ class ThingsWorkspace:
                                 into_uuid=uuid,
                                 into_kind="project",
                                 anytime=True,
-                                sort_index=heading_index * 1024,
+                                sort_index=(heading_index + 1) * 1024,
                             )
                         )
                         heading_index += 1
@@ -3081,7 +3125,7 @@ class ThingsWorkspace:
                         into_uuid=uuid,
                         into_kind="project",
                         anytime=True,
-                        sort_index=task_index * 1024,
+                        sort_index=(task_index + 1) * 1024,
                         heading_uuid=heading_uuid,
                     )
                 )
@@ -4830,9 +4874,21 @@ class ThingsWorkspace:
             and self._write_scope(write) == wanted_scope
         )
         if not present:
-            return max(indexes, default=-1024) + 1024 if moving_uuid is None else None
+            return max(indexes, default=0) + 1024 if moving_uuid is None else None
         if reference is None:
-            return min(indexes, default=1024) - 1024
+            if not indexes:
+                return 1024
+            first = min(indexes)
+            if first > 1:
+                return max(1, first // 2)
+            self._rebalance_scope(
+                kind,
+                wanted_scope,
+                planned,
+                preconditions,
+                moving_uuid=moving_uuid,
+            )
+            return 512
         if reference.startswith("$"):
             uuid = local[reference][0]
             previous = next(
@@ -5003,7 +5059,7 @@ class ThingsWorkspace:
             ordered.insert(position + 1, moving)
         writes: list[Write] = []
         for index, row in enumerate(ordered):
-            wanted = index * 1024
+            wanted = (index + 1) * 1024
             if row.record is not None:
                 if row.sort_index == wanted:
                     continue
@@ -5064,7 +5120,7 @@ class ThingsWorkspace:
             key=lambda row: (row[0], row[1]),
         )
         for order, (_old, uuid, source, value) in enumerate(combined):
-            new_index = order * 1024
+            new_index = (order + 1) * 1024
             positions[uuid] = new_index
             if source == "existing":
                 item = cast(Record, value)

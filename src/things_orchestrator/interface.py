@@ -6,6 +6,7 @@ import re
 from collections.abc import Hashable, Sequence
 from datetime import date, datetime
 from typing import Any, Literal, Self
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -17,6 +18,7 @@ class StrictModel(BaseModel):
 
 
 Kind = Literal["task", "project", "area", "heading"]
+NoteStyle = Literal["natural", "visual"]
 Status = Literal["open", "completed", "canceled"]
 TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
 DetailField = Literal["notes", "checklist", "tags", "recurrence"]
@@ -153,6 +155,101 @@ def _validate_checklist_titles(value: list[str]) -> list[str]:
     if any(len(title) > 1000 for title in value):
         raise ValueError("checklist titles cannot exceed 1000 characters")
     return value
+
+
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+_MARKDOWN_HEADING = re.compile(r"^\s*#{1,6}(?:\s|$)", re.MULTILINE)
+_MARKDOWN_PRESENTATION = re.compile(
+    r"(?m)(?:^\s*(?:[-+*>]|\d+[.)])\s+|\*\*|__|`|\[[^\]\n]+\]\([^\n)]+\))"
+)
+_SOURCE_LOCATION_IN_PROSE = re.compile(
+    r"(?i)(?:[a-z][a-z0-9+.-]*://|\b[a-z][a-z0-9+.-]*:[^\s]|~/|"
+    r"(?<!\w)/(?:Users|home|Volumes|tmp)/\S+)"
+)
+
+
+def _clean_semantic_prose(value: str | None, *, name: str) -> str | None:
+    """Keep one semantic prose value safe for deterministic rendering."""
+
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{name} cannot be blank")
+    if _MARKDOWN_HEADING.search(cleaned):
+        raise ValueError(f"{name} cannot contain Markdown headings")
+    if _MARKDOWN_PRESENTATION.search(cleaned):
+        raise ValueError(f"{name} cannot contain presentation Markdown")
+    if _CONTROL_CHARACTER.search(cleaned):
+        raise ValueError(f"{name} cannot contain control characters")
+    if _SOURCE_LOCATION_IN_PROSE.search(cleaned):
+        raise ValueError(f"{name} must put source locations in structured sources")
+    return cleaned
+
+
+def _clean_semantic_list(value: list[str], *, name: str) -> list[str]:
+    cleaned: list[str] = []
+    for entry in value:
+        item = _clean_semantic_prose(entry, name=f"{name} entries")
+        assert item is not None
+        if len(item) > 300:
+            raise ValueError(f"{name} entries cannot exceed 300 characters")
+        cleaned.append(item)
+    return cleaned
+
+
+def _clean_source_location(value: str) -> str:
+    location = value.strip()
+    if not location:
+        raise ValueError("source location cannot be blank")
+    if _CONTROL_CHARACTER.search(location):
+        raise ValueError("source location cannot contain control characters")
+    if location.startswith(("/", "~/")):
+        return location
+
+    try:
+        parsed = urlsplit(location)
+    except ValueError as error:
+        raise ValueError("source location must be a valid URI or absolute path") from error
+    scheme = parsed.scheme.casefold()
+    if not scheme or any(character.isspace() for character in location):
+        raise ValueError("source location must be a valid URI or absolute path")
+    if _CONTROL_CHARACTER.search(unquote(location)):
+        raise ValueError("source location cannot contain encoded control characters")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("source location cannot contain credentials")
+    if scheme in {"http", "https"}:
+        try:
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError as error:
+            raise ValueError("web source location needs a valid host") from error
+        if hostname is None:
+            raise ValueError("web source location needs a host")
+        return location
+    if scheme == "file":
+        if parsed.netloc or not parsed.path.startswith("/"):
+            raise ValueError("file source location needs an absolute local path")
+        if parsed.query or parsed.fragment:
+            raise ValueError("file source location cannot contain query or fragment")
+        return location
+    if scheme == "things":
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        if (
+            parsed.netloc
+            or parsed.path != "/show"
+            or len(query) != 1
+            or query[0][0] != "id"
+            or not query[0][1]
+            or parsed.fragment
+        ):
+            raise ValueError("Things sources must use read-only things:///show?id=...")
+        return location
+    if scheme in {"data", "javascript", "vbscript"}:
+        raise ValueError("source location uses a dangerous URI scheme")
+    if not parsed.netloc and not parsed.path:
+        raise ValueError("source location must be a valid URI")
+    return location
 
 
 class ReadInclude(StrictModel):
@@ -379,11 +476,33 @@ class RepeatCreate(StrictModel):
         return self
 
 
+class SourceRef(StrictModel):
+    """One labeled source rendered into a Project Task note."""
+
+    label: str = Field(min_length=1, max_length=300)
+    location: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        cleaned = _clean_semantic_prose(value, name="source label")
+        assert cleaned is not None
+        return cleaned
+
+    @field_validator("location")
+    @classmethod
+    def clean_location(cls, value: str) -> str:
+        return _clean_source_location(value)
+
+
 class ProjectTask(StrictModel):
     """One ordered, committed Task created with a Project."""
 
     title: str = Field(min_length=1, max_length=1000)
-    finish: str | None = Field(default=None, min_length=1, max_length=800)
+    finish: str | None = Field(default=None, min_length=1, max_length=400)
+    start_here: list[str] = Field(default_factory=list, max_length=4)
+    approach: list[str] = Field(default_factory=list, max_length=4)
+    sources: list[SourceRef] = Field(default_factory=list, max_length=12)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
     heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -398,10 +517,12 @@ class ProjectTask(StrictModel):
     @field_validator("finish")
     @classmethod
     def clean_finish(cls, value: str | None) -> str | None:
-        cleaned = _clean_optional_title(value, name="finish")
-        if cleaned is not None and re.search(r"(?m)^#{1,6}\s", cleaned):
-            raise ValueError("finish cannot contain Markdown headings")
-        return cleaned
+        return _clean_semantic_prose(value, name="finish")
+
+    @field_validator("start_here", "approach")
+    @classmethod
+    def clean_prose_lists(cls, value: list[str], info: Any) -> list[str]:
+        return _clean_semantic_list(value, name=info.field_name)
 
     @field_validator("checklist")
     @classmethod
@@ -413,12 +534,28 @@ class ProjectTask(StrictModel):
     def clean_heading_title(cls, value: str | None) -> str | None:
         return _clean_optional_title(value, name="heading_title")
 
+    @model_validator(mode="after")
+    def one_note_interface(self) -> Self:
+        semantic_fields = {"finish", "start_here", "approach", "sources"}
+        if (
+            "notes_markdown" in self.model_fields_set
+            and self.model_fields_set.intersection(semantic_fields)
+        ):
+            raise ValueError(
+                "a Project Task cannot mix notes_markdown with semantic note fields"
+            )
+        return self
+
 
 class CreateEntry(StrictModel):
     key: str | None = Field(default=None, pattern=_LOCAL_KEY)
     kind: Kind = "task"
     document: Literal["source"] | None = None
     title: str = Field(min_length=1, max_length=1000)
+    note_style: NoteStyle | None = None
+    outcome: str | None = Field(default=None, min_length=1, max_length=400)
+    finished_when: list[str] = Field(default_factory=list, max_length=6)
+    keep_in_mind: list[str] = Field(default_factory=list, max_length=6)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
     tasks: list[ProjectTask] = Field(default_factory=list, max_length=20)
@@ -448,6 +585,16 @@ class CreateEntry(StrictModel):
         if not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("outcome")
+    @classmethod
+    def clean_outcome(cls, value: str | None) -> str | None:
+        return _clean_semantic_prose(value, name="outcome")
+
+    @field_validator("finished_when", "keep_in_mind")
+    @classmethod
+    def clean_project_prose_lists(cls, value: list[str], info: Any) -> list[str]:
+        return _clean_semantic_list(value, name=info.field_name)
 
     @field_validator("into_title")
     @classmethod
@@ -504,6 +651,36 @@ class CreateEntry(StrictModel):
             raise ValueError("only a task can have a checklist")
         if self.tasks and self.kind != "project":
             raise ValueError("only a Project can have tasks")
+        semantic_fields = {
+            "note_style",
+            "outcome",
+            "finished_when",
+            "keep_in_mind",
+        }
+        if self.model_fields_set.intersection(semantic_fields) and self.kind != "project":
+            raise ValueError("only a Project can use semantic note fields")
+        if (
+            "notes_markdown" in self.model_fields_set
+            and self.model_fields_set.intersection(semantic_fields)
+        ):
+            raise ValueError(
+                "a Project cannot mix notes_markdown with semantic note fields"
+            )
+        if self.document == "source":
+            if self.kind != "project":
+                raise ValueError("a source document must be a Project")
+            if "notes_markdown" in self.model_fields_set:
+                raise ValueError("a source document cannot use notes_markdown")
+            if not self.tasks:
+                raise ValueError("a source document needs tasks")
+            if self.outcome is None:
+                raise ValueError("a source document needs outcome")
+            if not self.finished_when:
+                raise ValueError("a source document needs finished_when")
+            if any(task.finish is None for task in self.tasks):
+                raise ValueError("every source document Task needs finish")
+            if any("notes_markdown" in task.model_fields_set for task in self.tasks):
+                raise ValueError("source document Tasks cannot use notes_markdown")
         task_titles = [task.title.strip().casefold() for task in self.tasks]
         if _duplicates(task_titles):
             raise ValueError("Project task titles must be unique")
@@ -1762,6 +1939,18 @@ _CREATE: dict[str, Any] = {
         "kind": {"enum": ["task", "project", "area", "heading"], "default": "task"},
         "document": {"const": "source"},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "note_style": {"enum": ["natural", "visual"]},
+        "outcome": {"type": "string", "minLength": 1, "maxLength": 400},
+        "finished_when": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "minLength": 1, "maxLength": 300},
+        },
+        "keep_in_mind": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "minLength": 1, "maxLength": 300},
+        },
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {
             "type": "array",
@@ -1784,7 +1973,46 @@ _CREATE: dict[str, Any] = {
                     "finish": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 800,
+                        "maxLength": 400,
+                    },
+                    "start_here": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300,
+                        },
+                    },
+                    "approach": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300,
+                        },
+                    },
+                    "sources": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["label", "location"],
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 300,
+                                },
+                                "location": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 4096,
+                                },
+                            },
+                        },
                     },
                     "notes_markdown": {
                         "type": ["string", "null"],
@@ -2501,14 +2729,11 @@ READ_DESC = (
     "Follow next and instruction."
 )
 COMMIT_DESC = (
-    "Commit one batch with durable intent_id. A source Project uses document=source and finish on every Task; send it once. "
-    "Prefer context_id and short refs. Exact changes need id and if_revision. "
+    "Commit one batch; use intent_id. Source Project: document=source, outcome, finished_when, and one Task finish; use semantic context and sources, not note Markdown. Send it complete once. "
     "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none; groups stay contiguous. "
-    "Local create keys may appear in any order. "
-    "Parent tags before children. "
+    "Local create keys may appear in any order. Parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation; keep control fields private. "
-    "If lost or pending, retry the same intent_id and payload. "
-    "Follow next and instruction."
+    "If lost or pending, retry the same intent_id and payload. Follow next and instruction."
 )
 APPROVE_DESC = (
     "After a clear yes from the owner, apply that plan. Send only plan_id. Keep "

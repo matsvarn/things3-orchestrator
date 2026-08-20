@@ -44,6 +44,7 @@ from things_orchestrator.interface import (
     RepeatEdit,
     Result,
     ReviewSection,
+    SourceRef,
     TagFact,
     dump_result,
 )
@@ -789,20 +790,35 @@ def test_compact_project_tasks_are_project_only() -> None:
             "kind": "project",
             "document": "source",
             "title": "Build Mats Mode as a reusable Agent Skill",
+            "note_style": "visual",
+            "outcome": "One reusable skill based on how I work.",
+            "finished_when": ["The skill passes one real task."],
+            "keep_in_mind": ["Use actual chats, not installed inventory."],
             "tasks": [
                 {
                     "title": "Choose representative chats",
                     "finish": "A dated source list for every active agent client.",
+                    "start_here": ["The chats are on my MacBook."],
+                    "approach": ["Keep each client separate."],
+                    "sources": [
+                        {
+                            "label": "Optional extractor",
+                            "location": "https://github.com/0xSero/ai-data-extraction",
+                        }
+                    ],
                     "heading_title": "Learn what works",
                 }
             ],
         }
     )
     assert source.document == "source"
+    assert source.note_style == "visual"
+    assert source.outcome == "One reusable skill based on how I work."
     assert source.tasks[0].finish.startswith("A dated source list")
+    assert source.tasks[0].sources[0].label == "Optional extractor"
 
-    with pytest.raises(ValidationError, match="800 characters"):
-        ProjectTask.model_validate({"title": "Draft", "finish": "x" * 801})
+    with pytest.raises(ValidationError, match="400 characters"):
+        ProjectTask.model_validate({"title": "Draft", "finish": "x" * 401})
 
     with pytest.raises(ValidationError, match="cannot contain Markdown headings"):
         ProjectTask.model_validate(
@@ -865,10 +881,8 @@ def test_compact_project_tasks_are_project_only() -> None:
             {"title": "Move house", "tasks": [{"title": "Call mover"}]}
         )
 
-    malformed_source = CreateEntry.model_validate(
-        {"document": "source", "title": "Renew passport"}
-    )
-    assert malformed_source.document == "source"
+    with pytest.raises(ValidationError, match="must be a Project"):
+        CreateEntry.model_validate({"document": "source", "title": "Renew passport"})
 
     with pytest.raises(ValidationError, match="extra_forbidden"):
         CreateEntry.model_validate(
@@ -948,6 +962,218 @@ def test_compact_project_tasks_are_project_only() -> None:
                 ],
             }
         )
+
+
+def test_semantic_project_fields_are_project_only_and_optional_for_ordinary_projects() -> None:
+    ordinary = CreateEntry.model_validate(
+        {
+            "kind": "project",
+            "title": "Replace the kitchen tap",
+            "outcome": "A working kitchen tap with no leak.",
+            "finished_when": ["The new tap runs without a leak."],
+            "tasks": [
+                {
+                    "title": "Measure the existing tap fittings",
+                    "finish": "The fitting sizes recorded in millimeters.",
+                }
+            ],
+        }
+    )
+    assert ordinary.document is None
+    assert ordinary.finished_when == ["The new tap runs without a leak."]
+
+    for field, value in (
+        ("note_style", "natural"),
+        ("outcome", "A result."),
+        ("finished_when", ["It is complete."]),
+        ("keep_in_mind", ["Use the existing parts."]),
+    ):
+        with pytest.raises(ValidationError, match="only a Project"):
+            CreateEntry.model_validate({"title": "Call the plumber", field: value})
+
+    with pytest.raises(ValidationError, match="cannot mix notes_markdown"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Replace the kitchen tap",
+                "outcome": "A working kitchen tap.",
+                "notes_markdown": "Legacy support material.",
+            }
+        )
+    with pytest.raises(ValidationError, match="cannot mix notes_markdown"):
+        ProjectTask.model_validate(
+            {
+                "title": "Measure the fittings",
+                "finish": "The fitting sizes recorded.",
+                "notes_markdown": "Legacy support material.",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (
+            {
+                "kind": "project",
+                "document": "source",
+                "title": "Old source document",
+                "notes_markdown": "## Result\n\nOne result.",
+                "tasks": [{"title": "Draft", "finish": "One draft."}],
+            },
+            "cannot use notes_markdown",
+        ),
+        (
+            {
+                "kind": "project",
+                "document": "source",
+                "title": "Missing task notes",
+                "outcome": "One result.",
+                "finished_when": ["The result works."],
+                "tasks": [{"title": "Draft"}],
+            },
+            "Task needs finish",
+        ),
+        (
+            {
+                "kind": "project",
+                "document": "source",
+                "title": "Raw task note",
+                "outcome": "One result.",
+                "finished_when": ["The result works."],
+                "tasks": [
+                    {
+                        "title": "Draft",
+                        "finish": "One draft.",
+                        "notes_markdown": "Legacy note.",
+                    }
+                ],
+            },
+            "cannot mix notes_markdown",
+        ),
+    ],
+)
+def test_source_documents_reject_incomplete_or_legacy_shapes(
+    payload: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        CreateEntry.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("outcome", "# Result"),
+        ("outcome", "Result\nwith a second line"),
+        ("finished_when", [" "]),
+        ("finished_when", ["# Finished"]),
+        ("keep_in_mind", ["x" * 301]),
+    ],
+)
+def test_semantic_project_prose_is_compact_plain_text(
+    field: str, value: object
+) -> None:
+    payload: dict[str, object] = {
+        "kind": "project",
+        "title": "Build the result",
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        CreateEntry.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "**manual styling**",
+        "[manual link](relative.md)",
+        "- hidden list row",
+        "obsidian:open?vault=Work",
+        "javascript:alert(1)",
+    ],
+)
+def test_semantic_prose_rejects_presentation_and_hidden_locations(
+    value: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        ProjectTask.model_validate({"title": "Record evidence", "finish": value})
+
+
+def test_semantic_lists_and_source_counts_are_bounded() -> None:
+    with pytest.raises(ValidationError):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Build the result",
+                "finished_when": [f"Check {index}" for index in range(7)],
+            }
+        )
+    with pytest.raises(ValidationError):
+        ProjectTask.model_validate(
+            {
+                "title": "Collect evidence",
+                "start_here": [f"Place {index}" for index in range(5)],
+            }
+        )
+    with pytest.raises(ValidationError):
+        ProjectTask.model_validate(
+            {
+                "title": "Collect evidence",
+                "sources": [
+                    {"label": f"Source {index}", "location": f"https://example.com/{index}"}
+                    for index in range(13)
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://example.com/path",
+        "http://localhost:8000/file",
+        "file:///Users/mats/Documents/notes.md",
+        "/Users/mats/Documents/notes.md",
+        "~/Documents/notes.md",
+        "things:///show?id=ABC-123",
+        "x-devonthink-item://ABC-123",
+    ],
+)
+def test_source_reference_accepts_safe_locations(location: str) -> None:
+    source = SourceRef.model_validate({"label": "Reference", "location": location})
+    assert source.location == location
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "relative/file.md",
+        "https:///missing-host",
+        "https://example.com:invalid/path",
+        "https://user:secret@example.com/private",
+        "file://remote.example.com/path",
+        "file:relative/path",
+        "things:///add?title=Mutation",
+        "things:///show?id=",
+        "things:///show?id=one&id=two",
+        "javascript:alert(1)",
+        "https://example.com/%0AInjected",
+        "https://example.com/path\nInjected",
+    ],
+)
+def test_source_reference_rejects_unsafe_locations(location: str) -> None:
+    with pytest.raises(ValidationError):
+        SourceRef.model_validate({"label": "Reference", "location": location})
+
+
+@pytest.mark.parametrize("field", ["finish", "start_here", "approach"])
+def test_semantic_task_prose_cannot_hide_a_source_location(field: str) -> None:
+    value: object = ["Use https://example.com/evidence"]
+    if field == "finish":
+        value = "Use https://example.com/evidence"
+
+    with pytest.raises(ValidationError, match="structured sources"):
+        ProjectTask.model_validate({"title": "Record evidence", field: value})
 
 
 def test_task_create_rejects_a_non_heading_local_heading_reference() -> None:
@@ -1493,13 +1719,14 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     # Review completeness, DiagnosticFact, named homes, and compact Project
     # headings and native checklists. Keep the contract compact, but allow that
     # justified expansion.
-    assert discovery_chars < 19_200
-    assert discovery_chars - 13_406 < 5_750
+    # Semantic Project and Task notes add explicit prose and source fields.
+    assert discovery_chars < 20_000
+    assert discovery_chars - 13_406 < 6_400
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 22_000
+    assert wire_chars < 23_000
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert len(READ_DESC) < 700
     assert len(COMMIT_DESC) < 550
@@ -1551,9 +1778,21 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert "heading_title" in project_task["properties"]
     assert "checklist" in project_task["properties"]
     assert "finish" in project_task["properties"]
+    assert project_task["properties"]["finish"]["maxLength"] == 400
+    assert project_task["properties"]["start_here"]["maxItems"] == 4
+    assert project_task["properties"]["approach"]["maxItems"] == 4
+    assert project_task["properties"]["sources"]["maxItems"] == 12
+    source_ref = project_task["properties"]["sources"]["items"]
+    assert source_ref["required"] == ["label", "location"]
+    assert source_ref["additionalProperties"] is False
     assert COMMIT_IN["properties"]["create"]["items"]["properties"]["document"] == {
         "const": "source"
     }
+    project_properties = COMMIT_IN["properties"]["create"]["items"]["properties"]
+    assert project_properties["note_style"]["enum"] == ["natural", "visual"]
+    assert project_properties["outcome"]["maxLength"] == 400
+    assert project_properties["finished_when"]["maxItems"] == 6
+    assert project_properties["keep_in_mind"]["maxItems"] == 6
     assert "revise" in RESULT_OUT["properties"]["next"]["enum"]
     assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
         "maxLength"

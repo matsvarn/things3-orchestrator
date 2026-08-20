@@ -1,4 +1,4 @@
-"""Owner commands: login, serve, serve-http, print-config, doctor."""
+"""Owner commands: login, configure, serve, print-config, and doctor."""
 
 from __future__ import annotations
 
@@ -29,6 +29,12 @@ from .cloud import (
 )
 from .context import SQLiteContextStore
 from .journal import SQLiteJournal, journal_path
+from .preferences import (
+    PreferencesError,
+    load_preferences,
+    load_source_schemes,
+    save_preferences,
+)
 from .server import ThingsMCPServer
 from .workspace import ThingsWorkspace
 
@@ -64,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="{login,serve,serve-http,print-config,doctor}",
+        metavar="{login,configure,serve,serve-http,print-config,doctor}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -88,6 +94,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-secrets",
         action="store_true",
         help="print snippet file bodies (includes the MCP bearer)",
+    )
+    configure = commands.add_parser(
+        "configure", help="change owner preferences without changing credentials"
+    )
+    configure.add_argument(
+        "--note-style",
+        choices=("natural", "visual"),
+        help="default note style for new Projects",
+    )
+    configure.add_argument(
+        "--source-schemes",
+        nargs="*",
+        help="approved third-party app schemes; pass no values to clear",
     )
     commands.add_parser("serve", help="MCP on stdio")
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
@@ -142,6 +161,30 @@ def main(argv: list[str] | None = None) -> None:
             http_only=args.http,
             show_secrets=args.show_secrets,
         )
+        return
+    if args.action == "configure":
+        if args.note_style is None and args.source_schemes is None:
+            parser.error("configure needs --note-style or --source-schemes")
+        try:
+            path = save_preferences(
+                note_style=args.note_style,
+                source_schemes=args.source_schemes,
+            )
+            saved_schemes = (
+                load_source_schemes(path=path)
+                if args.source_schemes is not None
+                else None
+            )
+        except PreferencesError as error:
+            parser.error(str(error))
+            return
+        if args.note_style is not None:
+            print(f"Note style: {args.note_style}")
+        if saved_schemes is not None:
+            schemes = ", ".join(saved_schemes)
+            print(f"Source schemes: {schemes or 'none'}")
+        print(f"Stored preferences in {path} (mode 0600).")
+        print("The next Project uses these preferences. No server restart is needed.")
         return
     if args.action == "doctor":
         _doctor(parser, wait=args.wait, public_url=args.public_url)
@@ -561,6 +604,7 @@ def _server(parser: argparse.ArgumentParser) -> ThingsMCPServer:
                 token_factory=lambda: token_urlsafe(24),
             ),
             account_id=email,
+            preferences=load_preferences,
         )
     )
 

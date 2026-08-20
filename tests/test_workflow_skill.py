@@ -107,7 +107,7 @@ def test_form_choice_lives_in_form() -> None:
     assert re.search(r"next\s+(?:one to three|1[^\w]3)\s+useful actions", lower)
     assert "visible action" in lower
     assert "finish criteria" in lower
-    assert "put a source url on the task" in lower
+    assert "put a needed source in that task's `sources`" in lower
     assert "startable" in lower
     assert "result or inclusion of work is undecided" in lower
     assert "complete supported finish path" in lower
@@ -120,9 +120,9 @@ def test_form_choice_lives_in_form() -> None:
     assert "six or more tasks" in lower
     assert "explicit owner-named headings at any size" in lower
     assert "heading_title" in lower
-    assert "notes explain context or method" in lower
+    assert "a task may add one `finish`" in lower
     assert "split it into its own task" in lower
-    assert "bold source label" in lower
+    assert "each source is `{label, location}`" in lower
     assert "never infer or browse for an area" in lower
 
     planning_stop = lower.split("stop planning", 1)[1].split("##", 1)[0]
@@ -150,7 +150,6 @@ def test_owner_control_is_in_the_package() -> None:
 
     internal_jargon = {
         "commitment",
-        "outcome",
         "evidence label",
         "blueprint",
         "invariant",
@@ -403,12 +402,13 @@ def test_source_capture_writes_a_human_things_document() -> None:
     assert "every opened task" in research
     assert "without this chat" in research
     assert "first-person" in research
-    assert "## result" in research
-    assert "## done when" in research
-    assert "## guardrails" in research
-    assert "## leave with" in research
-    assert "## starting evidence" in research
-    assert "full urls do not consume the prose limit" in research
+    assert "concrete `outcome`" in research
+    assert "`finished_when`" in research
+    assert "`keep_in_mind`" in research
+    assert "`start_here`" in research
+    assert "`approach`" in research
+    assert "structured `sources`" in research
+    assert "do not send `notes_markdown`" in research
     assert "not authority to author" in research
     assert "actual tools and standing instructions" in research
     assert "repeated patterns and corrections" in research
@@ -418,15 +418,20 @@ def test_source_capture_writes_a_human_things_document() -> None:
     assert "draft review" in research
     assert "tests in every active client" in research
     assert "one real-use validation" in research
+    assert "ten to twelve tasks under three headings" in research
+    assert "do not split mapping from selection" in research
+    assert "not one task per family or idea" in research
+    assert "put its url or path in `sources`" in research
+    assert "never in semantic prose" in research
     assert "add finite fixes only after" in research
     assert "pin, publish, send, or install task is delivery" in research
     assert "every task has `finish`" in research
-    assert "source is labeled" in research
+    assert "every source has a label and location" in research
     assert "next=revise" in research
     assert "without asking the owner" in research
     assert "never offer a later notes pass" in research
     assert "short plain notes" not in form
     assert "owner who will reopen things" in form
     assert "my chats" in form
-    assert "bold source label" in form
+    assert "each source is `{label, location}`" in form
     assert "write nothing this turn" not in f"{skill}\n{research}"

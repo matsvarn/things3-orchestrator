@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-08-20
+
+Project notes now store clear meaning with a consistent owner-selected style.
+Agents no longer write presentation Markdown for source-backed Projects.
+
+### Changed
+
+- Source Projects send an outcome, completion checks, shared constraints, Task
+  finishes, useful starting facts, approach notes, and labeled source locations.
+  One renderer turns that meaning into native Things Markdown.
+- `natural` is the default style. The optional `visual` style uses a fixed,
+  accessible emoji vocabulary in notes only. Titles and native headings stay
+  plain.
+- `configure --note-style natural|visual` saves the owner default outside the
+  checkout and credentials. The workspace reloads it before each Project, so a
+  restart is not required. A one-Project override does not change the default.
+- Third-party app source links require an owner allowlist. Web, local file,
+  absolute path, and read-only Things links remain built in.
+- Every Task and Project Cloud create now uses a positive order index. This
+  prevents Things from trapping while it applies incremental `Task6` history.
+- Preferences use a separate versioned, atomic `preferences.json`. Updates,
+  login, token rotation, snippet generation, rollback, and package replacement
+  do not change it.
+- Existing Things items stay unchanged. The old source-note payload grammar is
+  intentionally not accepted by v0.5.0.
+- Source documents enforce the taught 20-row limit and one checklist of at
+  most three rows. Semantic prose cannot carry Markdown or hidden source URIs.
+
 ## 0.4.9 — 2026-08-20
 
 Source-backed Projects now land as one complete Things document. The server
