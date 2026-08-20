@@ -1235,6 +1235,54 @@ def test_project_next_actions_use_the_compact_create_shape() -> None:
     actions = [item for item in module._library.records.values() if item.kind == "task"]  # noqa: SLF001
     assert [item.title for item in actions] == ["Call mover", "Book van"]
     assert all(item.parent_uuid == project.uuid for item in actions)
+    assert all(not item.notes for item in actions)
+
+
+def test_project_next_actions_can_carry_notes() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-action-notes-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Create Mats Mode",
+                        "notes_markdown": (
+                            "Mats Mode is pinned in Cursor as a custom mode.\n"
+                            "Adopt only what fits."
+                        ),
+                        "next_actions": [
+                            {
+                                "title": "List Cursor skills on this MacBook",
+                                "notes_markdown": (
+                                    "~/.cursor/skills, ~/.agents/skills, Hermes. "
+                                    "Keep, drop, or adapt."
+                                ),
+                            },
+                            {
+                                "title": "Pin Mats Mode as a Cursor custom mode",
+                                "notes_markdown": (
+                                    "From /, pick the skill and press Option-Return "
+                                    "on Mac. Pair with /goal.\n"
+                                    "https://cursor.com/changelog"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    by_title = {
+        item.title: item for item in module._library.records.values()  # noqa: SLF001
+    }
+    assert "~/.cursor/skills" in by_title["List Cursor skills on this MacBook"].notes
+    assert "Option-Return" in by_title["Pin Mats Mode as a Cursor custom mode"].notes
+    assert "pstack" not in by_title["Create Mats Mode"].notes
 
 
 def test_routine_capture_still_applies_with_short_notes() -> None:

@@ -147,7 +147,11 @@ class _NormalizedSearchText:
 def _undistilled_create(entry: CreateEntry) -> str | None:
     """Return ask-copy when a create is a mashed title, fake action, or pasted brief."""
     notes = entry.notes_markdown or ""
-    rows = [entry.title, *entry.checklist, *entry.next_actions]
+    rows = [
+        entry.title,
+        *entry.checklist,
+        *[action.title for action in entry.next_actions],
+    ]
     fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
     pasted_brief = len(notes) > _DISTILL_NOTE_CHARS
     mashed = _JOINED_FINISHES.search(entry.title) is not None
@@ -2992,13 +2996,14 @@ class ThingsWorkspace:
                         checklist_index=row_index * 1024,
                     )
                 )
-            for action_index, title in enumerate(entry.next_actions):
+            for action_index, action in enumerate(entry.next_actions):
                 writes.append(
                     Write(
                         action="create",
                         uuid=new_uuid(),
                         kind="task",
-                        title=title,
+                        title=action.title,
+                        notes=action.notes_markdown,
                         into_uuid=uuid,
                         into_kind="project",
                         anytime=True,

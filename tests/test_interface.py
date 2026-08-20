@@ -32,6 +32,7 @@ from things_orchestrator.interface import (
     ItemFact,
     LayoutFact,
     LayoutSectionFact,
+    NextAction,
     OrganizeDraft,
     OrganizeSection,
     PlanFact,
@@ -1297,8 +1298,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     )
     # Review completeness, DiagnosticFact, and named home titles. Keep
     # the contract compact, but allow that justified expansion.
-    assert discovery_chars < 18_700
-    assert discovery_chars - 13_406 < 5_300
+    assert discovery_chars < 18_800
+    assert discovery_chars - 13_406 < 5_400
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1399,6 +1400,12 @@ def test_manual_schema_contracts_match_the_runtime_models() -> None:
         (CommitCall, COMMIT_IN),
         (ApproveCall, APPROVE_IN),
         (CreateEntry, COMMIT_IN["properties"]["create"]["items"]),
+        (
+            NextAction,
+            COMMIT_IN["properties"]["create"]["items"]["properties"][
+                "next_actions"
+            ]["items"],
+        ),
         (ChangeEntry, COMMIT_IN["properties"]["change"]["items"]),
         (EnsureTag, COMMIT_IN["properties"]["ensure_tags"]["items"]),
         (ChangeTag, COMMIT_IN["properties"]["change_tags"]["items"]),

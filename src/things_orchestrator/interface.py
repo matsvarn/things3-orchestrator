@@ -371,13 +371,27 @@ class RepeatCreate(StrictModel):
         return self
 
 
+class NextAction(StrictModel):
+    """One startable Project Task created with the Project."""
+
+    title: str = Field(min_length=1, max_length=1000)
+    notes_markdown: str | None = Field(default=None, max_length=50_000)
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("title cannot be blank")
+        return value
+
+
 class CreateEntry(StrictModel):
     key: str | None = Field(default=None, pattern=_LOCAL_KEY)
     kind: Kind = "task"
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
-    next_actions: list[str] = Field(default_factory=list, max_length=20)
+    next_actions: list[NextAction] = Field(default_factory=list, max_length=20)
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
@@ -410,7 +424,20 @@ class CreateEntry(StrictModel):
     def clean_into_title(cls, value: str | None) -> str | None:
         return _clean_optional_title(value, name="into_title")
 
-    @field_validator("checklist", "next_actions")
+    @field_validator("next_actions", mode="before")
+    @classmethod
+    def coerce_next_actions(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        coerced: list[object] = []
+        for item in value:
+            if isinstance(item, str):
+                coerced.append({"title": item})
+            else:
+                coerced.append(item)
+        return coerced
+
+    @field_validator("checklist")
     @classmethod
     def valid_checklist(cls, value: list[str]) -> list[str]:
         if any(not title.strip() for title in value):
@@ -1667,7 +1694,22 @@ _CREATE: dict[str, Any] = {
         "next_actions": {
             "type": "array",
             "maxItems": 20,
-            "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                    },
+                    "notes_markdown": {
+                        "type": ["string", "null"],
+                        "maxLength": 50000,
+                    },
+                },
+            },
         },
         "into": _CONTEXT_HOME_SCHEMA,
         "into_title": {"type": "string", "minLength": 1, "maxLength": 1000},
