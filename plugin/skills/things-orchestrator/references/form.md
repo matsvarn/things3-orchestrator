@@ -33,7 +33,7 @@ Notes explain context or method. If notes contain a required prerequisite, selec
 
 Headings scan a multi-part Project. For six or more Tasks across two or more distinct stages, infer two to four short natural headings that describe the owner's path. Use explicit owner-named headings at any size. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
 
-Checklist only on a Task. `tasks` only on a Project. Use it for the whole ordered plan when every Task needs only a title, optional notes, optional native checklist, and optional `heading_title`. Use `heading_title` on every Task or none. Heading groups stay contiguous. If any Task needs another native field, create every Task as a sibling. Do not mix the two forms on one Project. Each title is physical, visible, and startable when reached. Put a needed path or URL in that Task's `notes_markdown`.
+Checklist only on a Task. `tasks` only on a Project. Use it for the whole ordered plan when every Task needs only a title, optional finish, notes, native checklist, and `heading_title`. Research uses `document=source` and a `finish` on every Task. Use `heading_title` on every Task or none. Heading groups stay contiguous. If any Task needs another native field, create every Task as a sibling. Do not mix the two forms on one Project. Each title is physical, visible, and startable when reached. Put a needed path or URL in that Task's `notes_markdown`.
 
 Never infer or browse for an Area during create. Use one only when the owner names it or an existing matching item proves it.
 

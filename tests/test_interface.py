@@ -784,6 +784,31 @@ def test_compact_project_tasks_are_project_only() -> None:
     assert [task.heading_title for task in staged.tasks] == ["Plan", "Plan", "Move"]
     assert staged.tasks[0].checklist == ["Ask about Friday", "Confirm the quote"]
 
+    source = CreateEntry.model_validate(
+        {
+            "kind": "project",
+            "document": "source",
+            "title": "Build Mats Mode as a reusable Agent Skill",
+            "tasks": [
+                {
+                    "title": "Choose representative chats",
+                    "finish": "A dated source list for every active agent client.",
+                    "heading_title": "Learn what works",
+                }
+            ],
+        }
+    )
+    assert source.document == "source"
+    assert source.tasks[0].finish.startswith("A dated source list")
+
+    with pytest.raises(ValidationError, match="800 characters"):
+        ProjectTask.model_validate({"title": "Draft", "finish": "x" * 801})
+
+    with pytest.raises(ValidationError, match="cannot contain Markdown headings"):
+        ProjectTask.model_validate(
+            {"title": "Draft", "finish": "One draft.\n\n## Leave with\n\nAnother."}
+        )
+
     with pytest.raises(ValidationError, match="1000 characters"):
         CreateEntry.model_validate(
             {
@@ -839,6 +864,11 @@ def test_compact_project_tasks_are_project_only() -> None:
         CreateEntry.model_validate(
             {"title": "Move house", "tasks": [{"title": "Call mover"}]}
         )
+
+    malformed_source = CreateEntry.model_validate(
+        {"document": "source", "title": "Renew passport"}
+    )
+    assert malformed_source.document == "source"
 
     with pytest.raises(ValidationError, match="extra_forbidden"):
         CreateEntry.model_validate(
@@ -1463,8 +1493,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     # Review completeness, DiagnosticFact, named homes, and compact Project
     # headings and native checklists. Keep the contract compact, but allow that
     # justified expansion.
-    assert discovery_chars < 19_000
-    assert discovery_chars - 13_406 < 5_550
+    assert discovery_chars < 19_200
+    assert discovery_chars - 13_406 < 5_750
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1520,6 +1550,11 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     ]["items"]
     assert "heading_title" in project_task["properties"]
     assert "checklist" in project_task["properties"]
+    assert "finish" in project_task["properties"]
+    assert COMMIT_IN["properties"]["create"]["items"]["properties"]["document"] == {
+        "const": "source"
+    }
+    assert "revise" in RESULT_OUT["properties"]["next"]["enum"]
     assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
         "maxLength"
     ] >= len("evening")

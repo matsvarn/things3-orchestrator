@@ -45,23 +45,30 @@ The unit suite proves accepted calls and stored Things records. It does not
 prove that a model derives the best call from a natural source packet.
 
 Before a release changes the skill or tool schema, use an isolated copy of the
-skill in two supported clients. Give each client three realistic paraphrases
-of one source-heavy create request. Keep Things and external tools disabled.
-Judge the derived transaction without writing owner data. After deployment,
-use a fresh session for the live dogfood run.
+skill in two supported clients. Give each client a realistic source-heavy
+create request. Keep external research and owner Things data unavailable.
+Replay each derived transaction through the public memory workspace. A model
+prediction without this server replay is not evidence. After deployment, use
+a fresh session for the live dogfood run.
 The run passes only when it has:
 
 - one opening update at most, then one concise result;
 - no Things or Area read for a clearly new Project;
 - no owner question when one supported durable result remains;
-- one material fact or exclusion for every named source and relevant reply;
+- one material fact, uncertainty, or exclusion for every named source and
+  relevant reply when research tools are available;
 - one Project whose collapsed view explains the complete path;
 - natural first-person titles and Markdown notes that work without the chat;
 - owner review before drafting, draft review, cross-client testing, real use,
   then delivery;
 - native headings, useful checklists, labeled Task-local sources, and no
   inferred Area; and
-- one commit, unless the server itself requires approval.
+- one complete source Project commit, unless the server requires revision or
+  approval;
+- a concrete finish and stored note for every Task in the first accepted
+  transaction; and
+- a receipt that proves note read-back, names the first Task, and tells the
+  agent to stop without offering a later note pass.
 
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
@@ -72,12 +79,42 @@ On 2026-08-20, Cursor Agent and Codex each ran three paraphrases against an
 isolated copy of the final skill. The directory contained no repository tests
 or golden Project fixture. Things, browser, web, and write tools were disabled.
 
-All six final transactions had no owner question, no Things read, at most one
-progress update, and one predicted commit. Each created one Agent Skill Project
-with separate Tasks for owner evidence, external evidence, comparison, rule
-review, drafting, draft review, cross-client tests, real use, and Cursor
-pinning. Each kept the optional extractor in the consuming Task's method notes
-and continual improvement outside the finite Project.
+All six predictions had no owner question, no Things read, at most one progress
+update, and one predicted commit. The run did not replay those payloads through
+the server. Live dogfood then found the missing proof: one rich Task note crossed
+the raw 800-character dump gate. The agent removed all Task notes, created a
+skeleton, and offered a later repair pass. The v0.4.8 derivation run therefore
+did not prove the released capture path.
+
+### v0.4.9 derivation and server replay
+
+On 2026-08-20, Cursor Agent and Codex each received the same natural Mats Mode
+owner request in a fresh isolated directory. The directory contained the final
+skill, its disclosed references, the public commit schema, and the owner
+prompt. It did not contain the repository, tests, golden Project fixture, or
+either client's result. External research and Things owner data were
+unavailable.
+
+Codex and Cursor each derived one source Project with 12 Tasks under three
+headings. Each used one three-row native checklist. Both payloads
+passed the public `CommitCall` schema and the real memory workspace. Every Task
+had a concrete finish. The source compiler stored `## Leave with` plus useful
+context on all 24 Tasks. Each applied receipt reported complete Task-note
+read-back, named the first Task, and told the agent to stop. Neither result
+needed a later change call or owner question.
+
+This isolated run proves transaction derivation, compilation, persistence, and
+receipt behavior. It does not prove authenticated X research or full source
+coverage because both clients lacked external research tools. The post-release
+live dogfood run remains the evidence gate for reply coverage and source facts.
+
+The run also caught and fixed one pre-release defect. Codex produced a natural
+1,063-character Project note. The first replay rejected it because the legacy
+gate counted the whole note. Source documents now limit each Markdown section
+to 800 prose characters. A complete structured note can be longer. Labeled
+full URLs do not count toward that section limit. The same Codex payload then
+applied at that development stage. The final fresh runs above then passed the
+stricter one-finish and native-row limits.
 
 ## Live evidence
 

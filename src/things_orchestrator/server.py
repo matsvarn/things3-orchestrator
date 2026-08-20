@@ -41,6 +41,7 @@ from .interface import (
     READ_OUT,
     ApproveCall,
     CommitCall,
+    Next,
     ReadCall,
     Result,
     dump_result,
@@ -169,13 +170,19 @@ class ThingsMCPServer:
             else:
                 ApproveCall.model_validate(arguments)
         except ValidationError as error:
+            instruction = _safe_validation_error(error, repair=_REPAIR.get(name))
+            next_step: Next = "ask"
+            if name == "things_commit" and _declares_source_document(arguments):
+                instruction = (
+                    f"{instruction[:900]} Revise the source payload and call "
+                    "things_commit again. Do not ask the owner."
+                )
+                next_step = "revise"
             return _domain_result(
                 Result(
-                    next="ask",
+                    next=next_step,
                     status="rejected",
-                    instruction=_safe_validation_error(
-                        error, repair=_REPAIR.get(name)
-                    ),
+                    instruction=instruction,
                 ),
                 full_items=name == "things_read",
             )
@@ -287,6 +294,14 @@ def bearer_matches(authorization: str | None, token: str) -> bool:
     if not token:
         return False
     return hmac.compare_digest(authorization or "", f"Bearer {token}")
+
+
+def _declares_source_document(arguments: dict[str, Any]) -> bool:
+    creates = arguments.get("create")
+    return isinstance(creates, list) and any(
+        isinstance(entry, dict) and entry.get("document") == "source"
+        for entry in creates
+    )
 
 
 def _safe_validation_error(error: ValidationError, *, repair: str | None = None) -> str:

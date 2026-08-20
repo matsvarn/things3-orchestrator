@@ -1,0 +1,18 @@
+Can you organize this in Things for me?
+
+I came across this post from Lauren Tan / poteto about her "Lauren Mode" and how she uses it at Cursor and xAI:
+https://x.com/poteto/status/2090141955695198633
+
+It made me want my own Mats Mode. I first want to audit how I actually use agents and local skills on my MacBook. Please use evidence from recent chats across the different agent clients I use, not only the skills that happen to be installed.
+
+Then look closely at Lauren's setup, including the useful replies under that post, pstack, poteto-mode, automate-me, her planning and design process, review-as-lint, and how she encodes feedback until she becomes redundant. Compare that with how I work and keep only what fits me.
+
+The result should be one reusable Mats Mode skill. I want to use the same skill across my agent clients and pin it in Cursor as a custom mode. Cursor's 19 August changelog says skills can be pinned with Option+Enter and paired with /goal. The CLI behavior matters too.
+
+This related post is also relevant:
+https://x.com/poteto/status/2089067865098113024
+
+This extractor might help with the chat audit, but it is only an option:
+https://github.com/0xSero/ai-data-extraction
+
+Please create whatever Things setup best represents this. Do not invent dates.

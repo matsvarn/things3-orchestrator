@@ -75,6 +75,12 @@ from .library import (
     template_uuid_of,
 )
 from .recurrence import RepeatMode, new_rule
+from .source_document import (
+    SourceDocumentError,
+    compile_project_document,
+    is_source_document,
+    prose_chars,
+)
 
 _READ_LIMIT = 40
 _BULK_TEXT_BUDGET = 100_000
@@ -123,15 +129,17 @@ _FAKE_ACTION_ROW = re.compile(
     r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs|assess)\b"
 )
 _JOINED_FINISHES = re.compile(
-    r"(?i)^\s*(?:audit|create|make|build|write|review|draft|adopt|"
-    r"collect|record|list|test|pin|match)\b.+?"
+    r"(?i)^\s*(?P<first>adopt|audit|build|choose|collect|compare|create|draft|"
+    r"extract|gather|install|list|make|mark|match|pin|propose|record|review|run|"
+    r"set up|study|summarize|test|verify|write)\b.+?"
     r"(?:\band\b|,|;|&|\+|\bthen\b)\s*(?:then\s+)?"
-    r"(?:create|make|write|adopt|assess)\b"
+    r"(?P<second>adopt|assess|compare|create|draft|install|make|mark|pin|propose|"
+    r"run|set up|verify|write)\b"
 )
 _DISTILL_NOTE_CHARS = 800
 _DUMP_CREATE_INSTRUCTION = (
     "That create is a dump. Split finishes into separate titles. "
-    "Distill notes to done-when, constraints, and full URLs. "
+    "Distill each note below 800 characters of prose; keep labeled full URLs. "
     "Chat already has the brief. Write a visible action, not Decide, "
     "Think about, Work on, or Assess."
 )
@@ -152,19 +160,31 @@ def _undistilled_create(entry: CreateEntry) -> str | None:
         *[(task.notes_markdown or "") for task in entry.tasks],
         *[(task.heading_title or "") for task in entry.tasks],
     ]
-    rows = [
+    action_rows = [
         entry.title,
         *entry.checklist,
         *[task.title for task in entry.tasks],
         *[row for task in entry.tasks for row in task.checklist],
-        *[(task.heading_title or "") for task in entry.tasks],
     ]
-    fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
-    pasted_brief = any(len(note) > _DISTILL_NOTE_CHARS for note in notes)
-    mashed = any(_JOINED_FINISHES.search(row) is not None for row in rows)
+    headings = [(task.heading_title or "") for task in entry.tasks]
+    fake = any(_FAKE_ACTION_ROW.match(row) for row in [*action_rows, *headings])
+    pasted_brief = entry.document != "source" and any(
+        prose_chars(note) > _DISTILL_NOTE_CHARS for note in notes
+    )
+    mashed = any(_joins_two_finishes(row) for row in action_rows)
     if fake or mashed or pasted_brief:
         return _DUMP_CREATE_INSTRUCTION
     return None
+
+
+def _joins_two_finishes(row: str) -> bool:
+    match = _JOINED_FINISHES.search(row)
+    if match is None:
+        return False
+    return not (
+        match.group("first").casefold() == "review"
+        and match.group("second").casefold() == "mark"
+    )
 
 
 def _new_checklist_writes(parent_uuid: str, titles: Sequence[str]) -> list[Write]:
@@ -2752,6 +2772,20 @@ class ThingsWorkspace:
     def _prepare(
         self, call: CommitCall, *, contextual_commit: bool = False
     ) -> _Prepared:
+        source_entries = [entry for entry in call.create if is_source_document(entry)]
+        if source_entries and (
+            len(call.create) != 1
+            or call.change
+            or call.organize
+            or call.ensure_tags
+            or call.change_tags
+        ):
+            raise _Abort(
+                self._revise(
+                    "Revise this source Project before writing. Send it as the only "
+                    "mutation in one things_commit. Do not ask the owner."
+                )
+            )
         context = self._preparation_context(
             call, contextual_commit=contextual_commit
         )
@@ -2787,10 +2821,19 @@ class ThingsWorkspace:
         summary = context.summary
         warnings = context.warnings
         for entry in call.create:
+            try:
+                entry = compile_project_document(entry)
+            except SourceDocumentError as error:
+                raise _Abort(self._revise(str(error))) from error
             if entry.kind in {"task", "project"}:
                 dump = _undistilled_create(entry)
                 if dump is not None:
-                    raise _Abort(self._needs_input(dump))
+                    result = (
+                        self._revise(f"{dump} Revise the payload. Do not ask the owner.")
+                        if entry.document == "source"
+                        else self._needs_input(dump)
+                    )
+                    raise _Abort(result)
             uuid = local[entry.key][0] if entry.key else new_uuid()
             create_titles = (
                 [(entry.kind, entry.title)]
@@ -5715,7 +5758,7 @@ class ThingsWorkspace:
             status="unchanged" if unchanged else "applied",
             instruction="The requested state was already true."
             if unchanged
-            else self._applied_instruction(items, created),
+            else self._applied_instruction(items, created, writes),
             items=items,
             tags=tags,
             receipt=intent_id,
@@ -5723,8 +5766,61 @@ class ThingsWorkspace:
         )
 
     def _applied_instruction(
-        self, items: list[ItemFact], created: set[str]
+        self, items: list[ItemFact], created: set[str], writes: list[Write]
     ) -> str:
+        project_creates = [
+            write
+            for write in writes
+            if write.action == "create" and write.kind == "project"
+        ]
+        if len(project_creates) == 1:
+            project = project_creates[0]
+            tasks = [
+                write
+                for write in writes
+                if write.action == "create"
+                and write.kind == "task"
+                and write.into_uuid == project.uuid
+            ]
+            headings = [
+                write
+                for write in writes
+                if write.action == "create_heading" and write.into_uuid == project.uuid
+            ]
+            document_uuids = {
+                project.uuid,
+                *[task.uuid for task in tasks],
+                *[heading.uuid for heading in headings],
+            }
+            document_only = all(
+                write.uuid in document_uuids
+                or (
+                    write.action == "checklist"
+                    and write.checklist_parent_uuid in document_uuids
+                )
+                for write in writes
+            )
+            if tasks and document_only:
+                created_project = self._library.records.get(project.uuid)
+                home = (
+                    self._record_home_title(created_project)
+                    if created_project is not None
+                    else self._home_title(project.into_kind, project.into_uuid)
+                )
+                note_count = sum(bool((task.notes or "").strip()) for task in tasks)
+                detail = (
+                    f'Created "{project.title}" in {home} with {len(tasks)} Tasks'
+                )
+                if headings:
+                    detail += f" under {len(headings)} headings"
+                detail += "."
+                if project.notes and note_count == len(tasks):
+                    detail += (
+                        f" Project notes and all {note_count} Task notes passed read-back."
+                    )
+                detail += f' First Task: "{tasks[0].title}". Report this result and stop.'
+                if len(detail) <= 1000:
+                    return detail
         named: list[tuple[str, str, bool]] = []
         homes: list[str] = []
         for fact in items:
@@ -6061,6 +6157,10 @@ class ThingsWorkspace:
     @staticmethod
     def _needs_input(instruction: str) -> Result:
         return Result(next="ask", status="needs_input", instruction=instruction)
+
+    @staticmethod
+    def _revise(instruction: str) -> Result:
+        return Result(next="revise", status="rejected", instruction=instruction)
 
     @staticmethod
     def _stale(instruction: str) -> Result:
