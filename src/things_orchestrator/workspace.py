@@ -120,7 +120,7 @@ _WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
 _SEARCH_ARTICLES = frozenset({"a", "an", "the"})
 _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _FAKE_ACTION_ROW = re.compile(
-    r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs)\b"
+    r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs|assess)\b"
 )
 _JOINED_FINISHES = re.compile(
     r"(?i)\b(audit|create|make|build|write|review|draft|adopt)\b"
@@ -128,11 +128,11 @@ _JOINED_FINISHES = re.compile(
     r"\b(audit|create|make|build|write|review|draft|adopt)\b"
 )
 _DISTILL_NOTE_CHARS = 800
-_DISTILL_NOTE_LINES = 8
 _DUMP_CREATE_INSTRUCTION = (
     "That create is a dump. Split finishes into separate titles. "
     "Distill notes to done-when, constraints, and full URLs. "
-    "Chat already has the brief. Write one visible action, not Decide or Think about."
+    "Chat already has the brief. Write a visible action, not Decide, "
+    "Think about, Work on, or Assess."
 )
 
 
@@ -145,15 +145,13 @@ class _NormalizedSearchText:
 
 
 def _undistilled_create(entry: CreateEntry) -> str | None:
-    """Return ask-copy when a create is a brief dump, not a next action."""
+    """Return ask-copy when a create is a mashed title, fake action, or pasted brief."""
     notes = entry.notes_markdown or ""
-    rows = [*entry.checklist, *entry.next_actions]
+    rows = [entry.title, *entry.checklist, *entry.next_actions]
     fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
-    long_notes = len(notes) > _DISTILL_NOTE_CHARS or notes.count("\n") >= _DISTILL_NOTE_LINES
-    mashed = _JOINED_FINISHES.search(entry.title) is not None and (
-        bool(rows) or long_notes
-    )
-    if fake or long_notes or mashed:
+    pasted_brief = len(notes) > _DISTILL_NOTE_CHARS
+    mashed = _JOINED_FINISHES.search(entry.title) is not None
+    if fake or mashed or pasted_brief:
         return _DUMP_CREATE_INSTRUCTION
     return None
 
