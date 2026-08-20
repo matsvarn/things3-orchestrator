@@ -9,7 +9,7 @@ Say what you found. Say what changed. Ask when the owner has to choose. During w
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
 
-Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: read [research](references/research.md) before any write. A source packet is not automatically a dump. If one durable result is clear and the owner authorized creation, research then create in the same turn.
+Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: read [research](references/research.md) before any Things call. It owns research, form, progress, and creation for that branch. A source packet is not automatically a dump.
 
 Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on. For a required choice, name the visible result: `Review and mark the proposed rules`.
 
@@ -17,7 +17,7 @@ The server asks and writes nothing when a create is still a dump. Follow `ask`.
 
 Process Inbox: read [form](references/form.md).
 
-Before you create a Project, checklist, headings, or more than one sitting, read [form](references/form.md). If this turn is an unresolved dump, research owns it. Ask only when two supported readings change the durable result or Things form. Do not create that Project and do not invent next actions while that choice is open.
+Before an ordinary Project, checklist, headings, or more than one sitting, read [form](references/form.md). Research owns a source-backed capture through its commit. Ask only when two supported readings change the durable result or Things form. Do not create that Project and do not invent next actions while that choice is open.
 
 Routine creates apply at once. Do not promise a plan or another approval. Follow the tool if it returns an approval step.
 

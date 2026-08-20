@@ -2289,7 +2289,11 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
                         "kind": "project",
                         "title": "Ship release",
                         "tasks": [
-                            {"title": "Check notes", "heading_title": "Prepare"},
+                            {
+                                "title": "Check notes",
+                                "checklist": ["Read changes", "Check links"],
+                                "heading_title": "Prepare",
+                            },
                             {"title": "Build package", "heading_title": "Prepare"},
                             {"title": "Publish package", "heading_title": "Release"},
                         ],
@@ -2309,6 +2313,17 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
     assert envelopes["Check notes"].payload["agr"] == [prepare_uuid]
     assert envelopes["Build package"].payload["agr"] == [prepare_uuid]
     assert envelopes["Publish package"].payload["agr"] == [release_uuid]
+    check_task_uuid = envelopes["Check notes"].uuid
+    checklist_envelopes = [
+        item
+        for item in client.committed
+        if item.kind == "ChecklistItem3" and item.payload["ts"] == [check_task_uuid]
+    ]
+    assert [item.payload["tt"] for item in checklist_envelopes] == [
+        "Read changes",
+        "Check links",
+    ]
+    assert [item.payload["ix"] for item in checklist_envelopes] == [0, 1024]
     assert [
         envelopes[title].payload["ix"]
         for title in ("Check notes", "Build package", "Publish package")
@@ -2323,6 +2338,11 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
         "Build package",
         "Release",
         "Publish package",
+    ]
+    check_notes = next(item for item in visible if item.title == "Check notes")
+    assert [row.title for row in check_notes.checklists] == [
+        "Read changes",
+        "Check links",
     ]
 
 

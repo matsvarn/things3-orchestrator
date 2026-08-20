@@ -156,6 +156,7 @@ def _undistilled_create(entry: CreateEntry) -> str | None:
         entry.title,
         *entry.checklist,
         *[task.title for task in entry.tasks],
+        *[row for task in entry.tasks for row in task.checklist],
         *[(task.heading_title or "") for task in entry.tasks],
     ]
     fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
@@ -164,6 +165,21 @@ def _undistilled_create(entry: CreateEntry) -> str | None:
     if fake or mashed or pasted_brief:
         return _DUMP_CREATE_INSTRUCTION
     return None
+
+
+def _new_checklist_writes(parent_uuid: str, titles: Sequence[str]) -> list[Write]:
+    """Create ordered native checklist rows for one new Task."""
+    return [
+        Write(
+            action="checklist",
+            uuid=new_uuid(),
+            title=title,
+            checklist_parent_uuid=parent_uuid,
+            checklist_status="open",
+            checklist_index=index * 1024,
+        )
+        for index, title in enumerate(titles)
+    ]
 
 
 def _normalize_search_text(text: str) -> _NormalizedSearchText:
@@ -2984,28 +3000,11 @@ class ThingsWorkspace:
                 warnings.append("This creates future generated Tasks.")
                 context.risky = True
             writes.append(common_create)
-            for row_index, title in enumerate(entry.checklist):
-                if repeat_template_uuid is not None:
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=new_uuid(),
-                            title=title,
-                            checklist_parent_uuid=repeat_template_uuid,
-                            checklist_status="open",
-                            checklist_index=row_index * 1024,
-                        )
-                    )
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=new_uuid(),
-                        title=title,
-                        checklist_parent_uuid=uuid,
-                        checklist_status="open",
-                        checklist_index=row_index * 1024,
-                    )
+            if repeat_template_uuid is not None:
+                writes.extend(
+                    _new_checklist_writes(repeat_template_uuid, entry.checklist)
                 )
+            writes.extend(_new_checklist_writes(uuid, entry.checklist))
             current_heading: str | None = None
             heading_uuid: str | None = None
             heading_index = 0
@@ -3028,10 +3027,11 @@ class ThingsWorkspace:
                             )
                         )
                         heading_index += 1
+                task_uuid = new_uuid()
                 writes.append(
                     Write(
                         action="create",
-                        uuid=new_uuid(),
+                        uuid=task_uuid,
                         kind="task",
                         title=task.title,
                         notes=task.notes_markdown,
@@ -3042,6 +3042,7 @@ class ThingsWorkspace:
                         heading_uuid=heading_uuid,
                     )
                 )
+                writes.extend(_new_checklist_writes(task_uuid, task.checklist))
                 task_index += 1
             summary.append(
                 f"Create repeating {entry.kind}: {entry.title}"
@@ -5373,8 +5374,21 @@ class ThingsWorkspace:
         move_titles: dict[str, str] = {}
         for write in prepared.writes:
             item = self._library.records.get(write.uuid)
+            item_id: str | None
             if write.action == "create_heading":
                 item_id = f"heading:{write.uuid}"
+            elif write.action == "checklist":
+                checklist_parent_uuid = write.checklist_parent_uuid
+                if checklist_parent_uuid is None:
+                    checklist_parent, _ = self._library._find_checklist(write.uuid)
+                    checklist_parent_uuid = (
+                        checklist_parent.uuid if checklist_parent is not None else None
+                    )
+                item_id = (
+                    f"task:{checklist_parent_uuid}"
+                    if checklist_parent_uuid is not None
+                    else None
+                )
             elif write.action in {"delete_tag", "rename_tag", "reparent_tag", "ensure_tag"}:
                 item_id = None
             elif item is not None:

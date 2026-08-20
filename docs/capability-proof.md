@@ -44,20 +44,40 @@ it means that the live case does not cover every input variation in the row.
 The unit suite proves accepted calls and stored Things records. It does not
 prove that a model derives the best call from a natural source packet.
 
-Before a release changes the skill or tool schema, use a fresh session in two
-supported clients. Give each client one realistic source-heavy create request.
+Before a release changes the skill or tool schema, use an isolated copy of the
+skill in two supported clients. Give each client three realistic paraphrases
+of one source-heavy create request. Keep Things and external tools disabled.
+Judge the derived transaction without writing owner data. After deployment,
+use a fresh session for the live dogfood run.
 The run passes only when it has:
 
-- at most one research update, then one concise result;
+- one opening update at most, then one concise result;
 - no Things or Area read for a clearly new Project;
 - no owner question when one supported durable result remains;
 - one material fact or exclusion for every named source and relevant reply;
-- one Project with the complete evidence, design, review, test, and delivery path;
-- native headings, labeled Task-local sources, and no inferred Area; and
+- one Project whose collapsed view explains the complete path;
+- natural first-person titles and Markdown notes that work without the chat;
+- owner review before drafting, draft review, cross-client testing, real use,
+  then delivery;
+- native headings, useful checklists, labeled Task-local sources, and no
+  inferred Area; and
 - one commit, unless the server itself requires approval.
 
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
+
+### v0.4.8 derivation run
+
+On 2026-08-20, Cursor Agent and Codex each ran three paraphrases against an
+isolated copy of the final skill. The directory contained no repository tests
+or golden Project fixture. Things, browser, web, and write tools were disabled.
+
+All six final transactions had no owner question, no Things read, at most one
+progress update, and one predicted commit. Each created one Agent Skill Project
+with separate Tasks for owner evidence, external evidence, comparison, rule
+review, drafting, draft review, cross-client tests, real use, and Cursor
+pinning. Each kept the optional extractor in the consuming Task's method notes
+and continual improvement outside the finite Project.
 
 ## Live evidence
 

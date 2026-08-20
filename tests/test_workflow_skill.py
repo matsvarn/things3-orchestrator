@@ -108,9 +108,7 @@ def test_form_choice_lives_in_form() -> None:
     assert "visible action" in lower
     assert "finish criteria" in lower
     assert "put a source url on the task" in lower
-    assert "do not require" in lower
     assert "startable" in lower
-    assert "do not file read after sources" in lower
     assert "result or inclusion of work is undecided" in lower
     assert "complete supported finish path" in lower
     assert "dependency order" in lower
@@ -122,12 +120,9 @@ def test_form_choice_lives_in_form() -> None:
     assert "six or more tasks" in lower
     assert "explicit owner-named headings at any size" in lower
     assert "heading_title" in lower
-    assert "evidence before its conclusion" in lower
     assert "notes explain context or method" in lower
     assert "split it into its own task" in lower
-    assert "test it in each named active client" in lower
-    assert "get the owner's review before drafting" in lower
-    assert "label each source" in lower
+    assert "bold source label" in lower
     assert "never infer or browse for an area" in lower
 
     planning_stop = lower.split("stop planning", 1)[1].split("##", 1)[0]
@@ -209,28 +204,27 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     assert "every reviewed item" in review
     assert "preserve all other work" in review
 
-    for concept in ("direct", "sources", "uncertainty", "owner", "markdown notes", "tasks"):
+    for concept in ("direct", "sources", "uncertainty", "owner", "markdown", "tasks"):
         assert concept in research
     assert "every accepted things change" in research
     assert "source packet is not automatically a dump" in research
-    assert "research and create in the same turn" in research
-    assert "two supported readings" in research
-    assert "gather" in research
+    assert "continue through the commit this turn" in research
+    assert "two supported results" in research
+    assert "batch" in research
     assert "leave undecided work outside active tasks" in research
     assert "actual use is not installed inventory" in research
-    assert "one named harness cannot replace another" in research
+    assert "one named client cannot replace another" in research
     assert "named thread includes relevant replies" in research
-    assert "two names for one durable artifact share one finish" in research
+    assert "same durable artifact" in research
     assert "evidence or delivery" in research
-    assert "project owns any broader accepted audit" in research
     assert "unavailable evidence" in research
-    assert "one empty result ends the search" in research
-    assert "do not search things or areas" in research
+    assert "reserve `things_read`" in research
+    assert "never browse areas" in research
     assert "private coverage list" in research
     assert "one material fact" in research
     assert "relevant replies" in research
-    assert "removes a read task" in research
-    assert "does not remove a required evidence result" in research
+    assert "removes a `read` task" in research
+    assert "not an unfinished evidence result" in research
 
     assert "view=inbox" in form
     assert "distill" in form
@@ -351,7 +345,7 @@ def test_capture_stops_illegal_first_writes() -> None:
     assert "think about" in lower
     assert "source packet is not automatically a dump" in lower
     assert "(references/research.md)" in skill
-    assert "research then create in the same turn" in lower
+    assert "before any things call" in lower
     assert "today" in lower and "focus" in lower
     assert "(references/review.md)" in skill
     assert "process inbox" in lower
@@ -362,11 +356,10 @@ def test_capture_stops_illegal_first_writes() -> None:
     assert "one sitting" in lower
     assert "two supported readings" in lower
 
-    assert "unresolved dump" in research
-    assert "writes nothing" in research
-    assert "gather" in research
+    assert "without create authority writes nothing" in research
+    assert "batch independent reads" in research
     assert "leave undecided work outside active tasks" in research
-    assert "form.md" in research
+    assert "owns research, form, progress, and creation" in research
 
     assert "decide" in form
     assert "distill" in form
@@ -383,16 +376,68 @@ def test_source_heavy_create_is_one_decisive_quiet_flow() -> None:
     skill = SKILL.read_text(encoding="utf-8").lower()
     research = (REFERENCES / "research.md").read_text(encoding="utf-8").lower()
 
-    assert "research then create in the same turn" in skill
+    assert "before any things call" in skill
+    assert "owns research, form, progress, and creation" in skill
     assert "routine creates apply at once" in skill
     assert "do not promise a plan or another approval" in skill
     assert "do not narrate tool loading, retries, or the next lookup" in skill
     assert "complete supported finish path" in skill
     assert "did not preapprove each task title" in skill
     assert "review and mark the proposed rules" in skill
-    assert "never ask the owner to repeat the sole supported result" in research
+    assert "one opening update" in research
+    assert "stay silent" in research
+    assert "one supported result" in research
     assert "batch independent reads" in research
-    assert "use one fallback for an unavailable source" in research
+    assert "one suitable fallback" in research
     assert "authenticated browser" in research
-    assert "one empty result ends the search" in research
+    assert "unavailable evidence is not a form question" in research
+    assert "reserve `things_read`" in research
+    assert "one commit" in research
+
+
+def test_source_capture_writes_a_human_things_document() -> None:
+    skill = SKILL.read_text(encoding="utf-8").lower()
+    research = (REFERENCES / "research.md").read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+
+    assert "shaping research" in research
+    assert "project work" in research
+    assert "collapsed view" in research
+    assert "opened task" in research
+    assert "without reopening the chat" in research
+    assert "first-person" in research
+    assert "## result" in research
+    assert "## done when" in research
+    assert "## guardrails" in research
+    assert "## leave with" in research
+    assert "## starting evidence" in research
+    assert "do not save only urls" in research
+    assert "make the owner find the same facts again" in research
+    assert "native checklist" in research
+    assert "natural does not mean terse" in research
+    assert "not authority to author or update" in research
+    assert "actual tools and standing instructions" in research
+    assert "repeated patterns and corrections" in research
+    assert "external candidate evidence" in research
+    assert "compare and propose rules" in research
+    assert "owner rule review" in research
+    assert "draft review" in research
+    assert "representative tests in every active client" in research
+    assert "one real-use validation" in research
+    assert "do not combine adjacent outputs" in research
+    assert "do not pre-create generic fix or revision tasks" in research
+    assert "pin, publish, send, or install is delivery" in research
+    assert "do not add a generic delivery task" in research
+    assert "check the artifact path privately" in research
+    assert "different task title" in research
+    assert "one task owns adjacent outputs" in research
+    assert "project title names the artifact type" in research
+    assert "each source task also has" in research
+    assert "owner-named optional tool" in research
+    assert "consuming task's method notes" in research
+    assert "leave it outside the project" in research
+    assert "short plain notes" not in form
+    assert "owner who will reopen things" in form
+    assert "my chats" in form
+    assert "bold source label" in form
     assert "write nothing this turn" not in f"{skill}\n{research}"
