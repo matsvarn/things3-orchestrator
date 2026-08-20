@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.4.7 — 2026-08-20
+
+Source-heavy Projects keep their full evidence-to-delivery path. Same three
+tools.
+
+### Changed
+
+- A Project's compact `tasks` can set `heading_title`. The server creates
+  native, contiguous Things headings while it keeps Task array order.
+- Source-backed creation can research and write in one turn when the owner
+  authorized one clear result. It asks only when two supported readings change
+  the result or Things form.
+- Project planning now checks evidence order, required intermediate results,
+  owner review, verification, delivery, source labels, and note-local work.
+- New creates do not browse or infer an Area. Work traces omit routine tool
+  narration and stop after one fallback for an unavailable source.
+
 ## 0.4.6 — 2026-08-20
 
 Accepted Project plans keep ordered Tasks visible. Same three tools.

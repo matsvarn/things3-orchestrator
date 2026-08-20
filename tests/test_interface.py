@@ -766,6 +766,56 @@ def test_compact_project_tasks_are_project_only() -> None:
     )
     assert [task.title for task in project.tasks] == ["Call mover"]
 
+    staged = CreateEntry.model_validate(
+        {
+            "kind": "project",
+            "title": "Move house",
+            "tasks": [
+                {"title": "Call mover", "heading_title": "Plan"},
+                {"title": "Book van", "heading_title": "Plan"},
+                {"title": "Move boxes", "heading_title": "Move"},
+            ],
+        }
+    )
+    assert [task.heading_title for task in staged.tasks] == ["Plan", "Plan", "Move"]
+
+    with pytest.raises(ValidationError, match="headings on every Task or none"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "tasks": [
+                    {"title": "Call mover", "heading_title": "Plan"},
+                    {"title": "Book van"},
+                ],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="contiguous"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "tasks": [
+                    {"title": "Call mover", "heading_title": "Plan"},
+                    {"title": "Move boxes", "heading_title": "Move"},
+                    {"title": "Book van", "heading_title": "Plan"},
+                ],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="stable spelling and case"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "tasks": [
+                    {"title": "Call mover", "heading_title": "Plan"},
+                    {"title": "Book van", "heading_title": "plan"},
+                ],
+            }
+        )
+
     with pytest.raises(ValidationError, match="only a Project can have tasks"):
         CreateEntry.model_validate(
             {"title": "Move house", "tasks": [{"title": "Call mover"}]}
@@ -1391,10 +1441,10 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    # Review completeness, DiagnosticFact, and named home titles. Keep
-    # the contract compact, but allow that justified expansion.
-    assert discovery_chars < 18_800
-    assert discovery_chars - 13_406 < 5_400
+    # Review completeness, DiagnosticFact, named homes, and compact Project
+    # headings. Keep the contract compact, but allow that justified expansion.
+    assert discovery_chars < 18_850
+    assert discovery_chars - 13_406 < 5_450
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1428,6 +1478,8 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         assert instruction in read_lower
     for instruction in (
         "project tasks keep array order",
+        "heading_title makes contiguous native headings",
+        "use it on every task or none",
         "local create keys may appear in any order",
         "parent tags before children",
         "natural confirmation",
@@ -1443,6 +1495,10 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     assert COMMIT_IN["properties"]["create"]["items"]["properties"]["start"][
         "maxLength"
     ] >= len("evening")
+    project_task = COMMIT_IN["properties"]["create"]["items"]["properties"][
+        "tasks"
+    ]["items"]
+    assert "heading_title" in project_task["properties"]
     assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
         "maxLength"
     ] >= len("evening")

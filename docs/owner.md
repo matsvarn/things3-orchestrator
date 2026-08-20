@@ -6,7 +6,12 @@ Setup is [scripts/setup](../scripts/setup) on this Mac, or
 
 New titles are short action phrases in the language of your existing
 titles. Named Project Tasks are kept verbatim. An accepted Project plan keeps
-all committed Tasks visible in dependency order.
+all committed Tasks visible in dependency order. Multi-stage Projects use
+native Things headings when they improve scanning.
+
+You can send a source thread, links, and one clear result in the same request.
+If you also ask it to create the work, it researches and creates in one turn.
+It does not browse for an Area or place the Project in one unless you named it.
 
 Today, Logbook, and reminders use the timezone stored by `login`. After
 a permanent move: `uv run things-orchestrator login --timezone Europe/Berlin`.
@@ -40,7 +45,7 @@ X. It will not invent a second copy of the same title.
 - two items match
 - a new Project has no stated finish
 - a mashed title, pasted brief, or Decide / Think about row
-- more than one sitting, until you name the finish and whether it is one Project or two
+- two supported readings lead to different results or Things forms
 - a permanent delete does not name exact Trash items
 
 ## It will ask you to confirm before

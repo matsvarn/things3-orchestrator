@@ -111,14 +111,24 @@ def test_form_choice_lives_in_form() -> None:
     assert "do not require" in lower
     assert "startable" in lower
     assert "do not file read after sources" in lower
-    assert "plan is open" in lower
-    assert "every committed task" in lower
+    assert "result or inclusion of work is undecided" in lower
+    assert "complete supported finish path" in lower
     assert "dependency order" in lower
     assert "first task is available now" in lower
     assert "committed later action is a project task" in lower
     assert "order shows dependencies" in lower
     assert "do not mix the two forms" in lower
-    assert "two or more named stages" in lower
+    assert "two or more distinct stages" in lower
+    assert "six or more tasks" in lower
+    assert "explicit owner-named headings at any size" in lower
+    assert "heading_title" in lower
+    assert "evidence before its conclusion" in lower
+    assert "notes explain context or method" in lower
+    assert "split it into its own task" in lower
+    assert "test it in each named active client" in lower
+    assert "get the owner's review before drafting" in lower
+    assert "label each source" in lower
+    assert "never infer or browse for an area" in lower
 
     planning_stop = lower.split("stop planning", 1)[1].split("##", 1)[0]
     assert "start" in planning_stop
@@ -202,8 +212,9 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     for concept in ("direct", "sources", "uncertainty", "owner", "markdown notes", "tasks"):
         assert concept in research
     assert "every accepted things change" in research
-    assert "first token" in research
-    assert "do not create" in research
+    assert "source packet is not automatically a dump" in research
+    assert "research and create in the same turn" in research
+    assert "two supported readings" in research
     assert "gather" in research
     assert "leave undecided work outside active tasks" in research
     assert "actual use is not installed inventory" in research
@@ -213,6 +224,13 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     assert "evidence or delivery" in research
     assert "project owns any broader accepted audit" in research
     assert "unavailable evidence" in research
+    assert "one empty result ends the search" in research
+    assert "do not search things or areas" in research
+    assert "private coverage list" in research
+    assert "one material fact" in research
+    assert "relevant replies" in research
+    assert "removes a read task" in research
+    assert "does not remove a required evidence result" in research
 
     assert "view=inbox" in form
     assert "distill" in form
@@ -331,9 +349,9 @@ def test_capture_stops_illegal_first_writes() -> None:
     assert "adopt vs skip" in lower
     assert "decide" in lower
     assert "think about" in lower
-    assert "write nothing" in lower
+    assert "source packet is not automatically a dump" in lower
     assert "(references/research.md)" in skill
-    assert "do not create" in lower
+    assert "research then create in the same turn" in lower
     assert "today" in lower and "focus" in lower
     assert "(references/review.md)" in skill
     assert "process inbox" in lower
@@ -342,10 +360,10 @@ def test_capture_stops_illegal_first_writes() -> None:
     assert "## route" not in lower
     assert "before any create" not in lower
     assert "one sitting" in lower
-    assert "one project or two" in lower
+    assert "two supported readings" in lower
 
-    assert "first token" in research
-    assert "do not create" in research
+    assert "unresolved dump" in research
+    assert "writes nothing" in research
     assert "gather" in research
     assert "leave undecided work outside active tasks" in research
     assert "form.md" in research
@@ -359,3 +377,22 @@ def test_capture_stops_illegal_first_writes() -> None:
     assert "postpone" in lower
     assert "empty your head" in review
     assert "capture" in review
+
+
+def test_source_heavy_create_is_one_decisive_quiet_flow() -> None:
+    skill = SKILL.read_text(encoding="utf-8").lower()
+    research = (REFERENCES / "research.md").read_text(encoding="utf-8").lower()
+
+    assert "research then create in the same turn" in skill
+    assert "routine creates apply at once" in skill
+    assert "do not promise a plan or another approval" in skill
+    assert "do not narrate tool loading, retries, or the next lookup" in skill
+    assert "complete supported finish path" in skill
+    assert "did not preapprove each task title" in skill
+    assert "review and mark the proposed rules" in skill
+    assert "never ask the owner to repeat the sole supported result" in research
+    assert "batch independent reads" in research
+    assert "use one fallback for an unavailable source" in research
+    assert "authenticated browser" in research
+    assert "one empty result ends the search" in research
+    assert "write nothing this turn" not in f"{skill}\n{research}"
