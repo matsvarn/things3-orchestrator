@@ -376,6 +376,7 @@ class ProjectTask(StrictModel):
 
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
+    heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
 
     @field_validator("title")
     @classmethod
@@ -383,6 +384,11 @@ class ProjectTask(StrictModel):
         if not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("heading_title")
+    @classmethod
+    def clean_heading_title(cls, value: str | None) -> str | None:
+        return _clean_optional_title(value, name="heading_title")
 
 
 class CreateEntry(StrictModel):
@@ -479,6 +485,22 @@ class CreateEntry(StrictModel):
         task_titles = [task.title.strip().casefold() for task in self.tasks]
         if _duplicates(task_titles):
             raise ValueError("Project task titles must be unique")
+        heading_titles = [task.heading_title for task in self.tasks]
+        if any(heading_titles) and not all(heading_titles):
+            raise ValueError("Project tasks use headings on every Task or none")
+        seen_headings: dict[str, str] = {}
+        previous_heading: str | None = None
+        for heading_title in heading_titles:
+            if heading_title is None:
+                continue
+            normalized = heading_title.casefold()
+            prior_title = seen_headings.get(normalized)
+            if prior_title is not None and prior_title != heading_title:
+                raise ValueError("Project headings need stable spelling and case")
+            if normalized in seen_headings and normalized != previous_heading:
+                raise ValueError("Project heading groups must be contiguous")
+            seen_headings[normalized] = heading_title
+            previous_heading = normalized
         if self.heading_id is not None and self.kind != "task":
             raise ValueError("only a Task can use a heading")
         if self.repeat is not None and self.kind != "task":
@@ -1740,6 +1762,11 @@ _CREATE: dict[str, Any] = {
                         "type": ["string", "null"],
                         "maxLength": 50000,
                     },
+                    "heading_title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                    },
                 },
             },
         },
@@ -2439,7 +2466,8 @@ COMMIT_DESC = (
     "Commit one decided batch with a durable intent_id. "
     "Prefer context_id and short refs from a review, change, or organize read. "
     "An exact change needs id and if_revision. "
-    "Project tasks keep array order. Local create keys may appear in any order. "
+    "Project tasks keep array order. heading_title makes contiguous native headings; use it on every Task or none. "
+    "Local create keys may appear in any order. "
     "Parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "
     "If the response is lost or pending, retry the same intent_id and payload. "

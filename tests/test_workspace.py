@@ -1265,6 +1265,99 @@ def test_project_tasks_use_the_compact_create_shape() -> None:
     assert all(not item.notes for item in actions)
 
 
+def test_compact_project_tasks_create_native_headings() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-compact-headings-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Ship release",
+                        "tasks": [
+                            {
+                                "title": "Check the release notes",
+                                "heading_title": "Prepare",
+                            },
+                            {
+                                "title": "Build the package",
+                                "heading_title": "Prepare",
+                            },
+                            {
+                                "title": "Publish the package",
+                                "heading_title": "Release",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    records = list(module._library.records.values())  # noqa: SLF001
+    project = next(item for item in records if item.kind == "project")
+    headings = sorted(
+        (item for item in records if item.heading), key=lambda item: item.sort_index
+    )
+    tasks = sorted(
+        (item for item in records if item.kind == "task" and not item.heading),
+        key=lambda item: item.sort_index,
+    )
+    heading_titles = {heading.uuid: heading.title for heading in headings}
+    assert [heading.title for heading in headings] == ["Prepare", "Release"]
+    assert [task.title for task in tasks] == [
+        "Check the release notes",
+        "Build the package",
+        "Publish the package",
+    ]
+    assert [heading_titles[task.heading_uuid] for task in tasks] == [
+        "Prepare",
+        "Prepare",
+        "Release",
+    ]
+    assert all(task.parent_uuid == project.uuid for task in tasks)
+
+
+def test_broad_compact_project_plan_names_generated_headings() -> None:
+    module = workspace()
+    heading_titles = ["Evidence", "Design", "Review", "Release"]
+    tasks = [
+        {
+            "title": f"Produce result {index + 1}",
+            "heading_title": heading_titles[min(index // 5, 3)],
+        }
+        for index in range(17)
+    ]
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-compact-broad-headings-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Ship large release",
+                        "tasks": tasks,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert "Headings created: 4" in result.plan.summary
+    headings = next(
+        section for section in result.sections if section.title == "Headings created"
+    )
+    assert len(headings.item_ids) == 4
+    assert all(item_id.startswith("heading:") for item_id in headings.item_ids)
+    assert module._library.records == {}  # noqa: SLF001
+
+
 def test_project_tasks_can_carry_notes() -> None:
     module = workspace()
 
@@ -1374,127 +1467,151 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     module = workspace()
     notes = (
         "Done when one canonical Mats Mode Agent Skill reflects repeated evidence "
-        "from my agent work and passes representative prompts in each active "
-        "harness. Cursor pins the same skill.\n\n"
-        "Use actual cross-harness behavior and skill invocations as primary "
-        "evidence. Adopt Lauren's practices only when evidence supports them."
+        "from selected chats, Mats has approved its rules, it passes representative "
+        "prompts in each active agent client, and Cursor pins the same skill.\n\n"
+        "Use actual behavior and skill calls, not installed inventory. Keep client "
+        "evidence separate. Adopt Lauren's practices only when Mats's evidence "
+        "supports them."
     )
     titles = [
-        "List the transcript sources for the Mats Mode audit",
-        "Record repeated working patterns from the selected transcripts",
-        "Record actual skill use from the selected transcripts",
-        "Record candidate rules from Lauren's workflow",
+        "Name the chat sources for the Mats Mode audit",
+        "Record actual skill use from the selected chats",
+        "Record working patterns and useful corrections from the selected chats",
+        "Record candidate rules from Lauren's posts and replies",
+        "Record candidate rules from pstack and poteto-mode",
         "Match Lauren's candidate rules to my evidence",
+        "Review and mark the proposed Mats Mode rules",
         "Draft Mats Mode Agent Skill",
+        "Review the Mats Mode draft against the approved rules",
         "Test Mats Mode in each active harness",
         "Pin Mats Mode in Cursor",
     ]
     evidence_notes = (
-        "Cover each active harness and record the transcript location and date "
-        "range. Test the extractor on one transcript only if it preserves "
-        "evidence and reduces work.\n"
-        "https://github.com/0xSero/ai-data-extraction"
-    )
-    lauren_notes = (
-        "Record candidate rules from pstack, poteto-mode, automate-me, the main "
-        "post, and relevant replies.\n"
-        "https://github.com/cursor/plugins/tree/main/pstack\n"
-        "https://x.com/poteto/status/2090141955695198633\n"
-        "https://x.com/poteto/status/2090180519766192437\n"
-        "https://x.com/poteto/status/2090147276434112518\n"
-        "https://x.com/poteto/status/2090147655876042880\n"
+        "For each active client, record the transcript location, date range, "
+        "availability, and privacy limit. Keep each client separate.\n\n"
+        "Optional extractor\n"
+        "https://github.com/0xSero/ai-data-extraction\n\n"
+        "Optional transcript method\n"
         "~/.agents/skills/automate-me/SKILL.md"
     )
-
-    create = [
-        {
-            "key": "$mats",
-            "kind": "project",
-            "title": "Create Mats Mode Agent Skill",
-            "notes_markdown": notes,
-        },
-        {
-            "key": "$evidence",
-            "kind": "heading",
-            "title": "Evidence",
-            "into": "$mats",
-        },
-        {
-            "key": "$design",
-            "kind": "heading",
-            "title": "Design",
-            "into": "$mats",
-            "after": "$evidence",
-        },
-        {
-            "key": "$verify",
-            "kind": "heading",
-            "title": "Verify",
-            "into": "$mats",
-            "after": "$design",
-        },
-        {
-            "key": "$sources",
-            "title": titles[0],
-            "notes_markdown": evidence_notes,
-            "into": "$mats",
-            "heading_id": "$evidence",
-        },
-        {
-            "key": "$patterns",
-            "title": titles[1],
-            "into": "$mats",
-            "heading_id": "$evidence",
-            "after": "$sources",
-        },
-        {
-            "key": "$usage",
-            "title": titles[2],
-            "into": "$mats",
-            "heading_id": "$evidence",
-            "after": "$patterns",
-        },
-        {
-            "key": "$lauren",
-            "title": titles[3],
-            "notes_markdown": lauren_notes,
-            "into": "$mats",
-            "heading_id": "$evidence",
-            "after": "$usage",
-        },
-        {
-            "key": "$match",
-            "title": titles[4],
-            "into": "$mats",
-            "heading_id": "$design",
-        },
-        {
-            "key": "$draft",
-            "title": titles[5],
-            "into": "$mats",
-            "heading_id": "$design",
-            "after": "$match",
-        },
-        {
-            "key": "$test",
-            "title": titles[6],
-            "into": "$mats",
-            "heading_id": "$verify",
-        },
-        {
-            "title": titles[7],
-            "notes_markdown": (
-                "Pin the same Agent Skill. Pair it with /goal.\n"
-                "https://cursor.com/changelog"
-            ),
-            "into": "$mats",
-            "heading_id": "$verify",
-            "after": "$test",
-        },
-    ]
+    lauren_notes = (
+        "Account for each material reply as a candidate rule or a named exclusion.\n\n"
+        "Lauren Mode thread\n"
+        "https://x.com/poteto/status/2090141955695198633\n\n"
+        "Continual feedback post\n"
+        "https://x.com/poteto/status/2089067865098113024\n\n"
+        "Encode feedback reply\n"
+        "https://x.com/poteto/status/2090154675756847217\n\n"
+        "Planning reply\n"
+        "https://x.com/poteto/status/2090180519766192437\n\n"
+        "Review-as-lint reply\n"
+        "https://x.com/poteto/status/2090181049754206370\n\n"
+        "Review architecture reply\n"
+        "https://x.com/poteto/status/2090147276434112518\n\n"
+        "Design ladder reply\n"
+        "https://x.com/poteto/status/2090147655876042880\n\n"
+    )
+    pstack_notes = (
+        "Record candidate rules or a named exclusion for each source.\n\n"
+        "pstack source\n"
+        "https://github.com/cursor/plugins/tree/main/pstack\n\n"
+        "poteto-mode source\n"
+        "https://github.com/cursor/plugins/tree/main/pstack/skills/poteto-mode\n\n"
+        "automate-me source\n"
+        "https://github.com/cursor/plugins/tree/main/pstack/skills/automate-me\n\n"
+        "Design guide\n"
+        "https://github.com/cursor/plugins/blob/main/pstack/docs/guide/04-design.md\n\n"
+        "Planning playbook\n"
+        "https://github.com/cursor/plugins/blob/main/pstack/skills/poteto-mode/references/plan.md"
+    )
     result = module.commit(
         CommitCall.model_validate(
-            {"intent_id": "mats-mode-create-001", "create": create}
+            {
+                "intent_id": "mats-mode-create-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Create Mats Mode Agent Skill",
+                        "notes_markdown": notes,
+                        "tasks": [
+                            {
+                                "title": titles[0],
+                                "notes_markdown": evidence_notes,
+                                "heading_title": "Evidence",
+                            },
+                            {
+                                "title": titles[1],
+                                "notes_markdown": (
+                                    "Record actual skill calls. Keep installed inventory "
+                                    "out and keep evidence separate by client."
+                                ),
+                                "heading_title": "Evidence",
+                            },
+                            {
+                                "title": titles[2],
+                                "notes_markdown": (
+                                    "Record repeated work patterns and corrections that "
+                                    "consistently improve results."
+                                ),
+                                "heading_title": "Evidence",
+                            },
+                            {
+                                "title": titles[3],
+                                "notes_markdown": lauren_notes,
+                                "heading_title": "Evidence",
+                            },
+                            {
+                                "title": titles[4],
+                                "notes_markdown": pstack_notes,
+                                "heading_title": "Evidence",
+                            },
+                            {
+                                "title": titles[5],
+                                "notes_markdown": (
+                                    "Mark each candidate supported, unsupported, or "
+                                    "still uncertain from the chat evidence."
+                                ),
+                                "heading_title": "Design",
+                            },
+                            {
+                                "title": titles[6],
+                                "notes_markdown": (
+                                    "Mats approves, rejects, or changes the marked "
+                                    "rules before the skill is drafted."
+                                ),
+                                "heading_title": "Design",
+                            },
+                            {"title": titles[7], "heading_title": "Design"},
+                            {
+                                "title": titles[8],
+                                "notes_markdown": (
+                                    "Check the draft against every approved rule and "
+                                    "remove unsupported instructions."
+                                ),
+                                "heading_title": "Design",
+                            },
+                            {
+                                "title": titles[9],
+                                "notes_markdown": (
+                                    "Run representative prompts in every active agent "
+                                    "client. Record failures as finite Project Tasks."
+                                ),
+                                "heading_title": "Verify",
+                            },
+                            {
+                                "title": titles[10],
+                                "notes_markdown": (
+                                    "Pin the same Agent Skill. Pair it with /goal. "
+                                    "Then check the unresolved CLI sticky behavior.\n\n"
+                                    "Cursor custom modes\n"
+                                    "https://cursor.com/changelog/08-19-26"
+                                ),
+                                "heading_title": "Verify",
+                            },
+                        ],
+                    }
+                ],
+            }
         )
     )
 
@@ -1520,6 +1637,9 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         "Evidence",
         "Evidence",
         "Evidence",
+        "Evidence",
+        "Design",
+        "Design",
         "Design",
         "Design",
         "Verify",
@@ -1527,10 +1647,18 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     ]
     assert "ai-data-extraction" in tasks[0].notes
     assert "ai-data-extraction" not in notes
+    assert "Lauren Mode thread" in tasks[3].notes
     assert "2090180519766192437" in tasks[3].notes
+    assert "2090181049754206370" in tasks[3].notes
     assert "2090147276434112518" in tasks[3].notes
     assert "2090147655876042880" in tasks[3].notes
+    assert "2089067865098113024" in tasks[3].notes
+    assert "pstack/skills/poteto-mode" in tasks[4].notes
+    assert "pstack/skills/automate-me" in tasks[4].notes
     assert "Cursor pins the same skill" in projects[0].notes
+    assert projects[0].area_uuid is None
+    assert all(not task.title.startswith("Read ") for task in tasks)
+    assert all("continual" not in task.title.casefold() for task in tasks)
     assert all("Hermes" not in (item.notes or "") for item in records)
     assert all("VPS" not in (item.notes or "") for item in records)
 
@@ -1544,8 +1672,19 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         {"title": "Audit skills then write Mats Mode"},
         {"title": "Audit skills & write Mats Mode"},
         {"title": "Audit skills + write Mats Mode"},
+        {"title": "Open the source list", "heading_title": "Think about stages"},
+        {"title": "Open the source list", "heading_title": "x" * 801},
     ],
-    ids=["long-note", "and", "comma", "then", "ampersand", "plus"],
+    ids=[
+        "long-note",
+        "and",
+        "comma",
+        "then",
+        "ampersand",
+        "plus",
+        "fake-heading",
+        "long-heading",
+    ],
 )
 def test_undistilled_project_task_asks_and_writes_nothing(
     task: dict[str, str],

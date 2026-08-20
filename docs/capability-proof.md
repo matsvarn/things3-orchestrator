@@ -39,6 +39,26 @@ interface through the memory adapter and inspect each Cloud envelope. The
 probe adds disposable live Cloud cases. `Partial` does not mean unsupported;
 it means that the live case does not cover every input variation in the row.
 
+## Model behavior gate
+
+The unit suite proves accepted calls and stored Things records. It does not
+prove that a model derives the best call from a natural source packet.
+
+Before a release changes the skill or tool schema, use a fresh session in two
+supported clients. Give each client one realistic source-heavy create request.
+The run passes only when it has:
+
+- at most one research update, then one concise result;
+- no Things or Area read for a clearly new Project;
+- no owner question when one supported durable result remains;
+- one material fact or exclusion for every named source and relevant reply;
+- one Project with the complete evidence, design, review, test, and delivery path;
+- native headings, labeled Task-local sources, and no inferred Area; and
+- one commit, unless the server itself requires approval.
+
+Start a new client session after the server and skill update. This refreshes
+the tool schema before the run.
+
 ## Live evidence
 
 Run the disposable proof harness with:

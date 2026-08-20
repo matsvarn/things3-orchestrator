@@ -5,19 +5,21 @@ description: Research a thread, changelog, dump, or mode before you write. Use f
 
 # Things
 
-Say what you found. Say what changed. Ask when the owner has to choose.
+Say what you found. Say what changed. Ask when the owner has to choose. During work, report only a material finding, blocker, or owner choice. Do not narrate tool loading, retries, or the next lookup.
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
 
-Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: write nothing this turn. Read [research](references/research.md). Do not create.
+Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: read [research](references/research.md) before any write. A source packet is not automatically a dump. If one durable result is clear and the owner authorized creation, research then create in the same turn.
 
-Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on.
+Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on. For a required choice, name the visible result: `Review and mark the proposed rules`.
 
 The server asks and writes nothing when a create is still a dump. Follow `ask`.
 
 Process Inbox: read [form](references/form.md).
 
-Before you create a Project, checklist, headings, or more than one sitting, read [form](references/form.md). If this turn is a dump, research owns it. If they did not say what finished looks like, ask one Project or two, or hat vs Project. Do not create that Project and do not invent next actions.
+Before you create a Project, checklist, headings, or more than one sitting, read [form](references/form.md). If this turn is an unresolved dump, research owns it. Ask only when two supported readings change the durable result or Things form. Do not create that Project and do not invent next actions while that choice is open.
+
+Routine creates apply at once. Do not promise a plan or another approval. Follow the tool if it returns an approval step.
 
 Weekly review or Area: read [review](references/review.md). Merge, teardown, or `purpose=organize`: read [review](references/review.md).
 
@@ -31,11 +33,11 @@ If they named a reusable filter, same commit `ensure_tags` with that exact title
 
 If they already named a Project and its next actions, keep those exact titles. A sitting that needs a path or URL gets notes on that Task in the same commit. Do not file Read after sources were already gathered.
 
-Once the owner accepts a Project plan, create all known committed Tasks in dependency order. The first is available now. Keep later accepted Tasks visible; do not hide them in notes.
+When the owner commits to one durable result, create its complete supported finish path in dependency order. The first Task is available now. Keep known later Tasks visible; do not hide them in notes. A plan is open only when the result or inclusion of work is undecided, not because the owner did not preapprove each Task title.
 
-Do not search first unless a matching item is likely already there. If it is, bind that item instead of creating a second copy.
+Do not search first unless the owner signals that matching work may exist. If it does, bind that item instead of creating a second copy.
 
-Ordinary capture does not ask how or when. Set start, deadline, reminder, Today, Area, or headings only when the owner named them.
+Never infer or browse for an Area during create. Use one only when the owner names it or an existing matching item proves it. Set start, deadline, reminder, Today, or headings only when the owner named them or the accepted Project stages need headings.
 
 Open Today or Inbox only when they asked to review that list.
 

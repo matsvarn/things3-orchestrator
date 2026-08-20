@@ -2275,6 +2275,57 @@ def test_ensure_tag_preserves_parent_aliases_for_memory_and_cloud(
     assert cloud.tag_parents["child"] == ["parent"]
 
 
+def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "cloud-compact-headings-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Ship release",
+                        "tasks": [
+                            {"title": "Check notes", "heading_title": "Prepare"},
+                            {"title": "Build package", "heading_title": "Prepare"},
+                            {"title": "Publish package", "heading_title": "Release"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    envelopes = {item.payload["tt"]: item for item in client.committed}
+    assert envelopes["Ship release"].payload["tp"] == 1
+    assert envelopes["Prepare"].payload["tp"] == 2
+    assert envelopes["Release"].payload["tp"] == 2
+    prepare_uuid = envelopes["Prepare"].uuid
+    release_uuid = envelopes["Release"].uuid
+    assert envelopes["Check notes"].payload["agr"] == [prepare_uuid]
+    assert envelopes["Build package"].payload["agr"] == [prepare_uuid]
+    assert envelopes["Publish package"].payload["agr"] == [release_uuid]
+    assert [
+        envelopes[title].payload["ix"]
+        for title in ("Check notes", "Build package", "Publish package")
+    ] == [0, 1024, 2048]
+
+    project = next(item for item in library.records.values() if item.kind == "project")
+    visible = library.project(project.id)
+    assert [item.title for item in visible] == [
+        "Ship release",
+        "Prepare",
+        "Check notes",
+        "Build package",
+        "Release",
+        "Publish package",
+    ]
+
+
 def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]

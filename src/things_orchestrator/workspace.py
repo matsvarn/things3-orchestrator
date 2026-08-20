@@ -150,11 +150,13 @@ def _undistilled_create(entry: CreateEntry) -> str | None:
     notes = [
         entry.notes_markdown or "",
         *[(task.notes_markdown or "") for task in entry.tasks],
+        *[(task.heading_title or "") for task in entry.tasks],
     ]
     rows = [
         entry.title,
         *entry.checklist,
         *[task.title for task in entry.tasks],
+        *[(task.heading_title or "") for task in entry.tasks],
     ]
     fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
     pasted_brief = any(len(note) > _DISTILL_NOTE_CHARS for note in notes)
@@ -3004,7 +3006,28 @@ class ThingsWorkspace:
                         checklist_index=row_index * 1024,
                     )
                 )
-            for task_index, task in enumerate(entry.tasks):
+            current_heading: str | None = None
+            heading_uuid: str | None = None
+            heading_index = 0
+            task_index = 0
+            for task in entry.tasks:
+                if task.heading_title != current_heading:
+                    current_heading = task.heading_title
+                    if current_heading is not None:
+                        heading_uuid = new_uuid()
+                        writes.append(
+                            Write(
+                                action="create_heading",
+                                uuid=heading_uuid,
+                                kind="task",
+                                title=current_heading,
+                                into_uuid=uuid,
+                                into_kind="project",
+                                anytime=True,
+                                sort_index=heading_index * 1024,
+                            )
+                        )
+                        heading_index += 1
                 writes.append(
                     Write(
                         action="create",
@@ -3016,8 +3039,10 @@ class ThingsWorkspace:
                         into_kind="project",
                         anytime=True,
                         sort_index=task_index * 1024,
+                        heading_uuid=heading_uuid,
                     )
                 )
+                task_index += 1
             summary.append(
                 f"Create repeating {entry.kind}: {entry.title}"
                 if entry.repeat is not None
@@ -5335,6 +5360,7 @@ class ThingsWorkspace:
             "create_area": "Areas created",
             "create_project": "Projects created",
             "create_task": "Tasks created",
+            "create_heading": "Headings created",
             "inbox": "Move from Inbox",
             "someday": "Move to Someday",
             "trash": "Move to recoverable Trash",
@@ -5347,7 +5373,9 @@ class ThingsWorkspace:
         move_titles: dict[str, str] = {}
         for write in prepared.writes:
             item = self._library.records.get(write.uuid)
-            if write.action in {"delete_tag", "rename_tag", "reparent_tag", "ensure_tag"}:
+            if write.action == "create_heading":
+                item_id = f"heading:{write.uuid}"
+            elif write.action in {"delete_tag", "rename_tag", "reparent_tag", "ensure_tag"}:
                 item_id = None
             elif item is not None:
                 item_id = item.id
@@ -5355,6 +5383,8 @@ class ThingsWorkspace:
                 item_id = f"{write.kind}:{write.uuid}"
             if write.action == "create":
                 add(f"create_{write.kind}", write.title or write.kind, item_id)
+            elif write.action == "create_heading":
+                add("create_heading", write.title or "Heading", item_id)
             elif write.action == "trash":
                 add("trash", "Trash", item_id)
             elif write.action == "restore":
