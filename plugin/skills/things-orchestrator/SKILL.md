@@ -27,7 +27,7 @@ Create each loop once in Inbox. Two decided actions are two Inbox Tasks. Title i
 
 Example: "Remind me to renew my passport." → create `Renew passport` in Inbox.
 
-If they named a reusable filter, same commit `ensure_tags` with that exact title and `tag_ids` as that `$key`. Do not open tags first. `waiting=true` already reuses Waiting. If they named an existing Area or Project, send `into_title` in that same commit. Unnamed stays Inbox.
+If they named a reusable filter, same commit `ensure_tags` with that exact title and `tag_ids` as that `$key`. Do not invent a second tag name. Do not open tags first. `waiting=true` already reuses Waiting. If they named an existing Area or Project, send `into_title` in that same commit. Unnamed stays Inbox.
 
 If they already named a Project and its next actions, keep those exact titles.
 

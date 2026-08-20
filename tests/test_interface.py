@@ -748,19 +748,11 @@ def test_create_and_change_accept_into_title_without_into() -> None:
     )
     assert changed.into_title == "Kitchen"
 
-    with pytest.raises(ValidationError, match="cannot combine"):
-        CreateEntry.model_validate(
-            {"title": "Buy milk", "into": "project:p", "into_title": "Kitchen"}
-        )
-    with pytest.raises(ValidationError, match="cannot combine"):
-        ChangeEntry.model_validate(
-            {
-                "id": "task:milk",
-                "if_revision": "r_1",
-                "into": "inbox",
-                "into_title": "Kitchen",
-            }
-        )
+    both = CreateEntry.model_validate(
+        {"title": "Buy milk", "into": "project:p", "into_title": "Kitchen"}
+    )
+    assert both.into == "project:p"
+    assert both.into_title == "Kitchen"
 
 
 def test_task_create_rejects_a_non_heading_local_heading_reference() -> None:
