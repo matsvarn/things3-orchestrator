@@ -336,8 +336,11 @@ def _domain_result(
             "title",
             "status",
             "into_id",
+            "into_title",
             "heading_id",
+            "heading_title",
             "start",
+            "direct_tag_ids",
             "signals",
         }
         structured["items"] = [

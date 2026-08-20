@@ -1,7 +1,7 @@
 interface:
   display_name: "Things Orchestrator"
   short_description: "Manage clear, useful work in Things 3"
-  default_prompt: "Use $things-orchestrator to capture this in Things."
+  default_prompt: "Use $things-orchestrator. Create only accepted work in Things."
 policy:
   allow_implicit_invocation: true
 dependencies:

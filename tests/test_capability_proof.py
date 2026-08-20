@@ -83,7 +83,7 @@ def test_owner_guide_is_how_to_talk() -> None:
     root = Path(__file__).parents[1]
     owner = (root / "docs" / "owner.md").read_text()
     skill = (
-        root / "plugin" / "skills" / "things-orchestrator" / "references" / "task-system.md"
+        root / "plugin" / "skills" / "things-orchestrator" / "SKILL.md"
     ).read_text()
 
     assert "purpose=recurrence" not in owner

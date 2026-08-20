@@ -727,6 +727,42 @@ def test_task_create_accepts_a_heading_defined_later_in_the_array() -> None:
     assert call.create[1].heading_id == "$section"
 
 
+def test_create_and_change_accept_into_title_without_into() -> None:
+    created = CreateEntry.model_validate(
+        {"title": "Buy milk", "into_title": "Kitchen"}
+    )
+    assert created.into is None
+    assert created.into_title == "Kitchen"
+
+    heading = CreateEntry.model_validate(
+        {"kind": "heading", "title": "Later", "into_title": "Kitchen"}
+    )
+    assert heading.into_title == "Kitchen"
+
+    changed = ChangeEntry.model_validate(
+        {
+            "id": "task:milk",
+            "if_revision": "r_1",
+            "into_title": " Kitchen ",
+        }
+    )
+    assert changed.into_title == "Kitchen"
+
+    with pytest.raises(ValidationError, match="cannot combine"):
+        CreateEntry.model_validate(
+            {"title": "Buy milk", "into": "project:p", "into_title": "Kitchen"}
+        )
+    with pytest.raises(ValidationError, match="cannot combine"):
+        ChangeEntry.model_validate(
+            {
+                "id": "task:milk",
+                "if_revision": "r_1",
+                "into": "inbox",
+                "into_title": "Kitchen",
+            }
+        )
+
+
 def test_task_create_rejects_a_non_heading_local_heading_reference() -> None:
     with pytest.raises(ValidationError, match="heading create entry"):
         CommitCall.model_validate(
@@ -1267,10 +1303,10 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     discovery_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
-    # Review completeness plus paginated DiagnosticFact. Keep the
-    # contract compact, but allow that justified expansion.
-    assert discovery_chars < 18_500
-    assert discovery_chars - 13_406 < 5_200
+    # Review completeness, DiagnosticFact, and named home titles. Keep
+    # the contract compact, but allow that justified expansion.
+    assert discovery_chars < 18_700
+    assert discovery_chars - 13_406 < 5_300
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas

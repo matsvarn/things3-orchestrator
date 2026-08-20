@@ -1,12 +1,18 @@
-# Review, merge, and organize
+# Review
 
-Search named existing items and edit them. Create only when asked to add. If a living notes-hit hides a Trash title, search with `within=trash`. Do not copy revisions.
+Search named existing items and edit them. Create only when asked to add. Newly spoken loops during Empty your head or Be creative follow Capture, one Inbox Task each. If a living notes-hit hides a Trash title, search with `within=trash`. Do not copy revisions.
 
-## Weekly review or Area redesign
+## Weekly review
 
-Start with `view=audit` or `view=diagnostics`, then `view=area` for each Area that needs a decision. An Area `id` lists its children. A Project `id` or `view=project` is the writable neighborhood, not a paged children list. `view=area` also takes `within`. Review lists return a context and short refs. A truncated page is not complete. Continue the same read to add the rest to that context, then commit keep, someday, trash, or file against it. `view=logbook` defaults to the last 14 days. Use `ids` for notes and checklists on up to 10 exact items. If `truncated_fields` is present, read that exact id.
+Start with `view=diagnostics`, then `view=audit`. Then Inbox to zero, Today leftovers, `view=logbook`, `view=week`, Waiting, Projects with no useful next action, then a glance at Someday. `view=week` is Upcoming starts, not the calendar. Apple Calendar is not in Cloud. Ask them to scan it. Glance at Someday every couple of months.
+
+Review lists return a context and short refs. A truncated page is not complete. Continue the same read to add the rest to that context, then commit keep, someday, trash, or file against it. `view=logbook` defaults to the last 14 days. Use `ids` for notes and checklists on up to 10 exact items. If `truncated_fields` is present, read that exact id.
 
 Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, harness leftovers (`test_residue`), and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
+
+## Area redesign
+
+An Area `id` lists its children. A Project `id` or `view=project` is the writable neighborhood, not a paged children list. `view=area` also takes `within`.
 
 Repair tag names and parent relationships when they reduce duplicate filters. Tag deletion uses `change_tags.delete_permanently`. Preserve rich notes unless the owner accepts a full Markdown replacement. Restore accidental cleanup.
 

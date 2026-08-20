@@ -19,6 +19,9 @@ dist/
 /docs/research/skill-architecture-decision.md
 /docs/research/task-quality-evidence.md
 /docs/research/things-best-practices.md
+/docs/research/things-agent-processes.md
+/docs/research/mcp-result-context.md
+/.grok/
 
 # Cloud password, MCP bearer snippets, checkout pointer, sync cache.
 # These names are written under ~/.config and ~/.local/state; never commit them.
