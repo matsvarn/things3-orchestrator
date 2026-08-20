@@ -1,15 +1,15 @@
 ---
 name: things-orchestrator
-description: Research a thread, changelog, dump, or mode before you write. Use for capture, Today, Inbox, weekly review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3. Write only accepted work. One finish per title.
+description: Before any Things tool, research a thread, changelog, dump, or mode. Use for capture, Today, Inbox, weekly review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3. Write only accepted work. One finish per title.
 ---
 
 # Things
 
+Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: read [research](references/research.md) before any Things call. It owns research, form, progress, and creation for that branch. A source packet is not automatically a dump.
+
 Say what you found. Say what changed. Ask when the owner has to choose. During work, report only a material finding, blocker, or owner choice. Do not narrate tool loading, retries, or the next lookup.
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
-
-Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode: read [research](references/research.md) before any Things call. It owns research, form, progress, and creation for that branch. A source packet is not automatically a dump.
 
 Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on. For a required choice, name the visible result: `Review and mark the proposed rules`.
 

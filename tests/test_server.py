@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from jsonschema import validate
 from mcp.types import ToolAnnotations
 
@@ -169,6 +170,100 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
     assert unknown.structured_content["status"] == "rejected"
     assert "intent_id" in unknown.content[0].text
     assert "Renew password" not in unknown.content[0].text
+
+
+def test_source_skeleton_returns_model_revision_without_an_owner_question() -> None:
+    library = MemoryLibrary()
+    server = ThingsMCPServer(ThingsWorkspace(library))
+    result = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {
+                "intent_id": "source-skeleton-server-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Build one Agent Skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne skill.\n\n"
+                            "## Done when\n\nThe skill passes.\n\n"
+                            "## Guardrails\n\nUse evidence."
+                        ),
+                        "tasks": [
+                            {
+                                "title": title,
+                                "heading_title": "Learn" if index < 3 else "Build",
+                            }
+                            for index, title in enumerate(
+                                [
+                                    "Collect source evidence",
+                                    "Summarize chat evidence",
+                                    "Record candidate rules from the posts",
+                                    "Compare the candidates",
+                                    "Draft the skill",
+                                    "Test the skill",
+                                ]
+                            )
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
+    assert result.structured_content["next"] == "revise"
+    assert "Do not ask the owner" in result.content[0].text
+    assert library.records == {}
+
+
+@pytest.mark.parametrize(
+    "create",
+    [
+        {
+            "document": "source",
+            "title": "Build one Agent Skill",
+            "tasks": [{"title": "Draft", "finish": "One draft."}],
+        },
+        {
+            "kind": "project",
+            "document": "source",
+            "title": "Build one Agent Skill",
+            "tasks": [{"title": "Draft", "finish": ""}],
+        },
+        {
+            "kind": "project",
+            "document": "source",
+            "title": "Build one Agent Skill",
+            "tasks": [
+                {
+                    "title": "Draft",
+                    "finish": "One draft.\n\n## Leave with\n\nA second finish.",
+                }
+            ],
+        },
+    ],
+)
+def test_source_schema_errors_request_model_revision(
+    create: dict[str, object],
+) -> None:
+    library = MemoryLibrary()
+    server = ThingsMCPServer(ThingsWorkspace(library))
+
+    result = asyncio.run(
+        server.call_tool(
+            "things_commit",
+            {"intent_id": "source-schema-error-001", "create": [create]},
+        )
+    )
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "rejected"
+    assert result.structured_content["next"] == "revise"
+    assert "Do not ask the owner" in result.content[0].text
+    assert library.records == {}
 
 
 def test_duplicate_includes_are_a_validation_error_not_internal() -> None:

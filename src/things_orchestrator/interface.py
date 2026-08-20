@@ -21,7 +21,7 @@ Status = Literal["open", "completed", "canceled"]
 TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
 DetailField = Literal["notes", "checklist", "tags", "recurrence"]
 DETAIL_FIELDS: tuple[DetailField, ...] = ("notes", "checklist", "tags", "recurrence")
-Next = Literal["done", "ask", "approve", "read", "retry_same", "stop"]
+Next = Literal["done", "ask", "approve", "read", "revise", "retry_same", "stop"]
 ResultStatus = Literal[
     "ok",
     "applied",
@@ -383,6 +383,7 @@ class ProjectTask(StrictModel):
     """One ordered, committed Task created with a Project."""
 
     title: str = Field(min_length=1, max_length=1000)
+    finish: str | None = Field(default=None, min_length=1, max_length=800)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
     heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -393,6 +394,14 @@ class ProjectTask(StrictModel):
         if not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("finish")
+    @classmethod
+    def clean_finish(cls, value: str | None) -> str | None:
+        cleaned = _clean_optional_title(value, name="finish")
+        if cleaned is not None and re.search(r"(?m)^#{1,6}\s", cleaned):
+            raise ValueError("finish cannot contain Markdown headings")
+        return cleaned
 
     @field_validator("checklist")
     @classmethod
@@ -408,6 +417,7 @@ class ProjectTask(StrictModel):
 class CreateEntry(StrictModel):
     key: str | None = Field(default=None, pattern=_LOCAL_KEY)
     kind: Kind = "task"
+    document: Literal["source"] | None = None
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
@@ -1750,6 +1760,7 @@ _CREATE: dict[str, Any] = {
     "properties": {
         "key": {"type": "string", "pattern": _LOCAL_KEY},
         "kind": {"enum": ["task", "project", "area", "heading"], "default": "task"},
+        "document": {"const": "source"},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
         "notes_markdown": {"type": ["string", "null"], "maxLength": 50000},
         "checklist": {
@@ -1769,6 +1780,11 @@ _CREATE: dict[str, Any] = {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 1000,
+                    },
+                    "finish": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 800,
                     },
                     "notes_markdown": {
                         "type": ["string", "null"],
@@ -2300,7 +2316,9 @@ RESULT_OUT: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["next", "status", "instruction"],
     "properties": {
-        "next": {"enum": ["done", "ask", "approve", "read", "retry_same", "stop"]},
+        "next": {
+            "enum": ["done", "ask", "approve", "read", "revise", "retry_same", "stop"]
+        },
         "status": {
             "enum": [
                 "ok",
@@ -2472,26 +2490,24 @@ APPROVE_OUT: dict[str, Any] = {
 }
 
 READ_DESC = (
-    "Read Things. Empty input reviews Today. "
+    "Do not call for a clearly new create. Read Things; empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. "
-    "An Area id lists children. A Project id is the writable neighborhood: Area, layout, hidden occupants, and if Trash the contained records. "
+    "A Project id is the writable neighborhood: Area, layout, hidden occupants, and Trash contents. "
     "purpose=change is one item; organize is the draft; include another Project to organize both; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return a context and short refs. A truncated page is incomplete; continue the cursor. "
-    "view=logbook defaults to the last 14 days. "
-    "within=trash searches Trash by title. "
+    "Review pages return context refs. Continue a truncated page. "
+    "view=logbook defaults to 14 days. within=trash searches Trash. "
     "Follow next and instruction."
 )
 COMMIT_DESC = (
-    "Commit one decided batch with a durable intent_id. "
-    "Prefer context_id and short refs from a review, change, or organize read. "
-    "An exact change needs id and if_revision. "
-    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none for contiguous headings. "
+    "Commit one batch with durable intent_id. A source Project uses document=source and finish on every Task; send it once. "
+    "Prefer context_id and short refs. Exact changes need id and if_revision. "
+    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none; groups stay contiguous. "
     "Local create keys may appear in any order. "
     "Parent tags before children. "
-    "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "
-    "If the response is lost or pending, retry the same intent_id and payload. "
+    "Risky work returns a plan. Ask one natural confirmation; keep control fields private. "
+    "If lost or pending, retry the same intent_id and payload. "
     "Follow next and instruction."
 )
 APPROVE_DESC = (

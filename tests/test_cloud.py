@@ -2346,6 +2346,63 @@ def test_compact_project_headings_round_trip_through_cloud(tmp_path: Path) -> No
     ]
 
 
+def test_source_document_finishes_round_trip_through_cloud(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    titles = [
+        "Choose evidence",
+        "Extract candidate rules",
+        "Compare the evidence",
+        "Review the rules",
+        "Draft the skill",
+        "Test the skill",
+        "Pin the tested skill",
+    ]
+    headings = ["Learn"] * 2 + ["Choose"] * 2 + ["Build"] + ["Use"] * 2
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "cloud-source-document-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build one Agent Skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne reusable skill.\n\n"
+                            "## Done when\n\nThe skill passes one real test.\n\n"
+                            "## Guardrails\n\nUse observed evidence."
+                        ),
+                        "tasks": [
+                            {
+                                "title": title,
+                                "finish": f"A visible result for {title.casefold()}.",
+                                "heading_title": heading,
+                            }
+                            for title, heading in zip(titles, headings, strict=True)
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    envelopes = {item.payload.get("tt"): item for item in client.committed}
+    for title in titles:
+        assert envelopes[title].payload["nt"]["v"].startswith("## Leave with\n\n")
+    tasks = [
+        item
+        for item in library.records.values()
+        if item.kind == "task" and not item.heading
+    ]
+    assert len(tasks) == 7
+    assert all((task.notes or "").startswith("## Leave with\n\n") for task in tasks)
+    assert "all 7 Task notes passed read-back" in result.instruction
+
+
 def test_heading_create_assignment_and_clear_round_trip(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]

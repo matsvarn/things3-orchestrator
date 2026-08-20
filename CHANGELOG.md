@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.4.9 — 2026-08-20
+
+Source-backed Projects now land as one complete Things document. The server
+rejects a stripped skeleton before it writes owner data.
+
+### Changed
+
+- Project creates can declare `document=source`. Every nested Task supplies a
+  concrete `finish`, which the server renders as a native Markdown
+  `## Leave with` block.
+- Source documents validate the Project result, done state, guardrails,
+  heading structure, and every Task note before the first write. Incomplete
+  payloads return `next=revise` and tell the agent to repair the call without
+  asking the owner.
+- The source-document gate limits each Markdown section to 800 prose
+  characters. A rich structured note can be longer, and labeled full URLs do
+  not consume that limit. Ordinary capture keeps its existing 800-character
+  note gate.
+- Applied receipts report the Project home, heading and Task counts, Task-note
+  read-back, and first Task. They tell the agent to report the result and stop.
+- The release behavior gate now replays isolated Codex and Cursor payloads
+  through the public workspace. Model predictions alone do not pass.
+
 ## 0.4.8 — 2026-08-20
 
 Source-backed capture now writes a human-readable Things document. Compact

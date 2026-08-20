@@ -47,8 +47,10 @@ src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
+src/things_orchestrator/source_document.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
+tests/fixtures/mats_mode_owner_prompt.txt
 tests/test_capability_proof.py
 tests/test_cli.py
 tests/test_cloud.py

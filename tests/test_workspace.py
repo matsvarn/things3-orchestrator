@@ -1454,6 +1454,588 @@ def test_project_tasks_can_carry_notes() -> None:
     )
 
 
+def test_source_document_skeleton_requests_revision_without_writes() -> None:
+    module = workspace()
+    titles = [
+        "List the tools and standing instructions I actually use",
+        "List repeated patterns and corrections from my recent chats",
+        "Extract candidate rules from Lauren's posts and pstack",
+        "Write proposed Mats Mode rules",
+        "Review and mark the proposed rules",
+        "Draft Mats Mode as a pin-able skill",
+    ]
+    headings = ["How I work"] * 2 + ["Learn from Lauren"] + ["Build"] * 3
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-skeleton-repro-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Create Mats Mode as a pin-able skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne pin-able Agent Skill.\n\n"
+                            "## Done when\n\nThe skill is tested and pinned.\n\n"
+                            "## Guardrails\n\nUse actual work as evidence."
+                        ),
+                        "tasks": [
+                            {"title": title, "heading_title": heading}
+                            for title, heading in zip(titles, headings, strict=True)
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert result.next == "revise"
+    assert "Every Task needs a finish" in result.instruction
+    assert module._library.records == {}  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "create",
+    [
+        {"document": "source", "title": "Renew passport"},
+        {"kind": "project", "document": "source", "title": "Build one guide"},
+    ],
+)
+def test_malformed_source_declaration_revises_without_owner_or_writes(
+    create: dict[str, object],
+) -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {"intent_id": "malformed-source-document-001", "create": [create]}
+        )
+    )
+
+    assert result.status == "rejected"
+    assert result.next == "revise"
+    assert "Project with Tasks" in result.instruction
+    assert "Do not ask the owner" in result.instruction
+    assert module._library.records == {}  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("title", "task_titles"),
+    [
+        (
+            "Build a new facilitation skill",
+            [f"Prepare facilitation item {index}" for index in range(6)],
+        ),
+        (
+            "Launch the company website",
+            [
+                "Audit the current pages",
+                "Collect source assets from design",
+                "Draft the home page",
+                "Review the copy",
+                "Test the forms",
+                "Publish the site",
+            ],
+        ),
+    ],
+)
+def test_large_ordinary_project_does_not_infer_a_source_document(
+    title: str, task_titles: list[str]
+) -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "ordinary-rich-project-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": title,
+                        "notes_markdown": (
+                            "## Result\n\nFriends share one meal.\n\n"
+                            "## Done when\n\nThe gathering is complete.\n\n"
+                            "## Guardrails\n\nKeep the plan simple."
+                        ),
+                        "tasks": [
+                            {
+                                "title": task_title,
+                                "heading_title": "Prepare" if index < 3 else "Host",
+                            }
+                            for index, task_title in enumerate(task_titles)
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.next == "done"
+
+
+def test_ordinary_project_task_finish_becomes_a_leave_with_note() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "ordinary-project-finish-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Replace the kitchen tap",
+                        "tasks": [
+                            {
+                                "title": "Measure the sink fittings",
+                                "finish": "The fitting dimensions are written down.",
+                            },
+                            {
+                                "title": "Order the replacement tap",
+                                "finish": "One compatible replacement tap is ordered.",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    tasks = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "task"
+    ]
+    assert all((task.notes or "").startswith("## Leave with\n\n") for task in tasks)
+
+
+def test_ordinary_project_accepts_an_800_character_finish() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "ordinary-project-long-finish-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Replace the kitchen tap",
+                        "tasks": [
+                            {
+                                "title": "Measure the sink fittings",
+                                "finish": "x" * 800,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "task"
+    )
+    assert task.notes.endswith("x" * 800)
+
+
+def test_ordinary_project_rejects_a_long_markdown_heading_as_a_dump() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "ordinary-project-heading-dump-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Replace the kitchen tap",
+                        "notes_markdown": "## " + "x" * 5_000,
+                        "tasks": [{"title": "Measure the sink fittings"}],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_project_document_receipt_does_not_hide_an_unrelated_create() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "mixed-project-receipt-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Plan the move",
+                        "tasks": [
+                            {"title": "Book the van", "finish": "One van is booked."},
+                            {"title": "Pack the boxes", "finish": "The boxes are packed."},
+                        ],
+                    },
+                    {"title": "Renew passport"},
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert "Report this result and stop" not in result.instruction
+    assert {item.title for item in module._library.records.values()} == {  # noqa: SLF001
+        "Plan the move",
+        "Book the van",
+        "Pack the boxes",
+        "Renew passport",
+    }
+
+
+def test_source_document_renders_every_finish_and_accepts_long_source_lists() -> None:
+    module = workspace()
+    sources = "\n\n".join(
+        f"**Source {index}**\nhttps://example.com/research/{index}/" + "x" * 80
+        for index in range(1, 10)
+    )
+    source_notes = (
+        "## Starting evidence\n\nLauren uses one persistent skill.\n\n"
+        f"## Sources\n\n{sources}"
+    )
+    assert len(source_notes) > 800
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-document-complete-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build Mats Mode as a reusable Agent Skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne reusable Agent Skill.\n\n"
+                            "## Done when\n\nThe skill is approved, tested, and pinned.\n\n"
+                            "## Guardrails\n\nUse actual work as evidence."
+                        ),
+                        "tasks": [
+                            {
+                                "title": "Choose representative chats",
+                                "finish": "A dated source list for every active client.",
+                                "heading_title": "Learn what works",
+                            },
+                            {
+                                "title": "Extract Lauren's candidate rules",
+                                "finish": "One candidate rule or exclusion for every source.",
+                                "notes_markdown": source_notes,
+                                "heading_title": "Learn what works",
+                            },
+                            {
+                                "title": "Compare the evidence",
+                                "finish": "A proposed rule set tied to my evidence.",
+                                "heading_title": "Choose what fits",
+                            },
+                            {
+                                "title": "Review the proposed rules",
+                                "finish": "Every rule marked keep, change, or drop.",
+                                "heading_title": "Choose what fits",
+                            },
+                            {
+                                "title": "Draft the Agent Skill",
+                                "finish": "One draft built only from approved rules.",
+                                "heading_title": "Build the skill",
+                            },
+                            {
+                                "title": "Test the Agent Skill",
+                                "finish": "The Agent Skill passes its representative test.",
+                                "heading_title": "Build and verify",
+                            },
+                            {
+                                "title": "Pin the tested Agent Skill",
+                                "finish": "The tested skill is pinned for regular use.",
+                                "heading_title": "Build and verify",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    tasks = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "task" and not item.heading
+    ]
+    assert len(tasks) == 7
+    assert all((task.notes or "").startswith("## Leave with\n\n") for task in tasks)
+    assert "https://example.com/research/9/" in next(
+        task.notes for task in tasks if task.title == "Extract Lauren's candidate rules"
+    )
+    assert 'in Anytime with 7 Tasks under 4 headings' in result.instruction
+    assert "all 7 Task notes passed read-back" in result.instruction
+    assert 'First Task: "Choose representative chats"' in result.instruction
+    assert result.instruction.endswith("Report this result and stop.")
+
+
+def test_source_document_accepts_an_800_character_finish() -> None:
+    module = workspace()
+    tasks = [
+        {
+            "title": f"Produce evidence result {index}",
+            "finish": "x" * 800 if index == 1 else f"Result {index} exists.",
+            "heading_title": "Evidence" if index <= 3 else "Ship",
+        }
+        for index in range(1, 7)
+    ]
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-document-long-finish-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build one evidence skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne reusable skill.\n\n"
+                            "## Done when\n\nThe skill passes its test.\n\n"
+                            "## Guardrails\n\nUse recorded evidence."
+                        ),
+                        "tasks": tasks,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    stored = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Produce evidence result 1"
+    )
+    assert stored.notes.endswith("x" * 800)
+
+
+def test_source_document_rejects_a_long_markdown_heading() -> None:
+    module = workspace()
+    tasks = [
+        {
+            "title": f"Produce source result {index}",
+            "finish": f"Result {index} exists.",
+            "notes_markdown": "## " + "x" * 5_000 if index == 1 else None,
+            "heading_title": "Evidence" if index <= 3 else "Ship",
+        }
+        for index in range(1, 7)
+    ]
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-document-heading-dump-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build one source skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne reusable skill.\n\n"
+                            "## Done when\n\nThe skill passes its test.\n\n"
+                            "## Guardrails\n\nUse recorded evidence."
+                        ),
+                        "tasks": tasks,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert result.next == "revise"
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_source_document_accepts_a_rich_project_note_above_800_total_chars() -> None:
+    module = workspace()
+    section = "A concise supported result. " * 12
+    project_note = (
+        f"## Result\n\n{section}\n\n"
+        f"## Done when\n\n{section}\n\n"
+        f"## Guardrails\n\n{section}"
+    )
+    assert len(project_note) > 800
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-rich-project-note-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build an evidence-backed working guide",
+                        "notes_markdown": project_note,
+                        "tasks": [
+                            {
+                                "title": f"Produce evidence result {index}",
+                                "finish": f"Evidence result {index} is ready.",
+                                "heading_title": (
+                                    "Evidence" if index < 3 else "Deliver"
+                                ),
+                            }
+                            for index in range(6)
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.next == "done"
+
+
+@pytest.mark.parametrize(
+    ("project_note", "task_note", "expected"),
+    [
+        (
+            "## Result\n\nOne skill.\n\n## Done when\n\nTested.",
+            None,
+            "Result, Done when, and Guardrails",
+        ),
+        (
+            (
+                "Pasted brief before the document.\n\n"
+                "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                "## Guardrails\n\nUse evidence."
+            ),
+            None,
+            "no preamble",
+        ),
+        (
+            (
+                "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                "## Guardrails\n\nUse evidence."
+            ),
+            "## Leave with\n\nA duplicate generated block.",
+            "second Leave with",
+        ),
+        (
+            (
+                "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                "## Guardrails\n\nUse evidence."
+            ),
+            "### leave with\n\nA duplicate generated block.",
+            "second Leave with",
+        ),
+        (
+            (
+                "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                "## Guardrails\n\nUse evidence."
+            ),
+            "x" * 801,
+            "Keep each Markdown section below 800",
+        ),
+        (
+            (
+                "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                "## Guardrails\n\nUse evidence."
+            ),
+            "x" * 49_990,
+            "exceeds 50000 characters",
+        ),
+    ],
+    ids=[
+        "missing-project-section",
+        "project-preamble",
+        "duplicate-leave-with",
+        "case-variant-leave-with",
+        "long-prose",
+        "rendered-note-too-long",
+    ],
+)
+def test_incomplete_source_document_revises_without_owner_or_writes(
+    project_note: str,
+    task_note: str | None,
+    expected: str,
+) -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-document-invalid-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build one Agent Skill",
+                        "notes_markdown": project_note,
+                        "tasks": [
+                            {
+                                "title": "Draft the skill",
+                                "finish": "One evidence-based draft.",
+                                "notes_markdown": task_note,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert result.next == "revise"
+    assert expected in result.instruction
+    assert "Do not ask the owner" in result.instruction
+    assert module._library.records == {}  # noqa: SLF001
+
+
+def test_source_document_is_the_only_mutation_in_its_commit() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "source-document-mixed-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "document": "source",
+                        "title": "Build one Agent Skill",
+                        "notes_markdown": (
+                            "## Result\n\nOne skill.\n\n## Done when\n\nTested.\n\n"
+                            "## Guardrails\n\nUse evidence."
+                        ),
+                        "tasks": [
+                            {
+                                "title": "Draft the skill",
+                                "finish": "One evidence-based draft.",
+                            }
+                        ],
+                    },
+                    {"title": "Unrelated capture"},
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert result.next == "revise"
+    assert "only mutation" in result.instruction
+    assert module._library.records == {}  # noqa: SLF001
+
+
 def test_routine_capture_still_applies_with_short_notes() -> None:
     module = workspace()
 
@@ -1546,17 +2128,29 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         "Use Mats Mode on one real task and capture what still feels wrong",
         "Set up the tested Mats Mode skill for regular use in Cursor",
     ]
+    finishes = [
+        "A source list for every active agent client, with location, date range, availability, and privacy limits.",
+        "A client-by-client list of the skills and standing instructions I actually used.",
+        "A summary of repeated work patterns and corrections that improved the selected chats.",
+        "One candidate rule or clear exclusion for every material Lauren source and reply.",
+        "One candidate rule or clear exclusion for every relevant pstack source.",
+        "Every candidate rule marked supported, worth testing, or leave out, with my evidence beside it.",
+        "Every proposed rule marked keep, change, skip, or needs more evidence.",
+        "One Mats Mode Agent Skill draft built only from the rules I approved.",
+        "A draft where every approved rule appears and unsupported instructions are gone.",
+        "The same skill passing representative work in every active agent client.",
+        "One real-use result and a short list of finite fixes.",
+        "The tested Agent Skill pinned for regular use in Cursor.",
+    ]
     evidence_notes = (
-        "## Leave with\n\nA source list for every active agent client. For each "
-        "client, include the transcript location, date range, availability, and "
-        "privacy limit. Keep each client separate.\n\n## Optional methods\n\n"
+        "## Method\n\nKeep each client separate. Use the extractor only when "
+        "manual sampling is inefficient.\n\n"
         "**AI data extractor**\nhttps://github.com/0xSero/ai-data-extraction\n\n"
         "**Local automate-me skill**\n"
         "~/.agents/skills/automate-me/SKILL.md"
     )
     lauren_notes = (
-        "## Leave with\n\nOne candidate rule or clear exclusion for every material "
-        "source and reply.\n\n## Starting evidence\n\nLauren uses one persistent "
+        "## Starting evidence\n\nLauren uses one persistent "
         "skill. Her replies show planning through prototypes, a design ladder, "
         "review as lint, and feedback encoded into rules.\n\n## Sources\n\n"
         "**Lauren Mode thread**\n"
@@ -1575,8 +2169,6 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         "https://x.com/poteto/status/2090147655876042880"
     )
     pstack_notes = (
-        "## Leave with\n\nOne candidate rule or clear exclusion for every source. "
-        "Treat these as examples and methods, not a package to install.\n\n"
         "## Starting evidence\n\npstack is a skill factory. poteto-mode uses "
         "planning and design guides; automate-me mines transcripts and iterates "
         "through review.\n\n"
@@ -1598,89 +2190,77 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
                 "create": [
                     {
                         "kind": "project",
+                        "document": "source",
                         "title": "Build Mats Mode as a reusable Agent Skill",
                         "notes_markdown": notes,
                         "tasks": [
                             {
                                 "title": titles[0],
+                                "finish": finishes[0],
                                 "notes_markdown": evidence_notes,
                                 "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[1],
-                                "notes_markdown": (
-                                    "## Leave with\n\nA client-by-client list of the skills "
-                                    "and standing instructions I actually used. Installed "
-                                    "inventory does not count as evidence."
-                                ),
+                                "finish": finishes[1],
+                                "notes_markdown": "Installed inventory does not count as evidence.",
                                 "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[2],
-                                "notes_markdown": (
-                                    "## Leave with\n\nA summary of repeated work patterns "
-                                    "and corrections that improved the selected chats."
-                                ),
+                                "finish": finishes[2],
                                 "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[3],
+                                "finish": finishes[3],
                                 "notes_markdown": lauren_notes,
                                 "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[4],
+                                "finish": finishes[4],
                                 "notes_markdown": pstack_notes,
                                 "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[5],
-                                "notes_markdown": (
-                                    "## Leave with\n\nEvery candidate rule marked supported, "
-                                    "worth testing, or leave out, with my evidence beside it."
-                                ),
+                                "finish": finishes[5],
                                 "heading_title": "Choose what fits",
                             },
                             {
                                 "title": titles[6],
-                                "notes_markdown": (
-                                    "**I review this before drafting starts.**\n\n"
-                                    "## Leave with\n\nEvery proposed rule marked keep, "
-                                    "change, skip, or needs more evidence."
-                                ),
+                                "finish": finishes[6],
+                                "notes_markdown": "**I review this before drafting starts.**",
                                 "heading_title": "Choose what fits",
                             },
-                            {"title": titles[7], "heading_title": "Build the skill"},
+                            {
+                                "title": titles[7],
+                                "finish": finishes[7],
+                                "heading_title": "Build the skill",
+                            },
                             {
                                 "title": titles[8],
-                                "notes_markdown": (
-                                    "## Leave with\n\nA draft where every approved rule appears, "
-                                    "unsupported instructions are gone, and conflicts are resolved."
-                                ),
+                                "finish": finishes[8],
                                 "heading_title": "Build the skill",
                             },
                             {
                                 "title": titles[9],
-                                "notes_markdown": (
-                                    "## Leave with\n\nThe same skill passing representative "
-                                    "planning, building, review, and feedback work in every "
-                                    "active agent client. Record failures as finite Project Tasks."
-                                ),
+                                "finish": finishes[9],
+                                "notes_markdown": "Record failures as finite Project Tasks.",
                                 "heading_title": "Put it to work",
                             },
                             {
                                 "title": titles[10],
-                                "notes_markdown": (
-                                    "## Leave with\n\nOne real-use result and a short list of "
-                                    "finite fixes. Continual tuning stays outside this Project."
-                                ),
+                                "finish": finishes[10],
+                                "notes_markdown": "Continual tuning stays outside this Project.",
                                 "heading_title": "Put it to work",
                             },
                             {
                                 "title": titles[11],
+                                "finish": finishes[11],
                                 "notes_markdown": (
-                                    "## Leave with\n\nThe tested Agent Skill pinned for regular "
-                                    "use in Cursor.\n\n## Starting evidence\n\nA Cursor custom "
+                                    "## Starting evidence\n\nA Cursor custom "
                                     "mode pins the same Agent Skill; it is not another artifact. "
                                     "Option+Enter or Use as Mode pins it, `/goal` can pair with it, "
                                     "and CLI Option+Enter keeps it active until exit.\n\n"
@@ -1766,6 +2346,9 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     assert "## Starting evidence" in tasks[11].notes
     assert "same Agent Skill" in tasks[11].notes
     assert "CLI Option+Enter keeps it active until exit" in tasks[11].notes
+    assert all((task.notes or "").startswith("## Leave with\n\n") for task in tasks)
+    assert "all 12 Task notes passed read-back" in result.instruction
+    assert result.instruction.endswith("Report this result and stop.")
     assert projects[0].area_uuid is None
     assert all(not task.title.startswith("Read ") for task in tasks)
     assert all("continual" not in task.title.casefold() for task in tasks)
@@ -1782,6 +2365,8 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         {"title": "Audit skills then write Mats Mode"},
         {"title": "Audit skills & write Mats Mode"},
         {"title": "Audit skills + write Mats Mode"},
+        {"title": "Compare the evidence and write proposed rules"},
+        {"title": "Install Mats Mode and pin it in Cursor"},
         {"title": "Open the source list", "heading_title": "Think about stages"},
         {"title": "Open the source list", "heading_title": "x" * 801},
         {
@@ -1796,6 +2381,8 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         "then",
         "ampersand",
         "plus",
+        "compare-and-write",
+        "install-and-pin",
         "fake-heading",
         "long-heading",
         "fake-checklist-row",
