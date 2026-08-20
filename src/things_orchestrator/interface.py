@@ -371,8 +371,8 @@ class RepeatCreate(StrictModel):
         return self
 
 
-class NextAction(StrictModel):
-    """One startable Project Task created with the Project."""
+class ProjectTask(StrictModel):
+    """One ordered, committed Task created with a Project."""
 
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
@@ -391,7 +391,7 @@ class CreateEntry(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
     checklist: list[str] = Field(default_factory=list, max_length=100)
-    next_actions: list[NextAction] = Field(default_factory=list, max_length=20)
+    tasks: list[ProjectTask] = Field(default_factory=list, max_length=20)
     into: str | None = Field(
         default=None, pattern=_CONTEXT_HOME_REFERENCE, max_length=512
     )
@@ -423,19 +423,6 @@ class CreateEntry(StrictModel):
     @classmethod
     def clean_into_title(cls, value: str | None) -> str | None:
         return _clean_optional_title(value, name="into_title")
-
-    @field_validator("next_actions", mode="before")
-    @classmethod
-    def coerce_next_actions(cls, value: object) -> object:
-        if not isinstance(value, list):
-            return value
-        coerced: list[object] = []
-        for item in value:
-            if isinstance(item, str):
-                coerced.append({"title": item})
-            else:
-                coerced.append(item)
-        return coerced
 
     @field_validator("checklist")
     @classmethod
@@ -487,8 +474,11 @@ class CreateEntry(StrictModel):
             return self
         if self.checklist and self.kind != "task":
             raise ValueError("only a task can have a checklist")
-        if self.next_actions and self.kind != "project":
-            raise ValueError("only a Project can have next_actions")
+        if self.tasks and self.kind != "project":
+            raise ValueError("only a Project can have tasks")
+        task_titles = [task.title.strip().casefold() for task in self.tasks]
+        if _duplicates(task_titles):
+            raise ValueError("Project task titles must be unique")
         if self.heading_id is not None and self.kind != "task":
             raise ValueError("only a Task can use a heading")
         if self.repeat is not None and self.kind != "task":
@@ -1060,6 +1050,48 @@ class CommitCall(StrictModel):
         )
         if _duplicates(keys):
             raise ValueError("local keys must be unique")
+
+        compact_project_keys = {
+            entry.key
+            for entry in self.create
+            if entry.kind == "project" and entry.tasks and entry.key is not None
+        }
+        has_sibling = any(
+            entry.into in compact_project_keys for entry in self.create
+        )
+        has_moved_item = any(
+            entry.into in compact_project_keys for entry in self.change
+        )
+        if has_sibling or has_moved_item:
+            raise ValueError(
+                "a new Project cannot mix compact tasks with sibling or moved items"
+            )
+
+        create_titles: dict[str, list[str]] = {
+            "task": [
+                entry.title.strip().casefold()
+                for entry in self.create
+                if entry.kind == "task"
+            ],
+            "project": [
+                entry.title.strip().casefold()
+                for entry in self.create
+                if entry.kind == "project"
+            ],
+            "area": [
+                entry.title.strip().casefold()
+                for entry in self.create
+                if entry.kind == "area"
+            ],
+        }
+        create_titles["task"].extend(
+            task.title.strip().casefold()
+            for entry in self.create
+            for task in entry.tasks
+        )
+        for kind, titles in create_titles.items():
+            if _duplicates(titles):
+                raise ValueError(f"new {kind} titles must be unique")
 
         tag_titles = [entry.title.strip().casefold() for entry in self.ensure_tags]
         if _duplicates(tag_titles):
@@ -1691,7 +1723,7 @@ _CREATE: dict[str, Any] = {
             "maxItems": 100,
             "items": {"type": "string", "minLength": 1, "maxLength": 1000},
         },
-        "next_actions": {
+        "tasks": {
             "type": "array",
             "maxItems": 20,
             "items": {
@@ -2407,7 +2439,8 @@ COMMIT_DESC = (
     "Commit one decided batch with a durable intent_id. "
     "Prefer context_id and short refs from a review, change, or organize read. "
     "An exact change needs id and if_revision. "
-    "Local create keys may appear in any order. Parent tags before children. "
+    "Project tasks keep array order. Local create keys may appear in any order. "
+    "Parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "
     "If the response is lost or pending, retry the same intent_id and payload. "
     "Follow next and instruction."

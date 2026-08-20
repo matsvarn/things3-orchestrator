@@ -694,6 +694,30 @@ def test_creating_a_duplicate_open_task_title_asks_instead() -> None:
     assert "already exists" in result.instruction
 
 
+def test_compact_project_task_duplicate_asks_before_any_write() -> None:
+    existing = Record(uuid="mover", kind="task", title="Call mover")
+    module = workspace([existing])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-task-twin-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Move house",
+                        "tasks": [{"title": "Call mover"}],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert "already exists" in result.instruction
+    assert set(module._library.records) == {existing.uuid}  # noqa: SLF001
+
+
 def test_task_search_scope_never_falls_back_to_global_search() -> None:
     scope = Record(uuid="scope", kind="task", title="Scope")
     match = Record(uuid="match", kind="task", title="Needle")
@@ -1210,7 +1234,7 @@ def test_commit_creates_structured_project_in_one_transaction() -> None:
     assert module._library.tags[task.tag_uuids[0]] == "Waiting"  # noqa: SLF001
 
 
-def test_project_next_actions_use_the_compact_create_shape() -> None:
+def test_project_tasks_use_the_compact_create_shape() -> None:
     module = workspace()
 
     result = module.commit(
@@ -1221,7 +1245,10 @@ def test_project_next_actions_use_the_compact_create_shape() -> None:
                     {
                         "kind": "project",
                         "title": "Move house",
-                        "next_actions": ["Call mover", "Book van"],
+                        "tasks": [
+                            {"title": "Call mover"},
+                            {"title": "Book van"},
+                        ],
                     }
                 ],
             }
@@ -1238,7 +1265,7 @@ def test_project_next_actions_use_the_compact_create_shape() -> None:
     assert all(not item.notes for item in actions)
 
 
-def test_project_next_actions_can_carry_notes() -> None:
+def test_project_tasks_can_carry_notes() -> None:
     module = workspace()
 
     result = module.commit(
@@ -1248,27 +1275,18 @@ def test_project_next_actions_can_carry_notes() -> None:
                 "create": [
                     {
                         "kind": "project",
-                        "title": "Create Mats Mode",
-                        "notes_markdown": (
-                            "Mats Mode is pinned in Cursor as a custom mode.\n"
-                            "Adopt only what fits."
-                        ),
-                        "next_actions": [
+                        "title": "Replace kitchen tap",
+                        "notes_markdown": "Done when one suitable tap is ordered.",
+                        "tasks": [
                             {
-                                "title": "List Cursor skills on this MacBook",
+                                "title": "Find three suitable taps",
                                 "notes_markdown": (
-                                    "~/.cursor/skills, ~/.agents/skills, Hermes. "
-                                    "Keep, drop, or adapt."
+                                    "Use the supplied shortlist.\n"
+                                    "https://example.com/taps"
                                 ),
                             },
-                            {
-                                "title": "Pin Mats Mode as a Cursor custom mode",
-                                "notes_markdown": (
-                                    "From /, pick the skill and press Option-Return "
-                                    "on Mac. Pair with /goal.\n"
-                                    "https://cursor.com/changelog"
-                                ),
-                            },
+                            {"title": "Measure the sink"},
+                            {"title": "Order one"},
                         ],
                     }
                 ],
@@ -1280,9 +1298,10 @@ def test_project_next_actions_can_carry_notes() -> None:
     by_title = {
         item.title: item for item in module._library.records.values()  # noqa: SLF001
     }
-    assert "~/.cursor/skills" in by_title["List Cursor skills on this MacBook"].notes
-    assert "Option-Return" in by_title["Pin Mats Mode as a Cursor custom mode"].notes
-    assert "pstack" not in by_title["Create Mats Mode"].notes
+    assert "https://example.com/taps" in by_title["Find three suitable taps"].notes
+    assert by_title["Replace kitchen tap"].notes == (
+        "Done when one suitable tap is ordered."
+    )
 
 
 def test_routine_capture_still_applies_with_short_notes() -> None:
@@ -1317,7 +1336,7 @@ def test_dump_create_asks_and_writes_nothing() -> None:
             "Source thread: https://x.com/poteto/status/1",
             "Cursor changelog, 19 Aug 2026: https://cursor.com/changelog",
             "pstack is the factory. Outer loop. Inner loop. Planning playbook.",
-            "Intent: audit current Hermes skills, assess pstack, then write Mats Mode.",
+            "Intent: audit actual cross-harness work, assess pstack, then write Mats Mode.",
         ]
         * 8
     )
@@ -1351,39 +1370,231 @@ def test_dump_create_asks_and_writes_nothing() -> None:
     assert module._library.records == {}  # noqa: SLF001
 
 
-def test_named_project_create_with_form_notes_applies() -> None:
+def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     module = workspace()
     notes = (
-        "# Done when\n"
-        "Mats Mode is pinned in Cursor as a custom mode.\n"
-        "\n"
-        "# Links\n"
-        "https://x.com/poteto/status/2090141955695198633\n"
-        "https://cursor.com/changelog\n"
-        "https://github.com/cursor/plugins/tree/main/pstack\n"
-        "https://github.com/0xSero/ai-data-extraction/blob/main/README.md\n"
-        "https://x.com/poteto/status/2089067865098113024\n"
-        "\n"
-        "# Constraints\n"
-        "Adopt only what fits.\n"
-        "Correction ladder: architecture, then lint or test, then skill or rule, "
-        "then human review last.\n"
+        "Done when one canonical Mats Mode Agent Skill reflects repeated evidence "
+        "from my agent work and passes representative prompts in each active "
+        "harness. Cursor pins the same skill.\n\n"
+        "Use actual cross-harness behavior and skill invocations as primary "
+        "evidence. Adopt Lauren's practices only when evidence supports them."
     )
+    titles = [
+        "List the transcript sources for the Mats Mode audit",
+        "Record repeated working patterns from the selected transcripts",
+        "Record actual skill use from the selected transcripts",
+        "Record candidate rules from Lauren's workflow",
+        "Match Lauren's candidate rules to my evidence",
+        "Draft Mats Mode Agent Skill",
+        "Test Mats Mode in each active harness",
+        "Pin Mats Mode in Cursor",
+    ]
+    evidence_notes = (
+        "Cover each active harness and record the transcript location and date "
+        "range. Test the extractor on one transcript only if it preserves "
+        "evidence and reduces work.\n"
+        "https://github.com/0xSero/ai-data-extraction"
+    )
+    lauren_notes = (
+        "Record candidate rules from pstack, poteto-mode, automate-me, the main "
+        "post, and relevant replies.\n"
+        "https://github.com/cursor/plugins/tree/main/pstack\n"
+        "https://x.com/poteto/status/2090141955695198633\n"
+        "https://x.com/poteto/status/2090180519766192437\n"
+        "https://x.com/poteto/status/2090147276434112518\n"
+        "https://x.com/poteto/status/2090147655876042880\n"
+        "~/.agents/skills/automate-me/SKILL.md"
+    )
+
+    create = [
+        {
+            "key": "$mats",
+            "kind": "project",
+            "title": "Create Mats Mode Agent Skill",
+            "notes_markdown": notes,
+        },
+        {
+            "key": "$evidence",
+            "kind": "heading",
+            "title": "Evidence",
+            "into": "$mats",
+        },
+        {
+            "key": "$design",
+            "kind": "heading",
+            "title": "Design",
+            "into": "$mats",
+            "after": "$evidence",
+        },
+        {
+            "key": "$verify",
+            "kind": "heading",
+            "title": "Verify",
+            "into": "$mats",
+            "after": "$design",
+        },
+        {
+            "key": "$sources",
+            "title": titles[0],
+            "notes_markdown": evidence_notes,
+            "into": "$mats",
+            "heading_id": "$evidence",
+        },
+        {
+            "key": "$patterns",
+            "title": titles[1],
+            "into": "$mats",
+            "heading_id": "$evidence",
+            "after": "$sources",
+        },
+        {
+            "key": "$usage",
+            "title": titles[2],
+            "into": "$mats",
+            "heading_id": "$evidence",
+            "after": "$patterns",
+        },
+        {
+            "key": "$lauren",
+            "title": titles[3],
+            "notes_markdown": lauren_notes,
+            "into": "$mats",
+            "heading_id": "$evidence",
+            "after": "$usage",
+        },
+        {
+            "key": "$match",
+            "title": titles[4],
+            "into": "$mats",
+            "heading_id": "$design",
+        },
+        {
+            "key": "$draft",
+            "title": titles[5],
+            "into": "$mats",
+            "heading_id": "$design",
+            "after": "$match",
+        },
+        {
+            "key": "$test",
+            "title": titles[6],
+            "into": "$mats",
+            "heading_id": "$verify",
+        },
+        {
+            "title": titles[7],
+            "notes_markdown": (
+                "Pin the same Agent Skill. Pair it with /goal.\n"
+                "https://cursor.com/changelog"
+            ),
+            "into": "$mats",
+            "heading_id": "$verify",
+            "after": "$test",
+        },
+    ]
+    result = module.commit(
+        CommitCall.model_validate(
+            {"intent_id": "mats-mode-create-001", "create": create}
+        )
+    )
+
+    records = list(module._library.records.values())  # noqa: SLF001
+    projects = [item for item in records if item.kind == "project"]
+    headings = sorted(
+        (item for item in records if item.heading),
+        key=lambda item: item.sort_index,
+    )
+    tasks = sorted(
+        (item for item in records if item.kind == "task" and not item.heading),
+        key=lambda item: item.sort_index,
+    )
+    assert result.status == "applied"
+    assert len(projects) == 1
+    assert projects[0].title == "Create Mats Mode Agent Skill"
+    assert [heading.title for heading in headings] == ["Evidence", "Design", "Verify"]
+    assert [task.title for task in tasks] == titles
+    assert all(task.parent_uuid == projects[0].uuid for task in tasks)
+    heading_titles = {heading.uuid: heading.title for heading in headings}
+    assert [heading_titles[task.heading_uuid] for task in tasks] == [
+        "Evidence",
+        "Evidence",
+        "Evidence",
+        "Evidence",
+        "Design",
+        "Design",
+        "Verify",
+        "Verify",
+    ]
+    assert "ai-data-extraction" in tasks[0].notes
+    assert "ai-data-extraction" not in notes
+    assert "2090180519766192437" in tasks[3].notes
+    assert "2090147276434112518" in tasks[3].notes
+    assert "2090147655876042880" in tasks[3].notes
+    assert "Cursor pins the same skill" in projects[0].notes
+    assert all("Hermes" not in (item.notes or "") for item in records)
+    assert all("VPS" not in (item.notes or "") for item in records)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"title": "Send source packet", "notes_markdown": "x" * 801},
+        {"title": "Audit skills and create Mats Mode"},
+        {"title": "Audit skills, assess pstack, write Mats Mode"},
+        {"title": "Audit skills then write Mats Mode"},
+        {"title": "Audit skills & write Mats Mode"},
+        {"title": "Audit skills + write Mats Mode"},
+    ],
+    ids=["long-note", "and", "comma", "then", "ampersand", "plus"],
+)
+def test_undistilled_project_task_asks_and_writes_nothing(
+    task: dict[str, str],
+) -> None:
+    module = workspace()
 
     result = module.commit(
         CommitCall.model_validate(
             {
-                "intent_id": "mats-mode-create-001",
+                "intent_id": "project-task-dump-001",
                 "create": [
                     {
                         "kind": "project",
-                        "title": "Create Mats Mode",
-                        "notes_markdown": notes,
-                        "next_actions": [
-                            "Audit currently used local skills (MacBook Pro)",
-                            "Read pstack poteto-mode",
-                            "Write Mats Mode as a pin-able Cursor custom mode",
-                        ],
+                        "title": "Improve agent workflow",
+                        "tasks": [task],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_input"
+    assert result.next == "ask"
+    assert module._library.records == {}  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Review Alice and Bob's draft",
+        "Write audit and review notes",
+        "Review the API / build plan",
+        "Record build and test results",
+        "List audit and test results",
+        "Collect design and test evidence",
+    ],
+)
+def test_project_task_with_one_finish_applies(title: str) -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "possessive-draft-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Prepare release",
+                        "tasks": [{"title": title}],
                     }
                 ],
             }
@@ -1391,12 +1602,6 @@ def test_named_project_create_with_form_notes_applies() -> None:
     )
 
     assert result.status == "applied"
-    records = list(module._library.records.values())  # noqa: SLF001
-    titles = {item.title for item in records}
-    assert "Create Mats Mode" in titles
-    assert "Audit currently used local skills (MacBook Pro)" in titles
-    assert "Read pstack poteto-mode" in titles
-    assert "Write Mats Mode as a pin-able Cursor custom mode" in titles
 
 
 def test_mashed_title_alone_asks_and_writes_nothing() -> None:

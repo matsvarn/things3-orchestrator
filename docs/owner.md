@@ -5,7 +5,8 @@ Setup is [scripts/setup](../scripts/setup) on this Mac, or
 [clients.md](clients.md). Then ask in normal language.
 
 New titles are short action phrases in the language of your existing
-titles. Named next actions on a new Project are kept verbatim.
+titles. Named Project Tasks are kept verbatim. An accepted Project plan keeps
+all committed Tasks visible in dependency order.
 
 Today, Logbook, and reminders use the timezone stored by `login`. After
 a permanent move: `uv run things-orchestrator login --timezone Europe/Berlin`.
