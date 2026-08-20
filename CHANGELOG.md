@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.4.3 — 2026-08-20
+
+Applied receipts name unique homes. Exact `into` wins. Same three tools.
+
+### Fixed
+
+- Applied copy names unique homes from the written record, including
+  Anytime. Inbox-only still uses the Cloud sentence.
+- Exact `into` is the home when `into_title` is also sent. Heading
+  create and heading moves resolve `into_title` through the same home
+  match.
+- Capture uses the named tag title. It does not invent a second name.
+
 ## 0.4.2 — 2026-08-20
 
 Named homes and tags in one capture. Leaner review bytes. Same three tools.

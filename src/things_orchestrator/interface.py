@@ -138,11 +138,6 @@ def _reject_cleared_start_with_reminder(
         raise ValueError("start=null cannot combine with remind_at")
 
 
-def _reject_combined_into(into: str | None, into_title: str | None) -> None:
-    if into is not None and into_title is not None:
-        raise ValueError("into and into_title cannot combine")
-
-
 def _clean_optional_title(value: str | None, *, name: str) -> str | None:
     if value is None:
         return None
@@ -448,7 +443,6 @@ class CreateEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_kind_fields(self) -> Self:
-        _reject_combined_into(self.into, self.into_title)
         if self.kind == "heading":
             allowed = {"key", "kind", "title", "into", "into_title", "after"}
             if self.into is None and self.into_title is None:
@@ -654,7 +648,6 @@ class ChangeEntry(StrictModel):
 
     @model_validator(mode="after")
     def valid_change(self) -> Self:
-        _reject_combined_into(self.into, self.into_title)
         exact = self.id is not None or self.if_revision is not None
         if self.ref is None and self.if_revision is not None and self.id is None:
             raise ValueError("an exact change needs id and if_revision")

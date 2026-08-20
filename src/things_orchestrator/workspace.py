@@ -2741,7 +2741,10 @@ class ThingsWorkspace:
         # merge must retain that heading UUID after both records enter the
         # destination Project.
         for change in call.change:
-            if change.id is None or "into" not in change.model_fields_set:
+            if change.id is None or (
+                "into" not in change.model_fields_set
+                and "into_title" not in change.model_fields_set
+            ):
                 continue
             item = self._library.records.get(parse_id(change.id)[1])
             if item is None or not item.heading:
@@ -3657,7 +3660,10 @@ class ThingsWorkspace:
                 )
                 context.risky = True
                 return True
-            if "into" in change.model_fields_set:
+            if (
+                "into" in change.model_fields_set
+                or "into_title" in change.model_fields_set
+            ):
                 # A merge moves headings with their source Project. Their
                 # assigned Tasks keep the heading UUID, so moving the heading
                 # first preserves the source layout in the destination.
@@ -4526,19 +4532,18 @@ class ThingsWorkspace:
     def _heading_destination_uuid(
         self, change: ChangeEntry, context: _PreparationContext
     ) -> str | None:
-        if change.into is None:
+        if change.into is None and change.into_title is None:
             return None
-        if change.into.startswith("$"):
-            resolved = context.local.get(change.into)
-            if resolved is None or resolved[1] != "project":
-                return None
-            return resolved[0]
-        if change.into in {"inbox", "anytime"}:
+        home = self._home(
+            change.into,
+            "task",
+            context.local,
+            new_item=False,
+            into_title=None if change.into is not None else change.into_title,
+        )
+        if home[1] != "project" or home[0] is None:
             return None
-        destination = self._required_exact(change.into)
-        if destination.kind != "project":
-            return None
-        return destination.uuid
+        return home[0]
 
     @staticmethod
     def _heading_follows_source_merge(heading: Record, call: CommitCall) -> bool:
@@ -4617,7 +4622,7 @@ class ThingsWorkspace:
 
     def _resolve_into_title(self, title: str) -> tuple[str, Kind]:
         resolved = self._library.resolve_into(title)
-        if resolved is None or resolved == []:
+        if resolved is None:
             raise _Abort(
                 self._needs_input(f"No Area or Project named {title}.")
             )
@@ -5667,14 +5672,32 @@ class ThingsWorkspace:
     def _applied_instruction(
         self, items: list[ItemFact], created: set[str]
     ) -> str:
-        parts: list[str] = []
-        for item in items:
-            if not item.into_title:
+        named: list[tuple[str, str, bool]] = []
+        homes: list[str] = []
+        for fact in items:
+            uuid = parse_id(fact.id)[1]
+            record = self._library.records.get(uuid)
+            if record is None or record.inbox or record.kind == "area":
                 continue
-            verb = "Created" if parse_id(item.id)[1] in created else "Updated"
-            parts.append(f"{verb} {item.title} in {item.into_title}.")
-        text = " ".join(parts)
-        if not text or len(text) > 1000:
+            home = self._record_home_title(record)
+            named.append((fact.title, home, uuid in created))
+            if home not in homes:
+                homes.append(home)
+        if not homes:
+            return "Cloud read-back matched the requested state."
+        if len(named) == 1:
+            title, home, is_create = named[0]
+            verb = "Created" if is_create else "Updated"
+            text = f"{verb} {title} in {home}."
+        else:
+            joined = " and ".join(homes)
+            if all(is_create for _title, _home, is_create in named):
+                text = f"Created in {joined}."
+            elif not any(is_create for _title, _home, is_create in named):
+                text = f"Updated in {joined}."
+            else:
+                text = f"Applied in {joined}."
+        if len(text) > 1000:
             return "Cloud read-back matched the requested state."
         return text
 

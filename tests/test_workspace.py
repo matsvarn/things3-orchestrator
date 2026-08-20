@@ -6598,3 +6598,100 @@ def test_inbox_create_keeps_the_cloud_applied_sentence() -> None:
     assert result.instruction == "Cloud read-back matched the requested state."
     assert result.items[0].into_id is None
     assert result.items[0].into_title is None
+
+
+def test_exact_into_wins_when_into_title_also_is_sent() -> None:
+    kitchen = Record(uuid="kitchen", kind="project", title="Kitchen")
+    garden = Record(uuid="garden", kind="project", title="Garden")
+    module = workspace([kitchen, garden])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "into-prefers-id-001",
+                "create": [
+                    {
+                        "title": "Buy milk",
+                        "into": kitchen.id,
+                        "into_title": "Garden",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.items[0].into_id == kitchen.id
+    assert result.items[0].into_title == "Kitchen"
+    created = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.title == "Buy milk"
+    )
+    assert created.parent_uuid == kitchen.uuid
+
+
+def test_heading_create_resolves_into_title() -> None:
+    kitchen = Record(uuid="kitchen", kind="project", title="Kitchen")
+    module = workspace([kitchen])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "heading-into-title-001",
+                "create": [
+                    {
+                        "kind": "heading",
+                        "title": "Later",
+                        "into_title": "Kitchen",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    heading = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.heading
+    )
+    assert heading.parent_uuid == kitchen.uuid
+    assert "Created Later in Kitchen." in result.instruction
+
+
+def test_applied_anytime_project_names_anytime() -> None:
+    module = workspace()
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "anytime-project-001",
+                "create": [{"kind": "project", "title": "Kitchen renovation"}],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.instruction == "Created Kitchen renovation in Anytime."
+
+
+def test_applied_instruction_names_unique_homes_once() -> None:
+    kitchen = Record(uuid="kitchen", kind="project", title="Kitchen")
+    module = workspace([kitchen])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "unique-homes-001",
+                "create": [
+                    {"title": "Buy milk", "into_title": "Kitchen"},
+                    {"title": "Buy soap", "into_title": "Kitchen"},
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.instruction == "Created in Kitchen."
+    assert result.instruction.count("Kitchen") == 1
