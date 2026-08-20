@@ -2777,17 +2777,20 @@ class ThingsWorkspace:
                     label = {"task": "Task", "project": "Project", "area": "Area"}[
                         entry.kind
                     ]
+                    identity = (
+                        f"{twins[0].title} already exists. Change that {label}."
+                        if entry.kind == "task"
+                        else (
+                            f"{twins[0].title} already exists as {twins[0].id}. "
+                            f"Change that {label}."
+                        )
+                    )
                     reminder = (
                         " If this is a reminder, ask for the clock time."
                         if entry.kind == "task"
                         else ""
                     )
-                    raise _Abort(
-                        self._needs_input(
-                            f"{twins[0].title} already exists. Change that {label}."
-                            f"{reminder}"
-                        )
-                    )
+                    raise _Abort(self._needs_input(f"{identity}{reminder}"))
             if entry.kind == "heading":
                 home = self._home(
                     entry.into,

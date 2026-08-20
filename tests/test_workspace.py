@@ -6533,6 +6533,7 @@ def test_duplicate_open_project_and_area_titles_ask() -> None:
     assert project_twin.status == "needs_input"
     assert "already exists" in project_twin.instruction
     assert "Project" in project_twin.instruction
+    assert project.id in project_twin.instruction
 
     area_twin = module.commit(
         CommitCall.model_validate(
@@ -6546,6 +6547,7 @@ def test_duplicate_open_project_and_area_titles_ask() -> None:
     assert area_twin.status == "needs_input"
     assert "already exists" in area_twin.instruction
     assert "Area" in area_twin.instruction
+    assert area.id in area_twin.instruction
 
 
 def test_tags_page_instruction_is_the_catalog() -> None:
