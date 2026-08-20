@@ -123,9 +123,10 @@ _FAKE_ACTION_ROW = re.compile(
     r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs|assess)\b"
 )
 _JOINED_FINISHES = re.compile(
-    r"(?i)\b(audit|create|make|build|write|review|draft|adopt)\b"
-    r".+\band\b.+"
-    r"\b(audit|create|make|build|write|review|draft|adopt)\b"
+    r"(?i)^\s*(?:audit|create|make|build|write|review|draft|adopt|"
+    r"collect|record|list|test|pin|match)\b.+?"
+    r"(?:\band\b|,|;|&|\+|\bthen\b)\s*(?:then\s+)?"
+    r"(?:create|make|write|adopt|assess)\b"
 )
 _DISTILL_NOTE_CHARS = 800
 _DUMP_CREATE_INSTRUCTION = (
@@ -146,15 +147,18 @@ class _NormalizedSearchText:
 
 def _undistilled_create(entry: CreateEntry) -> str | None:
     """Return ask-copy when a create is a mashed title, fake action, or pasted brief."""
-    notes = entry.notes_markdown or ""
+    notes = [
+        entry.notes_markdown or "",
+        *[(task.notes_markdown or "") for task in entry.tasks],
+    ]
     rows = [
         entry.title,
         *entry.checklist,
-        *[action.title for action in entry.next_actions],
+        *[task.title for task in entry.tasks],
     ]
     fake = any(_FAKE_ACTION_ROW.match(row) for row in rows)
-    pasted_brief = len(notes) > _DISTILL_NOTE_CHARS
-    mashed = _JOINED_FINISHES.search(entry.title) is not None
+    pasted_brief = any(len(note) > _DISTILL_NOTE_CHARS for note in notes)
+    mashed = any(_JOINED_FINISHES.search(row) is not None for row in rows)
     if fake or mashed or pasted_brief:
         return _DUMP_CREATE_INSTRUCTION
     return None
@@ -2770,21 +2774,25 @@ class ThingsWorkspace:
                 if dump is not None:
                     raise _Abort(self._needs_input(dump))
             uuid = local[entry.key][0] if entry.key else new_uuid()
-            if entry.kind in {"task", "project", "area"}:
+            create_titles = (
+                [(entry.kind, entry.title)]
+                if entry.kind in {"task", "project", "area"}
+                else []
+            )
+            create_titles.extend(("task", task.title) for task in entry.tasks)
+            for kind, title in create_titles:
                 twins = [
                     item
                     for item in self._library.records.values()
-                    if item.kind == entry.kind
+                    if item.kind == kind
                     and item.is_open()
-                    and item.title.casefold() == entry.title.casefold()
+                    and item.title.casefold() == title.casefold()
                 ]
                 if len(twins) == 1:
-                    label = {"task": "Task", "project": "Project", "area": "Area"}[
-                        entry.kind
-                    ]
+                    label = {"task": "Task", "project": "Project", "area": "Area"}[kind]
                     identity = (
                         f"{twins[0].title} already exists. Change that {label}."
-                        if entry.kind == "task"
+                        if kind == "task"
                         else (
                             f"{twins[0].title} already exists as {twins[0].id}. "
                             f"Change that {label}."
@@ -2792,7 +2800,7 @@ class ThingsWorkspace:
                     )
                     reminder = (
                         " If this is a reminder, ask for the clock time."
-                        if entry.kind == "task"
+                        if kind == "task"
                         else ""
                     )
                     raise _Abort(self._needs_input(f"{identity}{reminder}"))
@@ -2996,18 +3004,18 @@ class ThingsWorkspace:
                         checklist_index=row_index * 1024,
                     )
                 )
-            for action_index, action in enumerate(entry.next_actions):
+            for task_index, task in enumerate(entry.tasks):
                 writes.append(
                     Write(
                         action="create",
                         uuid=new_uuid(),
                         kind="task",
-                        title=action.title,
-                        notes=action.notes_markdown,
+                        title=task.title,
+                        notes=task.notes_markdown,
                         into_uuid=uuid,
                         into_kind="project",
                         anytime=True,
-                        sort_index=action_index * 1024,
+                        sort_index=task_index * 1024,
                     )
                 )
             summary.append(
@@ -3015,10 +3023,8 @@ class ThingsWorkspace:
                 if entry.repeat is not None
                 else f"Create {entry.kind}: {entry.title}"
             )
-            if entry.next_actions:
-                summary.append(
-                    f"Add {len(entry.next_actions)} next actions to {entry.title}"
-                )
+            if entry.tasks:
+                summary.append(f"Add {len(entry.tasks)} Tasks to {entry.title}")
             context.risky = context.risky or entry.kind == "area"
             if entry.kind == "area":
                 preconditions["scope:areas"] = self._area_scope_revision()

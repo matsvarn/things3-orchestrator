@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.4.6 — 2026-08-20
+
+Accepted Project plans keep ordered Tasks visible. Same three tools.
+
+### Changed
+
+- Project `tasks` replaces `next_actions`. The array holds every accepted,
+  committed Project Task in dependency order. The first Task is available now;
+  later Tasks stay visible. One new Project cannot mix compact Tasks with
+  sibling or moved items.
+- Research names the durable artifact before it splits finishes. It preserves
+  owner-named evidence scope, relevant thread replies, and actual use across
+  named harnesses.
+- Project Task titles and notes pass the same dump checks as their Project.
+  A mashed child title or note over 800 characters asks and writes nothing.
+- New Task, Project, and Area titles must be unique within one commit.
+
 ## 0.4.5 — 2026-08-20
 
 Project next actions can carry notes. Same three tools.

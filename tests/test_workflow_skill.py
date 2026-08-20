@@ -111,6 +111,14 @@ def test_form_choice_lives_in_form() -> None:
     assert "do not require" in lower
     assert "startable" in lower
     assert "do not file read after sources" in lower
+    assert "plan is open" in lower
+    assert "every committed task" in lower
+    assert "dependency order" in lower
+    assert "first task is available now" in lower
+    assert "committed later action is a project task" in lower
+    assert "order shows dependencies" in lower
+    assert "do not mix the two forms" in lower
+    assert "two or more named stages" in lower
 
     planning_stop = lower.split("stop planning", 1)[1].split("##", 1)[0]
     assert "start" in planning_stop
@@ -198,6 +206,13 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     assert "do not create" in research
     assert "gather" in research
     assert "leave undecided work outside active tasks" in research
+    assert "actual use is not installed inventory" in research
+    assert "one named harness cannot replace another" in research
+    assert "named thread includes relevant replies" in research
+    assert "two names for one durable artifact share one finish" in research
+    assert "evidence or delivery" in research
+    assert "project owns any broader accepted audit" in research
+    assert "unavailable evidence" in research
 
     assert "view=inbox" in form
     assert "distill" in form

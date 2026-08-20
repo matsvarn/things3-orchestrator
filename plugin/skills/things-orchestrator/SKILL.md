@@ -31,6 +31,8 @@ If they named a reusable filter, same commit `ensure_tags` with that exact title
 
 If they already named a Project and its next actions, keep those exact titles. A sitting that needs a path or URL gets notes on that Task in the same commit. Do not file Read after sources were already gathered.
 
+Once the owner accepts a Project plan, create all known committed Tasks in dependency order. The first is available now. Keep later accepted Tasks visible; do not hide them in notes.
+
 Do not search first unless a matching item is likely already there. If it is, bind that item instead of creating a second copy.
 
 Ordinary capture does not ask how or when. Set start, deadline, reminder, Today, Area, or headings only when the owner named them.

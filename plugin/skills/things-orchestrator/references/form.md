@@ -10,8 +10,8 @@ Walk these questions in order. Stop when the form is named.
 
 1. More than one sitting, and they have not said what finished looks like? Ask one Project or two. Do not create it.
 2. Will one sitting finish it? Yes: a Task. Title starts with the visible action and names the object. Known sub-steps of that sitting, packing, a shopping list, a known process: a Things checklist. Rows share that finish. Write call, draft, open, buy, list, read. Do not write Decide, Think about, Work on, or Assess. A blocking step goes first.
-3. No: a Project. Several actions that finish separately. Next one to three useful actions unless they supplied a plan. Each is startable. A Task is startable from its title: the visible action and the object. If you must open a path or URL to begin, that lives in that Task's notes. Opening the Project is not required to start. Projects cannot enter Inbox. Two named finishes are two Projects, or one after they say they share a finish. Independent finishes are Project Tasks, not checklist rows. Do not file Read after sources were already gathered. Optional, maybe, or continual work stays off this Project.
-4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. Prefer short plain notes. Do not require `# Done when` headings on a small note. Do not paste the chat brief onto the Project. Put a source URL on the Task that must open it, or a path. Shared finish and constraints stay on the Project. Later sequential steps may live in notes until they are current. Notes `- [ ]` is not Today. Do not use it as a list of current work.
+3. No: a Project. Several Tasks finish separately. If the plan is open, create the next one to three useful actions as Tasks. If the owner accepted a plan, create every committed Task now in dependency order. The first Task is available now. Each title is physical, visible, and startable when reached. Order shows dependencies; do not invent Waiting or dates. If a Task needs a path or URL, put it in that Task's notes. Opening the Project is not required to start. Projects cannot enter Inbox. Two named finishes are two Projects, or one after they say they share a finish. Independent finishes are Project Tasks, not checklist rows. Do not file Read after sources were already gathered. Optional, maybe, or continual work stays off this Project.
+4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. Prefer short plain notes. Do not require `# Done when` headings on a small note. Do not paste the chat brief onto the Project. Put a source URL on the Task that must open it, or a path. Shared finish and constraints stay on the Project. Keep uncommitted possibilities in notes. A committed later action is a Project Task. Notes `- [ ]` is not Today. Do not use it as a list of current work.
 
 ```
 One kitchen tap is ordered.
@@ -29,9 +29,9 @@ Paste full URLs.
 8. When: start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.
 9. Reusable filter: Tag.
 
-Headings scan a multi-part Project. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
+Headings scan a multi-part Project. Add them only when two or more named stages improve scanning. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
 
-Checklist only on a Task. `next_actions` only on a Project, and only when every title is startable. A sitting that needs a path or URL is a Task in the same commit with notes, or a next_action with `notes_markdown`.
+Checklist only on a Task. `tasks` only on a Project. Use it for the whole ordered plan when every Task needs only a title and optional notes. If any Task needs another native field, create every Task as a sibling. Do not mix the two forms on one Project. Each title is physical, visible, and startable when reached. Put a needed path or URL in that Task's `notes_markdown`.
 
 Stop planning when the owner can start, has the needed context, and can tell when the work is finished.
 

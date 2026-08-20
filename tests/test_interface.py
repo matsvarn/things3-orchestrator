@@ -32,10 +32,10 @@ from things_orchestrator.interface import (
     ItemFact,
     LayoutFact,
     LayoutSectionFact,
-    NextAction,
     OrganizeDraft,
     OrganizeSection,
     PlanFact,
+    ProjectTask,
     ReadCall,
     ReadInclude,
     RecoveryFact,
@@ -756,6 +756,101 @@ def test_create_and_change_accept_into_title_without_into() -> None:
     assert both.into_title == "Kitchen"
 
 
+def test_compact_project_tasks_are_project_only() -> None:
+    project = CreateEntry.model_validate(
+        {
+            "kind": "project",
+            "title": "Move house",
+            "tasks": [{"title": "Call mover"}],
+        }
+    )
+    assert [task.title for task in project.tasks] == ["Call mover"]
+
+    with pytest.raises(ValidationError, match="only a Project can have tasks"):
+        CreateEntry.model_validate(
+            {"title": "Move house", "tasks": [{"title": "Call mover"}]}
+        )
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "next_actions": [{"title": "Call mover"}],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="Project task titles must be unique"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "tasks": [{"title": "Call mover"}, {"title": "call mover"}],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="cannot mix compact tasks"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "mixed-project-tasks-001",
+                "create": [
+                    {
+                        "key": "$move",
+                        "kind": "project",
+                        "title": "Move house",
+                        "tasks": [{"title": "Call mover"}],
+                    },
+                    {
+                        "title": "Book van",
+                        "into": "$move",
+                        "waiting": True,
+                    },
+                ],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="cannot mix compact tasks"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "mixed-moved-task-001",
+                "create": [
+                    {
+                        "key": "$move",
+                        "kind": "project",
+                        "title": "Move house",
+                        "tasks": [{"title": "Call mover"}],
+                    }
+                ],
+                "change": [
+                    {
+                        "id": "task:van",
+                        "if_revision": "r_1",
+                        "into": "$move",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="new task titles must be unique"):
+        CommitCall.model_validate(
+            {
+                "intent_id": "duplicate-batch-task-001",
+                "create": [
+                    {
+                        "kind": "project",
+                        "title": "Move A",
+                        "tasks": [{"title": "Call mover"}],
+                    },
+                    {
+                        "kind": "project",
+                        "title": "Move B",
+                        "tasks": [{"title": "call mover"}],
+                    },
+                ],
+            }
+        )
+
+
 def test_task_create_rejects_a_non_heading_local_heading_reference() -> None:
     with pytest.raises(ValidationError, match="heading create entry"):
         CommitCall.model_validate(
@@ -1332,6 +1427,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     ):
         assert instruction in read_lower
     for instruction in (
+        "project tasks keep array order",
         "local create keys may appear in any order",
         "parent tags before children",
         "natural confirmation",
@@ -1401,9 +1497,9 @@ def test_manual_schema_contracts_match_the_runtime_models() -> None:
         (ApproveCall, APPROVE_IN),
         (CreateEntry, COMMIT_IN["properties"]["create"]["items"]),
         (
-            NextAction,
+            ProjectTask,
             COMMIT_IN["properties"]["create"]["items"]["properties"][
-                "next_actions"
+                "tasks"
             ]["items"],
         ),
         (ChangeEntry, COMMIT_IN["properties"]["change"]["items"]),
