@@ -147,6 +147,14 @@ def _clean_optional_title(value: str | None, *, name: str) -> str | None:
     return cleaned
 
 
+def _validate_checklist_titles(value: list[str]) -> list[str]:
+    if any(not title.strip() for title in value):
+        raise ValueError("titles cannot be blank")
+    if any(len(title) > 1000 for title in value):
+        raise ValueError("checklist titles cannot exceed 1000 characters")
+    return value
+
+
 class ReadInclude(StrictModel):
     """One bounded item lookup to add to a change context."""
 
@@ -376,6 +384,7 @@ class ProjectTask(StrictModel):
 
     title: str = Field(min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
+    checklist: list[str] = Field(default_factory=list, max_length=100)
     heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
 
     @field_validator("title")
@@ -384,6 +393,11 @@ class ProjectTask(StrictModel):
         if not value.strip():
             raise ValueError("title cannot be blank")
         return value
+
+    @field_validator("checklist")
+    @classmethod
+    def valid_checklist(cls, value: list[str]) -> list[str]:
+        return _validate_checklist_titles(value)
 
     @field_validator("heading_title")
     @classmethod
@@ -433,9 +447,7 @@ class CreateEntry(StrictModel):
     @field_validator("checklist")
     @classmethod
     def valid_checklist(cls, value: list[str]) -> list[str]:
-        if any(not title.strip() for title in value):
-            raise ValueError("titles cannot be blank")
-        return value
+        return _validate_checklist_titles(value)
 
     @field_validator("tag_ids")
     @classmethod
@@ -1762,6 +1774,15 @@ _CREATE: dict[str, Any] = {
                         "type": ["string", "null"],
                         "maxLength": 50000,
                     },
+                    "checklist": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                        },
+                    },
                     "heading_title": {
                         "type": "string",
                         "minLength": 1,
@@ -2466,7 +2487,7 @@ COMMIT_DESC = (
     "Commit one decided batch with a durable intent_id. "
     "Prefer context_id and short refs from a review, change, or organize read. "
     "An exact change needs id and if_revision. "
-    "Project tasks keep array order. heading_title makes contiguous native headings; use it on every Task or none. "
+    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none for contiguous headings. "
     "Local create keys may appear in any order. "
     "Parent tags before children. "
     "Risky work returns a plan. Ask one natural confirmation and keep control fields private. "

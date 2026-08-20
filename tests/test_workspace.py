@@ -1246,7 +1246,10 @@ def test_project_tasks_use_the_compact_create_shape() -> None:
                         "kind": "project",
                         "title": "Move house",
                         "tasks": [
-                            {"title": "Call mover"},
+                            {
+                                "title": "Call mover",
+                                "checklist": ["Ask about Friday", "Confirm the quote"],
+                            },
                             {"title": "Book van"},
                         ],
                     }
@@ -1263,6 +1266,11 @@ def test_project_tasks_use_the_compact_create_shape() -> None:
     assert [item.title for item in actions] == ["Call mover", "Book van"]
     assert all(item.parent_uuid == project.uuid for item in actions)
     assert all(not item.notes for item in actions)
+    assert [row.title for row in actions[0].checklists] == [
+        "Ask about Friday",
+        "Confirm the quote",
+    ]
+    assert actions[1].checklists == []
 
 
 def test_compact_project_tasks_create_native_headings() -> None:
@@ -1327,6 +1335,11 @@ def test_broad_compact_project_plan_names_generated_headings() -> None:
     tasks = [
         {
             "title": f"Produce result {index + 1}",
+            **(
+                {"checklist": ["Check evidence", "Check links"]}
+                if index == 0
+                else {}
+            ),
             "heading_title": heading_titles[min(index // 5, 3)],
         }
         for index in range(17)
@@ -1350,12 +1363,56 @@ def test_broad_compact_project_plan_names_generated_headings() -> None:
     assert result.status == "needs_approval"
     assert result.plan is not None
     assert "Headings created: 4" in result.plan.summary
+    assert "Checklist edits: 2" in result.plan.summary
     headings = next(
         section for section in result.sections if section.title == "Headings created"
     )
     assert len(headings.item_ids) == 4
     assert all(item_id.startswith("heading:") for item_id in headings.item_ids)
+    checklist = next(
+        section for section in result.sections if section.title == "Checklist edits"
+    )
+    created_tasks = next(
+        section for section in result.sections if section.title == "Tasks created"
+    )
+    assert checklist.item_ids == [created_tasks.item_ids[0]]
     assert module._library.records == {}  # noqa: SLF001
+
+
+def test_broad_checklist_removal_plan_names_parent_tasks() -> None:
+    tasks = [
+        Record(
+            uuid=f"task-{index}",
+            kind="task",
+            title=f"Review source {index + 1}",
+            checklists=[ChecklistLine(f"row-{index}", "Remove this row")],
+        )
+        for index in range(6)
+    ]
+    module = workspace(tasks)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "checklist-remove-broad-parent-ids-001",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "checklist_remove": [f"check:row-{index}"],
+                    }
+                    for index, task in enumerate(tasks)
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    checklist = next(
+        section for section in result.sections if section.title == "Checklist edits"
+    )
+    assert checklist.item_ids == [task.id for task in tasks]
+    assert all(item.checklists for item in tasks)
 
 
 def test_project_tasks_can_carry_notes() -> None:
@@ -1466,62 +1523,72 @@ def test_dump_create_asks_and_writes_nothing() -> None:
 def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     module = workspace()
     notes = (
-        "Done when one canonical Mats Mode Agent Skill reflects repeated evidence "
-        "from selected chats, Mats has approved its rules, it passes representative "
-        "prompts in each active agent client, and Cursor pins the same skill.\n\n"
-        "Use actual behavior and skill calls, not installed inventory. Keep client "
-        "evidence separate. Adopt Lauren's practices only when Mats's evidence "
-        "supports them."
+        "## Result\n\nOne reusable Mats Mode Agent Skill based on how I actually "
+        "work with agents.\n\n## Done when\n\n- I have approved the rules before "
+        "drafting.\n- The same skill works in every active agent client.\n- I have "
+        "used it on one real task.\n- Cursor pins the tested skill as a mode.\n\n"
+        "## Guardrails\n\n- Use recent work and actual skill calls, not installed "
+        "inventory.\n- Keep evidence from each client separate.\n- Adopt Lauren's "
+        "methods only where my evidence supports them.\n- Keep continual improvement "
+        "outside this finite Project."
     )
     titles = [
-        "Name the chat sources for the Mats Mode audit",
-        "Record actual skill use from the selected chats",
-        "Record working patterns and useful corrections from the selected chats",
-        "Record candidate rules from Lauren's posts and replies",
-        "Record candidate rules from pstack and poteto-mode",
-        "Match Lauren's candidate rules to my evidence",
-        "Review and mark the proposed Mats Mode rules",
-        "Draft Mats Mode Agent Skill",
-        "Review the Mats Mode draft against the approved rules",
-        "Test Mats Mode in each active harness",
-        "Pin Mats Mode in Cursor",
+        "Choose the chats that best represent how I work with each agent",
+        "List the skills and standing instructions I actually used in those chats",
+        "Summarize the patterns and corrections that keep recurring",
+        "Turn Lauren's posts and replies into candidate Mats Mode rules",
+        "Turn poteto-mode and automate-me into candidate Mats Mode rules",
+        "Compare the candidate rules with evidence from my own chats",
+        "Review the proposed rules and mark what belongs in Mats Mode",
+        "Draft the Mats Mode Agent Skill from the rules I approved",
+        "Check the draft against the evidence and approved rules",
+        "Try Mats Mode on representative work in every agent client I use",
+        "Use Mats Mode on one real task and capture what still feels wrong",
+        "Set up the tested Mats Mode skill for regular use in Cursor",
     ]
     evidence_notes = (
-        "For each active client, record the transcript location, date range, "
-        "availability, and privacy limit. Keep each client separate.\n\n"
-        "Optional extractor\n"
-        "https://github.com/0xSero/ai-data-extraction\n\n"
-        "Optional transcript method\n"
+        "## Leave with\n\nA source list for every active agent client. For each "
+        "client, include the transcript location, date range, availability, and "
+        "privacy limit. Keep each client separate.\n\n## Optional methods\n\n"
+        "**AI data extractor**\nhttps://github.com/0xSero/ai-data-extraction\n\n"
+        "**Local automate-me skill**\n"
         "~/.agents/skills/automate-me/SKILL.md"
     )
     lauren_notes = (
-        "Account for each material reply as a candidate rule or a named exclusion.\n\n"
-        "Lauren Mode thread\n"
+        "## Leave with\n\nOne candidate rule or clear exclusion for every material "
+        "source and reply.\n\n## Starting evidence\n\nLauren uses one persistent "
+        "skill. Her replies show planning through prototypes, a design ladder, "
+        "review as lint, and feedback encoded into rules.\n\n## Sources\n\n"
+        "**Lauren Mode thread**\n"
         "https://x.com/poteto/status/2090141955695198633\n\n"
-        "Continual feedback post\n"
+        "**Continual feedback**\n"
         "https://x.com/poteto/status/2089067865098113024\n\n"
-        "Encode feedback reply\n"
+        "**Encode feedback**\n"
         "https://x.com/poteto/status/2090154675756847217\n\n"
-        "Planning reply\n"
+        "**Plan through prototypes**\n"
         "https://x.com/poteto/status/2090180519766192437\n\n"
-        "Review-as-lint reply\n"
+        "**Review as lint**\n"
         "https://x.com/poteto/status/2090181049754206370\n\n"
-        "Review architecture reply\n"
+        "**Review architecture**\n"
         "https://x.com/poteto/status/2090147276434112518\n\n"
-        "Design ladder reply\n"
-        "https://x.com/poteto/status/2090147655876042880\n\n"
+        "**Design ladder**\n"
+        "https://x.com/poteto/status/2090147655876042880"
     )
     pstack_notes = (
-        "Record candidate rules or a named exclusion for each source.\n\n"
-        "pstack source\n"
+        "## Leave with\n\nOne candidate rule or clear exclusion for every source. "
+        "Treat these as examples and methods, not a package to install.\n\n"
+        "## Starting evidence\n\npstack is a skill factory. poteto-mode uses "
+        "planning and design guides; automate-me mines transcripts and iterates "
+        "through review.\n\n"
+        "## Sources\n\n**pstack**\n"
         "https://github.com/cursor/plugins/tree/main/pstack\n\n"
-        "poteto-mode source\n"
+        "**poteto-mode**\n"
         "https://github.com/cursor/plugins/tree/main/pstack/skills/poteto-mode\n\n"
-        "automate-me source\n"
+        "**automate-me**\n"
         "https://github.com/cursor/plugins/tree/main/pstack/skills/automate-me\n\n"
-        "Design guide\n"
+        "**Design guide**\n"
         "https://github.com/cursor/plugins/blob/main/pstack/docs/guide/04-design.md\n\n"
-        "Planning playbook\n"
+        "**Planning playbook**\n"
         "https://github.com/cursor/plugins/blob/main/pstack/skills/poteto-mode/references/plan.md"
     )
     result = module.commit(
@@ -1531,82 +1598,102 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
                 "create": [
                     {
                         "kind": "project",
-                        "title": "Create Mats Mode Agent Skill",
+                        "title": "Build Mats Mode as a reusable Agent Skill",
                         "notes_markdown": notes,
                         "tasks": [
                             {
                                 "title": titles[0],
                                 "notes_markdown": evidence_notes,
-                                "heading_title": "Evidence",
+                                "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[1],
                                 "notes_markdown": (
-                                    "Record actual skill calls. Keep installed inventory "
-                                    "out and keep evidence separate by client."
+                                    "## Leave with\n\nA client-by-client list of the skills "
+                                    "and standing instructions I actually used. Installed "
+                                    "inventory does not count as evidence."
                                 ),
-                                "heading_title": "Evidence",
+                                "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[2],
                                 "notes_markdown": (
-                                    "Record repeated work patterns and corrections that "
-                                    "consistently improve results."
+                                    "## Leave with\n\nA summary of repeated work patterns "
+                                    "and corrections that improved the selected chats."
                                 ),
-                                "heading_title": "Evidence",
+                                "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[3],
                                 "notes_markdown": lauren_notes,
-                                "heading_title": "Evidence",
+                                "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[4],
                                 "notes_markdown": pstack_notes,
-                                "heading_title": "Evidence",
+                                "heading_title": "Learn what works",
                             },
                             {
                                 "title": titles[5],
                                 "notes_markdown": (
-                                    "Mark each candidate supported, unsupported, or "
-                                    "still uncertain from the chat evidence."
+                                    "## Leave with\n\nEvery candidate rule marked supported, "
+                                    "worth testing, or leave out, with my evidence beside it."
                                 ),
-                                "heading_title": "Design",
+                                "heading_title": "Choose what fits",
                             },
                             {
                                 "title": titles[6],
                                 "notes_markdown": (
-                                    "Mats approves, rejects, or changes the marked "
-                                    "rules before the skill is drafted."
+                                    "**I review this before drafting starts.**\n\n"
+                                    "## Leave with\n\nEvery proposed rule marked keep, "
+                                    "change, skip, or needs more evidence."
                                 ),
-                                "heading_title": "Design",
+                                "heading_title": "Choose what fits",
                             },
-                            {"title": titles[7], "heading_title": "Design"},
+                            {"title": titles[7], "heading_title": "Build the skill"},
                             {
                                 "title": titles[8],
                                 "notes_markdown": (
-                                    "Check the draft against every approved rule and "
-                                    "remove unsupported instructions."
+                                    "## Leave with\n\nA draft where every approved rule appears, "
+                                    "unsupported instructions are gone, and conflicts are resolved."
                                 ),
-                                "heading_title": "Design",
+                                "heading_title": "Build the skill",
                             },
                             {
                                 "title": titles[9],
                                 "notes_markdown": (
-                                    "Run representative prompts in every active agent "
-                                    "client. Record failures as finite Project Tasks."
+                                    "## Leave with\n\nThe same skill passing representative "
+                                    "planning, building, review, and feedback work in every "
+                                    "active agent client. Record failures as finite Project Tasks."
                                 ),
-                                "heading_title": "Verify",
+                                "heading_title": "Put it to work",
                             },
                             {
                                 "title": titles[10],
                                 "notes_markdown": (
-                                    "Pin the same Agent Skill. Pair it with /goal. "
-                                    "Then check the unresolved CLI sticky behavior.\n\n"
-                                    "Cursor custom modes\n"
-                                    "https://cursor.com/changelog/08-19-26"
+                                    "## Leave with\n\nOne real-use result and a short list of "
+                                    "finite fixes. Continual tuning stays outside this Project."
                                 ),
-                                "heading_title": "Verify",
+                                "heading_title": "Put it to work",
+                            },
+                            {
+                                "title": titles[11],
+                                "notes_markdown": (
+                                    "## Leave with\n\nThe tested Agent Skill pinned for regular "
+                                    "use in Cursor.\n\n## Starting evidence\n\nA Cursor custom "
+                                    "mode pins the same Agent Skill; it is not another artifact. "
+                                    "Option+Enter or Use as Mode pins it, `/goal` can pair with it, "
+                                    "and CLI Option+Enter keeps it active until exit.\n\n"
+                                    "## Sources\n\n**Cursor custom modes**\n"
+                                    "https://cursor.com/changelog/08-19-26\n\n"
+                                    "**Cursor CLI**\nhttps://cursor.com/docs/cli/using"
+                                ),
+                                "checklist": [
+                                    "Pin the skill in Cursor",
+                                    "Pair it with /goal once",
+                                    "Confirm Option+Enter keeps it active in the CLI",
+                                ],
+                                "heading_title": "Put it to work",
                             },
                         ],
                     }
@@ -1627,27 +1714,35 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     )
     assert result.status == "applied"
     assert len(projects) == 1
-    assert projects[0].title == "Create Mats Mode Agent Skill"
-    assert [heading.title for heading in headings] == ["Evidence", "Design", "Verify"]
+    assert projects[0].title == "Build Mats Mode as a reusable Agent Skill"
+    assert [heading.title for heading in headings] == [
+        "Learn what works",
+        "Choose what fits",
+        "Build the skill",
+        "Put it to work",
+    ]
     assert [task.title for task in tasks] == titles
     assert all(task.parent_uuid == projects[0].uuid for task in tasks)
     heading_titles = {heading.uuid: heading.title for heading in headings}
     assert [heading_titles[task.heading_uuid] for task in tasks] == [
-        "Evidence",
-        "Evidence",
-        "Evidence",
-        "Evidence",
-        "Evidence",
-        "Design",
-        "Design",
-        "Design",
-        "Design",
-        "Verify",
-        "Verify",
+        "Learn what works",
+        "Learn what works",
+        "Learn what works",
+        "Learn what works",
+        "Learn what works",
+        "Choose what fits",
+        "Choose what fits",
+        "Build the skill",
+        "Build the skill",
+        "Put it to work",
+        "Put it to work",
+        "Put it to work",
     ]
     assert "ai-data-extraction" in tasks[0].notes
     assert "ai-data-extraction" not in notes
-    assert "Lauren Mode thread" in tasks[3].notes
+    assert "**Lauren Mode thread**" in tasks[3].notes
+    assert "## Starting evidence" in tasks[3].notes
+    assert "planning through prototypes" in tasks[3].notes
     assert "2090180519766192437" in tasks[3].notes
     assert "2090181049754206370" in tasks[3].notes
     assert "2090147276434112518" in tasks[3].notes
@@ -1655,7 +1750,22 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
     assert "2089067865098113024" in tasks[3].notes
     assert "pstack/skills/poteto-mode" in tasks[4].notes
     assert "pstack/skills/automate-me" in tasks[4].notes
-    assert "Cursor pins the same skill" in projects[0].notes
+    assert "pstack is a skill factory" in tasks[4].notes
+    assert "mines transcripts" in tasks[4].notes
+    assert "## Result" in projects[0].notes
+    assert "## Done when" in projects[0].notes
+    assert "## Guardrails" in projects[0].notes
+    assert "my evidence" in projects[0].notes
+    assert "the owner" not in projects[0].notes.casefold()
+    assert [row.title for row in tasks[11].checklists] == [
+        "Pin the skill in Cursor",
+        "Pair it with /goal once",
+        "Confirm Option+Enter keeps it active in the CLI",
+    ]
+    assert "## Leave with" in tasks[11].notes
+    assert "## Starting evidence" in tasks[11].notes
+    assert "same Agent Skill" in tasks[11].notes
+    assert "CLI Option+Enter keeps it active until exit" in tasks[11].notes
     assert projects[0].area_uuid is None
     assert all(not task.title.startswith("Read ") for task in tasks)
     assert all("continual" not in task.title.casefold() for task in tasks)
@@ -1674,6 +1784,10 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         {"title": "Audit skills + write Mats Mode"},
         {"title": "Open the source list", "heading_title": "Think about stages"},
         {"title": "Open the source list", "heading_title": "x" * 801},
+        {
+            "title": "Open the source list",
+            "checklist": ["Think about the evidence"],
+        },
     ],
     ids=[
         "long-note",
@@ -1684,10 +1798,11 @@ def test_mats_mode_project_keeps_the_accepted_plan_visible() -> None:
         "plus",
         "fake-heading",
         "long-heading",
+        "fake-checklist-row",
     ],
 )
 def test_undistilled_project_task_asks_and_writes_nothing(
-    task: dict[str, str],
+    task: dict[str, object],
 ) -> None:
     module = workspace()
 

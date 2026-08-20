@@ -2,16 +2,16 @@
 
 Use the owner's words and natural Things terms. Preserve the owner's dates and importance. Do not infer urgency. Preserve anything the owner did not ask to change.
 
-If this turn is a thread, changelog, or source packet, research owns the facts and authority check. Continue here in the same turn when one accepted durable result remains.
+If this turn is a thread, changelog, or source packet, research owns the complete branch. Do not continue here.
 
 ## Choose the smallest useful form
 
 Walk these questions in order. Stop when the form is named.
 
 1. More than one sitting, and the finish is unclear? Ask only when two supported finishes or forms remain. Ask one Project or two only when both readings fit. Otherwise use the sole supported Project.
-2. Will one sitting finish it? Yes: a Task. Title starts with the visible action and names the object. Known sub-steps of that sitting, packing, a shopping list, a known process: a Things checklist. Rows share that finish. Write call, draft, open, buy, list, read. Do not write Decide, Think about, Work on, or Assess. A blocking step goes first.
+2. Will one sitting finish it? Yes: a Task. Write for the owner who will reopen Things without this chat. The title is a natural action phrase that names the object and visible result. Natural does not mean terse. Known sub-steps of that sitting, packing, a shopping list, a known process: a Things checklist. Rows share that finish. Write call, draft, open, buy, list, read. Do not write Decide, Think about, Work on, or Assess. A blocking step goes first.
 3. No: a Project. Several Tasks finish separately. If the result or inclusion of work is undecided, create only the next one to three useful actions after the owner chooses. When the owner commits to one durable result, create its complete supported finish path now in dependency order. The first Task is available now. The owner need not preapprove each Task title. Each title is physical, visible, and startable when reached. Order shows dependencies; do not invent Waiting or dates. If a Task needs a path or URL, put it in that Task's notes. Opening the Project is not required to start. Projects cannot enter Inbox. Two named finishes are two Projects, or one after they say they share a finish. Independent finishes are Project Tasks, not checklist rows. Do not file Read after sources were already gathered. A gathered source can still require an evidence result. Optional, maybe, or continual work stays off this Project.
-4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. Prefer short plain notes. Do not require `# Done when` headings on a small note. Do not paste the chat brief onto the Project. Put a source URL on the Task that must open it, or a path. Shared finish and constraints stay on the Project. Keep uncommitted possibilities in notes. A committed later action is a Project Task. Notes `- [ ]` is not Today. Do not use it as a list of current work.
+4. Extra info to do the work: Markdown notes. Distill to done-when, constraints, and full-length URLs. Finish criteria live here. Keep executable steps in checklist rows or Project Tasks. A one-purpose note stays plain. When a note has distinct blocks, use only the helpful Markdown sections. A Project can use `## Result`, `## Done when`, and `## Guardrails`. A Task can use `## Leave with`, method, and `## Sources`. Write from the owner's first-person viewpoint: `my chats`, not `the owner`. Do not paste the chat brief onto the Project. Put a source URL on the Task that must open it, or a path. Shared finish and constraints stay on the Project. Keep uncommitted possibilities in notes. A committed later action is a Project Task. Notes `- [ ]` is not Today. Do not use it as a list of current work.
 
 ```
 One kitchen tap is ordered.
@@ -21,7 +21,7 @@ https://example.com/shortlist
 Measure the sink first.
 ```
 
-For three or more sources, label each source in two to six words. Put its full URL on the next line. Put it only on the Task that uses it.
+For three or more sources, use a two-to-six-word bold source label. Put its full URL on the next line. Put it only on the Task that uses it.
 
 5. Ongoing hat with no finish: Area.
 6. Not acting now: Someday.
@@ -29,13 +29,11 @@ For three or more sources, label each source in two to six words. Put its full U
 8. When: start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.
 9. Reusable filter: Tag.
 
-For a source-backed artifact, plan the required results in dependency order: name or acquire evidence; record observations and candidate rules; match and select rules; create the artifact; review it; test it in each named active client; deliver it. When the artifact encodes the owner's behavior, get the owner's review before drafting. Omit a result only when it already exists. Put evidence before its conclusion. A Task title must not claim a fact that an earlier Task has not produced.
-
 Notes explain context or method. If notes contain a required prerequisite, selection, owner review, validation, or delivery, split it into its own Task. Each Task produces one visible result or performs one delivery. Add the artifact type to a Project title when the owner's label can mean a workflow, mode, or skill.
 
-Headings scan a multi-part Project. For six or more Tasks across two or more distinct stages, infer two to four short headings. Use explicit owner-named headings at any size. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
+Headings scan a multi-part Project. For six or more Tasks across two or more distinct stages, infer two to four short natural headings that describe the owner's path. Use explicit owner-named headings at any size. Rename or reorder a heading when the section meaning changes. Delete it with `organize.delete_headings`. `lifecycle=trash` is recoverable teardown. Deleting it keeps its Tasks in the Project.
 
-Checklist only on a Task. `tasks` only on a Project. Use it for the whole ordered plan when every Task needs only a title, optional notes, and optional `heading_title`. Use `heading_title` on every Task or none. Heading groups stay contiguous. If any Task needs another native field, create every Task as a sibling. Do not mix the two forms on one Project. Each title is physical, visible, and startable when reached. Put a needed path or URL in that Task's `notes_markdown`.
+Checklist only on a Task. `tasks` only on a Project. Use it for the whole ordered plan when every Task needs only a title, optional notes, optional native checklist, and optional `heading_title`. Use `heading_title` on every Task or none. Heading groups stay contiguous. If any Task needs another native field, create every Task as a sibling. Do not mix the two forms on one Project. Each title is physical, visible, and startable when reached. Put a needed path or URL in that Task's `notes_markdown`.
 
 Never infer or browse for an Area during create. Use one only when the owner names it or an existing matching item proves it.
 

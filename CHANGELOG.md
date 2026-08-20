@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.4.8 — 2026-08-20
+
+Source-backed capture now writes a human-readable Things document. Compact
+Project Tasks can use native checklists without sibling-create plumbing.
+
+### Changed
+
+- Source capture is one quiet transaction before any Things call. It separates
+  research needed to shape the Project from work the Project must still finish.
+- Project and Task notes use selective Markdown structure, first-person text,
+  natural action titles, and collapsed-view and opened-Task checks.
+- Compact Project `tasks` accept native checklist rows alongside notes and
+  headings. The rows share the Task finish and stay in the same atomic commit.
+- The Mats Mode capability fixture now proves the full human-readable path,
+  including owner review, draft review, cross-client tests, real use, and
+  Cursor setup.
+
 ## 0.4.7 — 2026-08-20
 
 Source-heavy Projects keep their full evidence-to-delivery path. Same three

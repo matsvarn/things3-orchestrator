@@ -771,13 +771,32 @@ def test_compact_project_tasks_are_project_only() -> None:
             "kind": "project",
             "title": "Move house",
             "tasks": [
-                {"title": "Call mover", "heading_title": "Plan"},
+                {
+                    "title": "Call mover",
+                    "checklist": ["Ask about Friday", "Confirm the quote"],
+                    "heading_title": "Plan",
+                },
                 {"title": "Book van", "heading_title": "Plan"},
                 {"title": "Move boxes", "heading_title": "Move"},
             ],
         }
     )
     assert [task.heading_title for task in staged.tasks] == ["Plan", "Plan", "Move"]
+    assert staged.tasks[0].checklist == ["Ask about Friday", "Confirm the quote"]
+
+    with pytest.raises(ValidationError, match="1000 characters"):
+        CreateEntry.model_validate(
+            {
+                "kind": "project",
+                "title": "Move house",
+                "tasks": [{"title": "Call mover", "checklist": ["x" * 1001]}],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="1000 characters"):
+        CreateEntry.model_validate(
+            {"title": "Call mover", "checklist": ["x" * 1001]}
+        )
 
     with pytest.raises(ValidationError, match="headings on every Task or none"):
         CreateEntry.model_validate(
@@ -1442,9 +1461,10 @@ def test_manual_schemas_are_flat_and_compact() -> None:
         len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
     )
     # Review completeness, DiagnosticFact, named homes, and compact Project
-    # headings. Keep the contract compact, but allow that justified expansion.
-    assert discovery_chars < 18_850
-    assert discovery_chars - 13_406 < 5_450
+    # headings and native checklists. Keep the contract compact, but allow that
+    # justified expansion.
+    assert discovery_chars < 19_000
+    assert discovery_chars - 13_406 < 5_550
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1477,9 +1497,9 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
     ):
         assert instruction in read_lower
     for instruction in (
-        "project tasks keep array order",
-        "heading_title makes contiguous native headings",
-        "use it on every task or none",
+        "project tasks keep order",
+        "accept checklists",
+        "use heading_title on all tasks or none",
         "local create keys may appear in any order",
         "parent tags before children",
         "natural confirmation",
@@ -1499,6 +1519,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "tasks"
     ]["items"]
     assert "heading_title" in project_task["properties"]
+    assert "checklist" in project_task["properties"]
     assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
         "maxLength"
     ] >= len("evening")
