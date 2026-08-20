@@ -574,8 +574,8 @@ class MemoryLibrary:
                 elif item.inbox:
                     siblings.append(item)
         if not siblings:
-            return 0
-        return max(item.sort_index for item in siblings) + 1024
+            return 1024
+        return max(1024, max(item.sort_index for item in siblings) + 1024)
 
     def system(self) -> list[Record]:
         areas = self.areas()

@@ -13,6 +13,50 @@ You can send a source thread, links, and one clear result in the same request.
 If you also ask it to create the work, it researches and creates in one turn.
 It does not browse for an Area or place the Project in one unless you named it.
 
+## Project note style
+
+The server stores structured meaning before it renders new Project notes.
+Project notes start with the outcome. Task notes start with the result that the
+Task produces. The renderer adds only sections that have content.
+
+The default `natural` style uses visible Markdown headings such as `## Outcome`,
+`## Done when`, `## Start here`, and `## Sources`. The
+`visual` style adds fixed markers to the same meaning:
+
+- 🎯 outcome
+- ✅ completion or Task result
+- 🧭 shared constraints
+- 💡 starting context
+- ▶️ approach
+- 🔗 sources
+
+Set the saved style on the server:
+
+```console
+uv run things-orchestrator configure --note-style natural
+uv run things-orchestrator configure --note-style visual
+```
+
+The next Project uses the new style without a restart. An explicit request for
+one Project can override the style without changing the saved preference.
+Updates, login, token rotation, setup, and rollback preserve the preference in
+`${XDG_CONFIG_HOME:-$HOME/.config}/things-orchestrator/preferences.json`.
+Existing Things items stay unchanged. The supported styles are `natural` and
+`visual`; there is no legacy presentation mode. The command writes the file
+atomically with private permissions and preserves unknown future keys. An
+invalid preference stops the next Project before any Things write and tells
+you to run `configure` again.
+
+Approve third-party app links by their URL schemes:
+
+```console
+uv run things-orchestrator configure --source-schemes obsidian x-devonthink-item
+```
+
+Pass `--source-schemes` with no values to clear the allowlist. Web, file,
+and read-only Things links are built in. Do not add their schemes. The command
+case-folds schemes and rejects invalid or unsafe values.
+
 Today, Logbook, and reminders use the timezone stored by `login`. After
 a permanent move: `uv run things-orchestrator login --timezone Europe/Berlin`.
 

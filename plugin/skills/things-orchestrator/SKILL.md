@@ -13,6 +13,8 @@ Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `
 
 Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on. For a required choice, name the visible result: `Review and mark the proposed rules`.
 
+For a source Project, send meaning, not presentation. Use `outcome`, `finished_when`, and optional `keep_in_mind`. Give each Task a `finish`; use `start_here`, `approach`, and structured `sources` only when useful. Ordinary Projects may use the same fields. The server renders the saved note style. Send `note_style` only when the owner explicitly asks for a one-time `natural` or `visual` override.
+
 The server asks and writes nothing when a create is still a dump. Follow `ask`.
 
 Process Inbox: read [form](references/form.md).

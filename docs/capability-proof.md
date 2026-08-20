@@ -50,7 +50,7 @@ create request. Keep external research and owner Things data unavailable.
 Replay each derived transaction through the public memory workspace. A model
 prediction without this server replay is not evidence. After deployment, use
 a fresh session for the live dogfood run.
-The run passes only when it has:
+The v0.5.0 run passes only when it has:
 
 - one opening update at most, then one concise result;
 - no Things or Area read for a clearly new Project;
@@ -58,10 +58,11 @@ The run passes only when it has:
 - one material fact, uncertainty, or exclusion for every named source and
   relevant reply when research tools are available;
 - one Project whose collapsed view explains the complete path;
-- natural first-person titles and Markdown notes that work without the chat;
+- natural titles and semantic Project and Task fields that work without the
+  chat;
 - owner review before drafting, draft review, cross-client testing, real use,
   then delivery;
-- native headings, useful checklists, labeled Task-local sources, and no
+- native headings, useful checklists, structured Task-local sources, and no
   inferred Area; and
 - one complete source Project commit, unless the server requires revision or
   approval;
@@ -69,6 +70,16 @@ The run passes only when it has:
   transaction; and
 - a receipt that proves note read-back, names the first Task, and tells the
   agent to stop without offering a later note pass.
+
+Replay the same source-heavy request through two supported agents with the
+exact public schema. Each derived transaction must pass the real memory
+workspace. Then render the accepted Project once with the saved `natural`
+style and once with `visual`. Capture the collapsed Project and opened Task
+notes in Things. A human must verify that both styles remain clear without the
+chat. Record the two-agent replay and human review below. Do not commit the
+live screenshots: even disposable Projects can expose private owner lists in
+the Things sidebar. The renderer goldens and Cloud read-back tests are the
+durable public artifacts.
 
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
@@ -115,6 +126,37 @@ to 800 prose characters. A complete structured note can be longer. Labeled
 full URLs do not count toward that section limit. The same Codex payload then
 applied at that development stage. The final fresh runs above then passed the
 stricter one-finish and native-row limits.
+
+### v0.5.0 semantic replay and visual proof
+
+Status: passed on 2026-08-20.
+
+Fresh isolated Codex and Cursor runs each derived one semantic source Project
+with 12 Tasks, three headings, and one three-row checklist. Both used
+`outcome`, `finished_when`, `keep_in_mind`, Task `finish`, `start_here`,
+`approach`, and structured `{label, location}` sources. Neither payload sent
+presentation Markdown. Both passed the public schema, applied through the
+memory workspace, stored every Project and Task note, and returned the rich
+stop receipt.
+
+A live Cloud proof then rendered disposable eight-Task Projects in `natural`
+and `visual`. A human reviewed the collapsed Projects and an opened source
+Task in Things 3. The visible `##` labels gave both note levels clear hierarchy.
+Natural stayed quiet. Visual used only the six fixed markers. Optional sections
+were absent, and each source label stayed beside its full link. Both Projects
+and all Task notes passed Cloud read-back and were moved to Trash after review.
+The public renderer goldens are in `tests/test_source_document.py`; the exact
+Cloud structure and note read-back are covered in `tests/test_workspace.py` and
+`tests/test_cloud.py`. The live screenshots were discarded to avoid publishing
+the owner's Things sidebar.
+
+The first live proof also exposed a Cloud safety defect before release. A first
+heading or Task used `ix=0`. Things 3 trapped in `LegacySCHistoryPerformSync`
+while it applied the incremental `Task6` history. v0.5.0 now starts native
+Task, Project, and heading order at a positive index and normalizes every
+Task6 envelope before commit. A restored 09:45 local backup replaced the bad
+Cloud history. Things remained open after the reset, and both final live style
+Projects synced with positive indexes and no new crash report.
 
 ## Live evidence
 

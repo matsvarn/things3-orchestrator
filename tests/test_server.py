@@ -181,9 +181,10 @@ def test_source_skeleton_returns_model_revision_without_an_owner_question() -> N
             {
                 "intent_id": "source-skeleton-server-001",
                 "create": [
-                    {
-                        "kind": "project",
-                        "title": "Build one Agent Skill",
+                        {
+                            "kind": "project",
+                            "document": "source",
+                            "title": "Build one Agent Skill",
                         "notes_markdown": (
                             "## Result\n\nOne skill.\n\n"
                             "## Done when\n\nThe skill passes.\n\n"

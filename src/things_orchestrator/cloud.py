@@ -644,6 +644,34 @@ class CloudLibrary(MemoryLibrary):
         verified = self._verified_titles(writes)
         return ApplyResult(verified=verified, created=self._created_from_pull(writes))
 
+    def matches(self, writes: list[Write]) -> bool:
+        """Match the safe Cloud envelopes, including Task6 index normalization."""
+
+        try:
+            envelopes, _ = self._plan(writes)
+        except CloudError:
+            return False
+        dynamic_indexes = {
+            write.uuid
+            for write in writes
+            if write.action in {"create", "create_heading"}
+            and write.kind in {"task", "project"}
+            and write.sort_index is None
+        }
+        for envelope in envelopes:
+            if envelope.uuid not in dynamic_indexes:
+                if not self._pulled_matches(envelope):
+                    return False
+                continue
+            item = self.records.get(envelope.uuid)
+            if item is None or item.sort_index <= 0:
+                return False
+            payload = dict(envelope.payload)
+            payload.pop("ix", None)
+            if not self._pulled_matches(replace(envelope, payload=payload)):
+                return False
+        return True
+
     def _plan(self, writes: list[Write]) -> tuple[list[Envelope], dict[str, str]]:
         return _CloudPlanHandler(self).plan(writes)
 
@@ -908,6 +936,13 @@ class _CloudPlanHandler(_MutationHandler[None]):
         actual_kind = (
             current.kind if current is not None else planned_kind or write.kind
         )
+        if actual_kind in {"task", "project"} and (
+            write.sort_index is not None and write.sort_index <= 0
+        ):
+            # Things traps while it applies incremental Cloud history when a
+            # Task6 record has a non-positive ix. Keep first position positive.
+            write = replace(write, sort_index=1)
+            mutation = replace(mutation, write=write)
         if actual_kind == "project" and write.inbox:
             raise CloudError("Projects cannot enter Inbox")
         if write.heading_uuid is not None:
@@ -952,6 +987,8 @@ class _CloudPlanHandler(_MutationHandler[None]):
             key = (write.kind, write.into_uuid, write.into_kind)
             if key in self.created_ix:
                 index = self.created_ix[key] + 1024
+            if write.kind in {"task", "project"}:
+                index = max(1024, index)
             self.created_ix[key] = index
             write = replace(write, sort_index=index)
         self._emit(write)

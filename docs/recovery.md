@@ -42,6 +42,11 @@ Host steps: [host.md](host.md).
   reprints paths. `print-config --http` reprints HTTP paths without
   wiping a URL you already set. `--show-secrets` prints the bodies.
   `login` keeps `mcp_token` unless you pass `--rotate-token`.
+- **Preferences are unreadable or invalid.** Move
+  `~/.config/things-orchestrator/preferences.json` aside. Then run
+  `uv run things-orchestrator configure --note-style natural` or use
+  `visual`. The server refuses the affected Project before any Things
+  write. It does not reset the file silently.
 - **MCP HTTP 401.** Bearer mismatch: `print-config --http --show-secrets`
   on the serving host, update the client header, restart `serve-http`.
   Only `--rotate-token` replaces `mcp_token`. Then update every client.

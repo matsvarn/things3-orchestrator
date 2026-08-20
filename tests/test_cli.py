@@ -213,6 +213,131 @@ def test_login_keeps_mcp_token_unless_rotated(
     assert json.loads(creds.read_text())["mcp_token"] == "new-token"
 
 
+def test_login_and_snippet_generation_do_not_change_preferences(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    creds = tmp_path / "credentials.json"
+    preferences = tmp_path / "preferences.json"
+    original = '{"version":1,"note_style":"visual","future":"keep"}\n'
+    preferences.write_text(original)
+    _fake_cloud(monkeypatch)
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "first-token")
+
+    main(["login"])
+    main(["login", "--rotate-token"])
+    main(["print-config"])
+
+    assert preferences.read_text() == original
+
+
+def test_configure_changes_only_note_style_and_preserves_unknown_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "things-orchestrator/preferences.json"
+    path.parent.mkdir()
+    path.write_text(
+        '{"version":1,"note_style":"natural","future":{"keep":true}}\n'
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    main(["configure", "--note-style", "visual"])
+
+    payload = json.loads(path.read_text())
+    assert payload == {
+        "version": 1,
+        "note_style": "visual",
+        "future": {"keep": True},
+    }
+    out = capsys.readouterr().out
+    assert "Note style: visual" in out
+    assert str(path) in out
+
+
+def test_configure_refuses_invalid_saved_preferences_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "things-orchestrator/preferences.json"
+    path.parent.mkdir()
+    path.write_text("broken")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(SystemExit) as caught:
+        main(["configure", "--note-style", "visual"])
+
+    assert caught.value.code == 2
+    assert "Preferences file is unreadable" in capsys.readouterr().err
+    assert path.read_text() == "broken"
+
+
+def test_configure_sets_and_clears_source_schemes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "things-orchestrator/preferences.json"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    main(
+        [
+            "configure",
+            "--source-schemes",
+            "Obsidian",
+            "x-devonthink-item",
+        ]
+    )
+
+    assert json.loads(path.read_text()) == {
+        "version": 1,
+        "note_style": "natural",
+        "source_schemes": ["obsidian", "x-devonthink-item"],
+    }
+    assert "Source schemes: obsidian, x-devonthink-item" in capsys.readouterr().out
+
+    main(["configure", "--source-schemes"])
+    assert json.loads(path.read_text())["source_schemes"] == []
+    assert "Source schemes: none" in capsys.readouterr().out
+
+
+def test_configure_requires_at_least_one_preference(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["configure"])
+
+    assert caught.value.code == 2
+    assert "needs --note-style or --source-schemes" in capsys.readouterr().err
+
+
+def test_configure_rejects_scheme_and_keeps_note_style_change_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "things-orchestrator/preferences.json"
+    path.parent.mkdir()
+    path.write_text('{"version":1,"note_style":"natural"}\n')
+    original = path.read_text()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "configure",
+                "--note-style",
+                "visual",
+                "--source-schemes",
+                "javascript",
+            ]
+        )
+
+    assert path.read_text() == original
+
+
 def test_print_config_reprints_without_login(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -481,6 +606,7 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
     assert workspace is not None
     assert captured["journal"] is journal
     assert captured["account_id"] == "owner@example.com"
+    assert callable(captured["preferences"])
     assert captured["context_store"] is captured["context_store_instance"]
     assert captured["context_path"] == tmp_path / "contexts-accountdigest.sqlite3"
     context_clock = captured["context_clock"]
@@ -592,6 +718,7 @@ def test_parser_names_the_owner_commands() -> None:
     assert "serve-http" in help_text
     assert "print-config" in help_text
     assert "doctor" in help_text
+    assert "configure" in help_text
     assert "uv run things-orchestrator login" in help_text
     compact = help_text.replace("-\n", "-").replace("\n", " ")
     assert "things-orchestrator doctor" in compact
@@ -628,6 +755,42 @@ def test_plugin_wrapper_reads_the_checkout_file(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "uv run things-orchestrator login" in result.stderr
+
+
+def test_plugin_wrapper_runs_configure_from_the_checkout(tmp_path: Path) -> None:
+    import os
+    import stat
+    import subprocess
+
+    plugin = tmp_path / "cache" / "plugin"
+    (plugin / "bin").mkdir(parents=True)
+    script = plugin / "bin" / "things-orchestrator"
+    script.write_text((ROOT / "plugin/bin/things-orchestrator").read_text())
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    state = tmp_path / "state"
+    (state / "things-orchestrator").mkdir(parents=True)
+    (state / "things-orchestrator" / "checkout").write_text(f"{ROOT.resolve()}\n")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_STATE_HOME": str(state),
+    }
+
+    result = subprocess.run(
+        [str(script), "configure", "--note-style", "visual"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    saved = json.loads(
+        (tmp_path / "config/things-orchestrator/preferences.json").read_text()
+    )
+    assert saved["note_style"] == "visual"
 
 
 def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
