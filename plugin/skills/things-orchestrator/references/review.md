@@ -18,7 +18,7 @@ Use this section instead of Weekly review. Do not read research or form unless e
 
 Read `view=diagnostics` and `view=audit` with `limit=40`. Continue the same audit read until complete. Repeating `view=audit` on the continuation is accepted, but the continuation alone is shorter. The final audit page returns every complete Project layout in native order. The complete audit replaces separate Area, Inbox, and Project organization reads. Use that audit context as the only item write context. Use `ids` only to inspect truncated notes or checklists; those detail reads are evidence, not a new write context. Use refs from the final audit context. A ref stays stable across fresh reads, but it remains bound to the read that returned it. Do not combine refs from different reads. Do not reread each Project.
 
-If tag names, parents, assignments, or deletions are in scope, read `view=tags` once. Continue that cursor until complete. Keep its `scope_revision` as `tags_revision`; do not use it as the item `scope_revision`. This is a registry read, not a second item write context. Skip it when tags are not in scope.
+If tag names, parents, assignments, or deletions are in scope, read the complete tag catalog once. Follow the returned instruction until that read is complete. Keep its registry result for the final batch. It supplies tag preconditions, not item refs or a second item write context. Skip it when tags are not in scope.
 
 A Task inside a Project can also carry that Project's Area in native storage. It still has one visible home. This inherited Area is normal, not a conflict. Do not ask the owner to remove it.
 

@@ -6793,6 +6793,15 @@ def test_truncated_filtered_audit_continues_without_changes() -> None:
     assert continued.cursor is not None
     assert all("someday" in item.signals for item in continued.items)
 
+    final = module.read(ReadCall(cursor=continued.cursor, limit=10))
+
+    assert final.status == "ok"
+    assert final.cursor is None
+    assert final.context is not None and final.context.complete
+    assert final.layouts == []
+    assert "completes the selected filter" in final.instruction
+    assert "completes the active list" not in final.instruction
+
 
 def test_audit_cursor_accepts_the_repeated_view() -> None:
     records = [

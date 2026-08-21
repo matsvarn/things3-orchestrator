@@ -457,10 +457,10 @@ def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
     assert "bound to the read that returned it" in review
     assert "do not combine refs from different reads" in review
     assert "do not reread each project" in review
-    assert "read `view=tags` once" in review
-    assert "continue that cursor until complete" in review
-    assert "keep its `scope_revision` as `tags_revision`" in review
-    assert "do not use it as the item `scope_revision`" in review
+    assert "read the complete tag catalog once" in review
+    assert "returned instruction until that read is complete" in review
+    assert "keep its registry result for the final batch" in review
+    assert "supplies tag preconditions, not item refs" in review
     assert "skip it when tags are not in scope" in review
     assert "exact server manifest" in review
     assert "`require_approval=true`" in review

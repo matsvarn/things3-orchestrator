@@ -99,5 +99,7 @@ Do not teach the agent its expected tool calls.
 After every queued workflow has one human run, repeat all workflows in this
 register against the then-current release. Use changed owner data and natural
 paraphrases. A workflow passes only when its trace is concise, its writes match
-one accepted intent, Cloud read-back is true, and the Things result works
-without the chat.
+one accepted intent, and the result works without the chat. When the workflow
+writes Things, Cloud read-back must prove the result. Operational workflows
+instead need true health and configuration checks, preserved preferences, a
+working rollback, and a verified recovery path.

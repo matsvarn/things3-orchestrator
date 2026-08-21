@@ -1410,10 +1410,13 @@ class ThingsWorkspace:
         ]
         instruction = result.instruction
         if view == "audit" and finished:
-            instruction = (
-                "This final audit page completes the active list and includes "
-                "each complete Project layout in native order."
-            )
+            if call.signals_any:
+                instruction = "This final audit page completes the selected filter."
+            else:
+                instruction = (
+                    "This final audit page completes the active list and includes "
+                    "each complete Project layout in native order."
+                )
         if items and "short ref" not in instruction.casefold():
             instruction = (
                 instruction.rstrip(".")
