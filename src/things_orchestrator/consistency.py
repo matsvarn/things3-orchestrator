@@ -126,7 +126,13 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
         signals.append("inbox_with_project")
     if item.inbox and item.area_uuid:
         signals.append("inbox_with_area")
-    if item.parent_uuid and item.area_uuid:
+    inherited_project_area = (
+        item.kind == "task"
+        and parent is not None
+        and parent.kind == "project"
+        and parent.area_uuid == item.area_uuid
+    )
+    if item.parent_uuid and item.area_uuid and not inherited_project_area:
         signals.append("both_project_and_area")
     if item.inbox and (item.someday or item.tonight or item.start is not None):
         signals.append("inbox_with_schedule")

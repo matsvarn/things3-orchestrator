@@ -104,6 +104,10 @@ def test_full_reorganization_prompt_is_a_release_behavior_gate() -> None:
     assert "full reorganization behavior gate" in proof
     assert "one complete audit" in proof
     assert "one exact before-and-after manifest" in proof
-    assert "one commit and one approval" in proof
+    assert "one commit and at most one approval" in proof
     assert "final area order" in proof
     assert "known incoherent project" in proof
+    assert "no read was rejected or repeated" in proof
+    assert "one root-plus-include batch" in proof
+    assert "one commit and one approval" in proof
+    assert "twenty-one task or project changes" in proof

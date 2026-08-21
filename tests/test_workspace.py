@@ -3060,6 +3060,132 @@ def test_risky_area_change_needs_approval_and_is_revision_bound() -> None:
     assert module._library.records["work"].title == "Office"  # noqa: SLF001
 
 
+def test_exact_manifest_includes_all_created_task_fields() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch", kind="project", title="Finish launch", area_uuid=area.uuid
+    )
+    module = workspace([area, project])
+    module._library.tags["focus"] = "Focus"  # noqa: SLF001
+    area_fact = detail(module, area.id)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "created-task-manifest-001",
+                "scope_revision": system_scope(module),
+                "create": [
+                    {
+                        "kind": "task",
+                        "title": "Write plan",
+                        "notes_markdown": "Use source A.",
+                        "into": project.id,
+                        "start": "2026-08-20",
+                        "deadline": "2026-09-01",
+                        "remind_at": "2026-08-20T09:00:00+00:00",
+                        "tag_ids": ["tag:focus"],
+                    }
+                ],
+                "change": [
+                    {
+                        "id": area.id,
+                        "if_revision": area_fact.revision,
+                        "title": "Products",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    manifest = next(
+        section for section in prepared.sections if section.key == "manifest_1"
+    )
+    task_signal = next(
+        signal for signal in manifest.signals if 'Create Task "Write plan"' in signal
+    )
+    assert "notes:\nUse source A." in task_signal
+    assert 'when "2026-08-20"' in task_signal
+    assert "deadline 2026-09-01" in task_signal
+    assert "reminder 09:00" in task_signal
+    assert "tags [Focus]" in task_signal
+
+
+def test_exact_manifest_uses_owner_facing_canceled_status() -> None:
+    tasks = [
+        Record(uuid=f"cancel-{index}", kind="task", title=f"Task {index}")
+        for index in range(6)
+    ]
+    module = workspace(tasks)
+    current = [detail(module, task.id) for task in tasks]
+    changes = [
+        {
+            "id": current[0].id,
+            "if_revision": current[0].revision,
+            "status": "canceled",
+        }
+    ]
+    changes.extend(
+        {
+            "id": fact.id,
+            "if_revision": fact.revision,
+            "title": f"Renamed {index}",
+        }
+        for index, fact in enumerate(current[1:], start=1)
+    )
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {"intent_id": "canceled-status-manifest-001", "change": changes}
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    manifest = next(
+        section for section in prepared.sections if section.key == "manifest_1"
+    )
+    canceled = next(
+        signal for signal in manifest.signals if 'Task "Task 0"' in signal
+    )
+    assert "status open -> canceled" in canceled
+    assert "dropped" not in canceled
+
+
+def test_small_multi_item_change_gets_a_verified_reorganization_receipt() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    first = Record(uuid="first", kind="task", title="First", area_uuid=area.uuid)
+    second = Record(uuid="second", kind="task", title="Second", area_uuid=area.uuid)
+    module = workspace([area, first, second])
+    module._library.tags["focus"] = "Focus"  # noqa: SLF001
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "small-reorg-receipt-001",
+                "change": [
+                    {
+                        "id": first.id,
+                        "if_revision": detail(module, first.id).revision,
+                        "title": "Write first result",
+                    },
+                    {
+                        "id": second.id,
+                        "if_revision": detail(module, second.id).revision,
+                        "title": "Write second result",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert "Read-back verified 2 Task changes and 0 Project changes." in (
+        result.instruction
+    )
+    assert "Final Area order: Work." in result.instruction
+    assert "Final tag catalog: Focus." in result.instruction
+
+
 def test_new_area_settles_after_approval() -> None:
     module = workspace()
     scope_revision = system_scope(module)
@@ -3179,6 +3305,21 @@ def test_chained_area_reorder_uses_each_planned_anchor(step: int) -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
+    manifest = next(
+        section for section in prepared.sections if section.key == "manifest_1"
+    )
+    assert 'Create Area "Products" in Areas.' in manifest.signals
+    assert 'Area "Arbeit": title "Arbeit" -> "Job".' in manifest.signals
+    assert (
+        "Order in Areas: [Arbeit, Studium, Privat, Finanzen, Gesundheit, Systeme] "
+        "-> [Job, Products, Stack, Study, Money, Health, Private]."
+        in manifest.signals
+    )
+    assert (
+        "Tag catalog: [Anstehend, Besorgung, Büro, Privat, Waiting, Warten, Wichtig] "
+        "-> [Admin, Call, Errand, Focus, Waiting]."
+        in manifest.signals
+    )
     settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
 
     assert settled.status == "applied"
@@ -3206,6 +3347,107 @@ def test_chained_area_reorder_uses_each_planned_anchor(step: int) -> None:
     assert all(
         item.order is not None for item in settled.items if item.kind == "area"
     )
+
+
+@pytest.mark.parametrize("step", [1024, 1])
+@pytest.mark.parametrize("scope", ["project", "inbox"])
+def test_chained_task_reorder_preserves_the_existing_scope(
+    step: int, scope: str
+) -> None:
+    project = Record(uuid="project", kind="project", title="Prepare launch")
+    tasks = [
+        Record(
+            uuid=title.lower(),
+            kind="task",
+            title=title,
+            parent_uuid=project.uuid if scope == "project" else None,
+            inbox=scope == "inbox",
+            sort_index=index * step,
+        )
+        for index, title in enumerate(("A", "B", "C"), start=1)
+    ]
+    module = workspace([project, *tasks] if scope == "project" else tasks)
+    current = {task.title: detail(module, task.id) for task in tasks}
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"task-chain-order-{scope}-{step}",
+                "change": [
+                    {
+                        "id": current["B"].id,
+                        "if_revision": current["B"].revision,
+                        "after": None,
+                    },
+                    {
+                        "id": current["A"].id,
+                        "if_revision": current["A"].revision,
+                        "after": current["B"].id,
+                    },
+                    {
+                        "id": current["C"].id,
+                        "if_revision": current["C"].revision,
+                        "after": current["A"].id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert [
+        record.title
+        for record in sorted(
+            (record for record in tasks if record.is_open()),
+            key=lambda record: record.sort_index,
+        )
+    ] == ["B", "A", "C"]
+
+
+def test_chained_project_reorder_preserves_the_existing_area() -> None:
+    area = Record(uuid="area", kind="area", title="Products")
+    projects = [
+        Record(
+            uuid=title.lower(),
+            kind="project",
+            title=title,
+            area_uuid=area.uuid,
+            sort_index=index,
+        )
+        for index, title in enumerate(("A", "B", "C"), start=1)
+    ]
+    module = workspace([area, *projects])
+    current = {project.title: detail(module, project.id) for project in projects}
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "project-chain-order-area-dense",
+                "change": [
+                    {
+                        "id": current["B"].id,
+                        "if_revision": current["B"].revision,
+                        "after": None,
+                    },
+                    {
+                        "id": current["A"].id,
+                        "if_revision": current["A"].revision,
+                        "after": current["B"].id,
+                    },
+                    {
+                        "id": current["C"].id,
+                        "if_revision": current["C"].revision,
+                        "after": current["A"].id,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert [
+        record.title for record in sorted(projects, key=lambda record: record.sort_index)
+    ] == ["B", "A", "C"]
 
 
 def test_area_create_rejects_a_stale_system_scope_before_staging() -> None:
@@ -3265,6 +3507,56 @@ def test_area_removal_needs_system_scope_revision() -> None:
     assert settled.status == "applied"
     assert "old" not in module._library.records  # noqa: SLF001
     assert module._library.records["task"].area_uuid == "new"  # noqa: SLF001
+
+
+def test_area_merge_keeps_tag_cleanup_as_a_separate_mutation() -> None:
+    task = Record(
+        uuid="tagged-area-child",
+        kind="task",
+        title="Keep",
+        area_uuid="old",
+        tag_uuids=["focus"],
+    )
+    module = workspace(
+        [
+            Record(uuid="old", kind="area", title="Old"),
+            Record(uuid="new", kind="area", title="New"),
+            task,
+        ]
+    )
+    module._library.tags["focus"] = "Focus"  # noqa: SLF001
+    system = module.read(ReadCall(view="system"))
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+    old = detail(module, "area:old")
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-merge-delete-tag-001",
+                "scope_revision": system.scope_revision,
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:focus", "delete_permanently": True}
+                ],
+                "change": [
+                    {
+                        "id": "area:old",
+                        "if_revision": old.revision,
+                        "move_contents_to": "area:new",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    assert task.area_uuid == "new"
+    assert task.tag_uuids == []
+    assert "focus" not in module._library.tags  # noqa: SLF001
 
 
 def test_trash_needs_approval_and_tears_down_project_children() -> None:
@@ -3768,6 +4060,14 @@ def test_project_merge_accepts_local_area_project_task_batch() -> None:
 
     assert prepared.status == "needs_approval"
     assert prepared.plan is not None
+    manifest = next(
+        section for section in prepared.sections if section.key == "manifest_1"
+    )
+    assert manifest.signals[:3] == [
+        'Create Area "Work" in Areas.',
+        'Create Project "Launch" in Work.',
+        'Create Task "Ship" in Launch.',
+    ]
     applied = module.approve(ApproveCall(plan_id=prepared.plan.id))
 
     assert applied.status == "applied"
@@ -4324,6 +4624,131 @@ def test_clearing_missing_waiting_tag_does_not_create_one() -> None:
 
     assert result.status == "unchanged"
     assert module._library.tags == {}  # noqa: SLF001
+
+
+def test_waiting_true_replaces_a_deleted_localized_waiting_tag() -> None:
+    task = Record(
+        uuid="one", kind="task", title="Reply", tag_uuids=["warten"]
+    )
+    module = workspace([task])
+    module._library.tags["warten"] = "Warten"  # noqa: SLF001
+    current = detail(module, task.id)
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "replace-local-waiting-001",
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:warten", "delete_permanently": True}
+                ],
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "waiting": True,
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "applied"
+    assert set(module._library.tags.values()) == {"Waiting"}  # noqa: SLF001
+    waiting_uuid = next(iter(module._library.tags))  # noqa: SLF001
+    assert task.tag_uuids == [waiting_uuid]
+
+
+def test_tag_deletion_and_item_edit_settle_on_one_final_tag_state() -> None:
+    task = Record(
+        uuid="tagged-edit",
+        kind="task",
+        title="Bewerten",
+        tag_uuids=["wichtig", "buro"],
+    )
+    module = workspace([task])
+    module._library.tags.update(  # noqa: SLF001
+        {"wichtig": "Wichtig", "buro": "Büro"}
+    )
+    current = detail(module, task.id)
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "delete-tag-and-edit-item-001",
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:wichtig", "delete_permanently": True}
+                ],
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "title": "Write the keep-or-drop note",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "applied"
+    assert task.title == "Write the keep-or-drop note"
+    assert task.tag_uuids == ["buro"]
+    assert "wichtig" not in module._library.tags  # noqa: SLF001
+
+
+def test_multiple_tag_deletions_keep_the_latest_cleanup_before_an_item_edit() -> None:
+    task = Record(
+        uuid="multi-tagged-edit",
+        kind="task",
+        title="Bewerten",
+        tag_uuids=["first", "second", "keep"],
+    )
+    module = workspace([task])
+    module._library.tags.update(  # noqa: SLF001
+        {"first": "First", "second": "Second", "keep": "Keep"}
+    )
+    current = detail(module, task.id)
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "delete-two-tags-and-edit-item-001",
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:first", "delete_permanently": True},
+                    {"id": "tag:second", "delete_permanently": True},
+                ],
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "title": "Write the result",
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "applied"
+    assert task.title == "Write the result"
+    assert task.tag_uuids == ["keep"]
+    assert set(module._library.tags) == {"keep"}  # noqa: SLF001
 
 
 def test_unknown_cloud_outcome_never_reposts_after_state_appears() -> None:
@@ -6223,6 +6648,84 @@ def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
     assert "commit Continue" not in first.instruction
 
 
+def test_truncated_audit_cursor_stales_after_area_registry_changes() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    module = workspace(records)
+
+    first = module.read(ReadCall(view="audit", limit=10))
+    assert first.cursor is not None
+    module._library.records["new-area"] = Record(  # noqa: SLF001
+        uuid="new-area",
+        kind="area",
+        title="New Area",
+    )
+
+    continued = module.read(ReadCall(cursor=first.cursor, limit=10))
+
+    assert continued.status == "stale"
+    assert continued.next == "read"
+    assert continued.items == []
+
+
+def test_truncated_audit_cursor_stales_after_active_item_is_added() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    module = workspace(records)
+
+    first = module.read(ReadCall(view="audit", limit=10))
+    assert first.cursor is not None
+    module._library.records["new-task"] = Record(  # noqa: SLF001
+        uuid="new-task",
+        kind="task",
+        title="New Task",
+    )
+
+    continued = module.read(ReadCall(cursor=first.cursor, limit=10))
+
+    assert continued.status == "stale"
+    assert continued.next == "read"
+    assert continued.items == []
+
+
+def test_truncated_filtered_audit_continues_without_changes() -> None:
+    records = [
+        Record(
+            uuid=f"someday-{index:02d}",
+            kind="task",
+            title=f"Someday {index:02d}",
+            someday=True,
+        )
+        for index in range(25)
+    ]
+    records.extend(
+        Record(
+            uuid=f"inbox-{index:02d}",
+            kind="task",
+            title=f"Inbox {index:02d}",
+            inbox=True,
+        )
+        for index in range(5)
+    )
+    module = workspace(records)
+
+    first = module.read(
+        ReadCall(view="audit", signals_any=["someday"], limit=10)
+    )
+    assert first.cursor is not None
+
+    continued = module.read(ReadCall(cursor=first.cursor, limit=10))
+
+    assert continued.status == "ok"
+    assert continued.next == "read"
+    assert continued.cursor is not None
+    assert all("someday" in item.signals for item in continued.items)
+
+
 def test_truncated_audit_with_include_still_extends_the_same_context() -> None:
     records = [
         Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
@@ -6297,6 +6800,9 @@ def test_applied_receipt_names_every_purged_id() -> None:
     assert applied.status == "applied"
     assert len(applied.missing_ids) == 11
     assert set(applied.missing_ids) == {item.id for item in gone}
+    assert "Read-back verified 11 Task changes and 0 Project changes." in (
+        applied.instruction
+    )
 
 
 def test_logbook_defaults_to_the_last_fourteen_days() -> None:
@@ -6338,15 +6844,45 @@ def test_audit_view_lists_each_active_item_once() -> None:
         title="Buy milk",
         notes="semi",
         area_uuid=area.uuid,
+        tag_uuids=["errand"],
     )
     trashed = Record(uuid="old", kind="task", title="Old", trashed=True)
     module = workspace([area, project, task, trashed])
+    module._library.tags["errand"] = "Errand"  # noqa: SLF001
 
     result = module.read(ReadCall(view="audit", limit=40))
 
     assert result.status == "ok"
     assert [item.id for item in result.items] == [area.id, project.id, task.id]
     assert "has_notes" in result.items[2].signals
+    assert result.items[2].direct_tag_ids == ["tag:errand"]
+
+
+def test_complete_audit_scope_can_authorize_area_registry_changes() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    task = Record(uuid="report", kind="task", title="Write report", area_uuid=area.uuid)
+    inbox = Record(uuid="inbox", kind="task", title="Triage", inbox=True)
+    module = workspace([area, task, inbox])
+
+    audit = module.read(ReadCall(view="audit", limit=40))
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "audit-area-scope-001",
+                "context_id": audit.context.id,
+                "scope_revision": audit.scope_revision,
+                "change": [
+                    {
+                        "ref": audit.items[0].ref,
+                        "title": "Job",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.next == "approve"
 
 
 def test_diagnostics_view_exposes_inbox_hybrids() -> None:
@@ -6366,6 +6902,38 @@ def test_diagnostics_view_exposes_inbox_hybrids() -> None:
     assert result.status == "ok"
     assert [item.id for item in result.items] == [hybrid.id]
     assert "inbox_with_project" in result.items[0].signals
+
+
+def test_diagnostics_treats_a_project_area_on_its_child_as_inherited() -> None:
+    work = Record(uuid="work", kind="area", title="Work")
+    private = Record(uuid="private", kind="area", title="Private")
+    project = Record(
+        uuid="launch",
+        kind="project",
+        title="Launch",
+        area_uuid=work.uuid,
+    )
+    inherited = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        area_uuid=work.uuid,
+    )
+    conflicting = Record(
+        uuid="misfiled",
+        kind="task",
+        title="Misfiled",
+        parent_uuid=project.uuid,
+        area_uuid=private.uuid,
+    )
+    module = workspace([work, private, project, inherited, conflicting])
+
+    result = module.read(ReadCall(view="diagnostics"))
+
+    assert [item.id for item in result.items] == [conflicting.id]
+    assert "both_project_and_area" in result.items[0].signals
+    assert result.diagnostics[0].repair_kind == "owner_choice"
 
 
 def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None:
@@ -7481,11 +8049,9 @@ def test_tag_delete_plan_uses_tag_ids() -> None:
     assert result.status == "needs_approval"
     assert result.plan is not None
     assert any("Permanently delete tag: Focus" in line for line in result.plan.summary)
-    assert all(
-        not item_id.startswith("task:")
-        for section in result.sections
-        for item_id in section.item_ids
-    )
+    manifest = next(section for section in result.sections if section.key == "manifest_1")
+    assert manifest.item_ids == ["task:tagged"]
+    assert any("tags [Focus] -> []" in signal for signal in manifest.signals)
 
 
 def test_applied_receipt_echoes_placement() -> None:
@@ -7925,6 +8491,112 @@ def test_inbox_create_with_a_new_tag_keeps_the_capture_receipt() -> None:
     assert result.status == "applied"
     assert result.instruction == "Cloud read-back matched the requested state."
     assert result.tags[0].title == "Focus"
+
+
+def test_broad_item_only_reorganization_receipt_reports_final_registries() -> None:
+    areas = [
+        Record(uuid="products", kind="area", title="Products", sort_index=1024),
+        Record(uuid="stack", kind="area", title="Stack", sort_index=2048),
+    ]
+    tasks = [
+        Record(
+            uuid=f"task-{index}",
+            kind="task",
+            title=f"Aufgabe {index}",
+            area_uuid="products",
+            sort_index=index * 1024,
+        )
+        for index in range(1, 7)
+    ]
+    module = workspace([*areas, *tasks])
+    module._library.tags.update({"admin": "Admin", "call": "Call"})  # noqa: SLF001
+    current = [detail(module, task.id) for task in tasks]
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "broad-item-only-reorg-001",
+                "change": [
+                    {
+                        "id": item.id,
+                        "if_revision": item.revision,
+                        "title": f"Write result {index}",
+                    }
+                    for index, item in enumerate(current, start=1)
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "applied"
+    assert "Read-back verified 6 Task changes and 0 Project changes." in (
+        result.instruction
+    )
+    assert "Final Area order: Products, Stack." in result.instruction
+    assert "Final tag catalog: Admin, Call." in result.instruction
+    assert result.instruction.endswith("Report this result and stop.")
+
+
+def test_exact_manifest_names_someday_evening_and_anytime_changes() -> None:
+    tasks = [
+        Record(
+            uuid=f"task-{index}",
+            kind="task",
+            title=f"Task {index}",
+            someday=index == 2,
+            sort_index=index * 1024,
+        )
+        for index in range(6)
+    ]
+    module = workspace(tasks)
+    current = [detail(module, task.id) for task in tasks]
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "schedule-manifest-001",
+                "change": [
+                    {
+                        "id": current[0].id,
+                        "if_revision": current[0].revision,
+                        "start": "someday",
+                    },
+                    {
+                        "id": current[1].id,
+                        "if_revision": current[1].revision,
+                        "start": "evening",
+                    },
+                    {
+                        "id": current[2].id,
+                        "if_revision": current[2].revision,
+                        "start": None,
+                    },
+                    *[
+                        {
+                            "id": current[index].id,
+                            "if_revision": current[index].revision,
+                            "title": f"Write result {index}",
+                        }
+                        for index in range(3, 6)
+                    ],
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    manifest = next(
+        section for section in prepared.sections if section.key == "manifest_1"
+    )
+    assert any('Task "Task 0": when "Anytime" -> "Someday".' == signal for signal in manifest.signals)
+    assert any('when "Anytime" -> "Evening"' in signal for signal in manifest.signals)
+    assert any(
+        'when "Someday" -> "Anytime"' in signal for signal in manifest.signals
+    )
 
 
 def test_exact_into_wins_when_into_title_also_is_sent() -> None:

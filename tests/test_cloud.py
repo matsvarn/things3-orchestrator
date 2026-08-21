@@ -1907,6 +1907,58 @@ def test_existing_update_and_waiting_tag_share_one_envelope(tmp_path: Path) -> N
     assert client.committed[0].payload["tg"] == ["waiting"]
 
 
+def test_cloud_replaces_a_deleted_canonical_waiting_tag(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    task = Record(
+        uuid="refund",
+        kind="task",
+        title="Refund",
+        tag_uuids=["waiting"],
+        entity="Task6",
+    )
+    library.records[task.uuid] = task
+    library.tags["waiting"] = "Waiting"
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    current = module.read(ReadCall(ids=[task.id])).items[0]
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "cloud-replace-waiting-001",
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:waiting", "delete_permanently": True}
+                ],
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "waiting": True,
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    replacement_uuid = next(iter(library.tags))
+    assert replacement_uuid != "waiting"
+    assert library.tags[replacement_uuid] == "Waiting"
+    assert task.tag_uuids == [replacement_uuid]
+    replacement = next(
+        envelope
+        for envelope in client.committed
+        if envelope.kind == "Tag4" and envelope.action == 0
+    )
+    assert replacement.uuid == replacement_uuid
+
+
 def test_trash_is_a_recoverable_task_patch(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
@@ -2308,6 +2360,58 @@ def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
     assert client.committed[0].kind == "Tag4"
     assert client.committed[0].payload == {}
     assert "old" not in library.tags
+
+
+def test_cloud_area_merge_keeps_tag_cleanup_in_the_task_envelope(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    old = Record(uuid="old", kind="area", title="Old", entity="Area3")
+    new = Record(uuid="new", kind="area", title="New", entity="Area3")
+    task = Record(
+        uuid="tagged-area-child",
+        kind="task",
+        title="Keep",
+        area_uuid=old.uuid,
+        tag_uuids=["focus"],
+        entity="Task6",
+    )
+    library.records.update({item.uuid: item for item in [old, new, task]})
+    library.tags["focus"] = "Focus"
+    module = ThingsWorkspace(library, journal=MemoryJournal())
+    system = module.read(ReadCall(view="system"))
+    tags_revision = module.read(ReadCall(view="tags")).scope_revision
+    old_fact = module.read(ReadCall(ids=[old.id])).items[0]
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "cloud-area-merge-delete-tag-001",
+                "scope_revision": system.scope_revision,
+                "tags_revision": tags_revision,
+                "change_tags": [
+                    {"id": "tag:focus", "delete_permanently": True}
+                ],
+                "change": [
+                    {
+                        "id": old.id,
+                        "if_revision": old_fact.revision,
+                        "move_contents_to": new.id,
+                    }
+                ],
+            }
+        )
+    )
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+
+    settled = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    task_envelope = next(item for item in client.committed if item.uuid == task.uuid)
+    assert task_envelope.payload["ar"] == [new.uuid]
+    assert task_envelope.payload["tg"] == []
 
 
 def test_ensure_tag_preserves_parent_aliases_for_memory_and_cloud(

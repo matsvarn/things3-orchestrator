@@ -1,6 +1,6 @@
 ---
 name: things-orchestrator
-description: Before any Things tool, research a thread, changelog, dump, or mode. Use for capture, Today, Inbox, weekly review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3. Write only accepted work. One finish per title.
+description: Use for capture, review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3. For a full reorganization, the only pre-tool message is "I will audit the current system once, then show the complete change manifest before any write." After acceptance, use only "I will apply the accepted manifest in one commit, then report the verified receipt." Never mention skill loading. Research first only for a thread, changelog, dump, or mode. Write only accepted work. One finish per title.
 ---
 
 # Things
@@ -10,6 +10,8 @@ Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode
 Say what you found. Say what changed. Ask when the owner has to choose. During work, report only a material finding, blocker, or owner choice. Do not narrate tool loading, retries, or the next lookup.
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
+
+On every full-reorganization turn, including acceptance, read [review](references/review.md) before any Things call. Use one `change` object per item. Local create keys start with `$`. Trash a Project with `lifecycle=trash`; do not use the Area-only empty-removal field for a Project.
 
 Split finishes. Distill. Do not paste a brief, thread, or changelog. Do not write Decide, Think about, or Work on. For a required choice, name the visible result: `Review and mark the proposed rules`.
 

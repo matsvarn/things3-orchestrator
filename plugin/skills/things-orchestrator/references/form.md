@@ -25,7 +25,7 @@ Each source is `{label, location}` on the Task that uses it. Use a short label a
 
 5. Ongoing hat with no finish: Area.
 6. Not acting now: Someday. An active Task inside a Someday Project needs an explicit owner choice. Extract the Task or reactivate the Project. Keep the mixed state only when the owner asks for it.
-7. Someone else's ball: Waiting, `waiting=true`.
+7. Someone else's ball: Waiting is a tag, not a status. Use `waiting=true`.
 8. When: start date when work becomes available. Deadline for a real latest finish. Reminder only for a useful, time-specific start cue.
 9. Reusable filter: Tag.
 
