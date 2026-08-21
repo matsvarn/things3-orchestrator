@@ -327,7 +327,6 @@ class ReadCall(StrictModel):
         if self.cursor is not None and any(
             value is not None
             for value in (
-                self.view,
                 self.id,
                 self.find,
                 self.within,
@@ -335,7 +334,7 @@ class ReadCall(StrictModel):
                 self.to_date,
             )
         ):
-            raise ValueError("cursor cannot combine with another selector")
+            raise ValueError("cursor cannot combine with another item selector")
         if self.cursor is not None and (
             self.include or self.ids or self.signals_any or self.fields
         ):
@@ -1181,6 +1180,7 @@ def _local_create_order(payloads: Sequence[dict[str, Any]]) -> list[int]:
 
 class CommitCall(StrictModel):
     intent_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,120}$")
+    require_approval: Literal[True] | None = None
     context_id: str | None = Field(default=None, pattern=_CONTEXT_ID, max_length=124)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     tags_revision: str | None = Field(default=None, min_length=1, max_length=512)
@@ -1733,7 +1733,7 @@ class Result(StrictModel):
     tags: list[TagFact] = Field(default_factory=list, max_length=400)
     diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
-    layouts: list[LayoutFact] = Field(default_factory=list, max_length=10)
+    layouts: list[LayoutFact] = Field(default_factory=list, max_length=120)
     signals: list[str] = Field(default_factory=list, max_length=40)
     context: ContextFact | None = None
     recovery: RecoveryFact | None = None
@@ -2231,6 +2231,7 @@ COMMIT_IN: dict[str, Any] = {
     "required": ["intent_id"],
     "properties": {
         "intent_id": {"type": "string", "pattern": r"^[A-Za-z0-9._:-]{8,120}$"},
+        "require_approval": {"const": True},
         "context_id": {
             "type": "string",
             "pattern": _CONTEXT_ID,
@@ -2568,7 +2569,7 @@ RESULT_OUT: dict[str, Any] = {
         "tags": {"type": "array", "maxItems": 400, "items": _TAG_FACT},
         "diagnostics": {"type": "array", "maxItems": 40, "items": _DIAGNOSTIC},
         "sections": {"type": "array", "maxItems": 40, "items": _SECTION},
-        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
+        "layouts": {"type": "array", "maxItems": 120, "items": _LAYOUT},
         "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
         "context": _CONTEXT_FACT,
         "recovery": _RECOVERY,
@@ -2675,7 +2676,7 @@ READ_OUT: dict[str, Any] = {
             "maxItems": 40,
             "items": _SECTION,
         },
-        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
+        "layouts": {"type": "array", "maxItems": 120, "items": _LAYOUT},
         "signals": RESULT_OUT["properties"]["signals"],
         "context": _CONTEXT_FACT,
         "scope_revision": _STRING,
@@ -2724,15 +2725,15 @@ READ_DESC = (
     "purpose=change is one item; organize is the draft; include affected Projects in one read; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page. "
+    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page; the final page includes Project layouts. "
     "view=logbook defaults to 14 days. within=trash searches Trash. "
     "Follow next and instruction."
 )
 COMMIT_DESC = (
-    "Commit one batch; use intent_id. Source Project: document=source, outcome, finished_when, and one Task finish; use semantic context and sources, not note Markdown. Send it complete once. "
-    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none; groups stay contiguous. "
+    "Commit one batch with intent_id. Source Project: document=source, outcome, finished_when, and one Task finish. "
+    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none. "
     "Local create keys may appear in any order. Parent tags before children. "
-    "Risky work returns a plan. Ask one natural confirmation; keep control fields private. "
+    "Risky work returns a plan. For one owner-reviewed plan, set require_approval=true before asking. Ask one natural confirmation; keep control fields private. "
     "If lost or pending, retry the same intent_id and payload. Follow next and instruction."
 )
 APPROVE_DESC = (

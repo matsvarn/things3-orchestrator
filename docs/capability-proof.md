@@ -6,6 +6,9 @@ This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and
 read-back behavior agree.
 
+Human workflow runs are tracked separately in
+[`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
+
 - `Yes` means the layer has a passing proof.
 - `Partial` means the live probe covers only the named slice.
 - `Exercised` means the live probe used the approval plan and approval call.
@@ -91,10 +94,12 @@ a realistic isolated library. The library must include several Areas, active
 and Someday Projects, a thin Area, an empty Area, assigned tags, rich notes,
 and at least one known Project inconsistency.
 
-The release passes when the agent performs one complete audit and reads
-affected details in batches. It asks only material owner questions. It then
-shows one exact before-and-after manifest. The accepted reorganization uses
-one commit and at most one approval unless structured recovery requires a split.
+The release passes when the agent performs one complete audit. Its final page
+returns every complete Project layout in native order. The agent reads affected
+details in batches and asks only material owner questions. It then
+stages one exact server manifest with before-and-after values. That call writes
+nothing. One clear yes leads to one approval, with no second commit or question,
+unless structured recovery requires a split.
 
 The applied result must prove the final Area order, final tag catalog, mutation
 counts, and read-back. The agent must not claim success while a requested state

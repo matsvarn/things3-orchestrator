@@ -450,16 +450,24 @@ def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
     assert "do not mention loading a skill or research" in review
     assert "do not read research or form" in review
     assert "`limit=40`" in review
-    assert "audit replaces separate area and inbox scans" in review
-    assert "send `id=project:...` and `purpose=organize`" in review
-    assert "every other small affected project in `include`" in review
-    assert "omit `view` and `fields`" in review
-    assert "`include` cannot supply the root" in review
-    assert "do not reread the same project batch" in review
-    assert "do not call one read per project" in review
-    assert "one exact before-and-after manifest" in review
-    assert "one commit" in review
-    assert "at most one approval" in review
+    assert "complete audit replaces separate area, inbox" in review
+    assert "only item write context" in review
+    assert "every complete project layout in native order" in review
+    assert "detail reads are evidence, not a new write context" in review
+    assert "bound to the read that returned it" in review
+    assert "do not combine refs from different reads" in review
+    assert "do not reread each project" in review
+    assert "read the complete tag catalog once" in review
+    assert "returned instruction until that read is complete" in review
+    assert "keep its registry result for the final batch" in review
+    assert "supplies tag preconditions, not item refs" in review
+    assert "skip it when tags are not in scope" in review
+    assert "exact server manifest" in review
+    assert "`require_approval=true`" in review
+    assert "writes nothing" in review
+    assert "call `things_approve`" in review
+    assert "do not send the commit again" in review
+    assert "do not ask a second confirmation" in review
     assert "do not stage intermediate states" in review
     assert "permanent deletion, trash, cancellation, note replacement" in review
     assert "preserve notes unless" in review
