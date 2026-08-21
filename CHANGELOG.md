@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed
+
+- One complete audit now supplies the write context for Area, Inbox, Task, and
+  Project-layout changes in one full reorganization.
+- Context refs stay stable when a fresh read adds items. Refs remain bound to
+  the context that returned them.
+- Audit continuations accept the repeated audit view. A different view still
+  fails before data is returned.
+- `replace_rich_note` is harmless for plain Markdown and empty notes. Rich
+  notes still require explicit replacement approval.
+- Full reorganizations stage the server manifest before the owner confirms it.
+  One clear yes now leads to approval, not a second commit and question.
+- Created headings and Tasks now show their Project as the manifest home.
+
 ## 0.5.1 — 2026-08-21
 
 Full Things reorganizations now use one reviewable transaction and verify the

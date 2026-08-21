@@ -1370,6 +1370,15 @@ def test_broad_compact_project_plan_names_generated_headings() -> None:
     )
     assert len(headings.item_ids) == 4
     assert all(item_id.startswith("heading:") for item_id in headings.item_ids)
+    manifest = next(
+        section for section in result.sections if section.key == "manifest_1"
+    )
+    heading_signals = [
+        signal for signal in manifest.signals if signal.startswith("Create Heading")
+    ]
+    assert len(heading_signals) == 4
+    assert all("in Ship large release" in signal for signal in heading_signals)
+    assert all("in Anytime" not in signal for signal in heading_signals)
     checklist = next(
         section for section in result.sections if section.title == "Checklist edits"
     )
@@ -5025,6 +5034,41 @@ def test_rich_note_can_be_explicitly_replaced_after_one_approval() -> None:
     assert rich.notes_format == "markdown"
 
 
+@pytest.mark.parametrize("existing_notes", ["", "Plain Markdown"])
+def test_replace_rich_note_is_harmless_for_non_rich_notes(
+    existing_notes: str,
+) -> None:
+    task = Record(
+        uuid="plain-note",
+        kind="task",
+        title="Plain",
+        notes=existing_notes,
+        notes_format="markdown",
+    )
+    module = workspace([task])
+    current = detail(module, task.id)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"plain-note-replace-{len(existing_notes)}",
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": current.revision,
+                        "notes_markdown": "Updated Markdown",
+                        "replace_rich_note": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert task.notes == "Updated Markdown"
+    assert task.notes_format == "markdown"
+
+
 def test_repeat_mode_unit_and_interval_change_in_one_approved_plan() -> None:
     template = Record(
         uuid="repeat-full",
@@ -6724,6 +6768,48 @@ def test_truncated_filtered_audit_continues_without_changes() -> None:
     assert continued.next == "read"
     assert continued.cursor is not None
     assert all("someday" in item.signals for item in continued.items)
+
+
+def test_audit_cursor_accepts_the_repeated_view() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    module = workspace(records)
+    first = module.read(ReadCall(view="audit", limit=10))
+    assert first.cursor is not None
+
+    continued = module.read(
+        ReadCall.model_validate(
+            {"cursor": first.cursor, "view": "audit", "limit": 10}
+        )
+    )
+
+    assert continued.status == "ok"
+    assert continued.cursor is not None
+    assert [item.id for item in continued.items] == [
+        f"task:item-{index:02d}" for index in range(10, 20)
+    ]
+
+
+def test_audit_cursor_rejects_a_different_view() -> None:
+    records = [
+        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(25)
+    ]
+    module = workspace(records)
+    first = module.read(ReadCall(view="audit", limit=10))
+    assert first.cursor is not None
+
+    continued = module.read(
+        ReadCall.model_validate(
+            {"cursor": first.cursor, "view": "today", "limit": 10}
+        )
+    )
+
+    assert continued.status == "needs_input"
+    assert continued.next == "ask"
+    assert continued.items == []
 
 
 def test_truncated_audit_with_include_still_extends_the_same_context() -> None:

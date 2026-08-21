@@ -93,8 +93,9 @@ and at least one known Project inconsistency.
 
 The release passes when the agent performs one complete audit and reads
 affected details in batches. It asks only material owner questions. It then
-shows one exact before-and-after manifest. The accepted reorganization uses
-one commit and at most one approval unless structured recovery requires a split.
+stages one exact server manifest with before-and-after values. That call writes
+nothing. One clear yes leads to one approval, with no second commit or question,
+unless structured recovery requires a split.
 
 The applied result must prove the final Area order, final tag catalog, mutation
 counts, and read-back. The agent must not claim success while a requested state

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from base64 import b32encode
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, time, timedelta
@@ -392,7 +393,7 @@ class ThingsWorkspace:
         if failed is not None:
             return failed
         if call.cursor is not None:
-            return self._continue(call.cursor, call.limit)
+            return self._continue(call.cursor, call.limit, view=call.view)
 
         if call.purpose == "change":
             return self._context_change(call)
@@ -1177,22 +1178,15 @@ class ThingsWorkspace:
     def _context_refs(
         self, records: list[Record], *, existing: Sequence[ContextRef] = ()
     ) -> tuple[list[ContextRef], dict[str, str]]:
-        counters = {"task": 0, "project": 0, "area": 0, "heading": 0}
         prefixes = {"task": "t", "project": "p", "area": "a", "heading": "h"}
         by_id = {entry.exact_id: entry.ref for entry in existing}
-        for entry in existing:
-            kind = entry.exact_id.partition(":")[0]
-            if kind in counters:
-                counters[kind] = max(
-                    counters[kind], self._ref_index(entry.ref, prefixes[kind])
-                )
+        used = {entry.ref for entry in existing}
         refs: list[ContextRef] = []
         for record in records:
             if record.id in by_id:
                 continue
             kind = record.public_kind
-            counters[kind] += 1
-            short = f"{prefixes[kind]}{counters[kind]}"
+            short = self._stable_context_ref(record.id, prefixes[kind], used)
             refs.append(
                 ContextRef(
                     ref=short,
@@ -1201,14 +1195,18 @@ class ThingsWorkspace:
                 )
             )
             by_id[record.id] = short
+            used.add(short)
         return refs, by_id
 
     @staticmethod
-    def _ref_index(ref: str, prefix: str) -> int:
-        if not ref.startswith(prefix):
-            return 0
-        tail = ref[len(prefix) :]
-        return int(tail) if tail.isdigit() else 0
+    def _stable_context_ref(exact_id: str, prefix: str, used: set[str]) -> str:
+        for salt in range(16):
+            digest = sha256(f"{salt}:{exact_id}".encode()).digest()
+            token = b32encode(digest).decode("ascii").lower().rstrip("=")[:11]
+            candidate = f"{prefix}{token}"
+            if candidate not in used:
+                return candidate
+        raise ContextConflict("could not allocate a unique context reference")
 
     def _create_context(
         self,
@@ -1391,6 +1389,12 @@ class ThingsWorkspace:
                 seen=seen_count,
                 next_cursor=result.cursor,
             )
+        if view == "audit" and finished and not call.signals_any:
+            context = self._context_store.extend(
+                context.id,
+                account_id=self._account_id,
+                completeness=self._audit_project_completeness(context),
+            )
         if result.cursor is not None:
             saved = self._cursors.get(result.cursor)
             if saved is not None:
@@ -1419,6 +1423,28 @@ class ThingsWorkspace:
                 "instruction": instruction,
             }
         )
+
+    def _audit_project_completeness(
+        self, context: ReadContext
+    ) -> tuple[CompletenessFact, ...]:
+        exact_ids = {entry.exact_id for entry in context.refs}
+        facts: list[CompletenessFact] = []
+        for entry in context.refs:
+            project = self._exact_item(entry.exact_id)
+            if project is None or project.kind != "project" or project.heading:
+                continue
+            members = self._library.project(project.id)
+            if any(member.id not in exact_ids for member in members):
+                continue
+            facts.append(
+                CompletenessFact(
+                    scope=project.id,
+                    seen=len(members),
+                    total=len(members),
+                    complete=True,
+                )
+            )
+        return tuple(facts)
 
     @staticmethod
     def _public_context(context: ReadContext) -> ContextFact:
@@ -1612,7 +1638,7 @@ class ThingsWorkspace:
             state="prepared",
             plan=plan,
         )
-        if prepared.risky:
+        if prepared.risky or call.require_approval:
             return self._stage(record, prepared)
         claimed = self._journal.reserve(record)
         if claimed != record:
@@ -2061,9 +2087,11 @@ class ThingsWorkspace:
         result = self._follow_cursor(result)
         return self._bind_review_context(result, call, page_records)
 
-    def _continue(self, cursor: str, limit: int) -> Result:
+    def _continue(self, cursor: str, limit: int, *, view: View | None = None) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
         if detail_saved is not None:
+            if view is not None:
+                return self._needs_input("Use a detail cursor without view.")
             item = self._exact_item(detail_saved.item_id)
             if (
                 detail_saved.expires_at <= self._clock()
@@ -2080,6 +2108,8 @@ class ThingsWorkspace:
             )
         tag_saved = self._tag_cursors.get(cursor)
         if tag_saved is not None:
+            if view not in {None, "tags"}:
+                return self._needs_input("That cursor belongs to view tags.")
             if (
                 tag_saved.expires_at <= self._clock()
                 or self._tag_revision() != tag_saved.revision
@@ -2089,6 +2119,10 @@ class ThingsWorkspace:
         saved = self._cursors.get(cursor)
         if saved is None:
             return self._stale("That cursor is invalid. Start the read again.")
+        if view is not None and view != saved.view:
+            return self._needs_input(
+                f"That cursor belongs to view {saved.view or 'its original read'}."
+            )
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
         if saved.view == "diagnostics":
@@ -4082,12 +4116,6 @@ class ThingsWorkspace:
                     f"{item.title}'s rich formatting will be replaced with Markdown."
                 )
                 context.risky = True
-            elif change.replace_rich_note:
-                raise _Abort(
-                    self._rejected(
-                        "replace_rich_note is only for an existing rich note."
-                    )
-                )
             starts_repeating = (
                 item.recurrence.role == "none"
                 and change.repeat is not None
@@ -6012,6 +6040,8 @@ class ThingsWorkspace:
     ) -> str:
         if write.kind == "area":
             return "Areas"
+        if write.into_uuid is not None and write.into_kind is not None:
+            return self._home_title(write.into_kind, write.into_uuid, item_titles)
         if write.inbox:
             return "Inbox"
         if write.anytime:

@@ -1708,6 +1708,7 @@ def test_manual_schemas_are_flat_and_compact() -> None:
         assert schema["additionalProperties"] is False
 
     assert COMMIT_IN["required"] == ["intent_id"]
+    assert COMMIT_IN["properties"]["require_approval"] == {"const": True}
     assert APPROVE_IN["required"] == ["plan_id"]
     assert RESULT_OUT["required"] == ["next", "status", "instruction"]
     assert RESULT_OUT["properties"]["sections"]["items"]["properties"][
@@ -1721,7 +1722,7 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     # justified expansion.
     # Semantic Project and Task notes add explicit prose and source fields.
     assert discovery_chars < 20_000
-    assert discovery_chars - 13_406 < 6_400
+    assert discovery_chars - 13_406 < 6_450
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1732,6 +1733,7 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     assert len(COMMIT_DESC) < 550
     assert len(APPROVE_DESC) < 220
     assert "natural confirmation" in COMMIT_DESC
+    assert "require_approval=true" in COMMIT_DESC
     assert "private" in COMMIT_DESC
     assert "retry the same intent_id" in COMMIT_DESC
     assert "local neighborhood" in READ_DESC

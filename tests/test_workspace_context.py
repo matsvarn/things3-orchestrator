@@ -581,6 +581,151 @@ def test_living_project_change_is_the_writable_neighborhood() -> None:
     assert library.records[task.uuid].heading_uuid is None
 
 
+def test_complete_audit_context_can_apply_one_full_reorganization() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch",
+        kind="project",
+        title="Launch",
+        area_uuid=area.uuid,
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    child = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+    )
+    loose = Record(
+        uuid="invoice",
+        kind="task",
+        title="Invoice",
+        area_uuid=area.uuid,
+    )
+    inbox = Record(uuid="capture", kind="task", title="Capture", inbox=True)
+    workspace, library, _store = contextual_workspace(
+        [area, project, heading, child, loose, inbox]
+    )
+
+    audit = workspace.read(ReadCall(view="audit", limit=40))
+    assert audit.context is not None and audit.context.complete
+    refs = {item.id: item.ref for item in audit.items}
+
+    result = workspace.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "audit-full-reorg-001",
+                "context_id": audit.context.id,
+                "scope_revision": audit.scope_revision,
+                "change": [
+                    {"ref": refs[area.id], "title": "Job"},
+                    {"ref": refs[loose.id], "title": "Send invoice"},
+                    {"ref": refs[inbox.id], "start": "someday"},
+                ],
+                "organize": [
+                    {
+                        "project_ref": refs[project.id],
+                        "sections": [
+                            {
+                                "heading_ref": refs[heading.id],
+                                "task_refs": [refs[child.id]],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert result.plan is not None
+    assert result.recovery is None
+    assert library.records[area.uuid].title == "Work"
+    assert library.records[loose.uuid].title == "Invoice"
+    assert library.records[inbox.uuid].someday is False
+
+    settled = workspace.approve(ApproveCall(plan_id=result.plan.id))
+
+    assert settled.status == "applied"
+    assert library.records[area.uuid].title == "Job"
+    assert library.records[loose.uuid].title == "Send invoice"
+    assert library.records[inbox.uuid].someday is True
+    assert library.records[child.uuid].parent_uuid == project.uuid
+    assert library.records[child.uuid].heading_uuid == heading.uuid
+
+
+def test_short_refs_stay_stable_when_a_fresh_read_adds_includes() -> None:
+    project = Record(uuid="launch", kind="project", title="Launch")
+    child = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+    )
+    loose = Record(uuid="loose", kind="task", title="Loose")
+    extra = Record(uuid="extra", kind="task", title="Extra")
+    tokens = iter(["ctx_first000", "ctx_second00"])
+    store = MemoryContextStore(clock=lambda: NOW, token_factory=lambda: next(tokens))
+    workspace, _library, _store = contextual_workspace(
+        [project, child, loose, extra], store=store
+    )
+
+    first = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=project.id,
+            include=[{"id": loose.id}],
+        )
+    )
+    second = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=project.id,
+            include=[{"id": extra.id}, {"id": loose.id}],
+        )
+    )
+    first_refs = {item.id: item.ref for item in first.items}
+    second_refs = {item.id: item.ref for item in second.items}
+
+    assert second_refs[project.id] == first_refs[project.id]
+    assert second_refs[child.id] == first_refs[child.id]
+    assert second_refs[loose.id] == first_refs[loose.id]
+
+
+def test_contextual_commit_can_stage_one_owner_reviewed_plan() -> None:
+    task = Record(uuid="invoice", kind="task", title="Invoice")
+    workspace, library, _store = contextual_workspace([task])
+    audit = workspace.read(ReadCall(view="audit", limit=40))
+    assert audit.context is not None
+
+    prepared = workspace.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "owner-reviewed-plan-001",
+                "require_approval": True,
+                "context_id": audit.context.id,
+                "change": [{"ref": audit.items[0].ref, "title": "Send invoice"}],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    assert library.records[task.uuid].title == "Invoice"
+
+    settled = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert settled.status == "applied"
+    assert library.records[task.uuid].title == "Send invoice"
+
+
 def test_trashed_project_change_lists_contained_records() -> None:
     area = Record(uuid="work", kind="area", title="Work")
     project = Record(

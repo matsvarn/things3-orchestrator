@@ -235,6 +235,7 @@ class ContextualCommitCompiler:
             return CommitCall.model_validate(
                 {
                     "intent_id": call.intent_id,
+                    "require_approval": call.require_approval,
                     "scope_revision": call.scope_revision,
                     "tags_revision": call.tags_revision,
                     "ensure_tags": [

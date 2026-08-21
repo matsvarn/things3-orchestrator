@@ -327,7 +327,6 @@ class ReadCall(StrictModel):
         if self.cursor is not None and any(
             value is not None
             for value in (
-                self.view,
                 self.id,
                 self.find,
                 self.within,
@@ -335,7 +334,7 @@ class ReadCall(StrictModel):
                 self.to_date,
             )
         ):
-            raise ValueError("cursor cannot combine with another selector")
+            raise ValueError("cursor cannot combine with another item selector")
         if self.cursor is not None and (
             self.include or self.ids or self.signals_any or self.fields
         ):
@@ -1181,6 +1180,7 @@ def _local_create_order(payloads: Sequence[dict[str, Any]]) -> list[int]:
 
 class CommitCall(StrictModel):
     intent_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,120}$")
+    require_approval: Literal[True] | None = None
     context_id: str | None = Field(default=None, pattern=_CONTEXT_ID, max_length=124)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     tags_revision: str | None = Field(default=None, min_length=1, max_length=512)
@@ -2231,6 +2231,7 @@ COMMIT_IN: dict[str, Any] = {
     "required": ["intent_id"],
     "properties": {
         "intent_id": {"type": "string", "pattern": r"^[A-Za-z0-9._:-]{8,120}$"},
+        "require_approval": {"const": True},
         "context_id": {
             "type": "string",
             "pattern": _CONTEXT_ID,
@@ -2729,10 +2730,10 @@ READ_DESC = (
     "Follow next and instruction."
 )
 COMMIT_DESC = (
-    "Commit one batch; use intent_id. Source Project: document=source, outcome, finished_when, and one Task finish; use semantic context and sources, not note Markdown. Send it complete once. "
-    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none; groups stay contiguous. "
+    "Commit one batch with intent_id. Source Project: document=source, outcome, finished_when, and one Task finish. "
+    "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none. "
     "Local create keys may appear in any order. Parent tags before children. "
-    "Risky work returns a plan. Ask one natural confirmation; keep control fields private. "
+    "Risky work returns a plan. For one owner-reviewed plan, set require_approval=true before asking. Ask one natural confirmation; keep control fields private. "
     "If lost or pending, retry the same intent_id and payload. Follow next and instruction."
 )
 APPROVE_DESC = (
