@@ -53,6 +53,7 @@ def test_weekly_card_uses_section_counts_and_hides_plan_ids() -> None:
     assert "**Load:** 22:3 23:1" in text
     assert "If Inbox is still above zero" in text
     assert "Ask about any line." in text
+    assert len(text.splitlines()) <= 5
     assert "Get Clear" not in text
     assert "plan_" not in text
 
@@ -79,7 +80,20 @@ def test_approval_card_never_emits_plan_id() -> None:
     assert text.startswith("**Needs confirmation.**")
     assert "Old draft" in text
     assert "plan_" not in text
+    assert "If a line is wrong" in text
     assert "Ask about any line." in text
+    assert len(text.splitlines()) <= 5
+
+
+def test_needs_input_keeps_instruction() -> None:
+    text = owner_text(
+        Result(
+            next="ask",
+            status="needs_input",
+            instruction="Two items match. Which invoice?",
+        )
+    )
+    assert text == "Two items match. Which invoice?"
 
 
 def test_rejected_keeps_instruction_for_repair() -> None:
@@ -129,6 +143,7 @@ def test_today_card_lists_titles_by_bucket() -> None:
     assert "**Overdue:** Pay rent" in text
     assert "**Evening:** Water plants" in text
     assert "Ask about any line." in text
+    assert len(text.splitlines()) <= 5
 
 
 def test_owner_text_caps_length() -> None:

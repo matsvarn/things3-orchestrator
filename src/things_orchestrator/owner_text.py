@@ -97,20 +97,22 @@ def _today_card(result: Result) -> str:
         ("today", "Today"),
         ("waiting", "Waiting"),
     )
-    lines = [f"**Today.** {len(result.items)} item(s)."]
+    buckets: list[str] = []
     for signal, title in groups:
-        titles = [
-            item.title
-            for item in result.items
-            if signal in item.signals
-        ]
+        titles = [item.title for item in result.items if signal in item.signals]
         if titles:
-            shown = "; ".join(titles[:5])
-            extra = f" +{len(titles) - 5}" if len(titles) > 5 else ""
-            lines.append(f"**{title}:** {shown}{extra}")
-    lines.append("If something will not start today, move it off Today.")
-    lines.append("Ask about any line.")
-    return "\n".join(lines)
+            shown = "; ".join(titles[:3])
+            extra = f" +{len(titles) - 3}" if len(titles) > 3 else ""
+            buckets.append(f"**{title}:** {shown}{extra}")
+    middle = " · ".join(buckets) if buckets else "Nothing on Today."
+    return "\n".join(
+        [
+            f"**Today.** {len(result.items)} item(s).",
+            middle,
+            "If something will not start today, move it off Today.",
+            "Ask about any line.",
+        ]
+    )
 
 
 def _list_card(result: Result) -> str:
@@ -126,14 +128,18 @@ def _list_card(result: Result) -> str:
 
 def _approval_card(result: Result) -> str:
     assert result.plan is not None
-    lines = ["**Needs confirmation.**"]
-    for row in result.plan.summary[:5]:
-        lines.append(_PLAN_ID.sub("the plan", row))
-    omitted = len(result.plan.summary) - 5
+    rows = [_PLAN_ID.sub("the plan", row) for row in result.plan.summary[:3]]
+    omitted = len(result.plan.summary) - 3
     if omitted > 0:
-        lines.append(f"+{omitted} more change(s).")
-    lines.append("Ask about any line.")
-    return "\n".join(lines)
+        rows.append(f"+{omitted} more change(s).")
+    return "\n".join(
+        [
+            "**Needs confirmation.**",
+            " ".join(rows),
+            "If a line is wrong, say which change to drop.",
+            "Ask about any line.",
+        ]
+    )
 
 
 def _section_count(section: ReviewSection, label: str) -> int | None:
