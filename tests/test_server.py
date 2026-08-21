@@ -45,6 +45,8 @@ def test_discovery_is_three_flat_tools() -> None:
 def test_read_schema_accepts_empty_and_rejects_combined_looks() -> None:
     ReadCall.model_validate({})
     ReadCall.model_validate({"find": "passport"})
+    ReadCall.model_validate({"view": "weekly_review", "limit": 40})
+    assert "weekly_review" in READ_IN["properties"]["view"]["enum"]
     try:
         ReadCall.model_validate({"find": "x", "id": "task:1"})
     except Exception as error:

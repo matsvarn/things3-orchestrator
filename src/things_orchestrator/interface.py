@@ -42,6 +42,7 @@ View = Literal[
     "today",
     "inbox",
     "week",
+    "weekly_review",
     "system",
     "project",
     "area",
@@ -55,6 +56,22 @@ INCLUDE_LIMIT = 40
 BULK_ID_LIMIT = 10
 START_PATTERN = r"^(today|evening|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
 Purpose = Literal["review", "change", "organize", "recurrence"]
+WeeklyCategory = Literal[
+    "inbox",
+    "stale_start",
+    "overdue",
+    "today",
+    "upcoming",
+    "possible_duplicate",
+    "waiting",
+    "project_without_candidate_task",
+    "project_review",
+    "active_task_in_someday_project",
+    "open_task_with_finished_checklist",
+    "recently_completed_project",
+    "someday",
+    "weekly_candidate",
+]
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
@@ -294,6 +311,7 @@ class ReadCall(StrictModel):
     ids: list[str] = Field(default_factory=list, max_length=BULK_ID_LIMIT)
     fields: list[DetailField] = Field(default_factory=list, max_length=4)
     signals_any: list[str] = Field(default_factory=list, max_length=8)
+    category: WeeklyCategory | None = None
 
     @field_validator("from_date")
     @classmethod
@@ -336,10 +354,10 @@ class ReadCall(StrictModel):
         ):
             raise ValueError("cursor cannot combine with another item selector")
         if self.cursor is not None and (
-            self.include or self.ids or self.signals_any or self.fields
+            self.include or self.ids or self.signals_any or self.fields or self.category
         ):
             raise ValueError(
-                "cursor cannot combine with include, ids, fields, or signals_any"
+                "cursor cannot combine with include, ids, fields, signals_any, or category"
             )
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
@@ -357,8 +375,12 @@ class ReadCall(StrictModel):
             raise ValueError("ids needs at least one exact item ID")
         if self.signals_any and self.view != "audit":
             raise ValueError("signals_any needs view audit")
+        if any(not 1 <= len(signal) <= 80 for signal in self.signals_any):
+            raise ValueError("signals_any values need 1 to 80 characters")
         if _duplicates(self.signals_any):
             raise ValueError("signals_any cannot contain duplicates")
+        if self.category is not None and self.view != "weekly_review":
+            raise ValueError("category needs view weekly_review")
         if "fields" in self.model_fields_set and not self.ids:
             raise ValueError("fields needs ids")
         if _duplicates(self.fields):
@@ -1725,16 +1747,22 @@ class PlanFact(StrictModel):
         return checked
 
 
+class ReceiptItemFact(StrictModel):
+    id: str = Field(pattern=_ITEM_ID, max_length=512)
+    title: str = Field(min_length=1, max_length=1000)
+
+
 class Result(StrictModel):
     next: Next
     status: ResultStatus
     instruction: str = Field(min_length=1, max_length=1000)
     items: list[ItemFact] = Field(default_factory=list, max_length=120)
+    already_correct: list[ReceiptItemFact] = Field(default_factory=list, max_length=120)
     tags: list[TagFact] = Field(default_factory=list, max_length=400)
     diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
     layouts: list[LayoutFact] = Field(default_factory=list, max_length=120)
-    signals: list[str] = Field(default_factory=list, max_length=40)
+    signals: list[str] = Field(default_factory=list, max_length=160)
     context: ContextFact | None = None
     recovery: RecoveryFact | None = None
     plan: PlanFact | None = None
@@ -1862,6 +1890,7 @@ READ_IN: dict[str, Any] = {
                 "today",
                 "inbox",
                 "week",
+                "weekly_review",
                 "system",
                 "project",
                 "area",
@@ -1903,6 +1932,24 @@ READ_IN: dict[str, Any] = {
             "maxItems": 8,
             "uniqueItems": True,
             "items": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+        "category": {
+            "enum": [
+                "inbox",
+                "stale_start",
+                "overdue",
+                "today",
+                "upcoming",
+                "possible_duplicate",
+                "waiting",
+                "project_without_candidate_task",
+                "project_review",
+                "active_task_in_someday_project",
+                "open_task_with_finished_checklist",
+                "recently_completed_project",
+                "someday",
+                "weekly_candidate",
+            ]
         },
     },
 }
@@ -2540,6 +2587,16 @@ _PLAN: dict[str, Any] = {
     },
 }
 
+_RECEIPT_ITEM_FACT: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "title"],
+    "properties": {
+        "id": _EXACT_ITEM,
+        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+    },
+}
+
 RESULT_OUT: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -2566,11 +2623,16 @@ RESULT_OUT: dict[str, Any] = {
         },
         "instruction": {"type": "string", "minLength": 1, "maxLength": 1000},
         "items": {"type": "array", "maxItems": 120, "items": _ITEM_FACT},
+        "already_correct": {
+            "type": "array",
+            "maxItems": 120,
+            "items": _RECEIPT_ITEM_FACT,
+        },
         "tags": {"type": "array", "maxItems": 400, "items": _TAG_FACT},
         "diagnostics": {"type": "array", "maxItems": 40, "items": _DIAGNOSTIC},
         "sections": {"type": "array", "maxItems": 40, "items": _SECTION},
         "layouts": {"type": "array", "maxItems": 120, "items": _LAYOUT},
-        "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
+        "signals": {"type": "array", "maxItems": 160, "items": {"type": "string"}},
         "context": _CONTEXT_FACT,
         "recovery": _RECOVERY,
         "plan": _PLAN,
@@ -2720,12 +2782,11 @@ APPROVE_OUT: dict[str, Any] = {
 
 READ_DESC = (
     "Do not call for a clearly new create. Read Things; empty input reviews Today. "
-    "Select exactly one view, exact id, find, or ids. "
-    "A Project id is the writable neighborhood: Area, layout, hidden occupants, and Trash contents. "
-    "purpose=change is one item; organize is the draft; include affected Projects in one read; recurrence is one Task. "
-    "view=system is the Area and Project registry. "
-    "A change read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page; the final page includes Project layouts. "
+    "Select exactly one view, exact id, find, or ids. A Project id is the writable neighborhood. "
+    "purpose=change is one item; organize is the draft; recurrence is one Task. "
+    "A change read returns the local neighborhood. Include affected Projects in one read. Include a destination to move or merge. "
+    "view=weekly_review returns one exception-first GTD review; category opens one named list. view=system is the Area and Project registry. "
+    "Review pages return context refs. Use limit=40 for a full audit and continue truncated results. "
     "view=logbook defaults to 14 days. within=trash searches Trash. "
     "Follow next and instruction."
 )

@@ -1,14 +1,25 @@
 # Review
 
-Search named existing items and edit them. Create only when asked to add. Newly spoken loops during Empty your head or Be creative follow Capture, one Inbox Task each. If a living notes-hit hides a Trash title, search with `within=trash`. Do not copy revisions.
+Search named existing items and edit them. Create only when asked to add. Newly spoken loops during Empty your head or Be creative follow Capture, one Inbox Task each. If a living notes-hit hides a Trash title, search with `within=trash`. Do not copy revisions from a context-backed read.
 
 ## Weekly review
 
-Start with `view=diagnostics`, then `view=audit`. Then Inbox to zero, Today leftovers, `view=logbook`, `view=week`, Waiting, Projects with no useful next action, then a glance at Someday. `view=week` is Upcoming starts, not the calendar. Apple Calendar is not in Cloud. Ask them to scan it. Glance at Someday every couple of months.
+Use at most one opening sentence: `I will surface only what needs a decision and make Things current.` Do not describe setup or reads.
 
-Review lists return a context and short refs. A truncated page is not complete. Continue the same read to add the rest to that context, then commit keep, someday, trash, or file against it. `view=logbook` defaults to the last 14 days. Use `ids` for notes and checklists on up to 10 exact items. If `truncated_fields` is present, read that exact id.
+Read `view=weekly_review` with `limit=40`. The default is a compact exception index, not a full audit. Do not read Inbox, Today, week, Logbook, Projects, or Someday separately. Use `category` on this view to open only one named list: for example `stale_start`, `waiting`, `project_review`, `recently_completed_project`, `someday`, or `weekly_candidate`. A category read returns exact IDs and revisions, not a second write context. Continue only its returned continuation. When the default says it is summarized, open a category; do not repeat the same read. When notes or checklists change the choice, read selected exact IDs with those fields; this is evidence, not another write context. Weekly Review does not run diagnostics or redesign Areas.
 
-Separate what Things shows from what still needs judgment. Check Inbox, Projects without a useful next action, duplicates, waiting follow-ups, dates, Someday, harness leftovers (`test_residue`), and whether each Area is still one responsibility. Propose the smallest change set. Preserve all other work. Finish when every reviewed item and affected Area is accounted for, or one owner question remains.
+Follow the returned order.
+
+1. **Get Clear.** Name Inbox exceptions. Ask for uncaptured work. Use calendar access when available. Otherwise ask the owner to scan the past and upcoming calendars before any date proposal.
+2. **Get Current.** Scan the past and upcoming calendars first. Then resolve stale starts, overdue work, possible duplicates, Waiting follow-ups, finished checklists on open Tasks, and recent completed Projects that affect current choices. Open `category=project_review` and verify every active Project's first Task. A current next action is visible, physical, and startable. A topic such as `Plan launch` is not one. Show exact titles. Preserve all other work.
+3. **Get Creative.** Review Someday when the owner requests it or says it is due. Capture new loops only after the current lists are trusted.
+4. **Plan the week, if requested.** Open `category=weekly_candidate` only now. Show the returned Things day load and ask the owner to check calendar capacity. Schedule actions, not their parent Projects. Keep active work in Anytime unless the owner chooses a real begin day. `Monday` means start Monday, not merely important next week.
+
+Ask one narrow fork at a time. At most two tightly linked choices can share a question. Keep subjective priority choices neutral. Recommend one only from an owner-stated criterion, and name it. Use an open question when the client forces a default recommendation.
+
+For each stale date, offer only states that fit its meaning: active and startable in Anytime, inactive in Someday, a real future start day, complete, cancel, or Trash. Clearing a date is not parking it.
+
+After choices settle, use the default weekly context only when it contains all changed items. After any category or detail read, send the selected exact IDs with their latest returned revisions. This is the required non-context write path. Never mix short refs from different reads. Send one exact batch with `require_approval=true`. Show every affected title and old-to-new state in the server manifest. Ask once. After approval, report changed `items`, exact `already_correct`, truncation signals, any failure status, and whether the result was unchanged. Omit unrelated Areas and tags. If the server rejects an approval manifest as too large, follow its split boundary. Keep related Project structure together. Each exact batch gets one approval; never show or approve a truncated manifest.
 
 ## Full reorganization
 

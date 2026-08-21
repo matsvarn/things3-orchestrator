@@ -112,6 +112,27 @@ def test_read_purpose_selects_task_oriented_context() -> None:
         == "organize"
     )
     assert ReadCall.model_validate({"view": "system"}).view == "system"
+    assert (
+        ReadCall.model_validate({"view": "weekly_review"}).view
+        == "weekly_review"
+    )
+    assert ReadCall.model_validate(
+        {"view": "weekly_review", "category": "someday"}
+    ).category == "someday"
+    with pytest.raises(ValueError, match="signals_any needs view audit"):
+        ReadCall.model_validate(
+            {"view": "weekly_review", "signals_any": ["someday", "waiting"]}
+        )
+    with pytest.raises(ValidationError):
+        ReadCall.model_validate(
+            {"view": "weekly_review", "category": "not_a_category"}
+        )
+    assert ReadCall.model_validate(
+        {"view": "audit", "signals_any": ["someday", "waiting"]}
+    ).signals_any == ["someday", "waiting"]
+    for signal in ("", "x" * 81):
+        with pytest.raises(ValidationError):
+            ReadCall.model_validate({"view": "audit", "signals_any": [signal]})
     assert ReadCall.model_validate(
         {"purpose": "organize", "find": "Launch"}
     ).find == "Launch"
@@ -1720,9 +1741,10 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     # Review completeness, DiagnosticFact, named homes, and compact Project
     # headings and native checklists. Keep the contract compact, but allow that
     # justified expansion.
-    # Semantic Project and Task notes add explicit prose and source fields.
-    assert discovery_chars < 20_000
-    assert discovery_chars - 13_406 < 6_450
+    # Semantic notes, exact no-op receipts, and the weekly category vocabulary
+    # add explicit fields.
+    assert discovery_chars < 20_500
+    assert discovery_chars - 13_406 < 7_100
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas

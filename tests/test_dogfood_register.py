@@ -35,8 +35,8 @@ def test_dogfood_register_keeps_human_and_automated_proof_separate() -> None:
     text = DOGFOOD.read_text()
 
     assert "Automated tests and isolated model replays do not count" in text
-    assert "Weekly review — old contract completed" in text
-    assert "This is the next workflow" in text
+    assert "Weekly review — Round 1 complete" in text
+    assert "next first-round workflow is Routine capture" in text
     assert "Repeat required" in text
 
 

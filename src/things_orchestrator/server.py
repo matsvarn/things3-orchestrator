@@ -78,7 +78,7 @@ _FIELD_REPAIR = {
     "from": "view=logbook defaults to the last 14 days; send both from and to to override",
     "to": "view=logbook defaults to the last 14 days; send both from and to to override",
     "view": (
-        "Use one of today, inbox, week, system, project, area, audit, "
+        "Use one of today, inbox, week, weekly_review, system, project, area, audit, "
         "diagnostics, logbook, trash, or tags"
     ),
     "ids": "ids is a review-only list of 1 to 10 unique exact item IDs",

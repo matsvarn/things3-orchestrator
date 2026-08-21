@@ -45,17 +45,19 @@ order, a reorder retry, and unresolved Project quality.
 
 Status: **Repeat required** after the first-round fix program is complete.
 
-### Weekly review — old contract completed
+### Weekly review — Round 1 complete
 
-A live weekly review covered Inbox, Areas, Projects, and heading cleanup. The
-exact natural prompt was not recorded. It found copied revisions, shell-only
-Area reads, hidden heading occupants, incomplete pages, stale approvals, and
-misleading receipts.
+A live run used the recorded natural prompt against version 0.5.2. It found
+overlapping diagnostics, audit, Inbox, Today, Logbook, and week reads. The trace
+narrated each step before it reached a decision.
 
-The current review contract did not exist during that run.
+The run skipped the empty-head check, mixed cleanup with weekly planning, and
+recommended personal priorities without owner criteria. It converted "active
+next week" into Monday start dates. It also asked approval for six unnamed date
+changes and reported unchanged Areas and tags.
 
-Status: **Repeat required**. This is the next workflow after the current
-release.
+Status: **Repeat required** after the exception-first Weekly Review ships. The
+next first-round workflow is Routine capture and refusal gate.
 
 Use the recorded natural prompt in
 [`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt).
