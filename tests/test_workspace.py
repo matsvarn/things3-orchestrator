@@ -824,6 +824,26 @@ def test_empty_note_is_returned_only_on_the_first_detail_page() -> None:
     assert second.items[0].notes_markdown is None
 
 
+def test_detail_cursor_rejects_a_repeated_view() -> None:
+    task = Record(
+        uuid="task",
+        kind="task",
+        title="Paged detail",
+        notes="x" * 50_001,
+    )
+    module = workspace([task])
+
+    first = module.read(ReadCall(id=task.id))
+    assert first.cursor is not None
+    continued = module.read(
+        ReadCall.model_validate({"cursor": first.cursor, "view": "audit"})
+    )
+
+    assert continued.status == "needs_input"
+    assert continued.next == "ask"
+    assert continued.items == []
+
+
 def test_exact_detail_cursor_rejects_a_changed_inherited_tag() -> None:
     parent = Record(
         uuid="project",
@@ -975,7 +995,11 @@ def test_tag_catalog_pages_with_stable_opaque_cursors() -> None:
     module = ThingsWorkspace(library, clock=lambda: NOW)
 
     first = module.read(ReadCall(view="tags"))
-    second = module.read(ReadCall(cursor=first.cursor)) if first.cursor else None
+    second = (
+        module.read(ReadCall(cursor=first.cursor, view="tags"))
+        if first.cursor
+        else None
+    )
 
     assert [tag.id for tag in first.tags] == [f"tag:tag{index}" for index in range(20)]
     assert first.truncated is True

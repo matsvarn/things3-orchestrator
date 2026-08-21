@@ -6,6 +6,9 @@ This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and
 read-back behavior agree.
 
+Human workflow runs are tracked separately in
+[`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
+
 - `Yes` means the layer has a passing proof.
 - `Partial` means the live probe covers only the named slice.
 - `Exercised` means the live probe used the approval plan and approval call.

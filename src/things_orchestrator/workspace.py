@@ -326,7 +326,7 @@ class _ItemCursor:
     snapshot_revision: str
     public_scope_revision: str
     full: bool
-    view: str | None
+    view: View | None
     detail: tuple[str, ...]
     expires_at: datetime
     within: str | None = None
@@ -2037,7 +2037,7 @@ class ThingsWorkspace:
         *,
         full: bool,
         instruction: str,
-        view: str | None = None,
+        view: View | None = None,
         public_scope: str | None = None,
         result_signals: list[str] | None = None,
         extra_truncated: bool = False,
@@ -2117,8 +2117,8 @@ class ThingsWorkspace:
     def _continue(self, cursor: str, limit: int, *, view: View | None = None) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
         if detail_saved is not None:
-            if view is not None:
-                return self._needs_input("Use a detail cursor without view.")
+            if error := self._cursor_view_error(view, expected=None, repeatable=False):
+                return self._needs_input(error)
             item = self._exact_item(detail_saved.item_id)
             if (
                 detail_saved.expires_at <= self._clock()
@@ -2135,8 +2135,8 @@ class ThingsWorkspace:
             )
         tag_saved = self._tag_cursors.get(cursor)
         if tag_saved is not None:
-            if view not in {None, "tags"}:
-                return self._needs_input("That cursor belongs to view tags.")
+            if error := self._cursor_view_error(view, expected="tags"):
+                return self._needs_input(error)
             if (
                 tag_saved.expires_at <= self._clock()
                 or self._tag_revision() != tag_saved.revision
@@ -2146,10 +2146,8 @@ class ThingsWorkspace:
         saved = self._cursors.get(cursor)
         if saved is None:
             return self._stale("That cursor is invalid. Start the read again.")
-        if view is not None and view != saved.view:
-            return self._needs_input(
-                f"That cursor belongs to view {saved.view or 'its original read'}."
-            )
+        if error := self._cursor_view_error(view, expected=saved.view):
+            return self._needs_input(error)
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
         if saved.view == "diagnostics":
@@ -2239,6 +2237,19 @@ class ThingsWorkspace:
             existing_context_id=saved.context_id,
         )
 
+    @staticmethod
+    def _cursor_view_error(
+        requested: View | None,
+        *,
+        expected: View | None,
+        repeatable: bool = True,
+    ) -> str | None:
+        if requested is None or (repeatable and requested == expected):
+            return None
+        if expected is None:
+            return "Use this cursor without view."
+        return f"That cursor belongs to view {expected}."
+
     def _encode_cursor(
         self,
         ids: list[str],
@@ -2246,7 +2257,7 @@ class ThingsWorkspace:
         snapshot_revision: str,
         public_scope_revision: str,
         full: bool,
-        view: str | None,
+        view: View | None,
         detail: tuple[str, ...] = (),
         *,
         within: str | None = None,
@@ -2527,7 +2538,7 @@ class ThingsWorkspace:
         page_start: int,
         snapshot: str,
         scope: str,
-        view: str | None,
+        view: View | None,
         detail: tuple[str, ...] = DETAIL_FIELDS,
     ) -> Result:
         facts = list(result.items)

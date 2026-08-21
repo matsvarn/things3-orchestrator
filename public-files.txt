@@ -16,6 +16,7 @@ docs/adr/0005-one-project-read.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md
+docs/dogfood.md
 docs/host.md
 docs/maintainer.md
 docs/owner.md

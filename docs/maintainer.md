@@ -37,7 +37,8 @@ Keep one production server and one stable model Interface.
   `doctor --url` checks remote `/health`.
   Per-client wiring lives in `docs/clients.md`. A VPS plus a client is
   `docs/host.md`. Hermes is the default paste. Capability evidence is
-  `docs/capability-proof.md`.
+  `docs/capability-proof.md`. Human workflow coverage and rerun status are in
+  `docs/dogfood.md`.
 
 Do not add CRUD tools. Keep discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each
