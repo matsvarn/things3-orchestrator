@@ -452,7 +452,7 @@ def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
     assert "`limit=40`" in review
     assert "complete audit replaces separate area, inbox" in review
     assert "only write context" in review
-    assert "project completeness permits layout changes" in review
+    assert "every complete project layout in native order" in review
     assert "detail reads are evidence, not a new write context" in review
     assert "bound to the read that returned it" in review
     assert "do not combine refs from different reads" in review

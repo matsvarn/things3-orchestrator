@@ -103,6 +103,7 @@ def test_full_reorganization_prompt_is_a_release_behavior_gate() -> None:
     assert prompt.startswith("Help me fully reorganize my Things.")
     assert "full reorganization behavior gate" in proof
     assert "one complete audit" in proof
+    assert "every complete project layout in native order" in proof
     assert "one exact server manifest" in proof
     assert "one clear yes leads to one approval" in proof
     assert "no second commit or question" in proof

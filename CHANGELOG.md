@@ -5,7 +5,8 @@
 ### Fixed
 
 - One complete audit now supplies the write context for Area, Inbox, Task, and
-  Project-layout changes in one full reorganization.
+  Project-layout changes in one full reorganization. Its final page returns
+  every complete Project layout in native order.
 - Context refs stay stable when a fresh read adds items. Refs remain bound to
   the context that returned them.
 - Audit continuations accept the repeated audit view. A different view still

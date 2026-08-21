@@ -1733,7 +1733,7 @@ class Result(StrictModel):
     tags: list[TagFact] = Field(default_factory=list, max_length=400)
     diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
-    layouts: list[LayoutFact] = Field(default_factory=list, max_length=10)
+    layouts: list[LayoutFact] = Field(default_factory=list, max_length=120)
     signals: list[str] = Field(default_factory=list, max_length=40)
     context: ContextFact | None = None
     recovery: RecoveryFact | None = None
@@ -2569,7 +2569,7 @@ RESULT_OUT: dict[str, Any] = {
         "tags": {"type": "array", "maxItems": 400, "items": _TAG_FACT},
         "diagnostics": {"type": "array", "maxItems": 40, "items": _DIAGNOSTIC},
         "sections": {"type": "array", "maxItems": 40, "items": _SECTION},
-        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
+        "layouts": {"type": "array", "maxItems": 120, "items": _LAYOUT},
         "signals": {"type": "array", "maxItems": 40, "items": {"type": "string"}},
         "context": _CONTEXT_FACT,
         "recovery": _RECOVERY,
@@ -2676,7 +2676,7 @@ READ_OUT: dict[str, Any] = {
             "maxItems": 40,
             "items": _SECTION,
         },
-        "layouts": {"type": "array", "maxItems": 10, "items": _LAYOUT},
+        "layouts": {"type": "array", "maxItems": 120, "items": _LAYOUT},
         "signals": RESULT_OUT["properties"]["signals"],
         "context": _CONTEXT_FACT,
         "scope_revision": _STRING,
@@ -2725,7 +2725,7 @@ READ_DESC = (
     "purpose=change is one item; organize is the draft; include affected Projects in one read; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page. "
+    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page; the final page includes Project layouts. "
     "view=logbook defaults to 14 days. within=trash searches Trash. "
     "Follow next and instruction."
 )

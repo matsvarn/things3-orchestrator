@@ -1355,7 +1355,8 @@ class ThingsWorkspace:
         new_refs, by_id = self._context_refs(bound, existing=existing)
         scope = f"review:{call.within or call.id or view or call.find or 'page'}"
         seen_count = len(existing) + len(new_refs)
-        finished = not result.truncated
+        finished = result.cursor is None
+        layouts = result.layouts
         if existing_context_id is not None and existing:
             try:
                 context = self._context_store.extend(
@@ -1390,11 +1391,13 @@ class ThingsWorkspace:
                 next_cursor=result.cursor,
             )
         if view == "audit" and finished and not call.signals_any:
+            projects = self._complete_audit_projects(context)
             context = self._context_store.extend(
                 context.id,
                 account_id=self._account_id,
-                completeness=self._audit_project_completeness(context),
+                completeness=self._audit_project_completeness(projects),
             )
+            layouts = self._audit_project_layouts(projects, context)
         if result.cursor is not None:
             saved = self._cursors.get(result.cursor)
             if saved is not None:
@@ -1406,6 +1409,11 @@ class ThingsWorkspace:
             for item in result.items
         ]
         instruction = result.instruction
+        if view == "audit" and finished:
+            instruction = (
+                "This final audit page completes the active list and includes "
+                "each complete Project layout in native order."
+            )
         if items and "short ref" not in instruction.casefold():
             instruction = (
                 instruction.rstrip(".")
@@ -1419,16 +1427,17 @@ class ThingsWorkspace:
         return result.model_copy(
             update={
                 "items": items,
+                "layouts": layouts,
                 "context": self._public_context(context),
                 "instruction": instruction,
             }
         )
 
-    def _audit_project_completeness(
+    def _complete_audit_projects(
         self, context: ReadContext
-    ) -> tuple[CompletenessFact, ...]:
+    ) -> list[tuple[Record, list[Record]]]:
         exact_ids = {entry.exact_id for entry in context.refs}
-        facts: list[CompletenessFact] = []
+        projects: list[tuple[Record, list[Record]]] = []
         for entry in context.refs:
             project = self._exact_item(entry.exact_id)
             if project is None or project.kind != "project" or project.heading:
@@ -1436,15 +1445,33 @@ class ThingsWorkspace:
             members = self._library.project(project.id)
             if any(member.id not in exact_ids for member in members):
                 continue
-            facts.append(
-                CompletenessFact(
-                    scope=project.id,
-                    seen=len(members),
-                    total=len(members),
-                    complete=True,
-                )
+            projects.append((project, members))
+        return projects
+
+    @staticmethod
+    def _audit_project_completeness(
+        projects: Sequence[tuple[Record, list[Record]]],
+    ) -> tuple[CompletenessFact, ...]:
+        return tuple(
+            CompletenessFact(
+                scope=project.id,
+                seen=len(members),
+                total=len(members),
+                complete=True,
             )
-        return tuple(facts)
+            for project, members in projects
+        )
+
+    def _audit_project_layouts(
+        self,
+        projects: Sequence[tuple[Record, list[Record]]],
+        context: ReadContext,
+    ) -> list[LayoutFact]:
+        by_id = {entry.exact_id: entry.ref for entry in context.refs}
+        return [
+            self._project_layout(project, members, by_id)
+            for project, members in projects
+        ]
 
     @staticmethod
     def _public_context(context: ReadContext) -> ContextFact:

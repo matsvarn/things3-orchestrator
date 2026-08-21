@@ -91,8 +91,9 @@ a realistic isolated library. The library must include several Areas, active
 and Someday Projects, a thin Area, an empty Area, assigned tags, rich notes,
 and at least one known Project inconsistency.
 
-The release passes when the agent performs one complete audit and reads
-affected details in batches. It asks only material owner questions. It then
+The release passes when the agent performs one complete audit. Its final page
+returns every complete Project layout in native order. The agent reads affected
+details in batches and asks only material owner questions. It then
 stages one exact server manifest with before-and-after values. That call writes
 nothing. One clear yes leads to one approval, with no second commit or question,
 unless structured recovery requires a split.

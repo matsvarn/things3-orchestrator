@@ -1,6 +1,12 @@
 ---
 name: things-orchestrator
-description: Use for capture, review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3. For a full reorganization, the only opening is "I will audit the current system once, then show the complete change manifest before any write." Stage the exact server plan before asking. After a clear yes, approve that plan without a second commit or question. Never mention skill loading. Research first only for a thread, changelog, dump, or mode. Write only accepted work. One finish per title.
+description: >-
+  Use for capture, review, schedule, change, complete, cancel, delete, repeat, or organize in Things 3.
+  For a full reorganization, use the specified opening.
+  Opening: "I will audit the current system once, then show the complete change manifest before any write."
+  Stage the exact server plan before asking. After a clear yes, approve it without another commit or question.
+  Never mention skill loading. Research first only for a thread, changelog, dump, or mode.
+  Write only accepted work. One finish per title.
 ---
 
 # Things
