@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.5.3 — 2026-08-22
+
+Weekly Review now shows decisions first and keeps weekly planning explicit.
+
+### Added
+
+- `view=weekly_review` returns a bounded, revision-bound exception index for Get
+  Clear, Get Current, Get Creative, and optional weekly planning. `category`
+  opens one complete, exact category without loading Someday or planning work
+  by default or creating a competing write context.
+- A focused category exposes every active Project's first Task for semantic
+  next-action review. The default also surfaces stale starts, overdue work,
+  Waiting, possible duplicates, mixed Someday Projects, finished checklists on
+  open Tasks, and the daily seven-day load. Recent completed Projects and
+  planning actions stay in explicit categories. Inherited Waiting tags count.
+- The design evidence and source boundary are recorded in the public research
+  note.
+
+### Fixed
+
+- Weekly Review no longer starts with overlapping diagnostics, audit, Inbox,
+  Today, Logbook, week, Waiting, Project, and Someday reads.
+- The agent asks for uncaptured work and a calendar scan before date changes.
+  It keeps Get Clear, Get Current, Get Creative, and optional planning in order.
+- "Active next week" no longer becomes a Monday start date. Clearing a stale
+  date uses Anytime only when the work remains active and startable.
+- Subjective priority choices stay neutral unless the owner supplied a clear
+  criterion. Bulk confirmations name each affected title and state change.
+- Item-only batch receipts now report changed items and exact requested no-ops.
+  They omit unrelated Area and tag details and state any bounded omission.
+
 ## 0.5.2 — 2026-08-21
 
 Full reorganizations now use one complete audit context and one accepted

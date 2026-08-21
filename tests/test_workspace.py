@@ -3215,8 +3215,169 @@ def test_small_multi_item_change_gets_a_verified_reorganization_receipt() -> Non
     assert "Read-back verified 2 Task changes and 0 Project changes." in (
         result.instruction
     )
-    assert "Final Area order: Work." in result.instruction
-    assert "Final tag catalog: Focus." in result.instruction
+    assert [item.title for item in result.items] == [
+        "Write first result",
+        "Write second result",
+    ]
+    assert "items array reports changed Tasks and Projects" in result.instruction
+    assert "Final Area order" not in result.instruction
+    assert "Final tag catalog" not in result.instruction
+
+
+def test_mixed_change_receipt_separates_already_correct_items() -> None:
+    same = Record(uuid="same", kind="task", title="Keep this title")
+    changed = Record(uuid="changed", kind="task", title="Old title")
+    module = workspace([same, changed])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "mixed-no-op-receipt-001",
+                "change": [
+                    {
+                        "id": same.id,
+                        "if_revision": detail(module, same.id).revision,
+                        "title": "Keep this title",
+                    },
+                    {
+                        "id": changed.id,
+                        "if_revision": detail(module, changed.id).revision,
+                        "title": "New title",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    assert [item.id for item in result.items] == ["task:changed"]
+    assert [item.id for item in result.already_correct] == ["task:same"]
+    assert result.signals == []
+    assert "1 requested item(s) were already correct" in result.instruction
+
+
+def test_no_op_receipt_keeps_exact_ids_past_forty_and_duplicate_titles() -> None:
+    records = [
+        Record(uuid=f"same-{index}", kind="task", title="Same title")
+        for index in range(45)
+    ]
+    module = workspace(records)
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "many-no-op-receipt-001",
+                "change": [
+                    {
+                        "id": item.id,
+                        "if_revision": detail(module, item.id).revision,
+                        "title": item.title,
+                    }
+                    for item in records
+                ],
+            }
+        )
+    )
+
+    assert result.status == "unchanged"
+    assert [item.id for item in result.already_correct] == [
+        item.id for item in records
+    ]
+    assert [item.title for item in result.already_correct] == [
+        item.title for item in records
+    ]
+    assert result.signals == []
+    assert result.truncated is False
+
+
+def test_large_applied_receipt_reports_changed_item_truncation() -> None:
+    records = [
+        Record(uuid=f"existing-{index}", kind="task", title=f"Old {index}")
+        for index in range(120)
+    ]
+    module = workspace(records)
+
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "large-receipt-001",
+                "create": [
+                    {"kind": "task", "title": f"Created {index}"}
+                    for index in range(40)
+                ],
+                "change": [
+                    {
+                        "id": item.id,
+                        "if_revision": detail(module, item.id).revision,
+                        "title": f"New {index}",
+                    }
+                    for index, item in enumerate(records)
+                ],
+            }
+        )
+    )
+
+    assert prepared.status == "needs_approval"
+    assert prepared.plan is not None
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "applied"
+    assert len(result.items) == 120
+    assert result.signals == ["items_truncated:40"]
+    assert result.truncated is True
+
+
+def test_one_maximum_note_replacement_has_a_complete_approval_manifest() -> None:
+    task = Record(uuid="large-note", kind="task", title="Keep source notes")
+    module = workspace([task])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "one-large-note-manifest-001",
+                "require_approval": True,
+                "change": [
+                    {
+                        "id": task.id,
+                        "if_revision": detail(module, task.id).revision,
+                        "notes_markdown": "x" * 50_000,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    assert 1 < len(result.sections) <= 40
+    assert all(section.key.startswith("manifest_") for section in result.sections)
+
+
+def test_oversized_approval_manifest_requires_a_safe_split() -> None:
+    first = Record(uuid="large-note-1", kind="task", title="Keep first source")
+    second = Record(uuid="large-note-2", kind="task", title="Keep second source")
+    module = workspace([first, second])
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "two-large-notes-manifest-001",
+                "require_approval": True,
+                "change": [
+                    {
+                        "id": item.id,
+                        "if_revision": detail(module, item.id).revision,
+                        "notes_markdown": marker * 50_000,
+                    }
+                    for item, marker in ((first, "a"), (second, "b"))
+                ],
+            }
+        )
+    )
+
+    assert result.next == "revise"
+    assert result.status == "rejected"
+    assert "Split the request at a Project or note boundary" in result.instruction
+    assert result.plan is None
 
 
 def test_new_area_settles_after_approval() -> None:
@@ -8147,6 +8308,454 @@ def test_empty_week_does_not_use_find_copy() -> None:
     assert "find" not in result.instruction.casefold()
 
 
+def test_weekly_review_returns_one_exception_first_context() -> None:
+    healthy = Record(uuid="healthy", kind="project", title="Submit tax return")
+    healthy_action = Record(
+        uuid="healthy-action",
+        kind="task",
+        title="Download bank statement",
+        parent_uuid=healthy.uuid,
+    )
+    gap = Record(uuid="gap", kind="project", title="Renew office contract")
+    waiting_action = Record(
+        uuid="waiting-action",
+        kind="task",
+        title="Receive landlord reply",
+        parent_uuid=gap.uuid,
+        tag_uuids=["waiting"],
+    )
+    vague = Record(uuid="vague", kind="project", title="Launch new site")
+    vague_action = Record(
+        uuid="vague-action",
+        kind="task",
+        title="Plan launch",
+        parent_uuid=vague.uuid,
+    )
+    inherited_wait = Record(
+        uuid="inherited-wait",
+        kind="project",
+        title="Receive contract",
+        tag_uuids=["waiting"],
+    )
+    inherited_wait_action = Record(
+        uuid="inherited-wait-action",
+        kind="task",
+        title="Read contract reply",
+        parent_uuid=inherited_wait.uuid,
+    )
+    parked = Record(
+        uuid="parked",
+        kind="project",
+        title="Create workshop",
+        someday=True,
+    )
+    parked_active_task = Record(
+        uuid="parked-active",
+        kind="task",
+        title="Draft workshop outline",
+        parent_uuid=parked.uuid,
+    )
+    records = [
+        healthy,
+        healthy_action,
+        gap,
+        waiting_action,
+        vague,
+        vague_action,
+        inherited_wait,
+        inherited_wait_action,
+        parked,
+        parked_active_task,
+        Record(uuid="inbox", kind="task", title="Book dentist", inbox=True),
+        Record(
+            uuid="stale",
+            kind="task",
+            title="Correct invoice",
+            start=NOW.date() - timedelta(days=2),
+        ),
+        Record(
+            uuid="today",
+            kind="task",
+            title="Submit report",
+            start=NOW.date(),
+        ),
+        Record(
+            uuid="upcoming",
+            kind="task",
+            title="Call accountant",
+            start=NOW.date() + timedelta(days=3),
+        ),
+        Record(uuid="someday", kind="task", title="Learn pottery", someday=True),
+        Record(
+            uuid="finished-checklist",
+            kind="task",
+            title="Send application",
+            checklists=[ChecklistLine("row", "Attach file", status="done")],
+        ),
+        Record(uuid="duplicate-1", kind="task", title="Review contract"),
+        Record(uuid="duplicate-2", kind="task", title="Review contract"),
+        Record(
+            uuid="done-project",
+            kind="project",
+            title="Move from Cursor to Paper",
+            status="done",
+            completed_at=NOW - timedelta(days=5),
+        ),
+    ]
+    module = workspace(records)
+    module._library.tags["waiting"] = "Waiting"  # noqa: SLF001
+
+    result = module.read(ReadCall(view="weekly_review", limit=40))
+
+    assert result.status == "ok"
+    assert result.context is not None and result.context.complete
+    assert [section.key for section in result.sections] == [
+        "get_clear",
+        "get_current",
+        "get_creative",
+        "plan_week",
+    ]
+    by_id = {item.id: item for item in result.items}
+    assert "project:healthy" not in by_id
+    assert "task:healthy-action" not in by_id
+    assert "project:gap" in by_id
+    assert "project_without_candidate_task" in by_id["project:gap"].signals
+    assert "project_without_candidate_task" in by_id["project:vague"].signals
+    assert "project_without_candidate_task" in by_id["project:inherited-wait"].signals
+    assert "waiting" in by_id["task:inherited-wait-action"].signals
+    assert "stale_start" in by_id["task:stale"].signals
+    assert "upcoming" in by_id["task:upcoming"].signals
+    assert "task:someday" not in by_id
+    assert "possible_duplicate" in by_id["task:duplicate-1"].signals
+    assert "active_task_in_someday_project" in by_id["task:parked-active"].signals
+    assert "open_task_with_finished_checklist" in by_id["task:finished-checklist"].signals
+    assert "has_checklist" in by_id["task:finished-checklist"].signals
+    assert "project:done-project" not in by_id
+    current = next(section for section in result.sections if section.key == "get_current")
+    assert "project:healthy" not in current.item_ids
+    assert any("Active Projects: 4" in signal for signal in current.signals)
+    assert any(
+        "recently completed Projects available on request: 1" in signal
+        for signal in current.signals
+    )
+    assert result.signals == [
+        "capture_check_required",
+        "calendar_scan_required",
+        "weekly_planning_optional",
+    ]
+    plan = next(section for section in result.sections if section.key == "plan_week")
+    assert plan.item_ids == []
+    assert any(NOW.date().isoformat() in signal for signal in plan.signals)
+    assert "real begin day" in result.instruction
+
+    planning = module.read(
+        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
+    )
+    planning_ids = {item.id for item in planning.items}
+    assert "task:healthy-action" in planning_ids
+    assert "project:healthy" not in planning_ids
+    assert "task:vague-action" not in planning_ids
+    assert "exact IDs and current revisions" in planning.instruction
+    assert "send those exact IDs" in planning.instruction
+    assert "Open one named category" not in planning.instruction
+
+    recent = module.read(
+        ReadCall(
+            view="weekly_review",
+            category="recently_completed_project",
+            limit=40,
+        )
+    )
+    assert [item.id for item in recent.items] == ["project:done-project"]
+    assert recent.context is None
+
+    project_review = module.read(
+        ReadCall(view="weekly_review", category="project_review", limit=40)
+    )
+    review_ids = {item.id for item in project_review.items}
+    assert review_ids == {
+        "task:healthy-action",
+        "task:waiting-action",
+        "task:vague-action",
+        "task:inherited-wait-action",
+    }
+
+
+def test_weekly_review_category_pages_keep_exact_revisions() -> None:
+    records = [
+        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
+        for index in range(45)
+    ]
+    module = workspace(records)
+
+    page = module.read(
+        ReadCall(view="weekly_review", category="someday", limit=10)
+    )
+    assert page.context is None
+    seen = len(page.items)
+    assert all(item.revision is not None for item in page.items)
+    while page.cursor is not None:
+        page = module.read(
+            ReadCall(view="weekly_review", cursor=page.cursor, limit=10)
+        )
+        assert page.context is None
+        assert all(item.revision is not None for item in page.items)
+        seen += len(page.items)
+
+    assert seen == 45
+
+
+def test_weekly_review_default_is_bounded_and_summarized() -> None:
+    records = [
+        Record(uuid=f"gap-{index}", kind="project", title=f"Finish result {index}")
+        for index in range(80)
+    ]
+    module = workspace(records)
+
+    result = module.read(ReadCall(view="weekly_review", limit=40))
+
+    assert len(result.items) == 40
+    assert result.cursor is None
+    assert result.context is not None and result.context.complete
+    assert "weekly_review_summarized" in result.signals
+    assert "do not repeat the default read" in result.instruction
+    returned_ids = {item.id for item in result.items}
+    assert all(
+        item_id in returned_ids
+        for section in result.sections
+        for item_id in section.item_ids
+    )
+
+
+def test_weekly_review_default_balances_exception_categories() -> None:
+    records = [
+        Record(
+            uuid=f"stale-{index}",
+            kind="task",
+            title=f"Stale {index}",
+            start=NOW.date() - timedelta(days=1),
+        )
+        for index in range(60)
+    ]
+    records.append(Record(uuid="gap", kind="project", title="Ship release"))
+    module = workspace(records)
+
+    result = module.read(ReadCall(view="weekly_review", limit=40))
+
+    assert len(result.items) == 40
+    assert "project:gap" in {item.id for item in result.items}
+
+
+def test_weekly_review_filtered_cursor_is_bounded_and_membership_safe() -> None:
+    records = [
+        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
+        for index in range(125)
+    ]
+    module = workspace(records)
+
+    first = module.read(
+        ReadCall(view="weekly_review", category="someday", limit=40)
+    )
+    assert first.cursor is not None
+    module._library.records["later-124"].title = "Changed while paging"  # noqa: SLF001
+
+    stale = module.read(ReadCall(view="weekly_review", cursor=first.cursor, limit=40))
+
+    assert stale.status == "stale"
+
+
+def test_weekly_review_filtered_category_returns_every_row() -> None:
+    records = [
+        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
+        for index in range(125)
+    ]
+    module = workspace(records)
+
+    page = module.read(
+        ReadCall(view="weekly_review", category="someday", limit=40)
+    )
+    seen = len(page.items)
+    assert page.context is None
+    while page.cursor is not None:
+        page = module.read(
+            ReadCall(view="weekly_review", cursor=page.cursor, limit=40)
+        )
+        seen += len(page.items)
+        assert page.context is None
+
+    assert seen == 125
+
+
+def test_weekly_review_project_category_returns_all_projects() -> None:
+    records: list[Record] = []
+    for index in range(125):
+        project = Record(uuid=f"project-{index}", kind="project", title=f"Result {index}")
+        records.extend(
+            [
+                project,
+                Record(
+                    uuid=f"action-{index}",
+                    kind="task",
+                    title=f"Write result {index}",
+                    parent_uuid=project.uuid,
+                ),
+            ]
+        )
+    module = workspace(records)
+
+    page = module.read(
+        ReadCall(view="weekly_review", category="project_review", limit=40)
+    )
+    seen = len(page.items)
+    assert [section.key for section in page.sections] == ["get_current"]
+    while page.cursor is not None:
+        page = module.read(
+            ReadCall(view="weekly_review", cursor=page.cursor, limit=40)
+        )
+        seen += len(page.items)
+
+    assert seen == 125
+
+
+def test_weekly_review_uses_first_task_in_native_heading_order() -> None:
+    project = Record(uuid="project", kind="project", title="Ship product")
+    later_heading = Record(
+        uuid="later-heading",
+        kind="task",
+        title="Later",
+        heading=True,
+        parent_uuid=project.uuid,
+        sort_index=2048,
+    )
+    first_heading = Record(
+        uuid="first-heading",
+        kind="task",
+        title="First",
+        heading=True,
+        parent_uuid=project.uuid,
+        sort_index=1024,
+    )
+    records = [
+        project,
+        later_heading,
+        first_heading,
+        Record(
+            uuid="later-task",
+            kind="task",
+            title="Send release notes",
+            parent_uuid=project.uuid,
+            heading_uuid=later_heading.uuid,
+            sort_index=0,
+        ),
+        Record(
+            uuid="first-task",
+            kind="task",
+            title="Plan launch",
+            parent_uuid=project.uuid,
+            heading_uuid=first_heading.uuid,
+            sort_index=9999,
+        ),
+    ]
+    module = workspace(records)
+
+    default = module.read(ReadCall(view="weekly_review", limit=40))
+    review = module.read(
+        ReadCall(view="weekly_review", category="project_review", limit=40)
+    )
+    planning = module.read(
+        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
+    )
+
+    assert "project:project" in {item.id for item in default.items}
+    assert [item.id for item in review.items] == ["task:first-task"]
+    assert planning.items == []
+
+
+def test_weekly_review_does_not_skip_a_waiting_first_task() -> None:
+    project = Record(uuid="project", kind="project", title="Sign contract")
+    records = [
+        project,
+        Record(
+            uuid="waiting-first",
+            kind="task",
+            title="Receive legal reply",
+            parent_uuid=project.uuid,
+            tag_uuids=["waiting"],
+            sort_index=0,
+        ),
+        Record(
+            uuid="later-action",
+            kind="task",
+            title="Sign contract PDF",
+            parent_uuid=project.uuid,
+            sort_index=1024,
+        ),
+    ]
+    module = workspace(records)
+    module._library.tags["waiting"] = "Waiting"  # noqa: SLF001
+
+    review = module.read(
+        ReadCall(view="weekly_review", category="project_review", limit=40)
+    )
+    planning = module.read(
+        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
+    )
+
+    assert [item.id for item in review.items] == ["task:waiting-first"]
+    assert planning.items == []
+
+
+def test_weekly_review_cursor_depends_on_date_and_tag_catalog() -> None:
+    now = [NOW]
+    records = [
+        Record(
+            uuid=f"wait-{index}",
+            kind="task",
+            title=f"Wait {index}",
+            tag_uuids=["waiting"],
+        )
+        for index in range(45)
+    ]
+    library = MemoryLibrary(records)
+    library.tags["waiting"] = "Waiting"
+    module = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: now[0],
+    )
+
+    dated = module.read(
+        ReadCall(view="weekly_review", category="waiting", limit=20)
+    )
+    assert dated.cursor is not None
+    now[0] = NOW + timedelta(days=1)
+    assert module.read(
+        ReadCall(view="weekly_review", cursor=dated.cursor, limit=20)
+    ).status == "stale"
+
+    now[0] = NOW
+    tagged = module.read(
+        ReadCall(view="weekly_review", category="waiting", limit=20)
+    )
+    assert tagged.cursor is not None
+    library.tags["waiting"] = "Delegated"
+    assert module.read(
+        ReadCall(view="weekly_review", cursor=tagged.cursor, limit=20)
+    ).status == "stale"
+
+
+def test_weekly_planning_excludes_tonight_without_a_start_date() -> None:
+    module = workspace(
+        [Record(uuid="tonight", kind="task", title="Send note", tonight=True)]
+    )
+
+    result = module.read(
+        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
+    )
+
+    assert result.items == []
+
+
 def test_tag_delete_plan_uses_tag_ids() -> None:
     task = Record(uuid="tagged", kind="task", title="Ship", tag_uuids=["focus"])
     library = MemoryLibrary([task])
@@ -8612,7 +9221,7 @@ def test_inbox_create_with_a_new_tag_keeps_the_capture_receipt() -> None:
     assert result.tags[0].title == "Focus"
 
 
-def test_broad_item_only_reorganization_receipt_reports_final_registries() -> None:
+def test_broad_item_only_receipt_reports_changed_items_only() -> None:
     areas = [
         Record(uuid="products", kind="area", title="Products", sort_index=1024),
         Record(uuid="stack", kind="area", title="Stack", sort_index=2048),
@@ -8655,8 +9264,11 @@ def test_broad_item_only_reorganization_receipt_reports_final_registries() -> No
     assert "Read-back verified 6 Task changes and 0 Project changes." in (
         result.instruction
     )
-    assert "Final Area order: Products, Stack." in result.instruction
-    assert "Final tag catalog: Admin, Call." in result.instruction
+    assert [item.title for item in result.items] == [
+        f"Write result {index}" for index in range(1, 7)
+    ]
+    assert "Final Area order" not in result.instruction
+    assert "Final tag catalog" not in result.instruction
     assert result.instruction.endswith("Report this result and stop.")
 
 

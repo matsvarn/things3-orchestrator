@@ -87,6 +87,34 @@ durable public artifacts.
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
 
+### Weekly Review behavior gate
+
+Run the natural request in `tests/fixtures/weekly_review_owner_prompt.txt`
+against a realistic isolated library. It must contain Inbox work, stale and
+future starts, Waiting, possible duplicates, Someday work, one healthy active
+Project, and one active Project without an available next action.
+
+One `view=weekly_review` read must return Get Clear, Get Current, Get Creative,
+and optional weekly planning in one revision-bound context. Its default result
+contains at most 40 exception rows. Someday and planning actions stay closed.
+`category` opens one named list and pages its complete exact result
+without creating another write context. The result reports the active Project
+count. A focused `project_review` category exposes each active Project's first
+Task in native heading order for semantic next-action review.
+
+The agent asks for uncaptured work. It scans the past and upcoming calendars
+before Waiting and Project choices. Weekly planning first shows the Things load
+for each day and asks for calendar capacity. It keeps subjective priorities
+neutral. It does not translate "next week" into Monday. A write uses one exact
+server manifest and one owner confirmation. Its receipt identifies changed
+items and exact requested no-ops. It states any bounded omission and excludes
+unrelated Areas and tags.
+
+The public memory tests prove the bounded index, category continuation, Project
+coverage, inherited Waiting, checklist exceptions, stable pagination, date
+semantics, mixed Someday state, duplicate signals, and bounded receipts.
+A human rerun remains required in `docs/dogfood.md`.
+
 ### Full reorganization behavior gate
 
 Run the natural request in `tests/fixtures/full_reorg_owner_prompt.txt` against

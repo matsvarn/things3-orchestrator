@@ -200,7 +200,11 @@ def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
 
     for concept in ("inbox", "next action", "duplicates", "waiting", "someday", "area"):
         assert concept in review
-    assert "every reviewed item" in review
+    assert "view=weekly_review" in review
+    assert "get clear" in review
+    assert "get current" in review
+    assert "get creative" in review
+    assert "plan the week, if requested" in review
     assert "preserve all other work" in review
 
     for concept in ("direct", "sources", "uncertainty", "owner", "markdown", "tasks"):

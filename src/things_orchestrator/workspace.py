@@ -48,6 +48,7 @@ from .interface import (
     LayoutSectionFact,
     PlanFact,
     ReadCall,
+    ReceiptItemFact,
     RecoveryFact,
     RecurrenceFact,
     RecurrenceKind,
@@ -99,6 +100,7 @@ _TRUNCATION_SIGNALS = {
     "recurrence": "recurrence_links_truncated",
 }
 _CONTEXT_LIMIT = 120
+_WEEKLY_DEFAULT_LIMIT = 40
 _CHANGE_FIND_LIMIT = 40
 _NOTES_LIMIT = 50_000
 _TITLE_LIMIT = 1000
@@ -111,6 +113,7 @@ _REVIEW_CONTEXT_VIEWS = {
     "today",
     "inbox",
     "week",
+    "weekly_review",
     "area",
     "project",
     "audit",
@@ -132,6 +135,10 @@ _SEARCH_ARTICLES = frozenset({"a", "an", "the"})
 _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _FAKE_ACTION_ROW = re.compile(
     r"(?i)^\s*(decide|think about|work on|figure out|look into|adopt vs|assess)\b"
+)
+_NON_STARTABLE_ACTION_ROW = re.compile(
+    r"(?i)^\s*(audit|consider|decide|explore|figure out|handle|investigate|"
+    r"look into|plan|research|think about|work on)\b"
 )
 _JOINED_FINISHES = re.compile(
     r"(?i)^\s*(?P<first>adopt|audit|build|choose|collect|compare|create|draft|"
@@ -156,6 +163,16 @@ class _NormalizedSearchText:
 
     folded: str
     tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _WeeklyReviewSnapshot:
+    records: list[Record]
+    signals_by_id: dict[str, list[str]]
+    sections: list[ReviewSection]
+    result_signals: list[str]
+    membership_revision: str
+    summary_instruction: str = ""
 
 
 def _undistilled_create(entry: CreateEntry) -> str | None:
@@ -224,6 +241,7 @@ class _Prepared:
     summary: list[str]
     warnings: list[str]
     risky: bool
+    already_correct: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -235,6 +253,7 @@ class _PreparationContext:
     preconditions: dict[str, str]
     summary: list[str]
     warnings: list[str]
+    already_correct: list[str] = field(default_factory=list)
     project_heading_moves: dict[str, str] = field(default_factory=dict)
     allow_project_heading_moves: bool = False
     risky: bool = False
@@ -246,6 +265,7 @@ class _PreparationContext:
             summary=list(dict.fromkeys(self.summary))[:40],
             warnings=list(dict.fromkeys(self.warnings))[:40],
             risky=self.risky,
+            already_correct=list(dict.fromkeys(self.already_correct))[:120],
         )
 
 
@@ -516,6 +536,8 @@ class ThingsWorkspace:
 
         if view == "diagnostics":
             return self._diagnostics_page(call.limit, call=call)
+        if view == "weekly_review":
+            return self._weekly_review_page(call)
         if view == "project":
             container = call.within or call.id
             assert container is not None
@@ -620,6 +642,467 @@ class ThingsWorkspace:
             call,
             records,
             existing_context_id=existing_context_id,
+        )
+
+    def _weekly_review_page(
+        self,
+        call: ReadCall,
+        *,
+        offset: int = 0,
+        expected_ids: list[str] | None = None,
+        expected_snapshot: str | None = None,
+        expected_membership: str | None = None,
+        existing_context_id: str | None = None,
+    ) -> Result:
+        categories = [call.category] if call.category is not None else []
+        review = self._weekly_review_snapshot(categories)
+        ids = [record.id for record in review.records]
+        snapshot = self._scope_revision(review.records)
+        if expected_ids is not None and (
+            ids != expected_ids
+            or snapshot != expected_snapshot
+            or review.membership_revision != expected_membership
+        ):
+            return self._stale("That weekly review changed. Start the read again.")
+
+        limit = min(call.limit, _READ_LIMIT)
+        page_records = review.records[offset : offset + limit]
+        next_offset = offset + len(page_records)
+        cursor = None
+        if next_offset < len(review.records):
+            cursor = self._encode_cursor(
+                ids,
+                next_offset,
+                snapshot,
+                snapshot,
+                False,
+                "weekly_review",
+                signals_any=categories,
+                membership_revision=review.membership_revision,
+            )
+        facts = []
+        for record in page_records:
+            fact = self._fact(record, full=False)
+            facts.append(
+                fact.model_copy(
+                    update={
+                        "signals": list(
+                            dict.fromkeys(
+                                [*fact.signals, *review.signals_by_id[record.id]]
+                            )
+                        )
+                    }
+                )
+            )
+        sections = review.sections
+        if call.category is not None:
+            signal = call.category
+            section_key = (
+                "get_clear"
+                if signal == "inbox"
+                else "get_creative"
+                if signal == "someday"
+                else "plan_week"
+                if signal == "weekly_candidate"
+                else "get_current"
+            )
+            sections = [section for section in sections if section.key == section_key]
+        instruction = (
+            "This category returns exact IDs and current revisions. Continue its "
+            "cursor when present. For a change, send those exact IDs with the returned "
+            "revisions. Do not create a second write context."
+            if call.category is not None
+            else (
+                "This review contains the exceptions and choices for Get Clear, "
+                "Get Current, and Get Creative. Ask for uncaptured work and a "
+                "past-and-upcoming calendar scan before date changes. Open one "
+                "named category only when it needs a decision. Offer weekly planning "
+                "only after the review. A start date is a real begin day."
+                + (
+                    f" {review.summary_instruction}"
+                    if review.summary_instruction
+                    else ""
+                )
+            )
+        )
+        result = self._follow_cursor(
+            Result(
+                next="done",
+                status="ok",
+                instruction=instruction,
+                items=facts,
+                sections=sections if offset == 0 else [],
+                signals=review.result_signals if offset == 0 else [],
+                cursor=cursor,
+                truncated=cursor is not None,
+            )
+        )
+        if call.category is not None:
+            return result
+        return self._bind_review_context(
+            result,
+            call,
+            page_records,
+            existing_context_id=existing_context_id,
+        )
+
+    def _weekly_review_snapshot(
+        self, signals_any: Sequence[str] = ()
+    ) -> _WeeklyReviewSnapshot:
+        today = self._clock().date()
+        week_end = today + timedelta(days=6)
+        audit = self._library.audit()
+        waiting_tag = self._library.tag_uuid(self._library.waiting_tag())
+
+        inbox = [item for item in audit if item.inbox]
+        stale_starts = [
+            item for item in audit if item.start is not None and item.start < today
+        ]
+        overdue = [
+            item for item in audit if item.deadline is not None and item.deadline < today
+        ]
+        today_items = [
+            item
+            for item in audit
+            if item.start == today or item.deadline == today or item.tonight
+        ]
+        upcoming = [
+            item
+            for item in audit
+            if (
+                item.start is not None and today < item.start <= week_end
+            )
+            or (
+                item.deadline is not None and today < item.deadline <= week_end
+            )
+        ]
+        someday = [item for item in audit if item.someday and not item.heading]
+        by_title: dict[tuple[str, str], list[Record]] = {}
+        for item in audit:
+            if item.kind == "area" or item.heading:
+                continue
+            key = (item.kind, " ".join(item.title.casefold().split()))
+            by_title.setdefault(key, []).append(item)
+        possible_duplicates = [
+            item
+            for group in by_title.values()
+            if len(group) > 1
+            for item in group
+        ]
+
+        active_projects = [
+            item
+            for item in audit
+            if item.kind == "project"
+            and not item.heading
+            and not item.someday
+            and (item.start is None or item.start <= today)
+        ]
+        direct_tasks: dict[str, list[Record]] = {}
+        project_headings: dict[str, list[Record]] = {}
+        for item in audit:
+            if item.kind == "task" and not item.heading and item.parent_uuid is not None:
+                direct_tasks.setdefault(item.parent_uuid, []).append(item)
+            elif item.heading and item.parent_uuid is not None:
+                project_headings.setdefault(item.parent_uuid, []).append(item)
+
+        def project_tasks_in_native_order(project: Record) -> list[Record]:
+            tasks = direct_tasks.get(project.uuid, [])
+            ordered: list[Record] = []
+            for heading in sorted(
+                project_headings.get(project.uuid, []),
+                key=lambda item: (item.sort_index, item.uuid),
+            ):
+                ordered.extend(
+                    sorted(
+                        (task for task in tasks if task.heading_uuid == heading.uuid),
+                        key=lambda item: (item.sort_index, item.uuid),
+                    )
+                )
+            ordered.extend(
+                sorted(
+                    (task for task in tasks if task.heading_uuid is None),
+                    key=lambda item: (item.sort_index, item.uuid),
+                )
+            )
+            return ordered
+
+        def has_waiting_tag(item: Record) -> bool:
+            if waiting_tag is None:
+                return False
+            return waiting_tag in {
+                *item.tag_uuids,
+                *(tag for source in self._tag_sources(item) for tag in source.tag_uuids),
+            }
+
+        waiting = [item for item in audit if has_waiting_tag(item)]
+
+        def is_candidate_action(item: Record) -> bool:
+            if item.someday or (item.start is not None and item.start > today):
+                return False
+            if has_waiting_tag(item):
+                return False
+            return _NON_STARTABLE_ACTION_ROW.match(item.title) is None
+
+        first_project_tasks = {
+            project.uuid: tasks[0] if tasks else None
+            for project in active_projects
+            for tasks in [project_tasks_in_native_order(project)]
+        }
+        project_gaps = [
+            project
+            for project in active_projects
+            if (first := first_project_tasks[project.uuid]) is None
+            or not is_candidate_action(first)
+        ]
+        project_review: list[Record] = []
+        for project in active_projects:
+            project_review.append(first_project_tasks[project.uuid] or project)
+        plan_candidates: list[Record] = []
+        for project in active_projects:
+            first = first_project_tasks[project.uuid]
+            if (
+                first is not None
+                and is_candidate_action(first)
+                and first.start is None
+                and not first.tonight
+            ):
+                plan_candidates.append(first)
+        plan_candidates.extend(
+            item
+            for item in audit
+            if item.kind == "task"
+            and item.parent_uuid is None
+            and not item.inbox
+            and item.start is None
+            and not item.tonight
+            and is_candidate_action(item)
+        )
+        someday_project_ids = {
+            item.uuid for item in audit if item.kind == "project" and item.someday
+        }
+        active_tasks_in_someday = [
+            item
+            for item in audit
+            if item.kind == "task"
+            and item.parent_uuid in someday_project_ids
+            and not item.someday
+        ]
+
+        finished_checklists = [
+            item
+            for item in audit
+            if item.kind == "task"
+            and item.checklists
+            and all(row.status != "open" for row in item.checklists)
+        ]
+        completed_since = today - timedelta(days=_LOGBOOK_DAYS - 1)
+        recent_completed_projects = [
+            item
+            for item in self._library.records.values()
+            if item.kind == "project"
+            and item.status == "done"
+            and not item.trashed
+            and item.completed_at is not None
+            and completed_since
+            <= item.completed_at.astimezone(self._clock().tzinfo).date()
+            <= today
+        ]
+
+        signal_groups: list[tuple[str, list[Record]]] = [
+            ("inbox", inbox),
+            ("stale_start", stale_starts),
+            ("overdue", overdue),
+            ("today", today_items),
+            ("upcoming", upcoming),
+            ("possible_duplicate", possible_duplicates),
+            ("waiting", waiting),
+            ("project_without_candidate_task", project_gaps),
+            ("project_review", project_review),
+            ("active_task_in_someday_project", active_tasks_in_someday),
+            ("open_task_with_finished_checklist", finished_checklists),
+            ("recently_completed_project", recent_completed_projects),
+            ("someday", someday),
+            ("weekly_candidate", plan_candidates),
+        ]
+        signal_map: dict[str, list[str]] = {}
+        for signal, group in signal_groups:
+            for item in group:
+                signal_map.setdefault(item.id, []).append(signal)
+
+        selected: list[Record] = []
+        seen: set[str] = set()
+
+        def add(group: Sequence[Record], *, count: int, limit: int) -> None:
+            added = 0
+            if len(selected) >= limit:
+                return
+            for item in group:
+                if item.id in seen:
+                    continue
+                seen.add(item.id)
+                selected.append(item)
+                added += 1
+                if added >= count or len(selected) >= limit:
+                    return
+
+        default_signals = {
+            "inbox",
+            "stale_start",
+            "overdue",
+            "today",
+            "possible_duplicate",
+            "waiting",
+            "project_without_candidate_task",
+            "active_task_in_someday_project",
+            "open_task_with_finished_checklist",
+            "upcoming",
+        }
+        selected_signals = set(signals_any) or default_signals
+        result_limit = len(audit) + len(recent_completed_projects)
+        if not signals_any:
+            result_limit = _WEEKLY_DEFAULT_LIMIT
+        selected_groups = [
+            group
+            for signal, group in signal_groups
+            if signal in selected_signals and group
+        ]
+        if signals_any:
+            for group in selected_groups:
+                add(group, count=result_limit, limit=result_limit)
+                if len(selected) >= result_limit:
+                    break
+        elif selected_groups:
+            quota = max(1, result_limit // len(selected_groups))
+            for group in selected_groups:
+                add(group, count=quota, limit=result_limit)
+            for group in selected_groups:
+                add(group, count=result_limit, limit=result_limit)
+                if len(selected) >= result_limit:
+                    break
+        selected_ids = {item.id for item in selected}
+        requested_total = len(
+            {
+                item.id
+                for signal, group in signal_groups
+                if signal in selected_signals
+                for item in group
+            }
+        )
+        summarized = not signals_any and requested_total > len(selected)
+        summary_instruction = ""
+        if summarized:
+            summary_instruction = (
+                f"This index shows {len(selected)} of {requested_total} exception "
+                "rows. Open one named category; do not repeat the default read."
+            )
+
+        def section_ids(groups: Sequence[list[Record]]) -> list[str]:
+            values: list[str] = []
+            for group in groups:
+                for item in group:
+                    if item.id in selected_ids and item.id not in values:
+                        values.append(item.id)
+            return values[:40]
+
+        day_load = []
+        for offset in range(7):
+            day = today + timedelta(days=offset)
+            count = sum(
+                1
+                for item in audit
+                if item.start == day or item.deadline == day
+            )
+            day_load.append(f"{day.isoformat()}: {count}")
+
+        sections = [
+            ReviewSection(
+                key="get_clear",
+                title="Get Clear",
+                item_ids=section_ids([inbox]),
+                signals=[
+                    f"Inbox: {len(inbox)}.",
+                    "Ask for work that is not yet in Things.",
+                ],
+            ),
+            ReviewSection(
+                key="get_current",
+                title="Get Current",
+                item_ids=section_ids(
+                    [
+                        stale_starts,
+                        overdue,
+                        today_items,
+                        possible_duplicates,
+                        waiting,
+                        project_gaps,
+                        project_review,
+                        active_tasks_in_someday,
+                        finished_checklists,
+                        recent_completed_projects,
+                        upcoming,
+                    ]
+                ),
+                signals=[
+                    f"Active Projects: {len(active_projects)}; obvious candidate gaps: {len(project_gaps)}. Open category=project_review to verify each Project's first Task.",
+                    f"Stale starts: {len(stale_starts)}; overdue deadlines: {len(overdue)}; Waiting: {len(waiting)}.",
+                    f"Possible duplicate items: {len(possible_duplicates)}.",
+                    f"Active Tasks inside Someday Projects: {len(active_tasks_in_someday)}.",
+                    f"Open Tasks whose checklist is finished: {len(finished_checklists)}.",
+                    f"Seven-day window: {len(today_items)} today and {len(upcoming)} future-dated; recently completed Projects available on request: {len(recent_completed_projects)}.",
+                    "Scan the past and upcoming calendars before changing dates.",
+                ],
+            ),
+            ReviewSection(
+                key="get_creative",
+                title="Get Creative",
+                item_ids=section_ids([someday]),
+                signals=[
+                    f"Someday: {len(someday)}.",
+                    "Open category=someday only when the owner requests it or says it is due.",
+                ],
+            ),
+            ReviewSection(
+                key="plan_week",
+                title="Plan the week, if requested",
+                item_ids=section_ids(
+                    [
+                        plan_candidates
+                        if "weekly_candidate" in set(signals_any)
+                        else [],
+                    ]
+                ),
+                signals=[
+                    "This step is optional and starts after the review is current.",
+                    "Things load by day: " + "; ".join(day_load) + ".",
+                    "Calendar capacity is unknown until the owner scans the calendar.",
+                    "Keep an item in Anytime unless the owner chooses a real start day.",
+                    f"Planning actions: {len(plan_candidates)}. Open category=weekly_candidate only when the owner requests planning.",
+                ],
+            ),
+        ]
+        result_signals = [
+            "capture_check_required",
+            "calendar_scan_required",
+            "weekly_planning_optional",
+        ]
+        if summarized:
+            result_signals.append("weekly_review_summarized")
+        membership_records = [*audit, *recent_completed_projects]
+        membership_revision = "s_" + _digest(
+            [
+                self._scope_revision(membership_records),
+                today.isoformat(),
+                self._tag_revision(),
+            ]
+        )
+        return _WeeklyReviewSnapshot(
+            records=selected,
+            signals_by_id=signal_map,
+            sections=sections,
+            result_signals=result_signals,
+            membership_revision=membership_revision,
+            summary_instruction=summary_instruction,
         )
 
     def _diagnostic_title(self, conflict: Conflict) -> str:
@@ -1614,6 +2097,7 @@ class ThingsWorkspace:
             "within": call.within,
             "from": call.from_date,
             "to": call.to_date,
+            "category": call.category,
         }
         values.update({key: value for key, value in selectors.items() if value})
         if call.limit != 20:
@@ -1668,7 +2152,7 @@ class ThingsWorkspace:
             state="prepared",
             plan=plan,
         )
-        if prepared.risky or call.require_approval:
+        if prepared.writes and (prepared.risky or call.require_approval):
             return self._stage(record, prepared)
         claimed = self._journal.reserve(record)
         if claimed != record:
@@ -2163,6 +2647,22 @@ class ThingsWorkspace:
                 expected_ids=saved.ids,
                 expected_digest=saved.snapshot_revision,
                 call=continued,
+                existing_context_id=saved.context_id,
+            )
+        if saved.view == "weekly_review":
+            continued = ReadCall.model_validate(
+                {
+                    "view": "weekly_review",
+                    "limit": limit,
+                    "category": saved.signals_any[0] if saved.signals_any else None,
+                }
+            )
+            return self._weekly_review_page(
+                continued,
+                offset=saved.offset,
+                expected_ids=saved.ids,
+                expected_snapshot=saved.snapshot_revision,
+                expected_membership=saved.membership_revision,
                 existing_context_id=saved.context_id,
             )
         items = [
@@ -2865,7 +3365,11 @@ class ThingsWorkspace:
             ordinary.append("today")
         if item.tonight:
             ordinary.append("evening")
-        if waiting and waiting in item.tag_uuids:
+        effective_tags = {
+            *item.tag_uuids,
+            *(tag for source in self._tag_sources(item) for tag in source.tag_uuids),
+        }
+        if waiting and waiting in effective_tags:
             ordinary.append("waiting")
         if item.someday:
             ordinary.append("someday")
@@ -4172,6 +4676,7 @@ class ThingsWorkspace:
             if self._prepare_lifecycle_or_heading_change(item, change, context, call):
                 continue
             desired = desired or self._desired_item_change(item, change, local, context)
+            writes_before_change = len(writes)
             if any(
                 field in change.model_fields_set
                 for field in {
@@ -4190,7 +4695,8 @@ class ThingsWorkspace:
                     "heading_id",
                 }
             ):
-                writes.append(desired.update)
+                if not self._writes_match([desired.update]):
+                    writes.append(desired.update)
 
             self._prepare_checklist_change(item, desired.checklist, context)
 
@@ -4240,7 +4746,11 @@ class ThingsWorkspace:
                 warnings.append("One Area will be removed.")
                 context.risky = True
             else:
-                summary.append(f"Change {item.kind}: {item.title}")
+                if len(writes) == writes_before_change:
+                    context.already_correct.append(item.id)
+                    summary.append(f"Already correct: {item.title}")
+                else:
+                    summary.append(f"Change {item.kind}: {item.title}")
                 if item.kind == "area":
                     context.risky = True
                     warnings.append("The Area registry will change.")
@@ -4309,6 +4819,8 @@ class ThingsWorkspace:
         self, call: CommitCall, context: _PreparationContext
     ) -> None:
         """Apply batch-wide invariants after all planners finish."""
+        if not context.writes and context.already_correct:
+            return
         if not context.writes:
             raise _Abort(self._rejected("The request did not produce a change."))
         context.writes = self._collapse_companion_updates(context.writes)
@@ -5771,12 +6283,33 @@ class ThingsWorkspace:
             if ids
         ]
         manifest = self._manifest_review_sections(prepared.writes)
+        if len(manifest) > 40:
+            raise _Abort(
+                self._revise(
+                    "The exact approval manifest exceeds 40 sections. Split the "
+                    "request at a Project or note boundary. Keep related headings "
+                    "and Tasks together. Use a new intent_id for each batch. Do not "
+                    "ask the owner to approve an incomplete manifest."
+                )
+            )
         review = [*manifest, *category_review][:40]
         return summary, review
 
     def _manifest_review_sections(self, writes: list[Write]) -> list[ReviewSection]:
         pairs = self._manifest_pairs(writes)
-        chunks = [pairs[index : index + 40] for index in range(0, len(pairs), 40)]
+        chunks: list[list[tuple[str | None, str]]] = []
+        current: list[tuple[str | None, str]] = []
+        current_chars = 0
+        for pair in pairs:
+            pair_chars = len(pair[1])
+            if current and (len(current) >= 40 or current_chars + pair_chars > 1600):
+                chunks.append(current)
+                current = []
+                current_chars = 0
+            current.append(pair)
+            current_chars += pair_chars
+        if current:
+            chunks.append(current)
         sections: list[ReviewSection] = []
         for index, chunk in enumerate(chunks, start=1):
             suffix = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
@@ -5814,17 +6347,7 @@ class ThingsWorkspace:
             )
             if signal is None:
                 continue
-            pieces = [signal[index : index + 1500] for index in range(0, len(signal), 1500)]
-            if len(pieces) == 1:
-                pairs.append((item_id, pieces[0]))
-                continue
-            pairs.extend(
-                (
-                    item_id,
-                    f"{pieces[index - 1]}\n[part {index}/{len(pieces)}]",
-                )
-                for index in range(1, len(pieces) + 1)
-            )
+            pairs.append((item_id, signal))
 
         pairs.extend(self._order_manifest_pairs(writes, item_titles))
         if any(
@@ -5838,7 +6361,23 @@ class ThingsWorkspace:
             before = ", ".join(sorted(self._library.tags.values(), key=str.casefold))
             after = ", ".join(sorted(final_tags.values(), key=str.casefold))
             pairs.append((None, f"Tag catalog: [{before}] -> [{after}]."))
-        return pairs
+        bounded: list[tuple[str | None, str]] = []
+        for item_id, signal in pairs:
+            pieces = [
+                signal[index : index + 1500]
+                for index in range(0, len(signal), 1500)
+            ]
+            if len(pieces) == 1:
+                bounded.append((item_id, pieces[0]))
+                continue
+            bounded.extend(
+                (
+                    item_id,
+                    f"{pieces[index - 1]}\n[part {index}/{len(pieces)}]",
+                )
+                for index in range(1, len(pieces) + 1)
+            )
+        return bounded
 
     def _manifest_item_id(self, write: Write, item: Record | None) -> str | None:
         if write.action == "create_heading":
@@ -6116,7 +6655,10 @@ class ThingsWorkspace:
     def _stage(self, record: IntentRecord, prepared: _Prepared) -> Result:
         expires = self._clock() + timedelta(minutes=_PLAN_MINUTES)
         plan_id = f"plan_{token_urlsafe(12)}"
-        summary, sections = self._plan_manifest(prepared)
+        try:
+            summary, sections = self._plan_manifest(prepared)
+        except _Abort as error:
+            return error.result
         result = Result(
             next="approve",
             status="needs_approval",
@@ -6157,8 +6699,20 @@ class ThingsWorkspace:
 
     def _apply(self, record: IntentRecord) -> Result:
         writes = self._writes_from_plan(record.plan)
+        already_correct = self._already_correct_from_plan(record.plan)
+        if not writes and self._preconditions_changed(record.plan):
+            result = self._stale(
+                "Relevant Things data changed. Read it before a new intent."
+            )
+            self._save_result(record, "stale", result)
+            return result
         if self._writes_match(writes):
-            result = self._settled(record.intent_id, writes, unchanged=True)
+            result = self._settled(
+                record.intent_id,
+                writes,
+                unchanged=True,
+                already_correct=already_correct,
+            )
             self._save_result(record, "unchanged", result)
             return result
         if self._preconditions_changed(record.plan):
@@ -6216,7 +6770,12 @@ class ThingsWorkspace:
                 record,
                 "Cloud accepted the request, but read-back is still pending.",
             )
-        result = self._settled(record.intent_id, writes, unchanged=False)
+        result = self._settled(
+            record.intent_id,
+            writes,
+            unchanged=False,
+            already_correct=already_correct,
+        )
         self._save_result(record, "applied", result)
         return result
 
@@ -6232,8 +6791,20 @@ class ThingsWorkspace:
         if failed is not None:
             return failed
         writes = self._writes_from_plan(record.plan)
+        already_correct = self._already_correct_from_plan(record.plan)
+        if not writes and self._preconditions_changed(record.plan):
+            result = self._stale(
+                "Relevant Things data changed. Read it before a new intent."
+            )
+            self._save_result(record, "stale", result)
+            return result
         if self._writes_match(writes):
-            result = self._settled(record.intent_id, writes, unchanged=False)
+            result = self._settled(
+                record.intent_id,
+                writes,
+                unchanged=False,
+                already_correct=already_correct,
+            )
             self._save_result(record, "applied", result)
             return result
         if allow_apply:
@@ -6273,7 +6844,12 @@ class ThingsWorkspace:
         return result
 
     def _settled(
-        self, intent_id: str, writes: list[Write], *, unchanged: bool
+        self,
+        intent_id: str,
+        writes: list[Write],
+        *,
+        unchanged: bool,
+        already_correct: Sequence[str] = (),
     ) -> Result:
         ids: list[str] = []
         missing_ids: list[str] = []
@@ -6344,22 +6920,62 @@ class ThingsWorkspace:
             items.append(fact)
             if len(items) >= _CONTEXT_LIMIT:
                 break
-        missing_ids = list(dict.fromkeys(missing_ids))[:_CONTEXT_LIMIT]
+        changed_item_count = sum(
+            self._library.records.get(uuid) is not None for uuid in ids
+        )
+        changed_items_omitted = max(changed_item_count - len(items), 0)
+        all_missing_ids = list(dict.fromkeys(missing_ids))
+        missing_ids = all_missing_ids[:_CONTEXT_LIMIT]
+        missing_ids_omitted = max(len(all_missing_ids) - len(missing_ids), 0)
+        unchanged_items: list[ReceiptItemFact] = []
+        for public_id in already_correct:
+            item = self._exact_item(public_id)
+            if item is not None:
+                unchanged_items.append(
+                    ReceiptItemFact(id=item.id, title=_bounded_title(item.title))
+                )
+            if len(unchanged_items) >= _CONTEXT_LIMIT:
+                break
+        unchanged_items_omitted = max(len(already_correct) - len(unchanged_items), 0)
         created = {
             write.uuid
             for write in writes
             if write.action in {"create", "create_heading"}
         }
+        instruction = (
+            "The requested state was already true."
+            if unchanged
+            else self._applied_instruction(items, created, writes)
+        )
+        if already_correct:
+            instruction = (
+                instruction.rstrip(".")
+                + f". {len(already_correct)} requested item(s) were already correct; "
+                "already_correct identifies them by exact ID and title."
+            )
+        receipt_signals = []
+        if changed_items_omitted:
+            receipt_signals.append(f"items_truncated:{changed_items_omitted}")
+        if missing_ids_omitted:
+            receipt_signals.append(f"missing_ids_truncated:{missing_ids_omitted}")
+        if unchanged_items_omitted:
+            receipt_signals.append(
+                f"unchanged_items_truncated:{unchanged_items_omitted}"
+            )
+        receipt_truncated = any(
+            (changed_items_omitted, missing_ids_omitted, unchanged_items_omitted)
+        )
         return Result(
             next="done",
             status="unchanged" if unchanged else "applied",
-            instruction="The requested state was already true."
-            if unchanged
-            else self._applied_instruction(items, created, writes),
+            instruction=instruction,
             items=items,
+            already_correct=unchanged_items,
             tags=tags,
+            signals=receipt_signals,
             receipt=intent_id,
             missing_ids=missing_ids,
+            truncated=receipt_truncated,
         )
 
     def _applied_instruction(
@@ -6421,7 +7037,7 @@ class ThingsWorkspace:
                 detail += f' First Task: "{tasks[0].title}". Report this result and stop.'
                 if len(detail) <= 1000:
                     return detail
-        broad_instruction = self._broad_applied_instruction(writes)
+        broad_instruction = self._broad_applied_instruction(writes, items)
         if broad_instruction is not None:
             return broad_instruction
         named: list[tuple[str, str, bool]] = []
@@ -6453,7 +7069,9 @@ class ThingsWorkspace:
             return "Cloud read-back matched the requested state."
         return text
 
-    def _broad_applied_instruction(self, writes: list[Write]) -> str | None:
+    def _broad_applied_instruction(
+        self, writes: list[Write], items: list[ItemFact]
+    ) -> str | None:
         changed = {
             write.uuid
             for write in writes
@@ -6481,22 +7099,14 @@ class ThingsWorkspace:
                 if write.uuid in changed and write.kind == "project"
             }
         )
-        areas = sorted(
-            (
-                record
-                for record in self._library.records.values()
-                if record.kind == "area" and record.is_open()
-            ),
-            key=lambda record: (record.sort_index, record.uuid),
-        )
-        tags = sorted(set(self._library.tags.values()), key=str.casefold)
         instruction = (
             f"Read-back verified {tasks} Task changes and {projects} Project changes. "
-            f"Final Area order: {', '.join(area.title for area in areas)}. "
-            f"Final tag catalog: {', '.join(tags)}. "
-            "Report this result and stop."
+            "All requested changes now match Things Cloud. The items array reports "
+            "changed Tasks and Projects. A truncation signal gives any omitted count. "
+            "missing_ids confirms permanent removals. Report "
+            "this result and stop."
         )
-        return instruction if len(instruction) <= 1000 else None
+        return " ".join(instruction.split())
 
     def _registry_applied_instruction(self, writes: list[Write]) -> str | None:
         area_uuids = {
@@ -6564,11 +7174,17 @@ class ThingsWorkspace:
             "preconditions": dict(prepared.preconditions),
             "summary": list(prepared.summary),
             "warnings": list(prepared.warnings),
+            "already_correct": list(prepared.already_correct),
         }
 
     def _writes_from_plan(self, plan: JsonDict) -> list[Write]:
         raw = cast(list[object], plan.get("writes", []))
         return [_write_from_json(cast(dict[str, object], value)) for value in raw]
+
+    @staticmethod
+    def _already_correct_from_plan(plan: JsonDict) -> list[str]:
+        raw = cast(list[object], plan.get("already_correct", []))
+        return [str(value) for value in raw[:120]]
 
     def _preconditions_changed(self, plan: JsonDict) -> bool:
         raw = cast(dict[str, object], plan.get("preconditions", {}))

@@ -63,6 +63,10 @@ Repeats (create, change, or stop). Headings. Nested tags. Trash,
 restore, and permanent delete. Rich notes stay unless you approve a
 full Markdown replace.
 
+Weekly Review returns a compact exception index for Get Clear, Get Current,
+Get Creative, and optional weekly planning. Named categories open only when a
+decision needs their full list.
+
 It asks instead of guessing a date kind, a reminder time, a Project
 outcome, or a permanent-delete target.
 

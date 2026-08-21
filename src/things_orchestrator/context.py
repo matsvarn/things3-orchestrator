@@ -19,6 +19,7 @@ View = Literal[
     "today",
     "inbox",
     "week",
+    "weekly_review",
     "system",
     "project",
     "area",

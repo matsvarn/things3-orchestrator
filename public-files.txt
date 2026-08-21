@@ -22,6 +22,7 @@ docs/maintainer.md
 docs/owner.md
 docs/recovery.md
 docs/research/things3-cloud.md
+docs/research/weekly-review-best-practice.md
 docs/trust.md
 plugin/.codex-plugin/plugin.json
 plugin/.mcp.json
