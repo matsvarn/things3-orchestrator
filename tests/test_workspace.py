@@ -223,6 +223,25 @@ def test_find_includes_active_headings_for_rename() -> None:
     assert contextual.items[0].id == "heading:prep"
     assert review.status == "ok"
     assert review.items[0].id == "heading:prep"
+    assert review.instruction.startswith(
+        "These matches. Name one to open or stop."
+    )
+
+
+def test_create_tomorrow_starts_the_next_local_day() -> None:
+    module = workspace()
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "add-this-tomorrow-001",
+                "create": [{"title": "Call bank", "start": "tomorrow"}],
+            }
+        )
+    )
+    assert result.status == "applied"
+    item = next(iter(module._library.records.values()))  # noqa: SLF001
+    assert item.start == NOW.date() + timedelta(days=1)
+    assert item.tonight is False
 
 
 def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:

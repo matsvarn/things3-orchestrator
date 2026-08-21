@@ -492,7 +492,7 @@ class ThingsWorkspace:
                     matches,
                     call.limit,
                     full=False,
-                    instruction="Use an exact ID for a change.",
+                    instruction="These matches. Name one to open or stop.",
                     call=call,
                 )
             closed = [
@@ -520,7 +520,7 @@ class ThingsWorkspace:
                 matches,
                 call.limit,
                 full=False,
-                instruction="Use an exact ID for a change.",
+                instruction="No match. Try a shorter title token.",
                 call=call,
             )
 
@@ -5522,6 +5522,8 @@ class ThingsWorkspace:
             return self._clock().date(), False, False
         if value == "evening":
             return self._clock().date(), False, True
+        if value == "tomorrow":
+            return self._clock().date() + timedelta(days=1), False, False
         if value == "someday":
             return None, True, False
         return date.fromisoformat(value), False, False

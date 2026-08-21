@@ -77,6 +77,7 @@ def test_main_skill_keeps_winning_first_actions() -> None:
     assert "into_title" in lower
     assert "do not invent a second tag name" in lower
     assert "start=evening" in lower
+    assert "start=tomorrow" in lower
     assert "distinctive title token" in lower
     assert "do not create that project" in lower
     assert "do not start a permanent-delete plan" in lower

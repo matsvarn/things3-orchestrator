@@ -159,7 +159,7 @@ def test_validation_errors_prefer_field_specific_repair() -> None:
     assert start.is_error is False
     assert start.structured_content is not None
     assert start.structured_content["status"] == "rejected"
-    assert "today, evening, someday" in start.content[0].text
+    assert "today, evening, tomorrow, someday" in start.content[0].text
 
     unknown = asyncio.run(
         server.call_tool(
@@ -481,3 +481,24 @@ def test_mcp_returns_401_with_wrong_bearer() -> None:
     with TestClient(app) as client:
         response = client.post("/mcp", headers={"Authorization": "Bearer wrong"})
         assert response.status_code == 401
+
+
+def test_today_text_is_an_owner_card() -> None:
+    from datetime import date
+
+    task = Record(
+        uuid="today-task",
+        kind="task",
+        title="Pay rent",
+        start=date.today(),
+    )
+    server = ThingsMCPServer(ThingsWorkspace(MemoryLibrary([task])))
+    result = asyncio.run(server.call_tool("things_read", {}))
+    text = result.content[0].text
+    assert text.startswith("**Today.**")
+    assert "Pay rent" in text
+    assert "Ask about any line." in text
+    assert "Things result." not in text
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "ok"
+    assert result.structured_content["next"] == "done"

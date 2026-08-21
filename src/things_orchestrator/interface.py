@@ -54,7 +54,7 @@ View = Literal[
 ]
 INCLUDE_LIMIT = 40
 BULK_ID_LIMIT = 10
-START_PATTERN = r"^(today|evening|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
+START_PATTERN = r"^(today|evening|tomorrow|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
 Purpose = Literal["review", "change", "organize", "recurrence"]
 WeeklyCategory = Literal[
     "inbox",
@@ -129,7 +129,7 @@ def _validate_date(value: str | None, *, name: str) -> str | None:
 
 
 def _validate_start(value: str | None) -> str | None:
-    if value is None or value in {"today", "evening", "someday"}:
+    if value is None or value in {"today", "evening", "tomorrow", "someday"}:
         return value
     return _validate_date(value, name="start")
 
@@ -2795,7 +2795,7 @@ COMMIT_DESC = (
     "Project tasks keep order, accept checklists, and use heading_title on all Tasks or none. "
     "Local create keys may appear in any order. Parent tags before children. "
     "Risky work returns a plan. For one owner-reviewed plan, set require_approval=true before asking. Ask one natural confirmation; keep control fields private. "
-    "If lost or pending, retry the same intent_id and payload. Follow next and instruction."
+    "Prefer lifecycle=trash and repeat. If lost or pending, retry the same intent_id and payload. Follow next and instruction."
 )
 APPROVE_DESC = (
     "After a clear yes from the owner, apply that plan. Send only plan_id. Keep "
