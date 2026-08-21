@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.5.2 — 2026-08-21
+
+Full reorganizations now use one complete audit context and one accepted
+server manifest without repair reads or duplicate approval.
+
 ### Added
 
 - A public dogfood register now records completed human runs, found failures,
