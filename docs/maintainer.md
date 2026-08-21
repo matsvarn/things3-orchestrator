@@ -22,6 +22,8 @@ Keep one production server and one stable model Interface.
   It coalesces one envelope per UUID and verifies a forced Cloud pull.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
+- `owner_text.py` turns a Result into the owner-visible MCP text card.
+  `server.py` is the Adapter. Structured Result stays the model payload.
 - `server.py` exposes stdio and Streamable HTTP.
 - `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
   `print-config`, and `doctor`. Callers run `uv run things-orchestrator`

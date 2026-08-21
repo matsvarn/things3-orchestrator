@@ -46,6 +46,7 @@ from .interface import (
     Result,
     dump_result,
 )
+from .owner_text import owner_text
 from .workspace import ThingsWorkspace
 
 _LOGGER = logging.getLogger("things_orchestrator")
@@ -61,7 +62,7 @@ _FIELD_REPAIR = {
         "view=system read"
     ),
     "start": (
-        "start accepts today, evening, someday, an ISO date, or null to clear "
+        "start accepts today, evening, tomorrow, someday, an ISO date, or null to clear "
         "scheduling while keeping the current Project or Area"
     ),
     "today_after": (
@@ -339,9 +340,7 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
 def _domain_result(
     result: Result, *, full_items: bool, is_error: bool = False
 ) -> CallToolResult:
-    summary = f"Things result. status={result.status}; next={result.next}. {result.instruction}"
-    if len(summary) > 300:
-        summary = summary[:297] + "..."
+    summary = owner_text(result)
     structured = dump_result(result)
     if not full_items and "items" in structured:
         summary_fields = {

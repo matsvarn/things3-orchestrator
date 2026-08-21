@@ -1749,7 +1749,7 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
     )
-    assert wire_chars < 23_000
+    assert wire_chars < 23_100
     assert READ_DESC and COMMIT_DESC and APPROVE_DESC
     assert len(READ_DESC) < 700
     assert len(COMMIT_DESC) < 550
@@ -1758,6 +1758,7 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     assert "require_approval=true" in COMMIT_DESC
     assert "private" in COMMIT_DESC
     assert "retry the same intent_id" in COMMIT_DESC
+    assert "lifecycle=trash" in COMMIT_DESC
     assert "local neighborhood" in READ_DESC
     assert "include affected projects in one read" in READ_DESC.casefold()
     assert "limit=40" in READ_DESC
@@ -1827,6 +1828,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "pattern"
     ]
     assert "today" in start_pattern
+    assert "tomorrow" in start_pattern
     assert "someday" in start_pattern
     assert READ_IN["properties"]["ids"]["maxItems"] == 10
     assert READ_IN["properties"]["ids"]["minItems"] == 1

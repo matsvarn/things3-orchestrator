@@ -5,7 +5,10 @@ shared service or receive your Things Cloud credentials.
 
 The server uses an unofficial, reverse-engineered Things Cloud protocol.
 It impersonates a Things Mac client. Cultured Code can change or block
-this protocol, or disable an account.
+this protocol, or disable an account. On 2 April 2026 they listed
+Cloud-password tools as unsafe and said they have already seen data
+loss from unofficial methods. Self-hosting keeps the password off a
+third-party operator. It does not make the protocol official.
 
 This does not mean that all data stays on one machine.
 

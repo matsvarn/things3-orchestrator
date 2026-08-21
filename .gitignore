@@ -21,6 +21,7 @@ dist/
 /docs/research/things-best-practices.md
 /docs/research/things-agent-processes.md
 /docs/research/mcp-result-context.md
+/research/
 /.grok/
 
 # Cloud password, MCP bearer snippets, checkout pointer, sync cache.

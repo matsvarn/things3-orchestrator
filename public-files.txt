@@ -47,6 +47,7 @@ src/things_orchestrator/deployment.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
+src/things_orchestrator/owner_text.py
 src/things_orchestrator/preferences.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
@@ -65,6 +66,7 @@ tests/test_contextual.py
 tests/test_dogfood_register.py
 tests/test_interface.py
 tests/test_journal.py
+tests/test_owner_text.py
 tests/test_plugin_secret_scan.py
 tests/test_preferences.py
 tests/test_recurrence.py

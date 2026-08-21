@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.5.4 — 2026-08-22
+
+Owner-facing tool text now leads with a short card. Capture accepts tomorrow.
+
+### Added
+
+- MCP text content is an owner card: weekly counts, Today titles, or a confirmation
+  list. Plan IDs stay out of that text. The model still reads structured results.
+- `start=tomorrow` is a start date, the next local day.
+- Owner talk patterns for weekly review, logbook, promised names, and tomorrow.
+
+### Changed
+
+- Review search tells the agent the matches are for opening or stopping, not an
+  automatic change.
+- Commit descriptions prefer `lifecycle=trash` and the `repeat` object.
+- Trust and owner docs quote Cultured Code's 2 April 2026 warning about Cloud
+  credentials.
+
 ## 0.5.3 — 2026-08-22
 
 Weekly Review now shows decisions first and keeps weekly planning explicit.

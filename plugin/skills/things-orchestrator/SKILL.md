@@ -92,6 +92,7 @@ Then one commit on the returned item. Use the returned ref.
 First bind the existing item with one title token (`Sam`, `invoice`, `contract`).
 
 - Evening → `start=evening`. A start, not a clock time.
+- Tomorrow → `start=tomorrow`. A start, not a deadline.
 - Today → `start=today`.
 - A real latest finish → `deadline`.
 - A reminder needs a clock time. If none was given, ask. Do not invent one.

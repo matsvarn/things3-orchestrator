@@ -63,12 +63,22 @@ a permanent move: `uv run things-orchestrator login --timezone Europe/Berlin`.
 Never paste the Cloud password, an MCP bearer, or a config snippet into
 chat. If the model shows a tool id, answer in words.
 
+Cultured Code does not offer an official AI API. On 2 April 2026 they
+wrote that any tool which asks for Things Cloud credentials is unsafe,
+and that they have already seen data loss from unofficial methods. This
+server still uses those credentials on a host you run. Read
+[trust.md](trust.md) before you log in.
+
 ## Say
 
 - “Remind me to renew my passport.”
 - “Tag Buy milk Errands and put it in Kitchen.”
 - “Project: Replace kitchen tap. Next: Find three taps, Measure the sink, Order one.”
 - “What should I focus on in Things today?”
+- “Add this tomorrow.”
+- “What did I promise Alex?”
+- “Show the logbook for August.”
+- “Walk a weekly review.”
 - “Start the contract on 4 September.” / “Deadline for the contract is 4 September.”
 - “Remind me about the invoice at 09:00.”
 - “Make Water plants every two weeks.” / “Stop repeating Water plants but keep the task.”
@@ -79,12 +89,13 @@ chat. If the model shows a tool id, answer in words.
 - “Permanently delete Old draft from Trash.”
 - “Review my Areas and suggest one cleanup.”
 
-Evening is a start, not a reminder. “Remind me about X” updates existing
-X. It will not invent a second copy of the same title.
+Evening and tomorrow are starts, not reminders. “Remind me about X”
+updates existing X. It will not invent a second copy of the same title.
 
 ## It will ask, and change nothing, when
 
 - a date is not named as start or deadline
+- “weekend” or “next week” is not a real day
 - a reminder has no clock time
 - two items match
 - a new Project has no stated finish
