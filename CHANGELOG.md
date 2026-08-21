@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- A public dogfood register now records completed human runs, found failures,
+  the first-round workflow queue, and the later regression round.
+
 ### Fixed
 
 - One complete audit now supplies the write context for Area, Inbox, Task, and

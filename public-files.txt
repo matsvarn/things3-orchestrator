@@ -54,6 +54,7 @@ src/things_orchestrator/workspace.py
 tests/__init__.py
 tests/fixtures/full_reorg_owner_prompt.txt
 tests/fixtures/mats_mode_owner_prompt.txt
+tests/fixtures/weekly_review_owner_prompt.txt
 tests/test_capability_proof.py
 tests/test_cli.py
 tests/test_cloud.py

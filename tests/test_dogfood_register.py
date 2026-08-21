@@ -2,6 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOGFOOD = ROOT / "docs" / "dogfood.md"
+WEEKLY_REVIEW_PROMPT = ROOT / "tests" / "fixtures" / "weekly_review_owner_prompt.txt"
 
 
 def test_dogfood_register_covers_each_owner_workflow() -> None:
@@ -37,3 +38,12 @@ def test_dogfood_register_keeps_human_and_automated_proof_separate() -> None:
     assert "Weekly review — old contract completed" in text
     assert "This is the next workflow" in text
     assert "Repeat required" in text
+
+
+def test_next_dogfood_prompt_stays_natural() -> None:
+    prompt = WEEKLY_REVIEW_PROMPT.read_text().strip()
+
+    assert "weekly review" in prompt.casefold()
+    assert "things_read" not in prompt
+    assert "view=" not in prompt
+    assert "approval" not in prompt.casefold()

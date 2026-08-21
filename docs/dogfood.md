@@ -57,6 +57,10 @@ The current review contract did not exist during that run.
 Status: **Repeat required**. This is the next workflow after the current
 release.
 
+Use the recorded natural prompt in
+[`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt).
+Do not add tool or form instructions before the run.
+
 ## First-round queue
 
 Run these workflows once before the regression round. Keep each prompt natural.
@@ -97,4 +101,3 @@ register against the then-current release. Use changed owner data and natural
 paraphrases. A workflow passes only when its trace is concise, its writes match
 one accepted intent, Cloud read-back is true, and the Things result works
 without the chat.
-
