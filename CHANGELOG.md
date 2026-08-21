@@ -20,6 +20,8 @@
   notes still require explicit replacement approval.
 - Full reorganizations stage the server manifest before the owner confirms it.
   One clear yes now leads to approval, not a second commit and question.
+- Tag changes in a full reorganization now use one complete tag-catalog read
+  and its registry revision without replacing the audit write context.
 - Created headings and Tasks now show their Project as the manifest home.
 
 ## 0.5.1 — 2026-08-21

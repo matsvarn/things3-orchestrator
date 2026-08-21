@@ -608,15 +608,19 @@ def test_complete_audit_context_can_apply_one_full_reorganization() -> None:
         kind="task",
         title="Invoice",
         area_uuid=area.uuid,
+        tag_uuids=["old"],
     )
     inbox = Record(uuid="capture", kind="task", title="Capture", inbox=True)
     workspace, library, _store = contextual_workspace(
         [area, project, heading, child, loose, inbox]
     )
+    library.tags = {"old": "Old"}
 
     audit = workspace.read(ReadCall(view="audit", limit=40))
     assert audit.context is not None and audit.context.complete
     refs = {item.id: item.ref for item in audit.items}
+    tags = workspace.read(ReadCall(view="tags", limit=40))
+    assert tags.scope_revision is not None
 
     result = workspace.commit(
         CommitCall.model_validate(
@@ -624,6 +628,10 @@ def test_complete_audit_context_can_apply_one_full_reorganization() -> None:
                 "intent_id": "audit-full-reorg-001",
                 "context_id": audit.context.id,
                 "scope_revision": audit.scope_revision,
+                "tags_revision": tags.scope_revision,
+                "change_tags": [
+                    {"id": "tag:old", "delete_permanently": True}
+                ],
                 "change": [
                     {"ref": refs[area.id], "title": "Job"},
                     {"ref": refs[loose.id], "title": "Send invoice"},
@@ -650,6 +658,7 @@ def test_complete_audit_context_can_apply_one_full_reorganization() -> None:
     assert library.records[area.uuid].title == "Work"
     assert library.records[loose.uuid].title == "Invoice"
     assert library.records[inbox.uuid].someday is False
+    assert library.tags == {"old": "Old"}
 
     settled = workspace.approve(ApproveCall(plan_id=result.plan.id))
 
@@ -659,6 +668,8 @@ def test_complete_audit_context_can_apply_one_full_reorganization() -> None:
     assert library.records[inbox.uuid].someday is True
     assert library.records[child.uuid].parent_uuid == project.uuid
     assert library.records[child.uuid].heading_uuid == heading.uuid
+    assert library.records[loose.uuid].tag_uuids == []
+    assert library.tags == {}
 
 
 def test_final_audit_page_returns_every_project_layout_in_native_order() -> None:

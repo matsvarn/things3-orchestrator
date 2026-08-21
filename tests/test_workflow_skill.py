@@ -451,12 +451,17 @@ def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
     assert "do not read research or form" in review
     assert "`limit=40`" in review
     assert "complete audit replaces separate area, inbox" in review
-    assert "only write context" in review
+    assert "only item write context" in review
     assert "every complete project layout in native order" in review
     assert "detail reads are evidence, not a new write context" in review
     assert "bound to the read that returned it" in review
     assert "do not combine refs from different reads" in review
     assert "do not reread each project" in review
+    assert "read `view=tags` once" in review
+    assert "continue that cursor until complete" in review
+    assert "keep its `scope_revision` as `tags_revision`" in review
+    assert "do not use it as the item `scope_revision`" in review
+    assert "skip it when tags are not in scope" in review
     assert "exact server manifest" in review
     assert "`require_approval=true`" in review
     assert "writes nothing" in review
