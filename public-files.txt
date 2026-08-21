@@ -60,6 +60,7 @@ tests/test_cloud.py
 tests/test_consistency.py
 tests/test_context.py
 tests/test_contextual.py
+tests/test_dogfood_register.py
 tests/test_interface.py
 tests/test_journal.py
 tests/test_plugin_secret_scan.py
