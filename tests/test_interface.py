@@ -1735,6 +1735,8 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     assert "private" in COMMIT_DESC
     assert "retry the same intent_id" in COMMIT_DESC
     assert "local neighborhood" in READ_DESC
+    assert "include affected projects in one read" in READ_DESC.casefold()
+    assert "limit=40" in READ_DESC
     assert "private" in APPROVE_DESC
 
 

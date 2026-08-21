@@ -890,6 +890,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
         self.created_kinds: dict[str, Kind] = {}
         self.created_headings: dict[str, str | None] = {}
         self.project_heading_moves: dict[str, str] = {}
+        self.deleted_tags: set[str] = set()
 
     def plan(self, writes: list[Write]) -> tuple[list[Envelope], dict[str, str]]:
         self.created_kinds = {
@@ -901,6 +902,9 @@ class _CloudPlanHandler(_MutationHandler[None]):
             item.uuid: item.into_uuid
             for item in writes
             if item.action == "create_heading"
+        }
+        self.deleted_tags = {
+            item.uuid for item in writes if item.action == "delete_tag"
         }
         # A Project merge can move a heading and its assigned Tasks in one
         # batch. Project the heading destination before validating any Task
@@ -1006,6 +1010,8 @@ class _CloudPlanHandler(_MutationHandler[None]):
         if write.action == "ensure_tag":
             title = write.title or ""
             existing = self.library.tag_uuid(title)
+            if existing in self.deleted_tags:
+                existing = None
             parents = [
                 self.tag_map.get(parent, parent)
                 for parent in (write.tag_parent_uuids or [])

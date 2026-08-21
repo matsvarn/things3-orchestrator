@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-08-21
+
+Full Things reorganizations now use one reviewable transaction and verify the
+result before the agent reports success.
+
+### Changed
+
+- Full reorganizations use one complete audit, batched Project reads, material
+  owner questions, one exact before-and-after manifest, and one commit. Risky
+  work uses at most one approval.
+- Audit rows expose direct tag assignments. Native Project children no longer
+  report their inherited Project Area as a second-home conflict.
+- Approval manifests name final Area and item order, title and home changes,
+  full note replacements, schedule changes, tag assignments, lifecycle
+  changes, and permanent tag deletion.
+- Applied receipts report Task and Project mutation counts, final Area order,
+  and the final tag catalog. A pending or mismatched read-back cannot become a
+  success message.
+- Chained reordering now projects every prior move in the same batch. This
+  fixes dense Area, Project, Task, Inbox, and Project-child order changes.
+- Agent-proposed tags must enable a repeated useful filter. Empty or thin Areas
+  can stay when the owner names the ongoing responsibility.
+- Tag cleanup now keeps the final assignment when the same item is also moved,
+  renamed, or cleaned after more than one tag deletion.
+- Waiting stays a tag. Replacing a localized or canonical Waiting tag in the
+  same batch now creates and assigns a valid `Waiting` tag before deletion.
+
 ## 0.5.0 — 2026-08-20
 
 Project notes now store clear meaning with a consistent owner-selected style.

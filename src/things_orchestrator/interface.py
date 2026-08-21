@@ -2721,10 +2721,10 @@ READ_DESC = (
     "Do not call for a clearly new create. Read Things; empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. "
     "A Project id is the writable neighborhood: Area, layout, hidden occupants, and Trash contents. "
-    "purpose=change is one item; organize is the draft; include another Project to organize both; recurrence is one Task. "
+    "purpose=change is one item; organize is the draft; include affected Projects in one read; recurrence is one Task. "
     "view=system is the Area and Project registry. "
     "A change read returns the local neighborhood. Include a destination to move or merge. "
-    "Review pages return context refs. Continue a truncated page. "
+    "Review pages return context refs. For a full audit use limit=40. Continue a truncated page. "
     "view=logbook defaults to 14 days. within=trash searches Trash. "
     "Follow next and instruction."
 )

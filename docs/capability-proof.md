@@ -84,6 +84,53 @@ durable public artifacts.
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
 
+### Full reorganization behavior gate
+
+Run the natural request in `tests/fixtures/full_reorg_owner_prompt.txt` against
+a realistic isolated library. The library must include several Areas, active
+and Someday Projects, a thin Area, an empty Area, assigned tags, rich notes,
+and at least one known Project inconsistency.
+
+The release passes when the agent performs one complete audit and reads
+affected details in batches. It asks only material owner questions. It then
+shows one exact before-and-after manifest. The accepted reorganization uses
+one commit and at most one approval unless structured recovery requires a split.
+
+The applied result must prove the final Area order, final tag catalog, mutation
+counts, and read-back. The agent must not claim success while a requested state
+differs or a known incoherent Project remains. The trace must omit tool-loading,
+lookup, and retry narration. Measure duplicate work, not a fixed call count.
+
+This gate is separate from the two-client source-Project gate above. A full
+reorganization needs one isolated model replay plus the public memory and Cloud
+integration tests.
+
+#### v0.5.1 isolated replay
+
+On 2026-08-21, Codex received the natural request and the owner's material Area,
+Someday, Project-result, duplicate, and tag choices. The isolated library had
+six Areas, five Projects, sixteen Tasks, six tags, rich notes, one mixed
+Project, one Inbox duplicate, and one active Task inside a Someday Project.
+Codex gave the required one-sentence opening, performed no writes, and returned
+one exact manifest with no new owner question. It read diagnostics and audit
+once each with `limit=40`, read the tag catalog once, opened all five Projects
+in one root-plus-include batch, and used one bounded exact-item batch for the
+remaining notes. No read was rejected or repeated.
+
+The manifest named every direct tag effect, permanent tag deletion, note and
+date preservation rule, recoverable Trash move, Someday decision, and final
+Area and Project order. Every Project title named a finished result. The Task
+paths added the missing IOC approval, AI-environment test, and Cursor pin.
+
+A second run supplied that exact accepted manifest. It read diagnostics,
+audit, and tags once, then sent one commit and one approval. No call was
+rejected. The final read-back proved six Area changes, five tag changes,
+twenty-one Task or Project changes, the final `Arbeit`, `KI & Systeme`,
+`Studium`, `Finanzen`, `Gesundheit`, `Privat` order, the final `Besorgung` and
+`Waiting` tag catalog, and no mismatch. The server tests replay the same
+ordering, manifest, Waiting replacement, approval, and receipt seams through
+memory and Cloud adapters.
+
 ### v0.4.8 derivation run
 
 On 2026-08-20, Cursor Agent and Codex each ran three paraphrases against an

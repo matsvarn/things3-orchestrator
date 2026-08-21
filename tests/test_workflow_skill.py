@@ -435,3 +435,63 @@ def test_source_capture_writes_a_human_things_document() -> None:
     assert "my chats" in form
     assert "each source is `{label, location}`" in form
     assert "write nothing this turn" not in f"{skill}\n{research}"
+
+
+def test_full_reorganization_is_one_reviewable_verified_transaction() -> None:
+    skill = SKILL.read_text(encoding="utf-8").lower()
+    review = (REFERENCES / "review.md").read_text(encoding="utf-8").lower()
+    form = (REFERENCES / "form.md").read_text(encoding="utf-8").lower()
+
+    assert "one opening sentence" in review
+    assert "including acceptance, read [review]" in skill
+    assert "one `change` object per item" in skill
+    assert "local create keys start with `$`" in skill
+    assert "area-only empty-removal field for a project" in skill
+    assert "do not mention loading a skill or research" in review
+    assert "do not read research or form" in review
+    assert "`limit=40`" in review
+    assert "audit replaces separate area and inbox scans" in review
+    assert "send `id=project:...` and `purpose=organize`" in review
+    assert "every other small affected project in `include`" in review
+    assert "omit `view` and `fields`" in review
+    assert "`include` cannot supply the root" in review
+    assert "do not reread the same project batch" in review
+    assert "do not call one read per project" in review
+    assert "one exact before-and-after manifest" in review
+    assert "one commit" in review
+    assert "at most one approval" in review
+    assert "do not stage intermediate states" in review
+    assert "permanent deletion, trash, cancellation, note replacement" in review
+    assert "preserve notes unless" in review
+    assert "receipt proves" in review
+    assert "do not report success" in review
+    assert "known incoherent project" in review
+    assert "reach that finish" in review
+    assert "account for every active task inside a someday project" in review
+    assert "a title-only edit does not resolve it" in review
+
+    assert "owner may keep any tag" in review
+    assert "at least two real items" in review
+    assert "audit's `direct_tag_ids`" in review
+    assert "each affected item's old and new direct tags" in review
+    assert "waiting is the delegated-work tag, not a native view" in review
+    assert "cross-area use is evidence, not a requirement" in review
+    assert "provisional starter set" in review
+    assert "first useful weekly review" in review
+    assert "empty or thin area" in review
+    assert "ongoing responsibility" in review
+    assert "inherited area is normal, not a conflict" in review
+    assert "not only a product, topic, or workstream" in review
+    assert "privately state the finished result for every active or someday project" in review
+    assert "manifest never keeps a label-only title unchanged" in review
+    assert "approve rules before drafting" in review
+    assert "never lose a named delivery" in review
+    assert "pin, install, send, or publish is its own final task" in review
+    assert "not a filing verb" in review
+    assert "collapse a one-action project" in review
+
+    assert "project title names the finished outcome" in form
+    assert "task title names a visible action" in form
+    assert "active task inside a someday project" in form
+    assert "extract the task or reactivate the project" in form
+    assert "one opening sentence" not in skill

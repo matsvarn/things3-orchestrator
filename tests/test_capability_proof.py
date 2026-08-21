@@ -91,3 +91,23 @@ def test_owner_guide_is_how_to_talk() -> None:
     assert "contextual refs" not in owner
     assert "`purpose=recurrence`" in skill
     assert "current copy and template" in skill.lower()
+
+
+def test_full_reorganization_prompt_is_a_release_behavior_gate() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    prompt = (root / "tests" / "fixtures" / "full_reorg_owner_prompt.txt").read_text()
+    proof = (root / "docs" / "capability-proof.md").read_text().lower()
+
+    assert prompt.startswith("Help me fully reorganize my Things.")
+    assert "full reorganization behavior gate" in proof
+    assert "one complete audit" in proof
+    assert "one exact before-and-after manifest" in proof
+    assert "one commit and at most one approval" in proof
+    assert "final area order" in proof
+    assert "known incoherent project" in proof
+    assert "no read was rejected or repeated" in proof
+    assert "one root-plus-include batch" in proof
+    assert "one commit and one approval" in proof
+    assert "twenty-one task or project changes" in proof
