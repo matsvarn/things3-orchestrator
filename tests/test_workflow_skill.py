@@ -184,6 +184,15 @@ def test_skill_leaves_request_mechanics_to_the_mcp_interface() -> None:
     assert '{"' not in combined
 
 
+def test_skill_blocks_other_work_while_a_receipt_is_pending() -> None:
+    lower = _skill_text().lower()
+
+    assert "pending receipt blocks unrelated work" in lower
+    assert "only when instructed" in lower
+    assert "stop ends the turn" in lower
+    assert "never promise a later retry" in lower
+
+
 def test_skill_discloses_only_the_three_distinct_judgment_branches() -> None:
     source = SKILL.read_text(encoding="utf-8")
     links = set(re.findall(r"\(references/([^)]+)\)", source))

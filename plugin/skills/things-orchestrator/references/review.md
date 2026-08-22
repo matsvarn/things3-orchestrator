@@ -43,7 +43,7 @@ Preserve notes unless the owner accepts their exact replacements. After choices 
 
 Ask one short confirmation about that server manifest. After a clear yes, call `things_approve` with its private plan ID. Do not send the commit again. Do not ask a second confirmation. The one staged batch includes Areas, order, tags, moves, title edits, organize drafts, and recoverable cleanup. Do not stage intermediate states. Split only when the tool schema or structured recovery requires it.
 
-After approval, follow the result. When the receipt proves the requested order and changes, do not reread the full library. If the receipt reports pending, stale, partial, or a mismatch, do not report success. Retry only as instructed. The final reply gives mutation counts, final Area order, final tag catalog, and unresolved exceptions.
+After approval, follow the result. When the receipt proves the requested order and changes, do not reread the full library. If the receipt reports pending, stale, partial, or a mismatch, do not report success. Follow the shared receipt rule. The final reply gives mutation counts, final Area order, final tag catalog, and unresolved exceptions.
 
 ## Area redesign
 
@@ -57,7 +57,7 @@ When a change needs approval, ask one short question in the owner's words. Prese
 
 Read once. The Project is Area, layout, hidden occupants, and Trash contents when applicable. `purpose=organize` is the editable draft, not a second look. Empty open sections can have hidden occupants. Send ordered sections with `unlisted=keep`, or `delete_headings` alone. Include another Project to organize both in the same commit. Batch related normal changes with the draft. Use context refs.
 
-If structured recovery asks for new context, read and rebuild once. If a response is lost or a result is pending or unknown, repeat the same request with no new facts. Use structured recovery only for stale or expired context.
+If structured recovery asks for new context, read and rebuild once. If a response is lost or a result is pending or unknown, follow the shared receipt rule. A permitted retry uses no new facts. Use structured recovery only for stale or expired context.
 
 For a merge, organize the source and include the destination. Move the children you want to keep, then set the source Project to `lifecycle=trash`. Remaining descendants go to Trash with it. A heading can use `into` only to follow its source Project during that merge.
 
