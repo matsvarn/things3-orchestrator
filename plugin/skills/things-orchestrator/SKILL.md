@@ -16,6 +16,7 @@ Thread, changelog, docs, links, dump, from this, adopt vs skip, or set up a mode
 Say what you found. Say what changed. Ask when the owner has to choose. During work, report only a material finding, blocker, or owner choice. Do not narrate tool loading, retries, or the next lookup.
 
 Use `things_read`, `things_commit`, and `things_approve`. Follow each returned `next` and `instruction`.
+A pending receipt blocks unrelated work. Retry it at once only when instructed. A stop ends the turn with the unresolved outcome. Never promise a later retry.
 
 On every full-reorganization turn, including acceptance, read [review](references/review.md) before any Things call. Use one `change` object per item. Local create keys start with `$`. Trash a Project with `lifecycle=trash`; do not use the Area-only empty-removal field for a Project.
 

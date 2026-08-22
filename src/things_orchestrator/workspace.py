@@ -6744,8 +6744,9 @@ class ThingsWorkspace:
             self._library.apply(writes)
         except CloudError as error:
             if _outcome_unknown(error):
-                return self._pending_outcome(
+                return self._unsettled_outcome(
                     record,
+                    writes,
                     "The Cloud outcome is not proven. Retry only this same receipt.",
                 )
             if "conflict" in str(error).casefold() or "HTTP 409" in str(error):
@@ -6768,8 +6769,9 @@ class ThingsWorkspace:
             return self._rejected(str(error))
         failed = self._refresh(force=True)
         if failed is not None or not self._writes_match(writes):
-            return self._pending_outcome(
+            return self._unsettled_outcome(
                 record,
+                writes,
                 "Cloud accepted the request, but read-back is still pending.",
             )
         result = self._settled(
@@ -6811,23 +6813,75 @@ class ThingsWorkspace:
             return result
         if allow_apply:
             return self._apply(record)
-        return self._pending_outcome(
+        return self._unsettled_outcome(
             record,
+            writes,
             "The Cloud outcome is still unknown. Retry only this same receipt.",
         )
+
+    def _unsettled_outcome(
+        self,
+        record: IntentRecord,
+        writes: list[Write],
+        instruction: str,
+    ) -> Result:
+        matched = [write for write in writes if self._writes_match([write])]
+        if matched and len(matched) < len(writes):
+            applied = self._change_titles(matched)
+            not_applied = self._change_titles(
+                [write for write in writes if write not in matched]
+            )
+            result = Result(
+                next="stop",
+                status="partial",
+                instruction=(
+                    f"Cloud read-back verified {len(matched)} of {len(writes)} "
+                    f"requested changes. Applied: {applied}. Not applied: "
+                    f"{not_applied}. Do not retry this receipt. Report both lists. "
+                    "Read current facts only if the owner asks to continue."
+                ),
+                signals=[
+                    f"partial_applied:{len(matched)}",
+                    f"partial_not_applied:{len(writes) - len(matched)}",
+                ],
+                receipt=record.plan_id or record.intent_id,
+            )
+            self._save_result(record, "pending", result)
+            return result
+        return self._pending_outcome(record, instruction)
+
+    def _change_titles(self, writes: list[Write]) -> str:
+        titles: list[str] = []
+        for write in writes:
+            record = self._library.records.get(
+                write.checklist_parent_uuid or write.uuid
+            )
+            title = (
+                record.title
+                if record is not None
+                else write.title or f"{write.kind}:{write.uuid}"
+            )
+            compact = _bounded_title(title)
+            compact = compact if len(compact) <= 80 else compact[:79] + "…"
+            if compact not in titles:
+                titles.append(compact)
+        shown = titles[:5]
+        if len(titles) > len(shown):
+            shown.append(f"and {len(titles) - len(shown)} more")
+        return ", ".join(shown)
 
     def _pending_outcome(self, record: IntentRecord, instruction: str) -> Result:
         attempts = _pending_attempts(record) + 1
         receipt = record.plan_id or record.intent_id
-        if attempts > _PENDING_RETRY_LIMIT:
+        if attempts >= _PENDING_RETRY_LIMIT:
             result = Result(
                 next="stop",
                 status="unavailable",
                 instruction=(
                     "Cloud read-back did not settle after "
-                    f"{_PENDING_RETRY_LIMIT} attempts. Do not retry this receipt. "
-                    "Read current facts and start a new intent if the work is "
-                    "still needed."
+                    f"{_PENDING_RETRY_LIMIT} attempts. Do not retry or defer this "
+                    "receipt. Report the unresolved outcome. Read current facts "
+                    "only if the owner asks to continue."
                 ),
                 receipt=receipt,
             )

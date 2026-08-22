@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.5 — 2026-08-22
+
+Receipt recovery now stops cleanly and reports partial Cloud writes.
+
+### Fixed
+
+- A receipt stops after the third unsettled check, not the fourth.
+- A partial Cloud write returns `partial` on the first call. The result names
+  applied and unapplied work and blocks a blind retry.
+- A pending receipt blocks unrelated work. Agents no longer defer a receipt
+  retry until after other research.
+
 ## 0.5.4 — 2026-08-22
 
 Owner-facing tool text now leads with a short card. Capture accepts tomorrow.

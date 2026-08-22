@@ -6316,13 +6316,12 @@ def test_pending_approve_readback_stops_after_retry_cap() -> None:
     assert prepared.plan is not None
     call = ApproveCall(plan_id=prepared.plan.id)
 
-    pending = [module.approve(call) for _ in range(3)]
+    pending = [module.approve(call) for _ in range(2)]
     stopped = module.approve(call)
     repeated = module.approve(call)
 
-    assert [result.status for result in pending] == ["pending", "pending", "pending"]
+    assert [result.status for result in pending] == ["pending", "pending"]
     assert [result.next for result in pending] == [
-        "retry_same",
         "retry_same",
         "retry_same",
     ]
@@ -6333,7 +6332,40 @@ def test_pending_approve_readback_stops_after_retry_cap() -> None:
     assert repeated.status == "unavailable"
     stored = journal.get("area-pending-cap-001")
     assert stored is not None and stored.state == "pending"
-    assert stored.plan.get("pending_attempts") == 5
+    assert stored.plan.get("pending_attempts") == 4
+
+
+def test_pending_approve_reports_a_partial_cloud_apply_without_retry() -> None:
+    class PartialReadback(MemoryLibrary):
+        def apply(self, writes):  # type: ignore[no-untyped-def]
+            return MemoryLibrary.apply(self, writes[:4])
+
+    library = PartialReadback()
+    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
+    prepared = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "area-partial-apply-001",
+                "scope_revision": system_scope(module),
+                "create": [
+                    {"kind": "area", "title": f"Area {index}"}
+                    for index in range(1, 7)
+                ],
+            }
+        )
+    )
+    assert prepared.plan is not None
+
+    result = module.approve(ApproveCall(plan_id=prepared.plan.id))
+
+    assert result.status == "partial"
+    assert result.next == "stop"
+    assert "4 of 6" in result.instruction
+    assert "Area 1" in result.instruction
+    assert "Area 4" in result.instruction
+    assert "Area 5" in result.instruction
+    assert "Area 6" in result.instruction
+    assert "do not retry" in result.instruction.casefold()
 
 
 def test_pending_commit_readback_stops_after_retry_cap() -> None:
@@ -6347,12 +6379,11 @@ def test_pending_commit_readback_stops_after_retry_cap() -> None:
         {"intent_id": "task-pending-cap-001", "create": [{"title": "Only once"}]}
     )
 
-    pending = [module.commit(call) for _ in range(3)]
+    pending = [module.commit(call) for _ in range(2)]
     stopped = module.commit(call)
 
-    assert [result.status for result in pending] == ["pending", "pending", "pending"]
+    assert [result.status for result in pending] == ["pending", "pending"]
     assert [result.next for result in pending] == [
-        "retry_same",
         "retry_same",
         "retry_same",
     ]
@@ -6382,7 +6413,7 @@ def test_pending_approve_can_still_settle_after_the_retry_cap() -> None:
     )
     assert prepared.plan is not None
     call = ApproveCall(plan_id=prepared.plan.id)
-    for _ in range(3):
+    for _ in range(2):
         assert module.approve(call).next == "retry_same"
     assert module.approve(call).next == "stop"
     MemoryLibrary.apply(library, library.writes)
