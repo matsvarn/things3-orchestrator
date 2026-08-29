@@ -2856,7 +2856,7 @@ class ThingsWorkspace:
         if "notes" in selected:
             values["notes"] = item.notes
         if "status" in selected:
-            values["status"] = item.status
+            values["status"] = _public_status(item.status)
         if "trashed" in selected:
             values["trashed"] = item.trashed
         if "start" in selected:

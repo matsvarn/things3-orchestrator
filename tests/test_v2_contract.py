@@ -861,6 +861,28 @@ def test_capture_receipt_uses_public_destination_id(
     assert "into_uuid" not in desired and "into_kind" not in desired
 
 
+def test_completion_receipt_uses_public_status_values() -> None:
+    record = Record(uuid="a", kind="task", title="Canceled", status="dropped")
+    server = _server(record)
+    completed = asyncio.run(
+        server.call_tool(
+            "things_complete",
+            {"request_id": REQUEST, "ids": [record.id]},
+        )
+    )
+    receipt = asyncio.run(
+        server.call_tool(
+            "things_receipt",
+            {"operation_id": completed.structured_content["operation_id"]},
+        )
+    )
+
+    row = receipt.structured_content["rows"][0]
+    assert row["before"]["status"] == "canceled"
+    assert row["desired"]["status"] == "completed"
+    assert row["observed"]["status"] == "completed"
+
+
 def test_get_chunk_outage_is_not_reported_as_missing_ids() -> None:
     class SecondRefreshFails(MemoryLibrary):
         refreshes = 0
