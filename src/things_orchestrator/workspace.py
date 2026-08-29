@@ -3136,9 +3136,7 @@ class ThingsWorkspace:
         view = call.view or "today"
         today = self._clock().date()
         if view == "today":
-            return self._library.today(
-                waiting_tag=self._library.waiting_tag(), today=today
-            )
+            return self._library.today(today=today)
         if view == "inbox":
             return self._library.inbox(limit=10_000)
         if view == "week":

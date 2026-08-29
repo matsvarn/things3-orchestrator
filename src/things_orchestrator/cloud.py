@@ -55,11 +55,11 @@ CLIENT_INFO = {
     "ul": "en-Latn-US",
 }
 
-_TASK_KINDS = {"Task6", "Task4", "Task3", "Task"}
+_TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 4
+_CACHE_VERSION = 5
 
 
 class CloudError(RuntimeError):
@@ -369,6 +369,11 @@ def _event_matches_envelope(event: dict[str, Any], envelope: Envelope) -> bool:
 
 
 def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None:
+    for event in events:
+        kind = str(event.get("e") or "")
+        if _unsupported_versioned_entity(kind):
+            raise CloudError(f"unsupported Things Cloud entity: {kind}")
+
     checklists: list[dict[str, Any]] = []
     for event in events:
         kind = str(event.get("e") or "")
@@ -522,6 +527,20 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
     library.resolve_instance_types()
 
 
+def _unsupported_versioned_entity(kind: str) -> bool:
+    families = (
+        ("ChecklistItem", _CHECKLIST_KINDS),
+        ("Task", _TASK_KINDS),
+        ("Area", _AREA_KINDS),
+        ("Tag", _TAG_KINDS),
+    )
+    for prefix, supported in families:
+        generation = kind.removeprefix(prefix)
+        if generation != kind and generation.isdecimal():
+            return kind not in supported
+    return False
+
+
 def _fold_checklist(
     uuid: str, action: object, payload: dict[str, Any], library: MemoryLibrary
 ) -> None:
@@ -649,7 +668,7 @@ class CloudLibrary(MemoryLibrary):
         )
 
     def matches(self, writes: list[Write]) -> bool:
-        """Match the safe Cloud envelopes, including Task6 index normalization."""
+        """Match the safe Cloud envelopes, including Task7 index normalization."""
 
         try:
             envelopes, _ = self._plan(writes)
@@ -1103,9 +1122,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
 
     def _entity(self, write: Write) -> str:
         existing = self.library.records.get(write.uuid)
-        return (existing.entity if existing and existing.entity else "") or (
-            "Area3" if write.kind == "area" else "Task6"
-        )
+        if write.kind == "area":
+            return (existing.entity if existing and existing.entity else "") or "Area3"
+        return "Task7"
 
     def create(self, mutation: _CreateMutation) -> Envelope:
         write = mutation.write
@@ -1115,7 +1134,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
         return Envelope(
             uuid=write.uuid,
             action=0,
-            kind="Area3" if write.kind == "area" else "Task6",
+            kind="Area3" if write.kind == "area" else "Task7",
             payload=payload,
         )
 

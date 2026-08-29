@@ -323,7 +323,7 @@ class Library(Protocol):
     def find(
         self, text: str, limit: int = 10, into: str | None = None
     ) -> list[Record]: ...
-    def today(self, *, waiting_tag: str, today: date) -> list[Record]: ...
+    def today(self, *, today: date) -> list[Record]: ...
     def inbox(self, limit: int = 15) -> list[Record]: ...
     def week(self, *, today: date, limit: int = 15) -> list[Record]: ...
     def trash(self) -> list[Record]: ...
@@ -416,8 +416,7 @@ class MemoryLibrary:
         hits.sort(key=lambda item: (item.sort_index, item.title))
         return hits[:limit]
 
-    def today(self, *, waiting_tag: str, today: date) -> list[Record]:
-        waiting = self.tag_uuid(waiting_tag)
+    def today(self, *, today: date) -> list[Record]:
         ranked: list[tuple[int, Record]] = []
         for item in self._open():
             if item.kind == "area":
@@ -427,10 +426,8 @@ class MemoryLibrary:
                 issue = 0
             elif item.tonight:
                 issue = 1
-            elif item.start == today:
+            elif item.start is not None and item.start <= today:
                 issue = 2
-            elif waiting is not None and waiting in item.tag_uuids:
-                issue = 3
             else:
                 continue
             ranked.append((issue, item))
