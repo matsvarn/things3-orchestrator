@@ -44,9 +44,9 @@ skills on the VPS is one checkout.
 
 ## Shared facts
 
-All clients share one MCP bearer. There is no per-client identity.
-Owner approval (`things_approve`) is a model workflow rule, not a
-second authentication factor.
+All clients share one MCP bearer. There is no per-client identity. The bearer
+cannot approve operations. Enroll and use the separate host-only owner factor
+from a private local or SSH terminal.
 
 `login` and `print-config` print snippet *paths* only. Snippet files
 are mode 0600. To print bodies, including the MCP bearer, use
@@ -87,7 +87,7 @@ uses that user's `uv` (`command -v uv`, often `~/.local/bin/uv`, not
 apart. After a schema-changing deploy, reconnect the MCP client and
 start a fresh agent session so it picks up the new tool schema. Compare
 `/health` `commit`, `tool_schema_hash`, and `tool_contract_hash` with
-the previous values. `tool_schema_hash` covers the six discovery
+the previous values. `tool_schema_hash` covers the eight discovery
 schemas. `tool_contract_hash` also covers tool descriptions and the
 strict runtime `Result`.
 

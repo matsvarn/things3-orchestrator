@@ -10,9 +10,9 @@ prints the bodies, including the MCP bearer.
 The HTTP Bearer is the MCP token, not the Cloud password. Do not paste
 the Cloud password into chat.
 
-All clients share that one bearer. There is no per-client identity.
-Owner approval (`things_approve`) is a model workflow rule, not a
-second authentication factor.
+All clients share that one bearer. There is no per-client identity. MCP cannot
+approve an operation. Host approval uses a separate owner factor that the MCP
+server and agent runtime cannot access.
 
 Claude.ai, ChatGPT web, and ChatGPT mobile cannot use this bearer. This
 project does not ship MCP OAuth. When tools are missing:
@@ -53,8 +53,9 @@ codex plugin marketplace add .
 codex plugin add things-orchestrator@things-orchestrator
 ```
 
-Done when the client lists server `things` and tools `things_read`,
-`things_commit`, and `things_approve`. Ask:
+Done when the client lists server `things` and all eight tools:
+`things_view`, `things_find`, `things_get`, `things_capture`, `things_update`,
+`things_complete`, `things_trash`, and `things_receipt`. Ask:
 `What should I focus on in Things today?`
 
 ## Already hosted

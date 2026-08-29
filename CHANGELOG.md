@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-08-29
+
+The public MCP interface is now the bounded owner-safe v2 contract.
+
+### Changed
+
+- Discovery exposes only `things_view`, `things_find`, `things_get`,
+  `things_capture`, `things_update`, `things_complete`, `things_trash`, and
+  `things_receipt`.
+- Mutations use opaque request IDs, immutable private manifests, one
+  cross-process account fence, append-only receipts, and Cloud read-back.
+- Recoverable Trash requires the host-only owner factor. Legacy approvals are
+  quarantined and unresolved v1 writes fence all new writes without replay.
+- Things-origin text is explicitly untrusted in reads and receipt snapshots.
+- Advanced scopes and the mutation coach profile are deferred until the
+  default-eight safety contract is proven in use.
+
 ## 0.5.5 — 2026-08-22
 
 Receipt recovery now stops cleanly and reports partial Cloud writes.

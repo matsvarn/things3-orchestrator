@@ -1,44 +1,31 @@
-# Trust boundary
+# Trust model
 
-Self-hosted software for one owner. The project does not operate a
-shared service or receive your Things Cloud credentials.
+Things Orchestrator is unofficial. The serving host stores the Things Cloud
+credentials and sends them only to Things Cloud. Chat-visible Things data can
+reach the selected client and model provider.
 
-The server uses an unofficial, reverse-engineered Things Cloud protocol.
-It impersonates a Things Mac client. Cultured Code can change or block
-this protocol, or disable an account. On 2 April 2026 they listed
-Cloud-password tools as unsafe and said they have already seen data
-loss from unofficial methods. Self-hosting keeps the password off a
-third-party operator. It does not make the protocol official.
+This is not fully private: owner task data can reach the serving host, the MCP
+client, and that configured model provider.
 
-This does not mean that all data stays on one machine.
+Every title, note, checklist row, and tag label read from Things is untrusted.
+Derived text keeps that taint. Public v2 output places `source=things_cloud`
+and `trust=untrusted` next to text data. Things text cannot choose an action,
+state, ID, precondition, risk, approval, disposition, or recovery step.
 
-## Data path
+The server owns revisions and freezes the first force-refreshed mutation
+manifest. A repeated request returns the same operation. It never reparses or
+rebases terminal work.
 
-1. `login` accepts the Cloud password only in a private terminal.
-2. The CLI stores it as plaintext JSON with mode 0600 on the serving host.
-   The same file stores the owner's non-secret IANA timezone.
-3. The server sends it to Things Cloud with each Cloud request.
-4. MCP tool results return task data to the configured chat client.
-5. That client can send the result to its model provider.
+Pending and partial operations hold an account-wide outcome fence. The fence
+covers all write paths, including host approval and retained v1 recovery.
+Recovery observes Cloud state and never reposts an old operation.
 
-Your trust boundary includes the serving host, Things Cloud, the chat
-client, and its model provider. Check each provider's data controls
-before you connect an account with sensitive task names or notes.
+MCP cannot approve. The host-only approval component stores a salted `scrypt`
+verifier and encrypted Ed25519 private key in a separate 0600 file. It reads
+the raw passphrase only from the host terminal. Approval binds the account,
+action, operation ID, manifest hash, safety-policy digest, and expiry. The MCP
+server loads only the pinned Ed25519 public key and cannot sign authorization.
 
-Do not describe this system as fully private, zero-knowledge, or as
-keeping all data on one device.
-
-## MCP access
-
-The HTTP server binds only to `127.0.0.1`. Put TLS in front of it. Each
-`/mcp` request needs the MCP bearer. `/health` contains no account data.
-
-All authorized clients share one MCP bearer. There is no per-client
-identity. Owner approval (`things_approve`) is a model workflow rule,
-not a second authentication factor.
-
-The bearer is not the Cloud password. Rotate it with
-`login --rotate-token` if an HTTP configuration leaks.
-
-This project does not provide MCP OAuth. Claude.ai, ChatGPT web, and
-ChatGPT mobile cannot use this bearer-token setup.
+The host renderer escapes ANSI and OSC sequences, control characters,
+newlines, backslashes, and delimiters. Typed IDs and actions remain the
+authority. Human labels are supplemental.

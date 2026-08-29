@@ -8,6 +8,7 @@ import pytest
 
 from things_orchestrator.cli import _server, build_parser, main
 from things_orchestrator.cloud import CloudError
+from things_orchestrator.journal import IntentRecord, SQLiteJournal
 
 ROOT = Path(__file__).parents[1]
 
@@ -314,6 +315,29 @@ def test_configure_requires_at_least_one_preference(
     assert "needs --note-style or --source-schemes" in capsys.readouterr().err
 
 
+def test_migration_report_quarantines_and_reads_disposable_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(path)
+    journal.save(IntentRecord("old-approval", "a", "needs_approval"))
+    journal.save(IntentRecord("old-pending", "b", "pending"))
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_credentials",
+        lambda: ("owner@example.com", "unused", None),
+    )
+    monkeypatch.setattr("things_orchestrator.cli.journal_path", lambda _email: path)
+
+    main(["migration-report"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["quarantined"] == ["old-approval"]
+    assert report["unresolved"] == ["old-pending"]
+    assert SQLiteJournal(path).get("old-approval").state == "stale"  # type: ignore[union-attr]
+
+
 def test_configure_rejects_scheme_and_keeps_note_style_change_atomic(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -554,7 +578,16 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
 ) -> None:
     account_journal = tmp_path / "journal-accountdigest.sqlite3"
     captured: dict[str, object] = {}
-    journal = object()
+    class FakeJournal:
+        def cutover_v1(self) -> dict[str, object]:
+            return {"unresolved": []}
+
+        def prune_v2(self, *, now: str, retention_days: int) -> int:
+            assert now
+            assert retention_days == 7
+            return 0
+
+    journal = FakeJournal()
 
     class FakeClient:
         def __init__(self, email: str, password: str) -> None:

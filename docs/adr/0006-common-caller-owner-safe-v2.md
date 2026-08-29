@@ -233,8 +233,8 @@ the account, operation ID, next sequence, receipt hash, and cursor version. It
 never substitutes `N more` for omitted rows. Canonical manifest and receipt
 hashing are explicitly versioned.
 
-Full settled manifests and receipt bodies use a configurable short retention
-period. The default is seven days. Pending and partial rows are not pruned.
+Full settled manifests and receipt bodies use a fixed seven-day retention
+period. Pending and partial rows are not pruned.
 Expired awaiting-owner rows become `stale` and may then be pruned. After
 pruning, the journal keeps a content-minimized tombstone with the request hash,
 operation ID, final state, manifest hash, and receipt hash so an old retry

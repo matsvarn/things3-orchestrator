@@ -29,64 +29,19 @@ from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from .deployment import health_payload, package_version
-from .interface import (
-    APPROVE_DESC,
-    APPROVE_IN,
-    APPROVE_OUT,
-    COMMIT_DESC,
-    COMMIT_IN,
-    COMMIT_OUT,
-    READ_DESC,
-    READ_IN,
-    READ_OUT,
-    ApproveCall,
-    CommitCall,
-    Next,
-    ReadCall,
-    Result,
-    dump_result,
-)
-from .owner_text import owner_text
+from .v2 import DESCRIPTIONS, MODELS, PublicResult, ThingsV2, flat_schema
 from .workspace import ThingsWorkspace
 
 _LOGGER = logging.getLogger("things_orchestrator")
 
-_REPAIR = {
-    "things_read": 'Use {} or {"find":"passport"}',
-    "things_commit": 'Use {"intent_id":"capture-001","create":[{"title":"Renew password"}]}',
-    "things_approve": 'Copy the returned plan ID, for example {"plan_id":"plan_12345678"}',
-}
 _FIELD_REPAIR = {
-    "scope_revision": (
-        "Area and registry changes need the scope_revision from a fresh "
-        "view=system read"
-    ),
+    "request_id": "request_id needs one opaque UUID or ULID",
     "start": (
-        "start accepts today, evening, tomorrow, someday, an ISO date, or null to clear "
-        "scheduling while keeping the current Project or Area"
+        "start accepts today, evening, tomorrow, someday, an ISO date, or null"
     ),
-    "today_after": (
-        "today_after needs a Today item, including one moved to Today earlier "
-        "in this same commit"
-    ),
-    "within": (
-        "view project needs id or within as project:<id>; view area needs id or "
-        "within as area:<id>; within=trash needs find"
-    ),
-    "if_revision": (
-        "an exact change needs id and if_revision, or a context_id that binds the item"
-    ),
-    "from": "view=logbook defaults to the last 14 days; send both from and to to override",
-    "to": "view=logbook defaults to the last 14 days; send both from and to to override",
-    "view": (
-        "Use one of today, inbox, week, weekly_review, system, project, area, audit, "
-        "diagnostics, logbook, trash, or tags"
-    ),
-    "ids": "ids is a review-only list of 1 to 10 unique exact item IDs",
-    "include": (
-        "include is only for purpose=review, change, or organize, must be unique, "
-        "and accepts up to 40 compact lookups"
-    ),
+    "deadline": "deadline needs an ISO date or null",
+    "remind_at": "remind_at needs an ISO date-time with an explicit offset or null",
+    "into_id": "into_id needs one exact project:<id> or area:<id>",
 }
 
 _READ_ONLY = ToolAnnotations(
@@ -102,36 +57,25 @@ _IDEMPOTENT_WRITE = ToolAnnotations(
     open_world_hint=False,
 )
 
-_TOOLS = (
+_TOOL_NAMES = tuple(MODELS)
+_READ_NAMES = frozenset(("things_view", "things_find", "things_get", "things_receipt"))
+_TOOLS = tuple(
     Tool(
-        name="things_read",
-        description=READ_DESC,
-        input_schema=READ_IN,
-        output_schema=READ_OUT,
-        annotations=_READ_ONLY,
-    ),
-    Tool(
-        name="things_commit",
-        description=COMMIT_DESC,
-        input_schema=COMMIT_IN,
-        output_schema=COMMIT_OUT,
-        annotations=_IDEMPOTENT_WRITE,
-    ),
-    Tool(
-        name="things_approve",
-        description=APPROVE_DESC,
-        input_schema=APPROVE_IN,
-        output_schema=APPROVE_OUT,
-        annotations=_IDEMPOTENT_WRITE,
-    ),
+        name=name,
+        description=DESCRIPTIONS[name],
+        input_schema=flat_schema(MODELS[name]),
+        output_schema=flat_schema(PublicResult),
+        annotations=_READ_ONLY if name in _READ_NAMES else _IDEMPOTENT_WRITE,
+    )
+    for name in _TOOL_NAMES
 )
 
 
 class ThingsMCPServer:
     name = "things"
 
-    def __init__(self, workspace: ThingsWorkspace) -> None:
-        self._workspace = workspace
+    def __init__(self, workspace: ThingsWorkspace | ThingsV2) -> None:
+        self._interface = workspace if isinstance(workspace, ThingsV2) else ThingsV2(workspace)
         self._lock = anyio.Lock()
         self._tools_only_server: Server[object] = Server(
             name=self.name,
@@ -143,12 +87,8 @@ class ThingsMCPServer:
     async def list_tools(self) -> list[Tool]:
         return [tool.model_copy(deep=True) for tool in _TOOLS]
 
-    def _dispatch(self, name: str, arguments: dict[str, Any]) -> Result:
-        if name == "things_read":
-            return self._workspace.read(ReadCall.model_validate(arguments))
-        if name == "things_commit":
-            return self._workspace.commit(CommitCall.model_validate(arguments))
-        return self._workspace.approve(ApproveCall.model_validate(arguments))
+    def _dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
+        return self._interface.dispatch(name, arguments)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         try:
@@ -164,29 +104,10 @@ class ThingsMCPServer:
                         }
                     ],
                 )
-            if name == "things_read":
-                ReadCall.model_validate(arguments)
-            elif name == "things_commit":
-                CommitCall.model_validate(arguments)
-            else:
-                ApproveCall.model_validate(arguments)
+            MODELS[name].model_validate(arguments)
         except ValidationError as error:
-            instruction = _safe_validation_error(error, repair=_REPAIR.get(name))
-            next_step: Next = "ask"
-            if name == "things_commit" and _declares_source_document(arguments):
-                instruction = (
-                    f"{instruction[:900]} Revise the source payload and call "
-                    "things_commit again. Do not ask the owner."
-                )
-                next_step = "revise"
-            return _domain_result(
-                Result(
-                    next=next_step,
-                    status="rejected",
-                    instruction=instruction,
-                ),
-                full_items=name == "things_read",
-            )
+            instruction = _safe_validation_error(error)
+            return _domain_result(PublicResult(state="rejected", instruction=instruction))
         try:
             async with self._lock:
                 result = await anyio.to_thread.run_sync(self._dispatch, name, arguments)
@@ -199,21 +120,12 @@ class ThingsMCPServer:
                 package_version(),
                 type(error).__name__,
             )
-            return _domain_result(
-                Result(
-                    next="stop",
-                    status="internal_error",
-                    instruction=(
-                        "The server stopped because of an internal error "
-                        f"({correlation_id}). "
-                        "Do not assume that a write started. "
-                        "See server logs for this correlation ID."
-                    ),
-                ),
-                full_items=name == "things_read",
-                is_error=True,
-            )
-        return _domain_result(result, full_items=name == "things_read")
+            return _domain_result(PublicResult(state="rejected", instruction=(
+                "The server stopped because of an internal error "
+                f"({correlation_id}). Do not assume that a write started. "
+                "See server logs for this correlation ID."
+            )), is_error=True)
+        return _domain_result(result)
 
     async def _list_wire_tools(
         self,
@@ -337,32 +249,10 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
     return message if len(message) <= 997 else message[:997] + "..."
 
 
-def _domain_result(
-    result: Result, *, full_items: bool, is_error: bool = False
-) -> CallToolResult:
-    summary = owner_text(result)
-    structured = dump_result(result)
-    if not full_items and "items" in structured:
-        summary_fields = {
-            "id",
-            "revision",
-            "kind",
-            "title",
-            "status",
-            "into_id",
-            "into_title",
-            "heading_id",
-            "heading_title",
-            "start",
-            "direct_tag_ids",
-            "signals",
-        }
-        structured["items"] = [
-            {key: value for key, value in item.items() if key in summary_fields}
-            for item in structured["items"]
-        ]
+def _domain_result(result: PublicResult, *, is_error: bool = False) -> CallToolResult:
+    structured = result.model_dump(mode="json", exclude_none=True)
     return CallToolResult(
-        content=[TextContent(type="text", text=summary)],
+        content=[TextContent(type="text", text=result.instruction)],
         structured_content=structured,
         is_error=is_error,
     )

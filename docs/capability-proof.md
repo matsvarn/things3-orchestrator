@@ -9,6 +9,21 @@ read-back behavior agree.
 Human workflow runs are tracked separately in
 [`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
 
+## v0.6.0 owner-safe interface gate
+
+The current public proof target is the exact default eight: bounded reads,
+Task/Project capture, ordinary explicit-field updates, completion, recoverable
+Trash, and immutable receipts. Focused regression tests cover opaque
+idempotency keys, immutable private manifests, cross-process fencing, signed
+host authorization, legacy quarantine, receipt HMAC cursors, taint propagation,
+retention, and permanent content-minimized tombstones. The v0.6.0 migration did
+not make live Things Cloud calls; retained Cloud fixtures and earlier live
+probes establish only the private batch and read-back primitives.
+
+Advanced Project scopes, mutation coaching, registries, recurrence, checklist
+editing, rich-note replacement, and permanent deletion are not public v0.6.0
+capabilities. They require a later safety gate.
+
 - `Yes` means the layer has a passing proof.
 - `Partial` means the live probe covers only the named slice.
 - `Exercised` means the live probe used the approval plan and approval call.
@@ -16,7 +31,7 @@ Human workflow runs are tracked separately in
   need, or did not exercise, an approval call.
 - `Not required` means the operation is safe without approval.
 
-## Proof matrix
+## Historical v1 private-engine proof matrix
 
 | Capability | Model | Memory | Cloud fixture | Live Cloud | Approval evidence | Forced read-back |
 | --- | --- | --- | --- | --- | --- | --- |

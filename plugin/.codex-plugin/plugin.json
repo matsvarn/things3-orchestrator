@@ -1,7 +1,7 @@
 {
   "name": "things-orchestrator",
-  "version": "0.5.5",
-  "description": "Unofficial self-hosted Things Cloud MCP with Read, Commit, and Approve tools",
+  "version": "0.6.0",
+  "description": "Unofficial self-hosted Things Cloud MCP with eight bounded owner-safe tools",
   "author": {
     "name": "Mats Varnskuhler"
   },
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Things Orchestrator",
     "shortDescription": "Manage tasks and projects in Things 3.",
-    "longDescription": "Read current Things work, apply verified routine changes, and approve unchanged plans for risky changes.",
+    "longDescription": "Read current Things work and submit bounded idempotent changes. Risky work requires the host-only owner command.",
     "developerName": "Mats Varnskuhler",
     "category": "Productivity",
     "capabilities": [
