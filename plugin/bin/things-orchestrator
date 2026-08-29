@@ -25,11 +25,11 @@ fi
 export PYTHONPATH="$TO_SOURCE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 case "${1:-}" in
-  configure|login|serve|serve-http|print-config)
+  configure|login|serve|serve-http|print-config|doctor|owner-factor|migration-report|legacy-reconcile|legacy-resolve|operation-show|operation-reconcile|operation-settle-not-applied|operation-approve|operation-decline|operation-accept-partial)
     exec "$TO_PYTHON" -m things_orchestrator.cli "$@"
     ;;
   *)
-    echo "Usage: things-orchestrator {configure,login,serve,serve-http,print-config}" >&2
+    echo "Usage: things-orchestrator {configure,login,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile,operation-settle-not-applied,operation-approve,operation-decline,operation-accept-partial}" >&2
     echo "From the clone: uv run things-orchestrator login" >&2
     exit 2
     ;;

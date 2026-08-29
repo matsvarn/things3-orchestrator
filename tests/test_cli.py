@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 from urllib.error import URLError
 
 import pytest
 
-from things_orchestrator.cli import _server, build_parser, main
+from things_orchestrator.cli import (
+    _legacy_resolution_command,
+    _server,
+    build_parser,
+    main,
+)
 from things_orchestrator.cloud import CloudError
+from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 
 ROOT = Path(__file__).parents[1]
 
@@ -314,6 +322,29 @@ def test_configure_requires_at_least_one_preference(
     assert "needs --note-style or --source-schemes" in capsys.readouterr().err
 
 
+def test_migration_report_quarantines_and_reads_disposable_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(path)
+    journal.save(IntentRecord("old-approval", "a", "needs_approval"))
+    journal.save(IntentRecord("old-pending", "b", "pending"))
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_credentials",
+        lambda: ("owner@example.com", "unused", None),
+    )
+    monkeypatch.setattr("things_orchestrator.cli.journal_path", lambda _email: path)
+
+    main(["migration-report"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["quarantined"] == ["old-approval"]
+    assert report["unresolved"] == ["old-pending"]
+    assert SQLiteJournal(path).get("old-approval").state == "stale"  # type: ignore[union-attr]
+
+
 def test_configure_rejects_scheme_and_keeps_note_style_change_atomic(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -554,7 +585,16 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
 ) -> None:
     account_journal = tmp_path / "journal-accountdigest.sqlite3"
     captured: dict[str, object] = {}
-    journal = object()
+    class FakeJournal:
+        def cutover_v1(self) -> dict[str, object]:
+            return {"unresolved": []}
+
+        def prune_v2(self, *, now: str, retention_days: int) -> int:
+            assert now
+            assert retention_days == 7
+            return 0
+
+    journal = FakeJournal()
 
     class FakeClient:
         def __init__(self, email: str, password: str) -> None:
@@ -814,6 +854,77 @@ def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "uv run things-orchestrator login" in result.stderr
     assert "No module named" not in result.stderr
+
+
+def test_plugin_wrapper_routes_every_recovery_command() -> None:
+    script = (ROOT / "plugin/bin/things-orchestrator").read_text()
+    for command in (
+        "legacy-reconcile", "legacy-resolve", "operation-reconcile",
+        "operation-settle-not-applied",
+    ):
+        assert command in script
+    usage = next(line for line in script.splitlines() if line.startswith('    echo "Usage:'))
+    for command in ("legacy-reconcile", "legacy-resolve", "operation-reconcile", "operation-settle-not-applied"):
+        assert command in usage
+
+
+def test_legacy_resolution_renders_before_reading_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    title = "\x1b[31mOwner\n|\u202e"
+    plan = {
+        "writes": [
+            {"action": "update", "uuid": "a", "kind": "task", "title": title}
+        ]
+    }
+    digest = "sha256:v1:" + sha256(
+        json.dumps(
+            plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode()
+    ).hexdigest()
+    operation = V2Operation(
+        account_id="owner@example.com",
+        api_version="legacy-v1",
+        request_id="fp",
+        request_hash=digest,
+        operation_id="legacy_render",
+        tool="legacy_pending_resolution",
+        state="pending",
+        manifest={
+            "intent_id_hash": "sha256:v1:" + "0" * 64,
+            "writes": plan["writes"],
+            "display_titles": [title],
+            "legacy_plan": plan,
+        },
+        manifest_hash=digest,
+        safety_policy_digest="sha256:v1:legacy-no-replay-resolution",
+    )
+
+    class Workspace:
+        def host_get_legacy_resolution_v1(self, _intent_id: str) -> V2Operation:
+            return operation
+
+        def host_resolve_legacy_v1(self, *_args: object) -> bool:
+            return True
+
+    @contextmanager
+    def tty(_parser: object) -> object:
+        yield object()
+
+    monkeypatch.setattr("things_orchestrator.cli._workspace", lambda _parser: Workspace())
+    monkeypatch.setattr("things_orchestrator.cli._private_tty", tty)
+
+    def getpass_after_render(_prompt: str, *, stream: object) -> str:
+        assert stream is not None
+        rendered = capsys.readouterr().out
+        assert "legacy_plan |" in rendered
+        assert "\x1b" not in rendered and "\\u000a" in rendered and "\\u202e" in rendered
+        return "passphrase"
+
+    monkeypatch.setattr("things_orchestrator.cli.getpass", getpass_after_render)
+    monkeypatch.setattr("things_orchestrator.owner_authority.verified_authorization", lambda *_args, **_kwargs: object())
+    _legacy_resolution_command(build_parser(), "legacy", "accepted_as_is")
 
 
 def test_login_password_confirm_mismatch(

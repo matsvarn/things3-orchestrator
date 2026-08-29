@@ -1,4 +1,5 @@
 .agents/plugins/marketplace.json
+.audit/v2-owner-safe-interface.tsv
 .github/workflows/ci.yml
 .gitignore
 .python-version
@@ -13,6 +14,7 @@ docs/adr/0002-contextual-desired-state.md
 docs/adr/0003-review-completeness-behind-three-tools.md
 docs/adr/0004-review-token-and-native-heading-delete.md
 docs/adr/0005-one-project-read.md
+docs/adr/0006-common-caller-owner-safe-v2.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md
@@ -47,11 +49,13 @@ src/things_orchestrator/deployment.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
+src/things_orchestrator/owner_authority.py
 src/things_orchestrator/owner_text.py
 src/things_orchestrator/preferences.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
 src/things_orchestrator/source_document.py
+src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
 tests/fixtures/full_reorg_owner_prompt.txt
@@ -73,6 +77,8 @@ tests/test_recurrence.py
 tests/test_release.py
 tests/test_server.py
 tests/test_source_document.py
+tests/test_v2_contract.py
+tests/test_v2_journal_authority.py
 tests/test_workflow_skill.py
 tests/test_workspace.py
 tests/test_workspace_context.py

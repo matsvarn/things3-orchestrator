@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "things-orchestrator"
-version = "0.5.5"
-description = "Unofficial self-hosted Things 3 Cloud MCP with three tools"
+version = "0.6.0"
+description = "Unofficial self-hosted Things 3 Cloud MCP with eight bounded owner-safe tools"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Mats Varnskuhler" }]
@@ -19,6 +19,7 @@ classifiers = [
 ]
 requires-python = ">=3.12,<3.15"
 dependencies = [
+  "cryptography==49.0.0",
   "mcp==2.0.0",
   "pydantic==2.13.4",
 ]

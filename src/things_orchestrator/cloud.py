@@ -642,7 +642,11 @@ class CloudLibrary(MemoryLibrary):
                 "Things Cloud read-back did not match the requested changes"
             )
         verified = self._verified_titles(writes)
-        return ApplyResult(verified=verified, created=self._created_from_pull(writes))
+        return ApplyResult(
+            verified=verified,
+            created=self._created_from_pull(writes),
+            read_back_verified=True,
+        )
 
     def matches(self, writes: list[Write]) -> bool:
         """Match the safe Cloud envelopes, including Task6 index normalization."""

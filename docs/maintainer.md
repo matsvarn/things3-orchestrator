@@ -4,26 +4,32 @@ Keep one production server and one stable model Interface.
 
 ## Module map
 
-- `interface.py` owns the three tool contracts. Schemas stay flat. Do not add
+- `v2.py` owns the eight bounded public contracts, immutable operation drafts
+  and manifests, and taint-preserving output. Schemas stay flat. Do not add
   `oneOf` or `anyOf` to discovery schemas. Discovery output schemas expose
   control flow and compact item summaries. Runtime facts stay strict through
   the `Result` model.
-- `workspace.py` is the deep Module behind Read, Commit, and Approve. It owns
-  revisions, task meaning, plans, idempotency, and verified outcomes.
+- `workspace.py` remains the one transaction engine. V2 shares private
+  preparation, application, read-back, and reconciliation primitives. It never
+  constructs the v1 `CommitCall` language.
 - `consistency.py` owns native-state conflict detection for diagnostics
   and review signals.
 - `deployment.py` owns package version, cache version, `/health`
   capabilities, `tool_schema_hash`, and `tool_contract_hash`.
-- `journal.py` stores intent receipts and approval plans in SQLite. It makes
-  retries safe across process restarts. Its compare-and-set claims an intent
-  before Cloud I/O. The journal path is namespaced by account.
+- `journal.py` creates immutable v2 operations, performs legal compare-and-set
+  transitions, claims the account fence, and appends exact receipt rows. The
+  journal path is namespaced by account. It rehashes the complete persisted
+  manifest before review, authorization, reconciliation, and application.
+  Retained v1 rows stay private for recovery only.
 - `library.py` is the in-memory Things graph used by tests and Cloud.
 - `cloud.py` syncs and commits through the unofficial Things Cloud API.
   It coalesces one envelope per UUID and verifies a forced Cloud pull.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
-- `owner_text.py` turns a Result into the owner-visible MCP text card.
-  `server.py` is the Adapter. Structured Result stays the model payload.
+- `owner_authority.py` is CLI-only. The MCP server must not import it or gain
+  access to its passphrase verifier or encrypted signing key. The journal pins
+  only the Ed25519 public key used to verify host signatures. `server.py` is
+  the v2 MCP adapter.
 - `server.py` exposes stdio and Streamable HTTP.
 - `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
   `print-config`, and `doctor`. Callers run `uv run things-orchestrator`
@@ -42,7 +48,8 @@ Keep one production server and one stable model Interface.
   `docs/capability-proof.md`. Human workflow coverage and rerun status are in
   `docs/dogfood.md`.
 
-Do not add CRUD tools. Keep discovery schemas flat because some model clients
+Do not expose v1 tools or add advanced scopes during this cutover. Keep
+discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each
 UUID. Treat post timeouts as unknown until a Cloud read proves the state.
 Debounce normal reads with the history cursor. Treat HTTP 409 as stale

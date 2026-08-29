@@ -10,35 +10,24 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .cloud import _CACHE_VERSION
-from .interface import (
-    APPROVE_DESC,
-    APPROVE_IN,
-    APPROVE_OUT,
-    COMMIT_DESC,
-    COMMIT_IN,
-    COMMIT_OUT,
-    READ_DESC,
-    READ_IN,
-    READ_OUT,
-    RESULT_OUT,
-)
+from .v2 import DESCRIPTIONS, MODELS, PublicResult
 
 PACKAGE_NAME = "things-orchestrator"
 CACHE_VERSION = _CACHE_VERSION
 CAPABILITIES = {
-    "repair_inbox_placement": True,
-    "clear_someday": True,
-    "area_view": True,
-    "audit_view": True,
-    "diagnostics_view": True,
-    "bulk_ids": True,
-    "trash_view": True,
-    "same_batch_today_after": True,
-    "project_teardown": True,
-    "neighborhood_reads": True,
-    "in_band_validation": True,
-    "review_context": True,
-    "native_heading_delete": True,
+    "owner_safe_v2": True,
+    "default_eight": True,
+    "immutable_operations": True,
+    "account_outcome_fence": True,
+    "signed_host_authorization": True,
+    "hmac_receipt_cursors": True,
+    "legacy_cutover_report": True,
+    "seven_day_retention": True,
+    "permanent_tombstones": True,
+    "taint_marked_things_text": True,
+    "advanced_scopes": False,
+    "mutation_coach": False,
+    "permanent_delete": False,
 }
 
 
@@ -77,24 +66,22 @@ def _hash_payload(value: object) -> str:
 
 def tool_schema_hash() -> str:
     return _hash_payload(
-        [READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT]
+        {
+            "version": "v2",
+            "inputs": {name: model.model_json_schema() for name, model in MODELS.items()},
+            "output": PublicResult.model_json_schema(),
+        }
     )
 
 
 def tool_contract_hash() -> str:
     return _hash_payload(
-        [
-            READ_IN,
-            COMMIT_IN,
-            APPROVE_IN,
-            READ_OUT,
-            COMMIT_OUT,
-            APPROVE_OUT,
-            READ_DESC,
-            COMMIT_DESC,
-            APPROVE_DESC,
-            RESULT_OUT,
-        ]
+        {
+            "version": "v2",
+            "inputs": {name: model.model_json_schema() for name, model in MODELS.items()},
+            "output": PublicResult.model_json_schema(),
+            "descriptions": DESCRIPTIONS,
+        }
     )
 
 

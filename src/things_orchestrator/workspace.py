@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import Callable, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 from .cloud import CloudError
 from .consistency import Conflict, diagnose, item_conflicts
@@ -64,16 +64,27 @@ from .interface import (
 from .interface import (
     Status as PublicStatus,
 )
-from .journal import IntentRecord, IntentState, Journal, JsonDict, MemoryJournal
+from .journal import (
+    IntentRecord,
+    IntentState,
+    Journal,
+    JsonDict,
+    MemoryJournal,
+    V2Operation,
+    V2State,
+    v2_manifest_is_valid,
+)
 from .library import (
     ChecklistLine,
     Kind,
     MemoryLibrary,
+    PublicKind,
     Record,
     Status,
     Write,
     new_uuid,
     parse_id,
+    public_id,
     template_uuid_of,
 )
 from .preferences import Preferences, PreferencesError
@@ -585,6 +596,29 @@ class ThingsWorkspace:
             ),
             membership_revision=audit_membership_revision,
             call=call,
+        )
+
+    def read_v2_registry(
+        self, *, kind: Literal["project", "area"], limit: int
+    ) -> Result:
+        """Page one homogeneous v2 registry without leaking mixed internal views."""
+
+        failed = self._refresh()
+        if failed is not None:
+            return failed
+        view: View = "audit" if kind == "project" else "system"
+        source = self._library.audit() if kind == "project" else self._library.system()
+        visible = [item for item in source if item.public_kind == kind]
+        return self._page(
+            visible,
+            limit,
+            full=False,
+            instruction=f"Current Things {kind}s.",
+            view=view,
+            public_scope=self._area_scope_revision(),
+            membership_revision=(
+                self._scope_revision(source) if view == "audit" else None
+            ),
         )
 
     def _diagnostics_page(
@@ -2117,6 +2151,733 @@ class ThingsWorkspace:
             ]
         return values
 
+    def execute_v2(self, draft: object) -> JsonDict:
+        """Prepare one immutable v2 operation and run or stage its manifest."""
+
+        from .v2 import OperationDraft
+
+        if not isinstance(draft, OperationDraft):
+            raise TypeError("execute_v2 needs an OperationDraft")
+        journal = self._journal
+        existing = journal.get_v2_request(
+            self._account_id, draft.api_version, draft.request_id
+        )
+        if existing is not None:
+            if existing.request_hash != draft.request_hash:
+                return {
+                    "state": "rejected",
+                    "code": "request_conflict",
+                    "next_action": "correct_request",
+                    "instruction": "That request_id belongs to different arguments.",
+                    "operation_id": existing.operation_id,
+                }
+            return self._resume_v2(existing)
+        blockers = journal.blocking_v2_operations(self._account_id)
+        if blockers:
+            return {
+                "state": "rejected",
+                "code": "write_fenced",
+                "next_action": "run_cli",
+                "instruction": "An unresolved operation blocks writes for this account.",
+                "blocking_operation_ids": blockers,
+            }
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "rejected", "code": "internal_error", "next_action": "retry_same", "instruction": failed.instruction}
+        prepared = self._prepare_v2_manifest(draft)
+        if isinstance(prepared, dict):
+            return prepared
+        manifest, writes, before = prepared
+        operation_id = f"op_{token_urlsafe(18)}"
+        already_current = self._writes_match(writes)
+        initial_state: V2State = (
+            "pending"
+            if already_current
+            else "awaiting_owner"
+            if manifest.requires_owner
+            else "pending"
+        )
+        operation = V2Operation(
+            account_id=self._account_id,
+            api_version=draft.api_version,
+            request_id=draft.request_id,
+            request_hash=draft.request_hash,
+            operation_id=operation_id,
+            tool=draft.tool,
+            state=initial_state,
+            manifest=manifest.to_json(),
+            manifest_hash=manifest.manifest_hash,
+            safety_policy_digest=manifest.safety_policy_digest,
+            expires_at=manifest.expires_at,
+        )
+        outcome, stored, blockers = journal.create_v2(
+            operation,
+            claim_fence=initial_state == "pending",
+        )
+        if outcome == "blocked":
+            return {
+                "state": "rejected",
+                "code": "write_fenced",
+                "next_action": "run_cli",
+                "instruction": "An unresolved operation blocks writes for this account.",
+                "blocking_operation_ids": blockers,
+            }
+        assert stored is not None
+        if outcome == "conflict":
+            return {
+                "state": "rejected",
+                "code": "request_conflict",
+                "next_action": "correct_request",
+                "instruction": "That request_id belongs to different arguments.",
+                "operation_id": stored.operation_id,
+            }
+        if outcome == "existing":
+            return self._resume_v2(stored)
+        if initial_state == "awaiting_owner":
+            response: JsonDict = {
+                "state": "awaiting_owner",
+                "code": "awaiting_owner",
+                "next_action": "run_cli",
+                "instruction": "Review this operation with the CLI-only operation command.",
+                "operation_id": operation_id,
+            }
+            return response
+        result = self._apply_v2(operation, writes=writes, before=before)
+        if result.get("item_ids"):
+            return {**result, "_fresh_items": True}
+        return result
+
+    def _prepare_v2_manifest(
+        self, draft: object
+    ) -> tuple[Any, list[Write], list[JsonDict | None]] | JsonDict:
+        from .v2 import OperationDraft, OperationManifest
+
+        assert isinstance(draft, OperationDraft)
+        writes: list[Write] = []
+        before: list[JsonDict | None] = []
+        preconditions: dict[str, str] = {}
+        touched: list[list[str]] = []
+        display_titles: list[str] = []
+        payload = draft.payload
+        if draft.tool == "things_capture":
+            for capture_item in cast(list[dict[str, object]], payload["items"]):
+                kind = cast(Kind, capture_item["kind"])
+                parent_uuid: str | None = None
+                area_uuid: str | None = None
+                into_id = capture_item.get("into_id")
+                if isinstance(into_id, str):
+                    destination = self._exact_item(into_id)
+                    if destination is None or destination.kind not in {"project", "area"}:
+                        return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "An exact destination was not found."}
+                    if destination.status != "open" or destination.trashed or destination.recurrence.role != "none":
+                        return {"state": "rejected", "code": "inactive_destination", "next_action": "correct_request", "instruction": "The destination is not an active ordinary container."}
+                    if kind == "project" and destination.kind != "area":
+                        return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "Projects may only be captured into Areas."}
+                    preconditions[destination.id] = self._revision(destination)
+                    if destination.kind == "project":
+                        parent_uuid = destination.uuid
+                    else:
+                        area_uuid = destination.uuid
+                uuid = new_uuid()
+                start_value = cast(str | None, capture_item.get("start"))
+                start, someday, tonight = self._start(start_value)
+                write = Write(
+                    action="create", uuid=uuid, kind=kind,
+                    title=cast(str, capture_item["title"]),
+                    notes=cast(str | None, capture_item.get("notes")),
+                    into_uuid=parent_uuid or area_uuid,
+                    into_kind="project" if parent_uuid else "area" if area_uuid else None,
+                    inbox=kind == "task" and into_id is None,
+                    start=start, tonight=tonight, someday=someday,
+                    deadline=date.fromisoformat(cast(str, capture_item["deadline"])) if capture_item.get("deadline") else None,
+                )
+                writes.append(write)
+                before.append(None)
+                touched.append(["title", "notes", "start", "deadline", "into"])
+                display_titles.append(cast(str, capture_item["title"]))
+                if kind == "project":
+                    for child in cast(list[dict[str, object]], capture_item.get("tasks", [])):
+                        child_write = Write(
+                            action="create", uuid=new_uuid(), kind="task",
+                            title=cast(str, child["title"]),
+                            notes=cast(str | None, child.get("notes")),
+                            into_uuid=uuid, into_kind="project",
+                        )
+                        writes.append(child_write)
+                        before.append(None)
+                        touched.append(["title", "notes", "into"])
+                        display_titles.append(cast(str, child["title"]))
+        else:
+            ids = cast(list[str], payload["ids"] if "ids" in payload else [row["id"] for row in cast(list[dict[str, object]], payload["items"])])
+            expanded_ids: set[str] = set()
+            targets: list[Record] = []
+            for item_id in ids:
+                target = self._exact_item(item_id)
+                if target is None or target.kind not in {"task", "project"} or target.heading:
+                    return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "Mutation targets must be exact Tasks or Projects."}
+                if draft.tool == "things_trash" and target.kind == "project":
+                    preconditions[f"scope:project:{target.uuid}"] = (
+                        self._project_scope_revision(target.uuid)
+                    )
+                candidates = [*self._project_descendants(target.uuid), target] if draft.tool == "things_trash" and target.kind == "project" else [target]
+                for candidate in candidates:
+                    if candidate.recurrence.role == "template":
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "The bounded v2 mutation tools do not edit, complete, or trash recurrence templates.",
+                        }
+                    if candidate.id not in expanded_ids:
+                        expanded_ids.add(candidate.id)
+                        targets.append(candidate)
+            if len(targets) > 120:
+                return {"state": "rejected", "code": "expanded_write_limit", "next_action": "correct_request", "instruction": "The operation expands beyond 120 writes."}
+            for target in targets:
+                item_id = target.id
+                preconditions[target.id] = self._revision(target)
+                if target.parent_uuid:
+                    parent = self._library.records.get(target.parent_uuid)
+                    if parent is not None:
+                        preconditions[parent.id] = self._revision(parent)
+                if draft.tool == "things_complete":
+                    if target.kind == "project":
+                        open_actions = [
+                            child
+                            for child in self._project_descendants(target.uuid)
+                            if child.kind == "task"
+                            and not child.heading
+                            and child.status == "open"
+                            and not child.trashed
+                            and child.recurrence.role != "template"
+                        ]
+                        if open_actions:
+                            return {
+                                "state": "rejected",
+                                "code": "validation_error",
+                                "next_action": "correct_request",
+                                "instruction": "Complete or move every open Project action before completing the Project.",
+                            }
+                        preconditions[f"scope:project:{target.uuid}"] = (
+                            self._project_scope_revision(target.uuid)
+                        )
+                    writes.append(Write(action="complete", uuid=target.uuid, kind=target.kind, status="done"))
+                    touched.append(["status"])
+                    before.append(self._v2_observed(target, ("status",)))
+                    display_titles.append(target.title)
+                elif draft.tool == "things_trash":
+                    writes.append(Write(action="trash", uuid=target.uuid, kind=target.kind, heading=target.heading))
+                    touched.append(["trashed"])
+                    before.append(self._v2_observed(target, ("trashed",)))
+                    display_titles.append(target.title)
+                else:
+                    row = next(entry for entry in cast(list[dict[str, object]], payload["items"]) if entry["id"] == item_id)
+                    fields = cast(dict[str, object], row["set"])
+                    if "notes" in fields and target.notes_format == "rich":
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "The bounded v2 update cannot replace a rich-text note.",
+                        }
+                    start_set = "start" in fields
+                    start, someday, tonight = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
+                    remind_set = "remind_at" in fields
+                    if (
+                        start_set
+                        and (fields.get("start") is None or someday)
+                        and target.remind is not None
+                        and not remind_set
+                    ):
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "Clearing a start or moving it to Someday with an existing reminder also requires remind_at=null.",
+                        }
+                    reminder_date, reminder = (
+                        self._remind_input(
+                            cast(str | None, fields.get("remind_at"))
+                        )
+                        if remind_set
+                        else (
+                            None,
+                            target.remind
+                            if start_set and fields.get("start") is not None
+                            else None,
+                        )
+                    )
+                    if reminder_date is not None:
+                        if start_set and (start is None or start != reminder_date):
+                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "start and remind_at must use the same local date."}
+                        if not start_set:
+                            if target.start != reminder_date:
+                                return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "remind_at may omit start only when the existing start uses the same local date."}
+                            start = reminder_date
+                            tonight = target.tonight
+                    writes.append(Write(
+                        action="update", uuid=target.uuid, kind=target.kind,
+                        title=cast(str | None, fields.get("title")),
+                        notes=cast(str | None, fields.get("notes")),
+                        start=start, clear_start=start_set and fields.get("start") is None,
+                        tonight=tonight, someday=someday,
+                        deadline=date.fromisoformat(cast(str, fields["deadline"])) if fields.get("deadline") else None,
+                        clear_deadline="deadline" in fields and fields.get("deadline") is None,
+                        remind=reminder,
+                        clear_remind="remind_at" in fields and fields.get("remind_at") is None,
+                    ))
+                    touched.append(sorted(fields))
+                    before.append(self._v2_observed(target, tuple(sorted(fields))))
+                    display_titles.append(target.title)
+        manifest = OperationManifest.build(
+            account_id=self._account_id,
+            draft=draft,
+            preconditions=preconditions,
+            writes=[_write_json(write) for write in writes],
+            touched=touched,
+            before=before,
+            display_titles=display_titles,
+            requires_owner=draft.tool == "things_trash",
+            clock=self._clock(),
+        )
+        return manifest, writes, before
+
+    def _apply_v2(
+        self,
+        operation: V2Operation,
+        *,
+        writes: list[Write] | None = None,
+        before: list[JsonDict | None] | None = None,
+    ) -> JsonDict:
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
+        writes = writes or [
+            _write_from_json(cast(dict[str, object], row))
+            for row in cast(list[object], operation.manifest["writes"])
+        ]
+        before = before or cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud precondition read-back is unavailable.", "operation_id": operation.operation_id}
+        if not self._v2_preconditions_match(operation):
+            response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
+            rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
+            settled = self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
+            return response if settled else self._persisted_v2_outcome(operation.operation_id)
+        if self._writes_match(writes):
+            response = {
+                "state": "unchanged",
+                "code": "unchanged",
+                "next_action": "read_receipt",
+                "instruction": "The requested state was already current.",
+                "operation_id": operation.operation_id,
+            }
+            rows = self._v2_receipt_rows(operation, writes, before, "unchanged")
+            settled = self._journal.settle_v2(
+                operation.operation_id,
+                expected="pending",
+                state="unchanged",
+                response=response,
+                rows=rows,
+            )
+            return response if settled else self._persisted_v2_outcome(
+                operation.operation_id
+            )
+        try:
+            applied = self._library.apply(writes)
+        except CloudError:
+            failed = self._refresh(force=True)
+            if failed is not None:
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The commit outcome is unknown and will never be replayed.", "operation_id": operation.operation_id}
+            return self._reconcile_v2(operation, writes, before)
+        if not applied.read_back_verified:
+            failed = self._refresh(force=True)
+            if failed is not None:
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
+        return self._reconcile_v2(operation, writes, before)
+
+    def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
+        matched = [self._writes_match([write]) for write in writes]
+        if all(matched):
+            state = "applied"
+        elif any(matched):
+            state = "partial"
+        else:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The Cloud outcome remains unresolved.", "operation_id": operation.operation_id}
+        item_ids = [_write_public_id(write) for write in writes]
+        response: JsonDict = {"state": state, "code": state, "next_action": "run_cli" if state == "partial" else "read_receipt", "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
+        rows = self._v2_receipt_rows(operation, writes, before, state)
+        settled = self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
+        return response if settled else self._persisted_v2_outcome(operation.operation_id)
+
+    def _persisted_v2_outcome(self, operation_id: str) -> JsonDict:
+        current = self._journal.get_v2_operation(operation_id)
+        if current is not None and current.response is not None:
+            return current.response
+        return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "A concurrent reconciliation changed the operation; inspect its persisted receipt.", "operation_id": operation_id}
+
+    def _v2_preconditions_match(self, operation: V2Operation) -> bool:
+        preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
+        for item_id, expected in preconditions.items():
+            if item_id.startswith("scope:project:"):
+                uuid = item_id.removeprefix("scope:project:")
+                if self._project_scope_revision(uuid) != expected:
+                    return False
+                continue
+            item = self._exact_item(item_id)
+            if item is None or self._revision(item) != expected:
+                return False
+        return True
+
+    def _resume_v2(self, operation: V2Operation) -> JsonDict:
+        if operation.response is not None:
+            return operation.response
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
+        if operation.state == "pending":
+            failed = self._refresh(force=True)
+            if failed is not None:
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable.", "operation_id": operation.operation_id}
+            writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
+            before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+            return self._reconcile_v2(operation, writes, before)
+        return {"state": operation.state, "instruction": "This immutable operation is unchanged.", "operation_id": operation.operation_id}
+
+    def host_get_operation_v2(self, operation_id: str) -> V2Operation | None:
+        """Return an operation only when it belongs to this workspace account."""
+
+        operation = self._journal.get_v2_operation(operation_id)
+        if (
+            operation is None
+            or operation.account_id != self._account_id
+            or not v2_manifest_is_valid(operation)
+        ):
+            return None
+        return operation
+
+    @staticmethod
+    def _invalid_v2_manifest(operation_id: str) -> JsonDict:
+        return {
+            "state": "rejected",
+            "code": "internal_error",
+            "next_action": "contact_operator",
+            "instruction": "The persisted operation manifest failed its integrity check; no write was made.",
+            "operation_id": operation_id,
+        }
+
+    def host_reconcile_v2(self, operation_id: str) -> JsonDict:
+        """Force current evidence for one pending operation without replaying it."""
+
+        operation = self.host_get_operation_v2(operation_id)
+        if operation is None:
+            return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "That operation does not belong to this account."}
+        if operation.state != "pending":
+            return self._resume_v2(operation)
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable; nothing was replayed.", "operation_id": operation_id}
+        writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
+        before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        return self._reconcile_v2(operation, writes, before)
+
+    def host_settle_not_applied_v2(self, operation_id: str, authorization: object) -> JsonDict:
+        """Settle pending only when forced evidence proves no frozen write landed."""
+
+        operation = self.host_get_operation_v2(operation_id)
+        if operation is None or operation.state != "pending":
+            return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "That operation is not pending for this account."}
+        if self._journal.verify_v2_authorization(operation, "settle_not_applied", authorization) is None:
+            return {"state": "rejected", "code": "validation_error", "next_action": "run_cli", "instruction": "Verified CLI authorization is required.", "operation_id": operation_id}
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud evidence is unavailable.", "operation_id": operation_id}
+        writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
+        if any(self._writes_match([write]) for write in writes):
+            return self.host_reconcile_v2(operation_id)
+        before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        if not self._v2_current_equals_before(operation, writes, before):
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Current touched fields differ from both the frozen before and desired observations; nothing was replayed.", "operation_id": operation_id}
+        response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "Forced read-back proved that no frozen write landed; nothing was replayed.", "operation_id": operation_id}
+        rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
+        settled = self._journal.settle_v2(
+            operation_id, expected="pending", state="not_applied", response=response,
+            rows=rows, authorization=authorization, action="settle_not_applied",
+        )
+        return response if settled else self._persisted_v2_outcome(operation_id)
+
+    def _v2_current_equals_before(
+        self,
+        operation: V2Operation,
+        writes: list[Write],
+        before: list[JsonDict | None],
+    ) -> bool:
+        touched = cast(list[list[str]], operation.manifest["touched"])
+        for index, write in enumerate(writes):
+            current = self._library.records.get(write.uuid)
+            observed = self._v2_observed(current, touched[index]) if current is not None else None
+            if observed != before[index]:
+                return False
+        return True
+
+    def host_reconcile_v1_pending(self, intent_id: str) -> JsonDict:
+        """Classify retained v1 pending evidence once, without replaying its writes."""
+
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return {"status": "rejected", "code": "missing_target", "instruction": "That retained v1 operation is not pending."}
+        if not _legacy_recovery_plan_is_complete(record.plan):
+            malformed_result: JsonDict = {"status": "pending_unknown", "classification": "malformed", "instruction": "The retained v1 row has no complete frozen write evidence and remains fenced."}
+            self._journal.annotate_v1_pending(intent_id, result=malformed_result)
+            return malformed_result
+        writes = self._writes_from_plan(record.plan)
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"status": "pending", "code": "pending_unknown", "instruction": "Cloud read-back is unavailable; nothing was replayed."}
+        matched = [self._writes_match([write]) for write in writes]
+        classification = "applied" if all(matched) else "partial" if any(matched) else "unknown"
+        result: JsonDict = {
+            "status": "reconciled_no_replay" if classification == "applied" else "pending_unknown",
+            "classification": classification,
+            "instruction": (
+                "Forced Cloud read-back proved every retained v1 write applied; no write was replayed."
+                if classification == "applied"
+                else "Current evidence is partial or ambiguous; the retained v1 fence remains until signed CLI resolution."
+            ),
+        }
+        changed = (
+            self._journal.resolve_v1_pending(
+                intent_id,
+                expected_fingerprint=record.fingerprint,
+                expected_plan_digest=_legacy_plan_digest(record.plan),
+                state="applied",
+                result=result,
+            )
+            if classification == "applied"
+            else self._journal.annotate_v1_pending(intent_id, result=result)
+        )
+        if not changed:
+            return {"status": "rejected", "code": "request_conflict", "instruction": "The retained v1 operation changed during reconciliation."}
+        return result
+
+    def host_get_legacy_resolution_v1(self, intent_id: str) -> V2Operation | None:
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return None
+        digest = _legacy_plan_digest(record.plan)
+        raw_writes = record.plan.get("writes", [])
+        writes = raw_writes if isinstance(raw_writes, list) else []
+        display_titles = [
+            cast(str, row["title"])
+            if isinstance(row, dict) and isinstance(row.get("title"), str)
+            else ""
+            for row in writes
+        ]
+        return V2Operation(
+            account_id=self._account_id,
+            api_version="legacy-v1",
+            request_id=record.fingerprint,
+            request_hash=digest,
+            operation_id="legacy_" + sha256((intent_id + record.fingerprint).encode()).hexdigest()[:24],
+            tool="legacy_pending_resolution",
+            state="pending",
+            manifest={
+                "intent_id_hash": "sha256:v1:" + sha256(intent_id.encode()).hexdigest(),
+                "writes": json.loads(json.dumps(writes)),
+                "display_titles": display_titles,
+                "legacy_plan": json.loads(json.dumps(record.plan)),
+            },
+            manifest_hash=digest,
+            safety_policy_digest="sha256:v1:legacy-no-replay-resolution",
+        )
+
+    def host_resolve_legacy_v1(
+        self,
+        intent_id: str,
+        resolution: Literal["accepted_as_is", "superseded"],
+        authorization: object,
+    ) -> bool:
+        operation = self.host_get_legacy_resolution_v1(intent_id)
+        if operation is None:
+            return False
+        action = f"legacy_{resolution}"
+        authorization_record = self._journal.verify_v2_authorization(operation, action, authorization)
+        if authorization_record is None:
+            return False
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return False
+        prior = record.result or {}
+        return self._journal.resolve_v1_pending(
+            intent_id,
+            expected_fingerprint=operation.request_id,
+            expected_plan_digest=operation.manifest_hash,
+            state="stale",
+            result={
+                "status": "owner_resolved_no_replay",
+                "classification": prior.get("classification", "unknown"),
+                "resolution": resolution,
+                "authorization": authorization_record,
+                "instruction": "The owner released this retained v1 fence without a Cloud write.",
+            },
+        )
+
+    def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
+        operation = self._journal.get_v2_operation(operation_id)
+        if operation is None or operation.account_id != self._account_id:
+            return {"state": "rejected", "instruction": "That operation does not belong to this account."}
+        if self._journal.verify_v2_authorization(operation, "approve", authorization) is None:
+            return {"state": "rejected", "instruction": "Verified host authorization is required.", "operation_id": operation_id}
+        if operation.state != "awaiting_owner":
+            return self._resume_v2(operation)
+        if operation.expires_at is None or datetime.fromisoformat(operation.expires_at) <= self._clock():
+            response: JsonDict = {"state": "stale", "instruction": "The owner approval window expired.", "operation_id": operation_id}
+            self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
+            return response
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "awaiting_owner", "instruction": "Cloud state could not be rechecked.", "operation_id": operation_id}
+        if not self._v2_preconditions_match(operation):
+            response = {"state": "stale", "instruction": "A private operation precondition changed.", "operation_id": operation_id}
+            self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
+            return response
+        authorized, blockers = self._journal.authorize_v2(operation_id, authorization)
+        if not authorized:
+            return {"state": "rejected", "instruction": "Another unresolved operation blocks approval.", "operation_id": operation_id, "blocking_operation_ids": blockers}
+        pending = self._journal.get_v2_operation(operation_id)
+        assert pending is not None
+        return self._apply_v2(pending)
+
+    def host_decline_v2(self, operation_id: str, authorization: object) -> bool:
+        operation = self._journal.get_v2_operation(operation_id)
+        return bool(
+            operation is not None
+            and operation.account_id == self._account_id
+            and self._journal.verify_v2_authorization(operation, "decline", authorization) is not None
+            and self._journal.transition_v2(
+                operation_id,
+                expected="awaiting_owner",
+                state="declined",
+                authorization=authorization,
+                response={"state": "declined", "instruction": "The owner declined this operation.", "operation_id": operation_id},
+            )
+        )
+
+    def host_resolve_partial_v2(
+        self,
+        operation_id: str,
+        resolution: Literal["accepted_as_is", "superseded"],
+        authorization: object,
+    ) -> bool:
+        operation = self._journal.get_v2_operation(operation_id)
+        return bool(
+            operation is not None
+            and operation.account_id == self._account_id
+            and self._journal.verify_v2_authorization(operation, resolution, authorization) is not None
+            and self._journal.transition_v2(
+                operation_id,
+                expected="partial",
+                state="partial_resolved",
+                authorization=authorization,
+                resolution=resolution,
+                response={"state": "partial_resolved", "instruction": "The owner recorded the partial outcome without replay.", "operation_id": operation_id},
+            )
+        )
+
+    def _v2_receipt_rows(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None], outcome: str) -> list[JsonDict]:
+        rows: list[JsonDict] = []
+        touched = cast(list[list[str]], operation.manifest["touched"])
+        for index, write in enumerate(writes, start=1):
+            item = self._library.records.get(write.uuid)
+            observed = self._v2_observed(item, touched[index - 1]) if item is not None else None
+            result = outcome
+            if outcome == "partial":
+                result = "applied" if self._writes_match([write]) else "not_applied"
+            desired = self._v2_desired(write, touched[index - 1])
+            rows.append({"sequence": index, "action": write.action, "target_id": _write_public_id(write), "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
+        return rows
+
+    def _v2_desired(self, write: Write, fields: Sequence[str]) -> JsonDict:
+        selected = set(fields)
+        desired: JsonDict = {
+            "action": write.action,
+            "uuid": write.uuid,
+            "kind": "heading" if write.heading else write.kind,
+        }
+        if "title" in selected:
+            desired["title"] = write.title
+        if "notes" in selected:
+            desired["notes"] = write.notes
+        if "status" in selected:
+            desired["status"] = _public_status(write.status or "open")
+        if "trashed" in selected:
+            desired["trashed"] = write.action == "trash"
+        if "start" in selected:
+            desired["start"] = self._v2_write_start(write)
+        if "deadline" in selected:
+            desired["deadline"] = (
+                None
+                if write.clear_deadline or write.deadline is None
+                else write.deadline.isoformat()
+            )
+        if "remind_at" in selected:
+            desired["remind_at"] = (
+                None if write.clear_remind else self._reminder_from_write(write)
+            )
+        if "into" in selected:
+            desired["into_id"] = (
+                f"{write.into_kind}:{write.into_uuid}"
+                if write.into_kind is not None and write.into_uuid is not None
+                else None
+            )
+        return desired
+
+    @staticmethod
+    def _v2_write_start(write: Write) -> str | None:
+        if write.clear_start:
+            return None
+        if write.tonight:
+            return "evening"
+        if write.someday:
+            return "someday"
+        return write.start.isoformat() if write.start is not None else None
+
+    def _reminder_from_write(self, write: Write) -> str | None:
+        if write.remind is None or write.start is None:
+            return None
+        return datetime.combine(write.start, time.fromisoformat(write.remind), tzinfo=self._clock().tzinfo).isoformat()
+
+    def _v2_observed(self, item: Record, fields: Sequence[str]) -> JsonDict:
+        values: JsonDict = {"id": item.id}
+        selected = set(fields) or {"title", "notes", "status", "trashed", "start", "deadline", "into"}
+        if "title" in selected:
+            values["title"] = item.title
+        if "notes" in selected:
+            values["notes"] = item.notes
+        if "status" in selected:
+            values["status"] = _public_status(item.status)
+        if "trashed" in selected:
+            values["trashed"] = item.trashed
+        if "start" in selected:
+            values["start"] = (
+                "evening"
+                if item.tonight
+                else "someday"
+                if item.someday
+                else item.start.isoformat()
+                if item.start
+                else None
+            )
+        if "deadline" in selected:
+            values["deadline"] = item.deadline.isoformat() if item.deadline else None
+        if "remind_at" in selected:
+            values["remind_at"] = self._reminder(item)
+        if "into" in selected:
+            values["into_id"] = f"project:{item.parent_uuid}" if item.parent_uuid else f"area:{item.area_uuid}" if item.area_uuid else None
+        return values
+
+
     def commit(self, call: CommitCall) -> Result:
         fingerprint = _fingerprint(call.model_dump(mode="json", by_alias=True))
         stored = self._journal.get(call.intent_id)
@@ -3263,10 +4024,12 @@ class ThingsWorkspace:
             direct_tags=direct_tags,
             inherited_tags=inherited_tags,
             direct_tag_ids=compact_direct_tag_ids,
-            start=item.start.isoformat()
-            if item.start
+            start="evening"
+            if item.tonight
             else "someday"
             if item.someday
+            else item.start.isoformat()
+            if item.start
             else None,
             deadline=item.deadline.isoformat() if item.deadline else None,
             remind_at=self._reminder(item),
@@ -6984,8 +7747,8 @@ class ThingsWorkspace:
         missing_ids = all_missing_ids[:_CONTEXT_LIMIT]
         missing_ids_omitted = max(len(all_missing_ids) - len(missing_ids), 0)
         unchanged_items: list[ReceiptItemFact] = []
-        for public_id in already_correct:
-            item = self._exact_item(public_id)
+        for item_id in already_correct:
+            item = self._exact_item(item_id)
             if item is not None:
                 unchanged_items.append(
                     ReceiptItemFact(id=item.id, title=_bounded_title(item.title))
@@ -7244,21 +8007,21 @@ class ThingsWorkspace:
 
     def _preconditions_changed(self, plan: JsonDict) -> bool:
         raw = cast(dict[str, object], plan.get("preconditions", {}))
-        for public_id, expected in raw.items():
-            if public_id == "scope:areas":
+        for item_id, expected in raw.items():
+            if item_id == "scope:areas":
                 if self._area_scope_revision() != expected:
                     return True
                 continue
-            if public_id == "scope:tags":
+            if item_id == "scope:tags":
                 if self._tag_revision() != expected:
                     return True
                 continue
-            if public_id == "scope:today":
+            if item_id == "scope:today":
                 if self._today_scope_revision() != expected:
                     return True
                 continue
-            if public_id.startswith("scope:list:"):
-                encoded_scope = public_id.removeprefix("scope:list:")
+            if item_id.startswith("scope:list:"):
+                encoded_scope = item_id.removeprefix("scope:list:")
                 try:
                     kind, scope_name, scope_uuid = json.loads(encoded_scope)
                 except (TypeError, ValueError):
@@ -7269,17 +8032,17 @@ class ThingsWorkspace:
                 if self._list_scope_revision(cast(Kind, kind), scope) != expected:
                     return True
                 continue
-            if public_id.startswith("scope:project:"):
-                uuid = public_id.removeprefix("scope:project:")
+            if item_id.startswith("scope:project:"):
+                uuid = item_id.removeprefix("scope:project:")
                 if self._project_scope_revision(uuid) != expected:
                     return True
                 continue
-            if public_id.startswith("scope:repeat:"):
-                uuid = public_id.removeprefix("scope:repeat:")
+            if item_id.startswith("scope:repeat:"):
+                uuid = item_id.removeprefix("scope:repeat:")
                 if self._recurrence_scope_revision(uuid) != expected:
                     return True
                 continue
-            item = self._exact_item(public_id)
+            item = self._exact_item(item_id)
             if item is None or self._revision(item) != expected:
                 return True
         return False
@@ -7997,6 +8760,11 @@ def _outcome_unknown(error: CloudError) -> bool:
     )
 
 
+def _write_public_id(write: Write) -> str:
+    kind: PublicKind = "heading" if write.heading else write.kind
+    return public_id(kind, write.uuid)
+
+
 def _write_json(write: Write) -> JsonDict:
     payload = cast(JsonDict, asdict(write))
     for name in ("start", "deadline", "owner_today"):
@@ -8014,6 +8782,117 @@ def _write_from_json(payload: dict[str, object]) -> Write:
         if isinstance(value, str):
             values[name] = date.fromisoformat(value)
     return Write(**values)  # type: ignore[arg-type]
+
+
+def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
+    raw = plan.get("writes")
+    if not isinstance(raw, list) or not raw:
+        return False
+    for value in raw:
+        if not isinstance(value, dict):
+            return False
+        action = value.get("action")
+        uuid = value.get("uuid")
+        kind = value.get("kind")
+        if (
+            action not in _LEGACY_WRITE_ACTIONS
+            or kind not in _LEGACY_WRITE_KINDS
+            or not isinstance(uuid, str)
+            or not uuid
+        ):
+            return False
+        try:
+            write = _write_from_json(cast(dict[str, object], value))
+        except (TypeError, ValueError):
+            return False
+        action = write.action
+        if (write.into_uuid is None) != (write.into_kind is None):
+            return False
+        if write.into_kind not in {None, "project", "area"}:
+            return False
+        if action == "move" and write.kind not in {"task", "project"}:
+            return False
+        if action == "move" and write.kind == "project" and write.into_kind == "project":
+            return False
+        if action in {"rename_area", "delete_area"} and write.kind != "area":
+            return False
+        if action == "create_heading" and write.kind != "task":
+            return False
+        if action in {"create", "create_heading", "rename_area", "ensure_tag", "rename_tag"} and not write.title:
+            return False
+        if action == "update" and not _legacy_has_effective_field(write, (
+            "title", "notes", "status", "into_uuid", "start", "clear_start",
+            "deadline", "clear_deadline", "remind", "clear_remind", "tag_uuids",
+            "tonight", "someday", "inbox", "anytime", "heading_uuid",
+            "clear_heading", "sort_index", "today_index",
+        )):
+            return False
+        if action == "move" and not (
+            (write.into_uuid is not None and write.into_kind is not None)
+            or _legacy_has_effective_field(write, (
+                "start", "clear_start", "tonight", "someday", "inbox", "anytime",
+                "heading_uuid", "clear_heading", "sort_index", "today_index",
+            ))
+        ):
+            return False
+        if action == "tags" and write.tag_uuids is None:
+            return False
+        if action == "reparent_tag" and write.tag_parent_uuids is None:
+            return False
+        if action == "checklist" and not (
+            write.title
+            or _legacy_has_effective_field(write, (
+                "checklist_parent_uuid", "checklist_status", "checklist_index",
+                "checklist_remove",
+            ))
+        ):
+            return False
+        if action == "repeat" and not write.recurrence_rule:
+            return False
+        if action == "repeat_link" and write.recurrence_links is None:
+            return False
+    return True
+
+
+def _legacy_has_effective_field(write: Write, names: tuple[str, ...]) -> bool:
+    return any(
+        (value := getattr(write, name)) is not None and value is not False
+        for name in names
+    )
+
+
+_LEGACY_WRITE_ACTIONS = frozenset({
+    "create", "create_heading", "update", "complete", "cancel", "move", "tags",
+    "rename_area", "delete_area", "trash", "restore", "permanent_delete",
+    "ensure_tag", "rename_tag", "reparent_tag", "delete_tag", "checklist",
+    "repeat", "repeat_link",
+})
+_LEGACY_WRITE_KINDS = frozenset({"task", "project", "area"})
+
+
+def _legacy_plan_digest(plan: JsonDict) -> str:
+    canonical = json.dumps(plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return "sha256:v1:" + sha256(canonical.encode()).hexdigest()
+
+
+def _taint_things_text(value: object) -> object:
+    """Mark Things-origin title/note values, including nested receipt snapshots."""
+
+    if isinstance(value, list):
+        return [_taint_things_text(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, object] = {}
+    for key, item in value.items():
+        if key in {"title", "notes", "notes_markdown"} and isinstance(item, str):
+            projected[key] = {
+                "value": item,
+                "source": "things_cloud",
+                "trust": "untrusted",
+            }
+        else:
+            projected[key] = _taint_things_text(item)
+    return projected
 
 
 def _delete_write(record: Record) -> Write:
