@@ -662,7 +662,7 @@ class ThingsV2:
             kind=item.kind,
             title=TaintedText(value=item.title),
             status=item.status,
-            notes=TaintedText(value=item.notes_markdown) if item.notes_markdown is not None else None,
+            notes=TaintedText(value=item.notes_markdown) if item.notes_markdown else None,
             into_id=item.into_id,
             start=item.start,
             deadline=item.deadline,

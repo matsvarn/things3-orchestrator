@@ -103,7 +103,7 @@ def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
         {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]},
     )
     assert retried.operation_id == result.operation_id
-    assert [item.title.value for item in retried.items] == ["B"]
+    assert retried.items == result.items
     assert library.refreshes == 4
 
 
