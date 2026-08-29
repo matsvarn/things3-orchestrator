@@ -32,6 +32,8 @@ The public MCP interface is now the bounded owner-safe v2 contract.
   review. Clearing a start cannot implicitly delete an omitted reminder.
 - Retention maintenance is throttled to once per day per server process, and a
   successful mutation reuses its verified post-write snapshot for the response.
+  Idempotent retries deliberately reread those item IDs instead of dropping the
+  original response shape.
 - Advanced scopes and the mutation coach profile are deferred until the
   default-eight safety contract is proven in use.
 

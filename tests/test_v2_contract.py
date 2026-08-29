@@ -81,14 +81,15 @@ def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
             self.refreshes += 1
 
     library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
-    result = ThingsV2(
+    interface = ThingsV2(
         ThingsWorkspace(
             library,
             journal=MemoryJournal(),
             clock=lambda: NOW,
             account_id="owner@example.com",
         )
-    ).dispatch(
+    )
+    result = interface.dispatch(
         "things_update",
         {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]},
     )
@@ -96,6 +97,14 @@ def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
     assert result.state == "applied"
     assert [item.title.value for item in result.items] == ["B"]
     assert library.refreshes == 3
+
+    retried = interface.dispatch(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    assert retried.operation_id == result.operation_id
+    assert [item.title.value for item in retried.items] == ["B"]
+    assert library.refreshes == 4
 
 
 def test_read_cursors_continue_find_projects_and_tags_without_repeating_selectors() -> None:

@@ -599,22 +599,18 @@ class ThingsV2:
     def _mutation(self, result: dict[str, object]) -> PublicResult:
         item_ids = cast(list[str], result.pop("item_ids", []))
         fresh_items = result.pop("_fresh_items", False) is True
-        items = (
-            [
-                self._item(
-                    self.workspace._fact(
-                        item,
-                        full=True,
-                        include_revision=False,
-                        detail=("notes", "tags"),
-                    )
+        items = [
+            self._item(
+                self.workspace._fact(
+                    item,
+                    full=True,
+                    include_revision=False,
+                    detail=("notes", "tags"),
                 )
-                for item_id in item_ids
-                if (item := self.workspace._exact_item(item_id)) is not None
-            ]
-            if fresh_items
-            else []
-        )
+            )
+            for item_id in item_ids
+            if (item := self.workspace._exact_item(item_id)) is not None
+        ] if fresh_items else self._get(item_ids).items if item_ids else []
         return PublicResult(
             state=cast(Any, result["state"]),
             code=cast(Any, result.get("code", _result_code(cast(str, result["state"])))),
