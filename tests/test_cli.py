@@ -849,6 +849,18 @@ def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
     assert "No module named" not in result.stderr
 
 
+def test_plugin_wrapper_routes_every_recovery_command() -> None:
+    script = (ROOT / "plugin/bin/things-orchestrator").read_text()
+    for command in (
+        "legacy-reconcile", "legacy-resolve", "operation-reconcile",
+        "operation-settle-not-applied",
+    ):
+        assert command in script
+    usage = next(line for line in script.splitlines() if line.startswith('    echo "Usage:'))
+    for command in ("legacy-reconcile", "legacy-resolve", "operation-reconcile", "operation-settle-not-applied"):
+        assert command in usage
+
+
 def test_login_password_confirm_mismatch(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

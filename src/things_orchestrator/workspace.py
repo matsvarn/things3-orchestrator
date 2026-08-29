@@ -2340,6 +2340,7 @@ class ThingsWorkspace:
                             if target.start != reminder_date:
                                 return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "remind_at may omit start only when the existing start uses the same local date."}
                             start = reminder_date
+                            tonight = target.tonight
                     writes.append(Write(
                         action="update", uuid=target.uuid, kind=target.kind,
                         title=cast(str | None, fields.get("title")),
@@ -2385,8 +2386,8 @@ class ThingsWorkspace:
         if not self._v2_preconditions_match(operation):
             response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
             rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
-            self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
-            return response
+            settled = self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
+            return response if settled else self._persisted_v2_outcome(operation.operation_id)
         try:
             self._library.apply(writes)
         except CloudError:
@@ -2410,8 +2411,14 @@ class ThingsWorkspace:
         item_ids = [f"{'heading' if write.heading else write.kind}:{write.uuid}" for write in writes]
         response: JsonDict = {"state": state, "code": state, "next_action": "run_cli" if state == "partial" else "read_receipt", "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
         rows = self._v2_receipt_rows(operation, writes, before, state)
-        self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
-        return response
+        settled = self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
+        return response if settled else self._persisted_v2_outcome(operation.operation_id)
+
+    def _persisted_v2_outcome(self, operation_id: str) -> JsonDict:
+        current = self._journal.get_v2_operation(operation_id)
+        if current is not None and current.response is not None:
+            return current.response
+        return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "A concurrent reconciliation changed the operation; inspect its persisted receipt.", "operation_id": operation_id}
 
     def _v2_preconditions_match(self, operation: V2Operation) -> bool:
         preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
@@ -2470,13 +2477,29 @@ class ThingsWorkspace:
         if any(self._writes_match([write]) for write in writes):
             return self.host_reconcile_v2(operation_id)
         before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        if not self._v2_current_equals_before(operation, writes, before):
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Current touched fields differ from both the frozen before and desired observations; nothing was replayed.", "operation_id": operation_id}
         response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "Forced read-back proved that no frozen write landed; nothing was replayed.", "operation_id": operation_id}
         rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
-        self._journal.settle_v2(
+        settled = self._journal.settle_v2(
             operation_id, expected="pending", state="not_applied", response=response,
             rows=rows, authorization=authorization, action="settle_not_applied",
         )
-        return response
+        return response if settled else self._persisted_v2_outcome(operation_id)
+
+    def _v2_current_equals_before(
+        self,
+        operation: V2Operation,
+        writes: list[Write],
+        before: list[JsonDict | None],
+    ) -> bool:
+        touched = cast(list[list[str]], operation.manifest["touched"])
+        for index, write in enumerate(writes):
+            current = self._library.records.get(write.uuid)
+            observed = self._v2_observed(current, touched[index]) if current is not None else None
+            if observed != before[index]:
+                return False
+        return True
 
     def host_reconcile_v1_pending(self, intent_id: str) -> JsonDict:
         """Classify retained v1 pending evidence once, without replaying its writes."""
@@ -2484,25 +2507,81 @@ class ThingsWorkspace:
         record = self._journal.get(intent_id)
         if record is None or record.state != "pending":
             return {"status": "rejected", "code": "missing_target", "instruction": "That retained v1 operation is not pending."}
-        try:
-            writes = self._writes_from_plan(record.plan)
-        except (KeyError, TypeError, ValueError):
-            writes = []
-        if not writes:
-            return {"status": "pending", "code": "pending_unknown", "instruction": "The retained v1 row has no complete frozen write evidence and remains fenced."}
+        if not _legacy_recovery_plan_is_complete(record.plan):
+            malformed_result: JsonDict = {"status": "pending_unknown", "classification": "malformed", "instruction": "The retained v1 row has no complete frozen write evidence and remains fenced."}
+            self._journal.annotate_v1_pending(intent_id, result=malformed_result)
+            return malformed_result
+        writes = self._writes_from_plan(record.plan)
         failed = self._refresh(force=True)
         if failed is not None:
             return {"status": "pending", "code": "pending_unknown", "instruction": "Cloud read-back is unavailable; nothing was replayed."}
         matched = [self._writes_match([write]) for write in writes]
-        classification = "applied" if all(matched) else "partial" if any(matched) else "not_applied"
+        classification = "applied" if all(matched) else "partial" if any(matched) else "unknown"
         result: JsonDict = {
-            "status": "reconciled_no_replay",
+            "status": "reconciled_no_replay" if classification == "applied" else "pending_unknown",
             "classification": classification,
-            "instruction": "Forced Cloud read-back classified the retained v1 operation; no write was replayed.",
+            "instruction": (
+                "Forced Cloud read-back proved every retained v1 write applied; no write was replayed."
+                if classification == "applied"
+                else "Current evidence is partial or ambiguous; the retained v1 fence remains until signed CLI resolution."
+            ),
         }
-        if not self._journal.resolve_v1_pending(intent_id, result=result):
+        changed = (
+            self._journal.resolve_v1_pending(intent_id, state="applied", result=result)
+            if classification == "applied"
+            else self._journal.annotate_v1_pending(intent_id, result=result)
+        )
+        if not changed:
             return {"status": "rejected", "code": "request_conflict", "instruction": "The retained v1 operation changed during reconciliation."}
         return result
+
+    def host_get_legacy_resolution_v1(self, intent_id: str) -> V2Operation | None:
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return None
+        plan_json = json.dumps(record.plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        digest = "sha256:v1:" + sha256(plan_json.encode()).hexdigest()
+        return V2Operation(
+            account_id=self._account_id,
+            api_version="legacy-v1",
+            request_id=record.fingerprint,
+            request_hash=digest,
+            operation_id="legacy_" + sha256((intent_id + record.fingerprint).encode()).hexdigest()[:24],
+            tool="legacy_pending_resolution",
+            state="pending",
+            manifest={"intent_id_hash": "sha256:v1:" + sha256(intent_id.encode()).hexdigest()},
+            manifest_hash=digest,
+            safety_policy_digest="sha256:v1:legacy-no-replay-resolution",
+        )
+
+    def host_resolve_legacy_v1(
+        self,
+        intent_id: str,
+        resolution: Literal["accepted_as_is", "superseded"],
+        authorization: object,
+    ) -> bool:
+        operation = self.host_get_legacy_resolution_v1(intent_id)
+        if operation is None:
+            return False
+        action = f"legacy_{resolution}"
+        authorization_record = self._journal.verify_v2_authorization(operation, action, authorization)
+        if authorization_record is None:
+            return False
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return False
+        prior = record.result or {}
+        return self._journal.resolve_v1_pending(
+            intent_id,
+            state="stale",
+            result={
+                "status": "owner_resolved_no_replay",
+                "classification": prior.get("classification", "unknown"),
+                "resolution": resolution,
+                "authorization": authorization_record,
+                "instruction": "The owner released this retained v1 fence without a Cloud write.",
+            },
+        )
 
     def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
         operation = self._journal.get_v2_operation(operation_id)
@@ -8509,6 +8588,34 @@ def _write_from_json(payload: dict[str, object]) -> Write:
         if isinstance(value, str):
             values[name] = date.fromisoformat(value)
     return Write(**values)  # type: ignore[arg-type]
+
+
+def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
+    raw = plan.get("writes")
+    if not isinstance(raw, list) or not raw:
+        return False
+    for value in raw:
+        if not isinstance(value, dict):
+            return False
+        action = value.get("action")
+        uuid = value.get("uuid")
+        if not isinstance(action, str) or not isinstance(uuid, str) or not uuid:
+            return False
+        try:
+            write = _write_from_json(cast(dict[str, object], value))
+        except (TypeError, ValueError):
+            return False
+        if write.action == "update" and all(
+            getattr(write, name) is None or getattr(write, name) is False
+            for name in (
+                "title", "notes", "status", "into_uuid", "start", "clear_start",
+                "deadline", "clear_deadline", "remind", "clear_remind", "tag_uuids",
+                "tonight", "someday", "inbox", "anytime", "heading_uuid",
+                "clear_heading", "sort_index", "today_index",
+            )
+        ):
+            return False
+    return True
 
 
 def _taint_things_text(value: object) -> object:

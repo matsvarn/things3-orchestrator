@@ -10,6 +10,7 @@ from hashlib import sha256
 from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .interface import ReadCall
 
@@ -151,12 +152,12 @@ class PublicResult(StrictModel):
         "inactive_destination", "expanded_write_limit", "awaiting_owner",
         "pending_unknown", "applied", "unchanged", "not_applied_precondition",
         "partial", "partial_resolved", "stale", "declined", "receipt_missing",
-        "cursor_invalid", "internal_error",
-    ] = "ok"
+        "cursor_invalid", "read_unavailable", "internal_error",
+    ]
     next_action: Literal[
         "none", "correct_request", "retry_same", "read_receipt", "run_cli",
         "wait", "contact_operator",
-    ] = "none"
+    ]
     operation_id: str | None = None
     blocking_operation_ids: list[str] = Field(default_factory=list)
     items: list[PublicItem] = Field(default_factory=list)
@@ -264,13 +265,13 @@ class CaptureCall(StrictModel):
 
 
 class UpdateFields(StrictModel):
-    title: str | None = Field(default=None, min_length=1, max_length=1000)
-    notes: str | None = Field(default=None, max_length=50_000)
+    title: str | SkipJsonSchema[None] = Field(default=None, min_length=1, max_length=1000)
+    notes: str | SkipJsonSchema[None] = Field(default=None, max_length=50_000)
     start: str | None = None
     deadline: str | None = None
     remind_at: str | None = None
 
-    @field_validator("title", "notes")
+    @field_validator("title", "notes", mode="before")
     @classmethod
     def no_implicit_clear(cls, value: str | None) -> str:
         if value is None:
@@ -397,7 +398,11 @@ def flat_schema(model: type[BaseModel]) -> dict[str, Any]:
         if isinstance(reference, str) and reference.startswith("#/$defs/"):
             target = definitions[reference.removeprefix("#/$defs/")]
             return inline(target)
-        mapped = {key: inline(item) for key, item in value.items()}
+        mapped = {
+            key: inline(item)
+            for key, item in value.items()
+            if key != "discriminator"
+        }
         variants = mapped.get("anyOf")
         if isinstance(variants, list) and len(variants) == 2 and {str(item) for item in variants if isinstance(item, dict) and item.get("type") == "null"}:
             non_null = next(item for item in variants if isinstance(item, dict) and item.get("type") != "null")
@@ -433,7 +438,7 @@ class ThingsV2:
                 page = self.workspace._journal.v2_receipt_page(self.workspace._account_id, call.operation_id, limit=call.limit, cursor=call.cursor)
             except (KeyError, ValueError):
                 return PublicResult(state="rejected", code="cursor_invalid", next_action="correct_request", instruction="That receipt cursor is invalid or no longer retained.", operation_id=call.operation_id)
-            return PublicResult(state=cast(Any, operation.state), code=cast(Any, operation.state if operation.state != "not_applied" else "not_applied_precondition"), next_action="none", instruction="Immutable receipt rows.", operation_id=call.operation_id, rows=page.rows, cursor=page.cursor, receipt_hash=page.receipt_hash)
+            return PublicResult(state=cast(Any, operation.state), code=cast(Any, _result_code(operation.state)), next_action=cast(Any, _result_next_action(operation.state)), instruction="Immutable receipt rows.", operation_id=call.operation_id, rows=page.rows, cursor=page.cursor, receipt_hash=page.receipt_hash)
         payload = call.model_dump(mode="json", exclude_unset=True)
         request_id = cast(str, payload.pop("request_id"))
         result = self.workspace.execute_v2(OperationDraft.build(name, request_id, payload))
@@ -465,7 +470,13 @@ class ThingsV2:
     def _get(self, ids: list[str]) -> PublicResult:
         items: list[Any] = []
         for offset in range(0, len(ids), 10):
-            items.extend(self.workspace.read(ReadCall(ids=ids[offset:offset + 10], fields=["notes", "tags"])).items)
+            result = self.workspace.read(ReadCall(ids=ids[offset:offset + 10], fields=["notes", "tags"]))
+            if result.status == "unavailable":
+                return PublicResult(
+                    state="rejected", code="read_unavailable", next_action="retry_same",
+                    instruction="Things Cloud is unavailable; no IDs were classified as missing.",
+                )
+            items.extend(result.items)
         found = {item.id for item in items}
         missing = [item_id for item_id in ids if item_id not in found]
         return PublicResult(

@@ -267,6 +267,65 @@ def test_reminder_does_not_implicitly_change_an_omitted_start() -> None:
     assert result.structured_content["code"] == "validation_error"
 
 
+def test_reminder_only_update_preserves_tonight() -> None:
+    record = Record(uuid="a", kind="task", title="A", start=date(2026, 8, 30), tonight=True)
+    server = _server(record)
+    result = asyncio.run(server.call_tool(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"remind_at": "2026-08-30T09:00:00+00:00"}}]},
+    ))
+    assert result.structured_content["state"] == "applied"
+    assert record.tonight is True
+
+
+def test_get_chunk_outage_is_not_reported_as_missing_ids() -> None:
+    class SecondRefreshFails(MemoryLibrary):
+        refreshes = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                raise CloudError("unavailable")
+
+    library = SecondRefreshFails([Record(uuid=str(i), kind="task", title=str(i)) for i in range(11)])
+    workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
+    result = ThingsV2(workspace).dispatch("things_get", {"ids": [f"task:{i}" for i in range(11)]})
+    assert result.state == "rejected"
+    assert result.code == "read_unavailable"
+    assert result.items == [] and result.missing_ids == []
+
+
+def test_output_and_flattened_capture_schemas_are_closed() -> None:
+    tools = {tool.name: tool for tool in asyncio.run(_server().list_tools())}
+    output = tools["things_get"].output_schema
+    assert {"code", "next_action"}.issubset(output["required"])
+    update = str(tools["things_update"].input_schema)
+    assert "'title': {'" in update and "'notes': {'" in update
+    title_schema = tools["things_update"].input_schema["properties"]["items"]["items"]["properties"]["set"]["properties"]["title"]
+    notes_schema = tools["things_update"].input_schema["properties"]["items"]["items"]["properties"]["set"]["properties"]["notes"]
+    assert title_schema["type"] == "string"
+    assert notes_schema["type"] == "string"
+    capture = str(tools["things_capture"].input_schema)
+    assert "#/$defs" not in capture
+    assert "discriminator" not in capture
+
+
+def test_receipt_next_action_follows_operation_state() -> None:
+    from things_orchestrator.journal import V2Operation
+
+    for state, next_action in (("awaiting_owner", "run_cli"), ("pending", "run_cli"), ("partial", "run_cli"), ("applied", "read_receipt")):
+        journal = MemoryJournal()
+        operation = V2Operation(
+            account_id="owner@example.com", api_version="2",
+            request_id=REQUEST, request_hash="sha256:test", operation_id=f"op_{state}12345678",
+            tool="things_update", state=state, manifest={"writes": [], "touched": [], "before": []},
+            manifest_hash="sha256:test", safety_policy_digest="sha256:test",
+        )
+        journal.create_v2(operation, claim_fence=state == "pending")
+        result = asyncio.run(_server(journal=journal).call_tool("things_receipt", {"operation_id": operation.operation_id}))
+        assert result.structured_content["next_action"] == next_action
+
+
 def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> None:
     class RacingLibrary(MemoryLibrary):
         refreshes = 0

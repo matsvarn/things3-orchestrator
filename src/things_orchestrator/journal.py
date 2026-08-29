@@ -117,7 +117,8 @@ class Journal(Protocol):
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
     def cutover_v1(self) -> JsonDict: ...
-    def resolve_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool: ...
+    def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool: ...
+    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool: ...
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
 
 
@@ -259,6 +260,8 @@ class MemoryJournal:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
+        if expected != "pending" or state not in {"applied", "not_applied", "partial"}:
+            return False
         normalized = _validate_v2_receipts(rows)
         with self._lock:
             current = self._v2_operations.get(operation_id)
@@ -436,12 +439,20 @@ class MemoryJournal:
                     terminal.append(intent_id)
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
 
-    def resolve_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
+    def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
         with self._lock:
             current = self._records.get(intent_id)
             if current is None or current.state != "pending":
                 return False
-            self._records[intent_id] = replace(current, state="stale", result=_copy_json(result))
+            self._records[intent_id] = replace(current, result=_copy_json(result))
+            return True
+
+    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool:
+        with self._lock:
+            current = self._records.get(intent_id)
+            if current is None or current.state != "pending":
+                return False
+            self._records[intent_id] = replace(current, state=state, result=_copy_json(result))
             return True
 
     def verify_v2_authorization(
@@ -892,7 +903,11 @@ class SQLiteJournal:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        if not _legal_v2_transition(expected, state):
+        if (
+            expected != "pending"
+            or state not in {"applied", "not_applied", "partial"}
+            or not _legal_v2_transition(expected, state)
+        ):
             return False
         normalized = _validate_v2_receipts(rows)
         connection = self._connect()
@@ -1051,11 +1066,18 @@ class SQLiteJournal:
         finally:
             connection.close()
 
-    def resolve_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
+    def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
         with self._connect() as connection:
             return connection.execute(
-                "UPDATE intents SET state='stale', result_json=? WHERE intent_id=? AND state='pending'",
+                "UPDATE intents SET result_json=? WHERE intent_id=? AND state='pending'",
                 (_json(result), intent_id),
+            ).rowcount == 1
+
+    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "UPDATE intents SET state=?, result_json=? WHERE intent_id=? AND state='pending'",
+                (state, _json(result), intent_id),
             ).rowcount == 1
 
     def verify_v2_authorization(

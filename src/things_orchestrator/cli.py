@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="{login,configure,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,operation-show,operation-reconcile,operation-settle-not-applied,operation-approve,operation-decline,operation-accept-partial}",
+        metavar="{login,configure,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile,operation-settle-not-applied,operation-approve,operation-decline,operation-accept-partial}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -145,6 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("migration-report", help="quarantine and report retained v1 operations")
     legacy_reconcile = commands.add_parser("legacy-reconcile", help="classify one retained v1 pending row from Cloud evidence without replay")
     legacy_reconcile.add_argument("intent_id")
+    legacy_resolve = commands.add_parser("legacy-resolve", help="release one retained v1 partial or unknown fence with signed owner resolution")
+    legacy_resolve.add_argument("intent_id")
+    legacy_resolve.add_argument("resolution", choices=("accepted_as_is", "superseded"))
     operation_show = commands.add_parser("operation-show", help="render one exact operation manifest")
     operation_show.add_argument("operation_id")
     operation_reconcile = commands.add_parser("operation-reconcile", help="force read-back for one pending operation without replay")
@@ -219,6 +222,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.action == "legacy-reconcile":
         print(json.dumps(_workspace(parser).host_reconcile_v1_pending(args.intent_id), sort_keys=True))
+        return
+    if args.action == "legacy-resolve":
+        _legacy_resolution_command(parser, args.intent_id, args.resolution)
         return
     if args.action.startswith("operation-"):
         _operation_command(
@@ -748,6 +754,34 @@ def _operation_command(
     if not workspace.host_resolve_partial_v2(operation_id, cast(Any, resolution), authorization):
         parser.error("operation is not an unresolved partial")
     print(f"partial_resolved: {resolution}")
+
+
+def _legacy_resolution_command(
+    parser: argparse.ArgumentParser,
+    intent_id: str,
+    resolution: str,
+) -> None:
+    from .owner_authority import verified_authorization
+
+    workspace = _workspace(parser)
+    operation = workspace.host_get_legacy_resolution_v1(intent_id)
+    if operation is None:
+        parser.error("retained v1 operation is not pending")
+    with _private_tty(parser) as terminal:
+        passphrase = getpass("Owner approval passphrase: ", stream=terminal)
+    try:
+        authorization = verified_authorization(
+            operation,
+            action=f"legacy_{resolution}",
+            passphrase=passphrase,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        parser.error(f"owner factor is unavailable: {error}")
+    if authorization is None:
+        parser.error("owner factor did not match")
+    if not workspace.host_resolve_legacy_v1(intent_id, cast(Any, resolution), authorization):
+        parser.error("retained v1 operation cannot be resolved")
+    print(f"legacy_resolved: {resolution}")
 
 
 def _local_timezone_name() -> str:

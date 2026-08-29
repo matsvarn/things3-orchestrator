@@ -139,6 +139,20 @@ def test_only_legal_v2_transitions_are_accepted() -> None:
     assert not journal.transition_v2("op_pending", expected="applied", state="pending")
 
 
+def test_settlement_cannot_bypass_approval_or_fence(tmp_path: Path) -> None:
+    for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
+        operation = _operation("op_awaiting", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735", state="awaiting_owner")
+        journal.create_v2(operation, claim_fence=False)
+        assert not journal.settle_v2(
+            operation.operation_id,
+            expected="awaiting_owner",
+            state="pending",
+            response={"state": "pending"},
+            rows=[],
+        )
+        assert journal.get_v2_operation(operation.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+
+
 def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp_path: Path) -> None:
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
@@ -385,7 +399,9 @@ def test_sqlite_cutover_quarantines_old_approvals_and_reports_every_fence(tmp_pa
     assert journal.blocking_v2_operations("owner@example.com") == ["pending-a", "pending-b"]
 
 
-def test_retained_v1_pending_can_be_evidence_classified_without_replay(tmp_path: Path) -> None:
+def test_retained_v1_none_matched_stays_fenced_until_signed_resolution(tmp_path: Path) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
     journal = SQLiteJournal(tmp_path / "journal.sqlite3")
     journal.save(IntentRecord(
         intent_id="legacy-pending",
@@ -401,9 +417,58 @@ def test_retained_v1_pending_can_be_evidence_classified_without_replay(tmp_path:
 
     result = workspace.host_reconcile_v1_pending("legacy-pending")
 
-    assert result["classification"] == "not_applied"
-    assert journal.get("legacy-pending").state == "stale"  # type: ignore[union-attr]
-    assert journal.blocking_v2_operations("owner@example.com") == []
+    assert result["classification"] == "unknown"
+    assert journal.get("legacy-pending").state == "pending"  # type: ignore[union-attr]
+    assert journal.blocking_v2_operations("owner@example.com") == ["legacy-pending"]
+
+    journal_with_key = SQLiteJournal(
+        tmp_path / "journal.sqlite3",
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
+    )
+    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Old")]), journal=journal_with_key, account_id="owner@example.com")
+    operation = workspace.host_get_legacy_resolution_v1("legacy-pending")
+    assert operation is not None
+    authorization = verified_authorization(operation, action="legacy_accepted_as_is", passphrase="correct horse battery staple", path=factor)
+    assert authorization is not None
+    assert workspace.host_resolve_legacy_v1("legacy-pending", "accepted_as_is", authorization)
+    stored = journal_with_key.get("legacy-pending")
+    assert stored is not None and stored.state == "stale"
+    assert stored.result is not None and stored.result["resolution"] == "accepted_as_is"
+    assert journal_with_key.blocking_v2_operations("owner@example.com") == []
+
+
+def test_malformed_all_none_v1_update_remains_fenced(tmp_path: Path) -> None:
+    journal = SQLiteJournal(tmp_path / "journal.sqlite3")
+    journal.save(IntentRecord(
+        intent_id="legacy-malformed", fingerprint="sha256:legacy", state="pending",
+        plan={"writes": [{"action": "update", "uuid": "a", "kind": "task"}]},
+    ))
+    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="A")]), journal=journal, account_id="owner@example.com")
+    result = workspace.host_reconcile_v1_pending("legacy-malformed")
+    assert result["classification"] == "malformed"
+    assert journal.get("legacy-malformed").state == "pending"  # type: ignore[union-attr]
+
+
+def test_retained_v1_partial_evidence_remains_fenced(tmp_path: Path) -> None:
+    journal = SQLiteJournal(tmp_path / "journal.sqlite3")
+    journal.save(IntentRecord(
+        intent_id="legacy-partial", fingerprint="sha256:legacy", state="pending",
+        plan={"writes": [
+            {"action": "update", "uuid": "a", "kind": "task", "title": "Applied"},
+            {"action": "update", "uuid": "b", "kind": "task", "title": "Desired"},
+        ]},
+    ))
+    workspace = ThingsWorkspace(
+        MemoryLibrary([
+            Record(uuid="a", kind="task", title="Applied"),
+            Record(uuid="b", kind="task", title="Before"),
+        ]),
+        journal=journal,
+        account_id="owner@example.com",
+    )
+    result = workspace.host_reconcile_v1_pending("legacy-partial")
+    assert result["classification"] == "partial"
+    assert journal.get("legacy-partial").state == "pending"  # type: ignore[union-attr]
 
 
 def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tmp_path: Path) -> None:
@@ -432,6 +497,46 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None and stored.state == "not_applied"
     assert stored.authorization == authorization.record
+
+
+def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
+    operation = replace(
+        _operation("op_diverged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
+        manifest={
+            "writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "Desired"}],
+            "before": [{"id": "task:a", "title": "Before"}],
+            "touched": [["title"]], "preconditions": {"task:a": "frozen"}, "display_titles": ["Before"],
+        },
+    )
+    journal.create_v2(operation, claim_fence=True)
+    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Applied then overwritten")]), journal=journal, account_id=operation.account_id)
+    authorization = verified_authorization(operation, action="settle_not_applied", passphrase="correct horse battery staple", path=factor)
+    assert authorization is not None
+    result = workspace.host_settle_not_applied_v2(operation.operation_id, authorization)
+    assert result["state"] == "pending"
+    assert journal.get_v2_operation(operation.operation_id).state == "pending"  # type: ignore[union-attr]
+
+
+def test_workspace_returns_persisted_winner_when_settlement_cas_loses() -> None:
+    class LosingJournal(MemoryJournal):
+        def settle_v2(self, operation_id: str, **kwargs: object) -> bool:
+            current = self._v2_operations[operation_id]  # noqa: SLF001
+            self._v2_operations[operation_id] = replace(  # noqa: SLF001
+                current,
+                state="not_applied",
+                response={"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "persisted winner", "operation_id": operation_id},
+            )
+            return False
+
+    journal = LosingJournal()
+    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="A")]), journal=journal, account_id="owner@example.com")
+    from things_orchestrator.v2 import OperationDraft
+
+    result = workspace.execute_v2(OperationDraft.build("things_update", "0198f0ee-98d4-7bd5-91ba-8e76019b2735", {"items": [{"id": "task:a", "set": {"title": "B"}}]}))
+    assert result["instruction"] == "persisted winner"
 
 
 def test_sqlite_retention_replaces_terminal_content_with_permanent_tombstone(tmp_path: Path) -> None:

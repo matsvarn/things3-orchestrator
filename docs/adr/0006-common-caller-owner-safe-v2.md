@@ -284,7 +284,10 @@ when that extraction deletes duplicated ownership.
    namespace retained rows as v1; classify every row; start v2; reject all v1
    tool names; and update CLI, trust, recovery, docs, examples, and the Skill.
    Quarantine `prepared` and `needs_approval`. Inspect `pending` without replay.
-   Hold detected partials as legacy fences. Tombstone terminal rows. If more
+   Only all-desired-matched evidence may settle a retained row as applied.
+   Partial, none-matched without frozen-before proof, malformed, and unknown
+   evidence remains fenced until a signed CLI-only owner resolution records
+   `accepted_as_is` or `superseded` without Cloud I/O. Tombstone terminal rows. If more
    than one unresolved retained row exists, block all writes and surface every
    ID rather than choosing or discarding one.
 5. Only after that gate, evaluate and implement the Project-only advanced scope
