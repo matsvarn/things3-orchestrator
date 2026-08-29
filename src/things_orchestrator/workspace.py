@@ -8631,17 +8631,48 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
             write = _write_from_json(cast(dict[str, object], value))
         except (TypeError, ValueError):
             return False
-        if write.action == "update" and all(
-            getattr(write, name) is None or getattr(write, name) is False
-            for name in (
-                "title", "notes", "status", "into_uuid", "start", "clear_start",
-                "deadline", "clear_deadline", "remind", "clear_remind", "tag_uuids",
-                "tonight", "someday", "inbox", "anytime", "heading_uuid",
-                "clear_heading", "sort_index", "today_index",
-            )
+        action = write.action
+        if action in {"create", "create_heading", "rename_area", "ensure_tag", "rename_tag"} and not write.title:
+            return False
+        if action == "update" and not _legacy_has_effective_field(write, (
+            "title", "notes", "status", "into_uuid", "start", "clear_start",
+            "deadline", "clear_deadline", "remind", "clear_remind", "tag_uuids",
+            "tonight", "someday", "inbox", "anytime", "heading_uuid",
+            "clear_heading", "sort_index", "today_index",
+        )):
+            return False
+        if action == "move" and not (
+            (write.into_uuid is not None and write.into_kind is not None)
+            or _legacy_has_effective_field(write, (
+                "start", "clear_start", "tonight", "someday", "inbox", "anytime",
+                "heading_uuid", "clear_heading", "sort_index", "today_index",
+            ))
         ):
             return False
+        if action == "tags" and write.tag_uuids is None:
+            return False
+        if action == "reparent_tag" and write.tag_parent_uuids is None:
+            return False
+        if action == "checklist" and not (
+            write.title
+            or _legacy_has_effective_field(write, (
+                "checklist_parent_uuid", "checklist_status", "checklist_index",
+                "checklist_remove",
+            ))
+        ):
+            return False
+        if action == "repeat" and not write.recurrence_rule:
+            return False
+        if action == "repeat_link" and write.recurrence_links is None:
+            return False
     return True
+
+
+def _legacy_has_effective_field(write: Write, names: tuple[str, ...]) -> bool:
+    return any(
+        (value := getattr(write, name)) is not None and value is not False
+        for name in names
+    )
 
 
 _LEGACY_WRITE_ACTIONS = frozenset({

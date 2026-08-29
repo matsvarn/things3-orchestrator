@@ -5,6 +5,8 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from things_orchestrator.journal import (
     IntentRecord,
     MemoryJournal,
@@ -37,7 +39,7 @@ def _operation(
         operation_id=operation_id,
         tool="things_capture",
         state=state,  # type: ignore[arg-type]
-        manifest={"writes": []},
+        manifest={"writes": [{"action": "create", "uuid": "a", "kind": "task", "title": "A"}]},
         manifest_hash="sha256:v1:manifest",
         safety_policy_digest="sha256:v1:policy",
         expires_at="2026-08-29T13:00:00+00:00" if state == "awaiting_owner" else None,
@@ -135,7 +137,8 @@ def test_only_legal_v2_transitions_are_accepted() -> None:
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
     journal.create_v2(operation, claim_fence=True)
-    assert journal.settle_v2("op_pending", expected="pending", state="applied", response={"state": "applied"}, rows=[])
+    rows = [{"sequence": 1, "action": "create", "target_id": "task:a", "desired": {}, "observed": {}, "result": "applied"}]
+    assert journal.settle_v2("op_pending", expected="pending", state="applied", response={"state": "applied"}, rows=rows)
     assert not journal.transition_v2("op_pending", expected="applied", state="pending")
 
 
@@ -171,8 +174,31 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
             raise AssertionError("unchanged without atomic receipts was accepted")
         pending = _operation("op_pending_owned", request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67")
         journal.create_v2(pending, claim_fence=True)
+        with pytest.raises(ValueError, match="one receipt row per manifest write"):
+            journal.settle_v2(
+                pending.operation_id, expected="pending", state="applied",
+                response={"state": "applied"}, rows=[],
+            )
+        with pytest.raises(ValueError, match="one receipt row per manifest write"):
+            journal.settle_v2(
+                pending.operation_id, expected="pending", state="applied",
+                response={"state": "applied"},
+                rows=[{"sequence": 1}, {"sequence": 2}],
+            )
         assert not journal.transition_v2(pending.operation_id, expected="pending", state="applied")
         assert journal.get_v2_operation(pending.operation_id).state == "pending"  # type: ignore[union-attr]
+
+
+def test_unchanged_requires_exactly_one_receipt_per_manifest_write(tmp_path: Path) -> None:
+    for index, journal in enumerate((MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3"))):
+        operation = replace(
+            _operation(f"op_unchanged_{index}", request_id=f"0198f0ee-98d4-7bd5-91ba-8e76019b273{index}"),
+            state="unchanged",
+        )
+        for rows in ([], [{"sequence": 1}, {"sequence": 2}]):
+            with pytest.raises(ValueError, match="one receipt row per manifest write"):
+                journal.create_v2(operation, claim_fence=False, receipt_rows=rows)
+        assert journal.get_v2_operation(operation.operation_id) is None
 
 
 def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp_path: Path) -> None:
@@ -568,6 +594,57 @@ def test_v1_cutover_scrubs_terminal_owner_content_but_keeps_pending_evidence(tmp
         assert journal.get(f"{prefix}-pending").plan == {"summary": "needed evidence"}  # type: ignore[union-attr]
 
 
+def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: Path) -> None:
+    for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
+        prefix = type(journal).__name__
+        journal.save(IntentRecord(
+            f"{prefix}-signed", "fp-signed", "stale", plan={"summary": "owner secret"},
+            result={
+                "status": "owner_resolved_no_replay", "classification": "partial",
+                "resolution": "accepted_as_is", "authorization": "ed25519:v1:safe",
+                "owner_text": "must disappear",
+            },
+        ))
+        journal.save(IntentRecord(
+            f"{prefix}-auto", "fp-auto", "applied", plan={"summary": "owner secret"},
+            result={
+                "status": "reconciled_no_replay", "classification": "applied",
+                "owner_text": "must disappear",
+            },
+        ))
+        journal.cutover_v1()
+        journal.cutover_v1()
+        signed = journal.get(f"{prefix}-signed")
+        automatic = journal.get(f"{prefix}-auto")
+        assert signed is not None and signed.plan == {}
+        assert signed.result == {
+            "status": "owner_resolved_no_replay", "classification": "partial",
+            "resolution": "accepted_as_is", "authorization": "ed25519:v1:safe",
+        }
+        assert automatic is not None and automatic.plan == {}
+        assert automatic.result == {"status": "reconciled_no_replay", "classification": "applied"}
+
+
+@pytest.mark.parametrize("write", [
+    {"action": "create"}, {"action": "move"},
+    {"action": "move", "into_uuid": "project-a"}, {"action": "tags"},
+    {"action": "checklist"}, {"action": "repeat"}, {"action": "repeat_link"},
+])
+def test_action_incomplete_legacy_plan_remains_fenced(write: dict[str, object]) -> None:
+    journal = MemoryJournal()
+    journal.save(IntentRecord(
+        intent_id="legacy-incomplete", fingerprint="sha256:legacy", state="pending",
+        plan={"writes": [{**write, "uuid": "a", "kind": "task"}]},
+    ))
+    workspace = ThingsWorkspace(
+        MemoryLibrary([Record(uuid="a", kind="task", title="A")]),
+        journal=journal, account_id="owner@example.com",
+    )
+    result = workspace.host_reconcile_v1_pending("legacy-incomplete")
+    assert result["classification"] == "malformed"
+    assert journal.get("legacy-incomplete").state == "pending"  # type: ignore[union-attr]
+
+
 def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tmp_path: Path) -> None:
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
@@ -643,7 +720,11 @@ def test_sqlite_retention_replaces_terminal_content_with_permanent_tombstone(tmp
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
     journal.create_v2(operation, claim_fence=True)
-    journal.settle_v2("op_retained", expected="pending", state="applied", response={"state": "applied", "owner_text": "private"}, rows=[])
+    journal.settle_v2(
+        "op_retained", expected="pending", state="applied",
+        response={"state": "applied", "owner_text": "private"},
+        rows=[{"sequence": 1, "result": "applied"}],
+    )
 
     assert journal.prune_v2(now="2030-01-01T00:00:00+00:00") == 1
     tombstone = journal.get_v2_request(

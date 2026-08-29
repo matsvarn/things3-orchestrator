@@ -225,8 +225,7 @@ class MemoryJournal:
         with self._lock:
             if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
                 raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            if operation.state == "unchanged" and not receipt_rows:
-                raise ValueError("unchanged creation requires atomic receipt rows")
+            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else _validate_v2_receipts(receipt_rows or [])
             existing = self.get_v2_request(
                 operation.account_id, operation.api_version, operation.request_id
             )
@@ -240,7 +239,6 @@ class MemoryJournal:
                 raise ValueError("routine operation creation must enter pending")
             copied = _copy_v2(operation)
             assert copied is not None
-            normalized = _validate_v2_receipts(receipt_rows or [])
             if normalized:
                 copied = replace(copied, receipt_hash=_v2_receipt_hash(normalized))
             self._v2_operations[operation.operation_id] = copied
@@ -266,11 +264,11 @@ class MemoryJournal:
     ) -> bool:
         if expected != "pending" or state not in {"applied", "not_applied", "partial"}:
             return False
-        normalized = _validate_v2_receipts(rows)
         with self._lock:
             current = self._v2_operations.get(operation_id)
             if current is None or current.state != expected or not _legal_v2_transition(expected, state):
                 return False
+            normalized = _validate_v2_operation_receipts(current, rows)
             authorization_record = current.authorization
             if action is not None:
                 authorization_record = self.verify_v2_authorization(current, action, authorization)
@@ -445,7 +443,7 @@ class MemoryJournal:
                     self._records[intent_id] = replace(
                         record,
                         plan={},
-                        result={"status": "legacy_tombstone", "state": record.state},
+                        result=_legacy_terminal_result(record.state, record.result),
                     )
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
 
@@ -728,9 +726,7 @@ class SQLiteJournal:
             if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
                 connection.rollback()
                 raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            if operation.state == "unchanged" and not receipt_rows:
-                connection.rollback()
-                raise ValueError("unchanged creation requires atomic receipt rows")
+            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else _validate_v2_receipts(receipt_rows or [])
             existing = connection.execute(
                 """SELECT * FROM owner_operations_v2
                    WHERE account_id=? AND api_version=? AND request_id=?""",
@@ -774,7 +770,6 @@ class SQLiteJournal:
                 )""",
                 _v2_sql_values(operation),
             )
-            normalized = _validate_v2_receipts(receipt_rows or [])
             stored_operation = operation
             if normalized:
                 digest = _insert_v2_receipts(connection, operation.operation_id, normalized)
@@ -929,7 +924,6 @@ class SQLiteJournal:
             or not _legal_v2_transition(expected, state)
         ):
             return False
-        normalized = _validate_v2_receipts(rows)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -940,10 +934,11 @@ class SQLiteJournal:
             if current is None or current["state"] != expected:
                 connection.rollback()
                 return False
+            current_operation = _v2_from_row(current)
+            assert current_operation is not None
+            normalized = _validate_v2_operation_receipts(current_operation, rows)
             authorization_record: str | None = None
             if action is not None:
-                current_operation = _v2_from_row(current)
-                assert current_operation is not None
                 authorization_record = self.verify_v2_authorization(current_operation, action, authorization)
                 if authorization_record is None:
                     connection.rollback()
@@ -1080,9 +1075,10 @@ class SQLiteJournal:
             for row in rows:
                 if row["state"] in {"prepared", "needs_approval", "pending"}:
                     continue
+                previous = cast(JsonDict | None, json.loads(str(row["result_json"]))) if row["result_json"] is not None else None
                 connection.execute(
                     "UPDATE intents SET plan_json='{}', result_json=? WHERE intent_id=?",
-                    (_json({"status": "legacy_tombstone", "state": str(row["state"])}), str(row["intent_id"])),
+                    (_json(_legacy_terminal_result(str(row["state"]), previous)), str(row["intent_id"])),
                 )
             connection.commit()
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
@@ -1449,6 +1445,46 @@ def _validate_v2_receipts(rows: list[JsonDict]) -> list[JsonDict]:
     if [row.get("sequence") for row in copied] != list(range(1, len(copied) + 1)):
         raise ValueError("receipt sequences must be contiguous")
     return copied
+
+
+def _validate_v2_operation_receipts(
+    operation: V2Operation, rows: list[JsonDict]
+) -> list[JsonDict]:
+    normalized = _validate_v2_receipts(rows)
+    writes = operation.manifest.get("writes")
+    if not isinstance(writes, list) or not writes or len(normalized) != len(writes):
+        raise ValueError("exactly one receipt row per manifest write is required")
+    return normalized
+
+
+def _legacy_terminal_result(state: str, result: JsonDict | None) -> JsonDict:
+    if result is None:
+        return {"status": "legacy_tombstone", "state": state}
+    status = result.get("status")
+    if status == "owner_resolved_no_replay":
+        classification = result.get("classification")
+        resolution = result.get("resolution")
+        authorization = result.get("authorization")
+        if (
+            classification in {"applied", "partial", "unknown", "malformed"}
+            and resolution in {"accepted_as_is", "superseded"}
+            and isinstance(authorization, str)
+            and authorization.startswith("ed25519:v1:")
+        ):
+            return {
+                "status": status,
+                "classification": classification,
+                "resolution": resolution,
+                "authorization": authorization,
+            }
+    if status == "reconciled_no_replay" and result.get("classification") == "applied":
+        return {"status": status, "classification": "applied"}
+    if status == "quarantined":
+        return {
+            "status": "quarantined",
+            "instruction": "This v1 operation cannot be approved or replayed after the v2 cutover.",
+        }
+    return {"status": "legacy_tombstone", "state": state}
 
 
 def _v2_receipt_hash(rows: list[JsonDict]) -> str:

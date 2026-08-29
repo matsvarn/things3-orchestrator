@@ -177,6 +177,14 @@ class PublicResult(StrictModel):
         }
         if self.state in state_codes and self.code != state_codes[self.state]:
             raise ValueError("state and code disagree")
+        state_actions = {
+            "ok": "none", "awaiting_owner": "run_cli", "pending": "run_cli",
+            "applied": "read_receipt", "unchanged": "read_receipt",
+            "not_applied": "read_receipt", "partial": "run_cli",
+            "partial_resolved": "none", "stale": "read_fresh", "declined": "none",
+        }
+        if self.state in state_actions and self.next_action != state_actions[self.state]:
+            raise ValueError("state and next_action disagree")
         if self.state == "rejected" and self.code == "ok":
             raise ValueError("rejected needs a rejection code")
         if self.state not in {"ok", "rejected"} and self.operation_id is None:

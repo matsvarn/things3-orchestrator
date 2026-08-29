@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.server import ThingsMCPServer
-from things_orchestrator.v2 import ThingsV2
+from things_orchestrator.v2 import PublicResult, ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
 
 NOW = datetime(2026, 8, 29, 12, tzinfo=timezone.utc)
@@ -319,16 +322,46 @@ def test_receipt_next_action_follows_operation_state() -> None:
         operation = V2Operation(
             account_id="owner@example.com", api_version="2",
             request_id=REQUEST, request_hash="sha256:test", operation_id=f"op_{state}12345678",
-            tool="things_update", state=initial_state, manifest={"writes": [], "touched": [], "before": []},
+            tool="things_update", state=initial_state,
+            manifest={"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "B"}], "touched": [], "before": []},
             manifest_hash="sha256:test", safety_policy_digest="sha256:test",
         )
         journal.create_v2(operation, claim_fence=initial_state == "pending")
         if state in {"partial", "applied"}:
-            journal.settle_v2(operation.operation_id, expected="pending", state=state, response={"state": state}, rows=[])
+            journal.settle_v2(
+                operation.operation_id, expected="pending", state=state,
+                response={"state": state}, rows=[{"sequence": 1, "result": state}],
+            )
         elif state == "stale":
             journal.transition_v2(operation.operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "stale", "operation_id": operation.operation_id})
         result = asyncio.run(_server(journal=journal).call_tool("things_receipt", {"operation_id": operation.operation_id}))
         assert result.structured_content["next_action"] == next_action
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "expected"),
+    [
+        ("ok", "ok", "none"), ("awaiting_owner", "awaiting_owner", "run_cli"),
+        ("pending", "pending_unknown", "run_cli"),
+        ("applied", "applied", "read_receipt"),
+        ("unchanged", "unchanged", "read_receipt"),
+        ("not_applied", "not_applied_precondition", "read_receipt"),
+        ("partial", "partial", "run_cli"),
+        ("partial_resolved", "partial_resolved", "none"),
+        ("stale", "stale", "read_fresh"), ("declined", "declined", "none"),
+    ],
+)
+def test_public_result_rejects_state_next_action_mismatch(
+    state: str, code: str, expected: str,
+) -> None:
+    wrong = "wait" if expected != "wait" else "none"
+    values: dict[str, object] = {
+        "state": state, "code": code, "next_action": wrong, "instruction": "test",
+    }
+    if state != "ok":
+        values["operation_id"] = "op_12345678"
+    with pytest.raises(ValidationError, match="state and next_action disagree"):
+        PublicResult.model_validate(values)
 
 
 def test_stale_mutation_projection_requires_fresh_read() -> None:
