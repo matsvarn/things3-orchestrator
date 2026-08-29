@@ -18,7 +18,9 @@ def test_capability_proof_names_the_v2_safety_gate() -> None:
 def test_live_probe_is_read_only_v2_and_has_no_legacy_approval_path() -> None:
     source = (ROOT / "scripts/probe_cloud_capabilities.py").read_text()
     assert "--read-only-live-probe" in source
+    assert "--native-parity" in source
     assert 'dispatch("things_view"' in source
+    assert '"exact_id_match"' in source
     for forbidden in (
         "CommitCall",
         "ApproveCall",

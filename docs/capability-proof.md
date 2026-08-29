@@ -256,54 +256,20 @@ Projects synced with positive indexes and no new crash report.
 
 ## Live evidence
 
-Run the disposable proof harness with:
+Run the read-only Cloud probe with native parity on a Mac that has Things 3:
 
 ```console
-uv run python scripts/probe_cloud_capabilities.py --apply-live-probes
+uv run python scripts/probe_cloud_capabilities.py --read-only-live-probe --native-parity
 ```
 
-The harness creates records with one unique `__TO_PROBE__` prefix. It stores
-their exact UUIDs and deletes only those UUIDs in `finally`. High-risk tag,
-note, repeat, Area-registry, and Project-lifecycle transitions use the public
-commit and approval path.
+The probe reads every public Today and Inbox page and compares their IDs with
+the native Things lists. It prints counts and equality results. It does not
+print task IDs, titles, or notes. A mismatch exits with status 1.
 
-The live contextual proofs are named in the JSON output:
-
-- `ax.context_change`: read one exact Task with `purpose=change`, then change
-  it with its context ref.
-- `ax.project_move_to_area`: create source and destination Areas plus a
-  Project through the public path, read the Project once with
-  `purpose=change` and include the destination Area, then move it with the
-  Project and destination Area refs.
-- `ax.organize_draft`: read one Project with `purpose=organize`, create a
-  heading, assign a Task, preserve unlisted work, and verify the layout.
-- `ax.project_merge`: read one exact source Project with `purpose=organize`
-  and include the destination, move the children you want to keep, trash the
-  source in one approved commit, and force an exact Task read-back. Cleanup
-  deletes only the five probe UUIDs.
-- `recurrence.inspect_relationship`: read the repeat template and generated
-  copy with `purpose=recurrence`, then verify both sides before mutation.
-- `tag.assign_task_readback`: add a disposable tag to a probe Task, refresh
-  Cloud, and verify the exact tag on an exact read-back.
-- `heading.clear_assignment`: assign a disposable Task to a heading, clear
-  that assignment through the public commit path, refresh Cloud, and verify
-  the exact Task read-back has no heading.
-
-The `ax.project_move_to_area` case forces a Cloud refresh and then performs an
-exact Project read-back. The read-back must report the destination Area.
-
-The 2026-08-16 run passed these additional transitions:
-
-- Area and Project capture in one approved public commit;
-- Project placement from one Area to another with short context refs;
-- forced Cloud read-back of the moved Project;
-- contextual exact change, with no copied revision;
-- editable Project organization with a new heading and preserved unlisted
-  work.
-
-The result keys are the claim boundary. For example, a run can claim tag
-assignment only when `tag.assign_task_readback` passes. It cannot extend that
-claim to every tag input or Cloud account state.
+The probe proves read parity for the current account and Mac at the time of the
+run. It does not prove mutation behavior, remote-host configuration, or another
+account. Deterministic Cloud fixtures cover mutation contracts. Any disposable
+live write needs a separate, explicit proof with exact-ID cleanup.
 
 A read-only history audit inspected 2,568 existing events. It found 88 native
 recurrence-linked creates and 88 completion events. In 64 cases, Things made
@@ -332,6 +298,6 @@ approval-bound full replacement path.
 ## Exact capability-to-probe mapping
 
 The table uses the exact result keys declared by
-`PROBE_CAPABILITY_KEYS` in `scripts/probe_cloud_capabilities.py`. A live run
+`V2_CAPABILITY_KEYS` in `scripts/probe_cloud_capabilities.py`. A live run
 must pass every key listed for a capability before that row can claim `Yes`.
 `Partial` rows name the tested slice and do not claim full input coverage.

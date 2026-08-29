@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.6.1 — 2026-08-30
+
+### Fixed
+
+- Cloud history now folds `Task7` records and emits `Task7` for current
+  task-family creates and mutations. Cache version 5 replays histories that
+  previously advanced past ignored Task7 events.
+- Today now matches the native Things list. Open items scheduled on or before
+  today remain visible, and Waiting-only items are no longer injected.
+- Future numbered Task, Area, Tag, and ChecklistItem entities fail before a
+  history page can partially change the in-memory snapshot.
+- The read-only live probe can compare every paginated Today and Inbox ID with
+  native Things without printing task content.
+
 ## 0.6.0 — 2026-08-29
 
 The public MCP interface is now the bounded owner-safe v2 contract.
