@@ -2166,22 +2166,11 @@ class ThingsWorkspace:
         operation_id = f"op_{token_urlsafe(18)}"
         already_current = self._writes_match(writes)
         initial_state: V2State = (
-            "unchanged"
+            "pending"
             if already_current
             else "awaiting_owner"
             if manifest.requires_owner
             else "pending"
-        )
-        initial_response: JsonDict | None = (
-            {
-                "state": "unchanged",
-                "code": "unchanged",
-                "next_action": "read_receipt",
-                "instruction": "The requested state was already current.",
-                "operation_id": operation_id,
-            }
-            if already_current
-            else None
         )
         operation = V2Operation(
             account_id=self._account_id,
@@ -2195,13 +2184,10 @@ class ThingsWorkspace:
             manifest_hash=manifest.manifest_hash,
             safety_policy_digest=manifest.safety_policy_digest,
             expires_at=manifest.expires_at,
-            response=initial_response,
         )
-        unchanged_rows = self._v2_receipt_rows(operation, writes, before, "unchanged") if initial_state == "unchanged" else None
         outcome, stored, blockers = journal.create_v2(
             operation,
             claim_fence=initial_state == "pending",
-            receipt_rows=unchanged_rows,
         )
         if outcome == "blocked":
             return {
@@ -2222,9 +2208,6 @@ class ThingsWorkspace:
             }
         if outcome == "existing":
             return self._resume_v2(stored)
-        if initial_state == "unchanged":
-            assert initial_response is not None
-            return initial_response
         if initial_state == "awaiting_owner":
             response: JsonDict = {
                 "state": "awaiting_owner",
@@ -2306,6 +2289,13 @@ class ThingsWorkspace:
                     return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "Mutation targets must be exact Tasks or Projects."}
                 candidates = [*self._project_descendants(target.uuid), target] if draft.tool == "things_trash" and target.kind == "project" else [target]
                 for candidate in candidates:
+                    if candidate.recurrence.role == "template":
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "The bounded v2 mutation tools do not edit, complete, or trash recurrence templates.",
+                        }
                     if candidate.id not in expanded_ids:
                         expanded_ids.add(candidate.id)
                         targets.append(candidate)
@@ -2319,6 +2309,26 @@ class ThingsWorkspace:
                     if parent is not None:
                         preconditions[parent.id] = self._revision(parent)
                 if draft.tool == "things_complete":
+                    if target.kind == "project":
+                        open_actions = [
+                            child
+                            for child in self._project_descendants(target.uuid)
+                            if child.kind == "task"
+                            and not child.heading
+                            and child.status == "open"
+                            and not child.trashed
+                            and child.recurrence.role != "template"
+                        ]
+                        if open_actions:
+                            return {
+                                "state": "rejected",
+                                "code": "validation_error",
+                                "next_action": "correct_request",
+                                "instruction": "Complete or move every open Project action before completing the Project.",
+                            }
+                        preconditions[f"scope:project:{target.uuid}"] = (
+                            self._project_scope_revision(target.uuid)
+                        )
                     writes.append(Write(action="complete", uuid=target.uuid, kind=target.kind, status="done"))
                     touched.append(["status"])
                     before.append(self._v2_observed(target, ("status",)))
@@ -2331,6 +2341,13 @@ class ThingsWorkspace:
                 else:
                     row = next(entry for entry in cast(list[dict[str, object]], payload["items"]) if entry["id"] == item_id)
                     fields = cast(dict[str, object], row["set"])
+                    if "notes" in fields and target.notes_format == "rich":
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "The bounded v2 update cannot replace a rich-text note.",
+                        }
                     start_set = "start" in fields
                     start, tonight, someday = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
                     reminder_date, reminder = self._remind_input(cast(str | None, fields.get("remind_at")))
@@ -2391,6 +2408,25 @@ class ThingsWorkspace:
             rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
             settled = self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
             return response if settled else self._persisted_v2_outcome(operation.operation_id)
+        if self._writes_match(writes):
+            response = {
+                "state": "unchanged",
+                "code": "unchanged",
+                "next_action": "read_receipt",
+                "instruction": "The requested state was already current.",
+                "operation_id": operation.operation_id,
+            }
+            rows = self._v2_receipt_rows(operation, writes, before, "unchanged")
+            settled = self._journal.settle_v2(
+                operation.operation_id,
+                expected="pending",
+                state="unchanged",
+                response=response,
+                rows=rows,
+            )
+            return response if settled else self._persisted_v2_outcome(
+                operation.operation_id
+            )
         try:
             self._library.apply(writes)
         except CloudError:
@@ -2427,10 +2463,16 @@ class ThingsWorkspace:
 
     def _v2_preconditions_match(self, operation: V2Operation) -> bool:
         preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
-        return all(
-            (item := self._exact_item(item_id)) is not None and self._revision(item) == expected
-            for item_id, expected in preconditions.items()
-        )
+        for item_id, expected in preconditions.items():
+            if item_id.startswith("scope:project:"):
+                uuid = item_id.removeprefix("scope:project:")
+                if self._project_scope_revision(uuid) != expected:
+                    return False
+                continue
+            item = self._exact_item(item_id)
+            if item is None or self._revision(item) != expected:
+                return False
+        return True
 
     def _resume_v2(self, operation: V2Operation) -> JsonDict:
         if operation.response is not None:

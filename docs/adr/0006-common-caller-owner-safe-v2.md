@@ -81,7 +81,8 @@ The default MCP interface has eight tools:
 - `things_update` sets only explicitly named ordinary item-local fields on one
   atomic batch of existing items. It cannot complete, trash, reorder, edit
   structure, checklists, recurrence, registries, or permanently delete.
-- `things_complete` completes one atomic batch.
+- `things_complete` completes one atomic batch. A Project must have no open
+  actions, and its complete Project scope stays frozen through application.
 - `things_trash` moves one atomic batch to recoverable Trash.
 - `things_receipt` returns immutable operation rows with restart-safe
   pagination.
@@ -184,9 +185,9 @@ this separation cannot execute approval-required operations or permanent
 deletion.
 
 The CLI session uses a local or SSH terminal with access to the private account
-configuration. Approval binds successful owner-factor verification, the
-account, action, operation ID, canonical manifest hash, safety-policy digest,
-and expiry.
+configuration. Approval binds successful owner-factor verification, the account,
+API version, action, operation ID, tool, canonical manifest hash, safety-policy
+digest, and expiry.
 
 The command rechecks current Cloud state before execution. A changed
 precondition produces `stale` and writes nothing. An expired approval also
@@ -197,9 +198,9 @@ becomes `stale`.
 The legal state machine is:
 
 ```text
-new -> rejected | unchanged | stale | awaiting_owner | pending
+new -> rejected | stale | awaiting_owner | pending
 awaiting_owner -> pending | stale | declined
-pending -> applied | not_applied | partial
+pending -> applied | unchanged | not_applied | partial
 partial -> partial_resolved
 ```
 
@@ -212,9 +213,9 @@ Two processes that use the same state database cannot claim different
 operations for the same account.
 
 Terminal settlement, its response, all receipt rows, and the receipt hash are
-one journal transaction. Creation of an `unchanged` operation and its receipt
-rows is also one transaction, so a crash cannot expose a terminal state without
-its immutable evidence.
+one journal transaction. An apparently unchanged request first claims the
+account fence as `pending`, then refreshes and rechecks its frozen preconditions
+and desired observations before settling `unchanged` without a Cloud write.
 
 The fence remains for `pending` and `partial`. It covers every write path:
 ordinary MCP mutation, CLI approval, retained-v1 reconciliation, and future

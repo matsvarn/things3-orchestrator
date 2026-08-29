@@ -23,7 +23,8 @@ Recovery observes Cloud state and never reposts an old operation.
 The MCP request path cannot approve. The CLI approval component stores a salted
 `scrypt` verifier and encrypted Ed25519 private key in a separate 0600 file. It
 reads the raw passphrase only from the host terminal. Approval binds the
-account, action, operation ID, manifest hash, safety-policy digest, and expiry.
+account, API version, action, operation ID, tool, manifest hash, safety-policy
+digest, and expiry.
 The MCP request path loads only the pinned Ed25519 public key and cannot sign
 without the passphrase-encrypted private key.
 

@@ -225,11 +225,10 @@ class MemoryJournal:
         with self._lock:
             if not v2_manifest_is_valid(operation):
                 raise ValueError("v2 manifest hash does not match its persisted content")
-            if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
-                raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            if operation.state != "unchanged" and receipt_rows:
+            if operation.state not in {"pending", "awaiting_owner"}:
+                raise ValueError("v2 operation must start pending or awaiting_owner")
+            if receipt_rows:
                 raise ValueError("nonterminal creation cannot preseed receipt rows")
-            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else []
             existing = self.get_v2_request(
                 operation.account_id, operation.api_version, operation.request_id
             )
@@ -243,11 +242,7 @@ class MemoryJournal:
                 raise ValueError("routine operation creation must enter pending")
             copied = _copy_v2(operation)
             assert copied is not None
-            if normalized:
-                copied = replace(copied, receipt_hash=_v2_receipt_hash(normalized))
             self._v2_operations[operation.operation_id] = copied
-            if normalized:
-                self._v2_receipts[operation.operation_id] = normalized
             created_at = _utc_now()
             self._v2_times[operation.operation_id] = (
                 created_at,
@@ -266,7 +261,12 @@ class MemoryJournal:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        if expected != "pending" or state not in {"applied", "not_applied", "partial"}:
+        if expected != "pending" or state not in {
+            "applied",
+            "unchanged",
+            "not_applied",
+            "partial",
+        }:
             return False
         with self._lock:
             current = self._v2_operations.get(operation_id)
@@ -729,13 +729,12 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
+            if operation.state not in {"pending", "awaiting_owner"}:
                 connection.rollback()
-                raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            if operation.state != "unchanged" and receipt_rows:
+                raise ValueError("v2 operation must start pending or awaiting_owner")
+            if receipt_rows:
                 connection.rollback()
                 raise ValueError("nonterminal creation cannot preseed receipt rows")
-            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else []
             existing = connection.execute(
                 """SELECT * FROM owner_operations_v2
                    WHERE account_id=? AND api_version=? AND request_id=?""",
@@ -779,14 +778,6 @@ class SQLiteJournal:
                 )""",
                 _v2_sql_values(operation),
             )
-            stored_operation = operation
-            if normalized:
-                digest = _insert_v2_receipts(connection, operation.operation_id, normalized)
-                connection.execute(
-                    "UPDATE owner_operations_v2 SET receipt_hash=? WHERE operation_id=?",
-                    (digest, operation.operation_id),
-                )
-                stored_operation = replace(operation, receipt_hash=digest)
             created_at = _utc_now()
             settled_at = (
                 None
@@ -798,7 +789,7 @@ class SQLiteJournal:
                 (operation.operation_id, created_at, settled_at),
             )
             connection.commit()
-            return "created", stored_operation, []
+            return "created", operation, []
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()
@@ -929,7 +920,7 @@ class SQLiteJournal:
     ) -> bool:
         if (
             expected != "pending"
-            or state not in {"applied", "not_applied", "partial"}
+            or state not in {"applied", "unchanged", "not_applied", "partial"}
             or not _legal_v2_transition(expected, state)
         ):
             return False
@@ -1175,10 +1166,12 @@ def owner_public_key_path() -> Path:
 def owner_authorization_binding_json(operation: V2Operation, *, action: str) -> str:
     return _json(
         {
-            "version": 1,
+            "version": 2,
             "account": operation.account_id,
+            "api_version": operation.api_version,
             "action": action,
             "operation": operation.operation_id,
+            "tool": operation.tool,
             "manifest_hash": operation.manifest_hash,
             "safety_policy_digest": operation.safety_policy_digest,
             "expiry": operation.expires_at,
@@ -1193,7 +1186,7 @@ def _verify_owner_authorization(
     public_key: bytes | None,
 ) -> str | None:
     if (
-        not v2_manifest_is_valid(operation)
+        not owner_operation_is_valid(operation)
         or not isinstance(authorization, OwnerAuthorization)
         or public_key is None
     ):
@@ -1226,7 +1219,7 @@ def v2_manifest_hash(manifest: JsonDict) -> str:
 
 def v2_manifest_is_valid(operation: V2Operation) -> bool:
     if operation.api_version != "2":
-        return True
+        return False
     manifest = operation.manifest
     envelope = {
         "account_id": operation.account_id,
@@ -1246,6 +1239,51 @@ def v2_manifest_is_valid(operation: V2Operation) -> bool:
 
 def _legacy_plan_digest(plan: JsonDict) -> str:
     return "sha256:v1:" + sha256(_json(plan).encode()).hexdigest()
+
+
+def legacy_owner_operation_is_valid(operation: V2Operation) -> bool:
+    """Validate the exact host-only envelope used to resolve retained v1 work."""
+
+    manifest = operation.manifest
+    legacy_plan = manifest.get("legacy_plan")
+    if not isinstance(legacy_plan, dict):
+        return False
+    raw_writes = legacy_plan.get("writes", [])
+    writes = raw_writes if isinstance(raw_writes, list) else []
+    display_titles = [
+        row["title"]
+        if isinstance(row, dict) and isinstance(row.get("title"), str)
+        else ""
+        for row in writes
+    ]
+    intent_id_hash = manifest.get("intent_id_hash")
+    return (
+        operation.api_version == "legacy-v1"
+        and operation.tool == "legacy_pending_resolution"
+        and operation.state == "pending"
+        and operation.expires_at is None
+        and operation.safety_policy_digest
+        == "sha256:v1:legacy-no-replay-resolution"
+        and operation.request_hash == operation.manifest_hash
+        and hmac.compare_digest(
+            _legacy_plan_digest(cast(JsonDict, legacy_plan)),
+            operation.manifest_hash,
+        )
+        and set(manifest)
+        == {"intent_id_hash", "writes", "display_titles", "legacy_plan"}
+        and manifest.get("writes") == writes
+        and manifest.get("display_titles") == display_titles
+        and isinstance(intent_id_hash, str)
+        and intent_id_hash.startswith("sha256:v1:")
+        and len(intent_id_hash) == len("sha256:v1:") + 64
+        and all(character in "0123456789abcdef" for character in intent_id_hash[10:])
+    )
+
+
+def owner_operation_is_valid(operation: V2Operation) -> bool:
+    """Accept only the v2 envelope or the exact retained-v1 owner envelope."""
+
+    return v2_manifest_is_valid(operation) or legacy_owner_operation_is_valid(operation)
 
 
 def _insert_v2_receipts(
@@ -1472,7 +1510,7 @@ def _sqlite_blockers(connection: sqlite3.Connection, account_id: str) -> list[st
 def _legal_v2_transition(before: V2State, after: V2State) -> bool:
     return after in {
         "awaiting_owner": {"pending", "stale", "declined"},
-        "pending": {"applied", "not_applied", "partial"},
+        "pending": {"applied", "unchanged", "not_applied", "partial"},
         "partial": {"partial_resolved"},
     }.get(before, set())
 

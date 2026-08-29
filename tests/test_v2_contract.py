@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
 
 from things_orchestrator.cloud import CloudError
-from things_orchestrator.journal import MemoryJournal
-from things_orchestrator.library import MemoryLibrary, Record
+from things_orchestrator.journal import JsonDict, MemoryJournal, V2Operation
+from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
+from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.server import ThingsMCPServer
 from things_orchestrator.v2 import PublicResult, ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
@@ -514,9 +516,9 @@ def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> N
             if self.refreshes == 2:
                 self.records["a"].title = "Concurrent change"
 
-        def apply(self, writes: list[object]) -> object:
+        def apply(self, writes: list[Write]) -> ApplyResult:
             self.applied = True
-            return super().apply(writes)  # type: ignore[arg-type]
+            return super().apply(writes)
 
     library = RacingLibrary([Record(uuid="a", kind="task", title="A")])
     workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
@@ -524,6 +526,169 @@ def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> N
     assert result.state == "not_applied"
     assert result.code == "not_applied_precondition"
     assert library.applied is False
+
+
+@pytest.mark.parametrize("kind", ["task", "project"])
+@pytest.mark.parametrize("notes", ["Replacement", ""])
+def test_v2_rejects_rich_note_replacement_before_journaling(
+    kind: Literal["task", "project"], notes: str
+) -> None:
+    record = Record(
+        uuid="a", kind=kind, title="A", notes="Rich content", notes_format="rich"
+    )
+    journal = MemoryJournal()
+    result = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary([record]),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": record.id, "set": {"notes": notes}}]},
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+
+
+@pytest.mark.parametrize("tool", ["things_update", "things_complete", "things_trash"])
+def test_v2_rejects_recurrence_templates_before_journaling(tool: str) -> None:
+    record = Record(
+        uuid="a",
+        kind="task",
+        title="Repeating",
+        recurrence=RecurrenceState(
+            role="template", repeat_type="fixed", rule={"tp": 0, "rc": 8, "iv": 1}
+        ),
+    )
+    journal = MemoryJournal()
+    arguments: dict[str, object] = {"request_id": REQUEST, "ids": [record.id]}
+    if tool == "things_update":
+        arguments = {
+            "request_id": REQUEST,
+            "items": [{"id": record.id, "set": {"title": "Changed"}}],
+        }
+    result = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary([record]),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(tool, arguments)
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+
+
+def test_v2_rejects_project_completion_with_open_actions_before_journaling() -> None:
+    project = Record(uuid="p", kind="project", title="Project")
+    journal = MemoryJournal()
+    result = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary(
+                [
+                    project,
+                    Record(
+                        uuid="a",
+                        kind="task",
+                        title="Open action",
+                        parent_uuid=project.uuid,
+                    ),
+                ]
+            ),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_complete", {"request_id": REQUEST, "ids": [project.id]}
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+
+
+def test_project_completion_freezes_the_clear_project_scope() -> None:
+    class RacingProjectLibrary(MemoryLibrary):
+        refreshes = 0
+        applied = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                self.records["late"] = Record(
+                    uuid="late",
+                    kind="task",
+                    title="Late action",
+                    parent_uuid="p",
+                )
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.applied = True
+            return super().apply(writes)
+
+    project = Record(uuid="p", kind="project", title="Project")
+    library = RacingProjectLibrary([project])
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_complete", {"request_id": REQUEST, "ids": [project.id]}
+    )
+
+    assert result.state == "not_applied"
+    assert project.status == "open"
+    assert library.applied is False
+
+
+def test_unchanged_result_rechecks_after_claiming_the_fence() -> None:
+    library = MemoryLibrary([Record(uuid="a", kind="task", title="A", notes="N")])
+
+    class RacingJournal(MemoryJournal):
+        def create_v2(
+            self,
+            operation: V2Operation,
+            *,
+            claim_fence: bool,
+            receipt_rows: list[JsonDict] | None = None,
+        ) -> tuple[
+            Literal["created", "existing", "conflict", "blocked"],
+            V2Operation | None,
+            list[str],
+        ]:
+            library.records["a"].notes = "Concurrent change"
+            return super().create_v2(
+                operation,
+                claim_fence=claim_fence,
+                receipt_rows=receipt_rows,
+            )
+
+    journal = RacingJournal()
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"notes": "N"}}]},
+    )
+
+    assert result.state == "not_applied"
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "not_applied"
 
 
 def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:

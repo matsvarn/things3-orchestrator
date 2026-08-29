@@ -133,39 +133,51 @@ def test_sqlite_terminal_settlement_rolls_back_state_and_receipts_together(tmp_p
         assert connection.execute("SELECT count(*) FROM owner_receipts_v2").fetchone() == (0,)
 
 
-def test_sqlite_unchanged_creation_rolls_back_operation_with_receipts(tmp_path: Path) -> None:
+def test_sqlite_unchanged_settlement_rolls_back_state_with_receipts(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
     journal = SQLiteJournal(path)
+    operation = _operation(
+        "op_unchanged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
     with sqlite3.connect(path) as connection:
         connection.execute(
             """CREATE TRIGGER crash_unchanged_receipt BEFORE INSERT ON owner_receipts_v2
                BEGIN SELECT RAISE(ABORT, 'injected crash'); END"""
         )
-    operation = replace(
-        _operation("op_unchanged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        state="unchanged",
-        response={"state": "unchanged"},
-    )
     rows = [{"sequence": 1, "action": "update", "target_id": "task:a", "desired": {}, "observed": {}, "result": "unchanged"}]
     try:
-        journal.create_v2(operation, claim_fence=False, receipt_rows=rows)
+        journal.settle_v2(
+            operation.operation_id,
+            expected="pending",
+            state="unchanged",
+            response={"state": "unchanged"},
+            rows=rows,
+        )
     except sqlite3.IntegrityError:
         pass
     else:
         raise AssertionError("receipt crash was not injected")
-    assert journal.get_v2_operation("op_unchanged") is None
-    assert journal.get_v2_request(operation.account_id, operation.api_version, operation.request_id) is None
+    stored = journal.get_v2_operation("op_unchanged")
+    assert stored is not None and stored.state == "pending"
+    assert stored.response is None and stored.receipt_hash is None
 
 
-def test_unchanged_creation_is_immediately_terminal_for_retention(tmp_path: Path) -> None:
+def test_unchanged_settlement_is_immediately_terminal_for_retention(tmp_path: Path) -> None:
     journal = SQLiteJournal(tmp_path / "journal.sqlite3")
-    operation = replace(
-        _operation("op_unchanged_retained", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        state="unchanged",
-        response={"state": "unchanged"},
+    operation = _operation(
+        "op_unchanged_retained",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
     rows = [{"sequence": 1, "action": "update", "target_id": "task:a", "desired": {}, "observed": {}, "result": "unchanged"}]
-    assert journal.create_v2(operation, claim_fence=False, receipt_rows=rows)[0] == "created"
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.settle_v2(
+        operation.operation_id,
+        expected="pending",
+        state="unchanged",
+        response={"state": "unchanged"},
+        rows=rows,
+    )
 
     assert journal.prune_v2(now="2030-01-01T00:00:00+00:00") == 1
     tombstone = journal.get_v2_request(operation.account_id, operation.api_version, operation.request_id)
@@ -237,16 +249,24 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
         assert journal.get_v2_operation(pending.operation_id).state == "pending"  # type: ignore[union-attr]
 
 
-def test_unchanged_requires_exactly_one_receipt_per_manifest_write(tmp_path: Path) -> None:
+def test_unchanged_settlement_requires_one_receipt_per_manifest_write(tmp_path: Path) -> None:
     for index, journal in enumerate((MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3"))):
-        operation = replace(
-            _operation(f"op_unchanged_{index}", request_id=f"0198f0ee-98d4-7bd5-91ba-8e76019b273{index}"),
-            state="unchanged",
+        operation = _operation(
+            f"op_unchanged_{index}",
+            request_id=f"0198f0ee-98d4-7bd5-91ba-8e76019b273{index}",
         )
+        assert journal.create_v2(operation, claim_fence=True)[0] == "created"
         for rows in ([], [{"sequence": 1}, {"sequence": 2}]):
             with pytest.raises(ValueError, match="one receipt row per manifest write"):
-                journal.create_v2(operation, claim_fence=False, receipt_rows=rows)
-        assert journal.get_v2_operation(operation.operation_id) is None
+                journal.settle_v2(
+                    operation.operation_id,
+                    expected="pending",
+                    state="unchanged",
+                    response={"state": "unchanged"},
+                    rows=rows,
+                )
+        stored = journal.get_v2_operation(operation.operation_id)
+        assert stored is not None and stored.state == "pending"
 
 
 def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp_path: Path) -> None:
@@ -391,6 +411,71 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
     assert library.records["a"].status == "open"
 
 
+def test_sqlite_approval_rejects_api_version_downgrade_bypass(tmp_path: Path) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal_path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(
+        journal_path,
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_version_downgrade",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        tool="things_trash",
+        writes=[{"action": "trash", "uuid": "a", "kind": "task"}],
+        before=[{"id": "task:a", "trashed": False}],
+        touched=[["trashed"]],
+        preconditions={},
+        display_titles=["A"],
+        requires_owner=True,
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    tampered = {
+        **operation.manifest,
+        "writes": [
+            {
+                "action": "complete",
+                "uuid": "a",
+                "kind": "task",
+                "status": "done",
+            }
+        ],
+        "touched": [["status"]],
+    }
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            """UPDATE owner_operations_v2
+               SET api_version='legacy-v1', manifest_json=?
+               WHERE operation_id=?""",
+            (
+                json.dumps(tampered, separators=(",", ":"), sort_keys=True),
+                operation.operation_id,
+            ),
+        )
+    library = MemoryLibrary([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id=operation.account_id,
+    )
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "rejected"
+    assert library.records["a"].status == "open"
+
+
 def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> None:
     journal = MemoryJournal()
     operation = _operation(
@@ -481,6 +566,12 @@ def test_authorization_binding_covers_action_and_operation_contract() -> None:
     assert authorization_binding(operation, action="approve") != authorization_binding(
         replace(operation, manifest_hash="sha256:v1:other"), action="approve"
     )
+    assert authorization_binding(operation, action="approve") != authorization_binding(
+        replace(operation, api_version="legacy-v1"), action="approve"
+    )
+    assert authorization_binding(operation, action="approve") != authorization_binding(
+        replace(operation, tool="things_complete"), action="approve"
+    )
 
 
 def test_host_rendering_escapes_control_ansi_newline_and_delimiter() -> None:
@@ -529,6 +620,35 @@ def test_legacy_resolution_render_contains_complete_escaped_signed_plan() -> Non
     assert "preconditions" in rendered and "summary" in rendered and "writes" in rendered
     assert "\x1b" not in rendered and "\nA" not in rendered and "\u202e" not in rendered
     assert "\\u000a" in rendered and "\\u007c" in rendered and "\\u202e" in rendered
+
+
+def test_legacy_resolution_rejects_a_substituted_owner_envelope() -> None:
+    journal = MemoryJournal()
+    record = IntentRecord(
+        "legacy-envelope",
+        "sha256:fingerprint",
+        "pending",
+        plan={
+            "writes": [
+                {"action": "update", "uuid": "a", "kind": "task", "title": "B"}
+            ]
+        },
+    )
+    journal.save(record)
+    workspace = ThingsWorkspace(
+        MemoryLibrary(), journal=journal, account_id="owner@example.com"
+    )
+    operation = workspace.host_get_legacy_resolution_v1(record.intent_id)
+    assert operation is not None
+
+    for tampered in (
+        replace(operation, api_version="2"),
+        replace(operation, tool="things_trash"),
+        replace(operation, safety_policy_digest="sha256:v1:other"),
+        replace(operation, manifest={**operation.manifest, "display_titles": ["Other"]}),
+    ):
+        with pytest.raises(ValueError, match="integrity"):
+            render_operation(tampered)
 
 
 def test_host_operation_lookup_is_scoped_to_workspace_account() -> None:

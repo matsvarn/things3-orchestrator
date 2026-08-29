@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 from urllib.error import URLError
 
@@ -871,14 +872,33 @@ def test_legacy_resolution_renders_before_reading_passphrase(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    title = "\x1b[31mOwner\n|\u202e"
+    plan = {
+        "writes": [
+            {"action": "update", "uuid": "a", "kind": "task", "title": title}
+        ]
+    }
+    digest = "sha256:v1:" + sha256(
+        json.dumps(
+            plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode()
+    ).hexdigest()
     operation = V2Operation(
-        account_id="owner@example.com", api_version="legacy-v1", request_id="fp",
-        request_hash="sha256:plan", operation_id="legacy_render", tool="legacy_pending_resolution",
-        state="pending", manifest={
-            "writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "\x1b[31mOwner\n|\u202e"}],
-            "display_titles": ["\x1b[31mOwner\n|\u202e"],
-            "legacy_plan": {"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "\x1b[31mOwner\n|\u202e"}]},
-        }, manifest_hash="sha256:plan", safety_policy_digest="sha256:policy",
+        account_id="owner@example.com",
+        api_version="legacy-v1",
+        request_id="fp",
+        request_hash=digest,
+        operation_id="legacy_render",
+        tool="legacy_pending_resolution",
+        state="pending",
+        manifest={
+            "intent_id_hash": "sha256:v1:" + "0" * 64,
+            "writes": plan["writes"],
+            "display_titles": [title],
+            "legacy_plan": plan,
+        },
+        manifest_hash=digest,
+        safety_policy_digest="sha256:v1:legacy-no-replay-resolution",
     )
 
     class Workspace:
