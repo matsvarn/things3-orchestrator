@@ -27,7 +27,7 @@ for a transport retry of the exact same tool arguments. Never reuse it for a
 correction or continuation.
 
 The server owns current reads and preconditions. A returned `awaiting_owner`
-state means that the owner must use the host-only command. Do not ask for a
+state means that the owner must use the CLI-only command. Do not ask for a
 chat confirmation and do not look for an MCP approval tool.
 
 If a mutation returns blocking operation IDs, stop all writes. Read-only calls

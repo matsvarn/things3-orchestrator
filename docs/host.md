@@ -45,7 +45,7 @@ skills on the VPS is one checkout.
 ## Shared facts
 
 All clients share one MCP bearer. There is no per-client identity. The bearer
-cannot approve operations. Enroll and use the separate host-only owner factor
+cannot approve operations. Enroll and use the separate CLI-only owner factor
 from a private local or SSH terminal.
 
 The owner factor separates MCP access from CLI approval, not processes that

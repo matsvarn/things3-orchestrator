@@ -118,6 +118,7 @@ def render_operation(operation: V2Operation) -> str:
         f"action | {host_escape(operation.tool)}",
     ]
     writes = operation.manifest.get("writes", [])
+    display_titles = operation.manifest.get("display_titles", [])
     if isinstance(writes, list):
         for index, write in enumerate(writes, start=1):
             if not isinstance(write, dict):
@@ -126,6 +127,8 @@ def render_operation(operation: V2Operation) -> str:
             kind = host_escape(str(write.get("kind", "item")))
             uuid = host_escape(str(write.get("uuid", "unknown")))
             lines.append(f"manifest[{index}] | {action} | {kind}:{uuid}")
+            if isinstance(display_titles, list) and index <= len(display_titles):
+                lines.append(f"  title | {host_escape(str(display_titles[index - 1]))}")
             for field, value in sorted(write.items()):
                 if field in {"action", "kind", "uuid"} or value is None:
                     continue

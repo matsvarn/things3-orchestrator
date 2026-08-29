@@ -2140,6 +2140,8 @@ class ThingsWorkspace:
             if existing.request_hash != draft.request_hash:
                 return {
                     "state": "rejected",
+                    "code": "request_conflict",
+                    "next_action": "correct_request",
                     "instruction": "That request_id belongs to different arguments.",
                     "operation_id": existing.operation_id,
                 }
@@ -2148,12 +2150,14 @@ class ThingsWorkspace:
         if blockers:
             return {
                 "state": "rejected",
+                "code": "write_fenced",
+                "next_action": "run_cli",
                 "instruction": "An unresolved operation blocks writes for this account.",
                 "blocking_operation_ids": blockers,
             }
         failed = self._refresh(force=True)
         if failed is not None:
-            return {"state": "rejected", "instruction": failed.instruction}
+            return {"state": "rejected", "code": "internal_error", "next_action": "retry_same", "instruction": failed.instruction}
         prepared = self._prepare_v2_manifest(draft)
         if isinstance(prepared, dict):
             return prepared
@@ -2170,6 +2174,8 @@ class ThingsWorkspace:
         initial_response: JsonDict | None = (
             {
                 "state": "unchanged",
+                "code": "unchanged",
+                "next_action": "read_receipt",
                 "instruction": "The requested state was already current.",
                 "operation_id": operation_id,
             }
@@ -2190,12 +2196,17 @@ class ThingsWorkspace:
             expires_at=manifest.expires_at,
             response=initial_response,
         )
+        unchanged_rows = self._v2_receipt_rows(operation, writes, before, "unchanged") if initial_state == "unchanged" else None
         outcome, stored, blockers = journal.create_v2(
-            operation, claim_fence=initial_state == "pending"
+            operation,
+            claim_fence=initial_state == "pending",
+            receipt_rows=unchanged_rows,
         )
         if outcome == "blocked":
             return {
                 "state": "rejected",
+                "code": "write_fenced",
+                "next_action": "run_cli",
                 "instruction": "An unresolved operation blocks writes for this account.",
                 "blocking_operation_ids": blockers,
             }
@@ -2203,6 +2214,8 @@ class ThingsWorkspace:
         if outcome == "conflict":
             return {
                 "state": "rejected",
+                "code": "request_conflict",
+                "next_action": "correct_request",
                 "instruction": "That request_id belongs to different arguments.",
                 "operation_id": stored.operation_id,
             }
@@ -2210,12 +2223,13 @@ class ThingsWorkspace:
             return self._resume_v2(stored)
         if initial_state == "unchanged":
             assert initial_response is not None
-            self._save_v2_receipts(operation, writes, before, "unchanged")
             return initial_response
         if initial_state == "awaiting_owner":
             response: JsonDict = {
                 "state": "awaiting_owner",
-                "instruction": "Review this operation with the host-only operation command.",
+                "code": "awaiting_owner",
+                "next_action": "run_cli",
+                "instruction": "Review this operation with the CLI-only operation command.",
                 "operation_id": operation_id,
             }
             return response
@@ -2231,6 +2245,7 @@ class ThingsWorkspace:
         before: list[JsonDict | None] = []
         preconditions: dict[str, str] = {}
         touched: list[list[str]] = []
+        display_titles: list[str] = []
         payload = draft.payload
         if draft.tool == "things_capture":
             for capture_item in cast(list[dict[str, object]], payload["items"]):
@@ -2241,7 +2256,11 @@ class ThingsWorkspace:
                 if isinstance(into_id, str):
                     destination = self._exact_item(into_id)
                     if destination is None or destination.kind not in {"project", "area"}:
-                        return {"state": "rejected", "instruction": "An exact destination was not found."}
+                        return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "An exact destination was not found."}
+                    if destination.status != "open" or destination.trashed or destination.recurrence.role != "none":
+                        return {"state": "rejected", "code": "inactive_destination", "next_action": "correct_request", "instruction": "The destination is not an active ordinary container."}
+                    if kind == "project" and destination.kind != "area":
+                        return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "Projects may only be captured into Areas."}
                     preconditions[destination.id] = self._revision(destination)
                     if destination.kind == "project":
                         parent_uuid = destination.uuid
@@ -2263,6 +2282,7 @@ class ThingsWorkspace:
                 writes.append(write)
                 before.append(None)
                 touched.append(["title", "notes", "start", "deadline", "into"])
+                display_titles.append(cast(str, capture_item["title"]))
                 if kind == "project":
                     for child in cast(list[dict[str, object]], capture_item.get("tasks", [])):
                         child_write = Write(
@@ -2274,12 +2294,24 @@ class ThingsWorkspace:
                         writes.append(child_write)
                         before.append(None)
                         touched.append(["title", "notes", "into"])
+                        display_titles.append(cast(str, child["title"]))
         else:
             ids = cast(list[str], payload["ids"] if "ids" in payload else [row["id"] for row in cast(list[dict[str, object]], payload["items"])])
+            expanded_ids: set[str] = set()
+            targets: list[Record] = []
             for item_id in ids:
                 target = self._exact_item(item_id)
                 if target is None or target.kind not in {"task", "project"} or target.heading:
-                    return {"state": "rejected", "instruction": "Mutation targets must be exact Tasks or Projects."}
+                    return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "Mutation targets must be exact Tasks or Projects."}
+                candidates = [*self._project_descendants(target.uuid), target] if draft.tool == "things_trash" and target.kind == "project" else [target]
+                for candidate in candidates:
+                    if candidate.id not in expanded_ids:
+                        expanded_ids.add(candidate.id)
+                        targets.append(candidate)
+            if len(targets) > 120:
+                return {"state": "rejected", "code": "expanded_write_limit", "next_action": "correct_request", "instruction": "The operation expands beyond 120 writes."}
+            for target in targets:
+                item_id = target.id
                 preconditions[target.id] = self._revision(target)
                 if target.parent_uuid:
                     parent = self._library.records.get(target.parent_uuid)
@@ -2289,15 +2321,25 @@ class ThingsWorkspace:
                     writes.append(Write(action="complete", uuid=target.uuid, kind=target.kind, status="done"))
                     touched.append(["status"])
                     before.append(self._v2_observed(target, ("status",)))
+                    display_titles.append(target.title)
                 elif draft.tool == "things_trash":
-                    writes.append(Write(action="trash", uuid=target.uuid, kind=target.kind))
+                    writes.append(Write(action="trash", uuid=target.uuid, kind=target.kind, heading=target.heading))
                     touched.append(["trashed"])
                     before.append(self._v2_observed(target, ("trashed",)))
+                    display_titles.append(target.title)
                 else:
                     row = next(entry for entry in cast(list[dict[str, object]], payload["items"]) if entry["id"] == item_id)
                     fields = cast(dict[str, object], row["set"])
                     start_set = "start" in fields
                     start, tonight, someday = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
+                    reminder_date, reminder = self._remind_input(cast(str | None, fields.get("remind_at")))
+                    if reminder_date is not None:
+                        if start_set and (start is None or start != reminder_date):
+                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "start and remind_at must use the same local date."}
+                        if not start_set:
+                            if target.start != reminder_date:
+                                return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "remind_at may omit start only when the existing start uses the same local date."}
+                            start = reminder_date
                     writes.append(Write(
                         action="update", uuid=target.uuid, kind=target.kind,
                         title=cast(str | None, fields.get("title")),
@@ -2306,11 +2348,12 @@ class ThingsWorkspace:
                         tonight=tonight, someday=someday,
                         deadline=date.fromisoformat(cast(str, fields["deadline"])) if fields.get("deadline") else None,
                         clear_deadline="deadline" in fields and fields.get("deadline") is None,
-                        remind=self._remind_input(cast(str | None, fields.get("remind_at")))[1] if fields.get("remind_at") else None,
+                        remind=reminder,
                         clear_remind="remind_at" in fields and fields.get("remind_at") is None,
                     ))
                     touched.append(sorted(fields))
                     before.append(self._v2_observed(target, tuple(sorted(fields))))
+                    display_titles.append(target.title)
         manifest = OperationManifest.build(
             account_id=self._account_id,
             draft=draft,
@@ -2318,6 +2361,7 @@ class ThingsWorkspace:
             writes=[_write_json(write) for write in writes],
             touched=touched,
             before=before,
+            display_titles=display_titles,
             requires_owner=draft.tool == "things_trash",
             clock=self._clock(),
         )
@@ -2335,18 +2379,24 @@ class ThingsWorkspace:
             for row in cast(list[object], operation.manifest["writes"])
         ]
         before = before or cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
-        try:
-            self._library.apply(writes)
-        except CloudError as error:
-            if _outcome_unknown(error):
-                return self._reconcile_v2(operation, writes, before)
-            response: JsonDict = {"state": "not_applied", "instruction": "Things Cloud rejected the operation.", "operation_id": operation.operation_id}
-            self._journal.transition_v2(operation.operation_id, expected="pending", state="not_applied", response=response)
-            self._save_v2_receipts(operation, writes, before, "not_applied")
-            return response
         failed = self._refresh(force=True)
         if failed is not None:
-            return {"state": "pending", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud precondition read-back is unavailable.", "operation_id": operation.operation_id}
+        if not self._v2_preconditions_match(operation):
+            response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
+            rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
+            self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
+            return response
+        try:
+            self._library.apply(writes)
+        except CloudError:
+            failed = self._refresh(force=True)
+            if failed is not None:
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The commit outcome is unknown and will never be replayed.", "operation_id": operation.operation_id}
+            return self._reconcile_v2(operation, writes, before)
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
         return self._reconcile_v2(operation, writes, before)
 
     def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
@@ -2356,12 +2406,19 @@ class ThingsWorkspace:
         elif any(matched):
             state = "partial"
         else:
-            return {"state": "pending", "instruction": "The Cloud outcome remains unresolved.", "operation_id": operation.operation_id}
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The Cloud outcome remains unresolved.", "operation_id": operation.operation_id}
         item_ids = [f"{'heading' if write.heading else write.kind}:{write.uuid}" for write in writes]
-        response: JsonDict = {"state": state, "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
-        self._journal.transition_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response)
-        self._save_v2_receipts(operation, writes, before, state)
+        response: JsonDict = {"state": state, "code": state, "next_action": "run_cli" if state == "partial" else "read_receipt", "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
+        rows = self._v2_receipt_rows(operation, writes, before, state)
+        self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
         return response
+
+    def _v2_preconditions_match(self, operation: V2Operation) -> bool:
+        preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
+        return all(
+            (item := self._exact_item(item_id)) is not None and self._revision(item) == expected
+            for item_id, expected in preconditions.items()
+        )
 
     def _resume_v2(self, operation: V2Operation) -> JsonDict:
         if operation.response is not None:
@@ -2369,7 +2426,7 @@ class ThingsWorkspace:
         if operation.state == "pending":
             failed = self._refresh(force=True)
             if failed is not None:
-                return {"state": "pending", "instruction": "Cloud read-back is unavailable.", "operation_id": operation.operation_id}
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable.", "operation_id": operation.operation_id}
             writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
             before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
             return self._reconcile_v2(operation, writes, before)
@@ -2382,6 +2439,70 @@ class ThingsWorkspace:
         if operation is None or operation.account_id != self._account_id:
             return None
         return operation
+
+    def host_reconcile_v2(self, operation_id: str) -> JsonDict:
+        """Force current evidence for one pending operation without replaying it."""
+
+        operation = self.host_get_operation_v2(operation_id)
+        if operation is None:
+            return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "That operation does not belong to this account."}
+        if operation.state != "pending":
+            return self._resume_v2(operation)
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable; nothing was replayed.", "operation_id": operation_id}
+        writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
+        before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        return self._reconcile_v2(operation, writes, before)
+
+    def host_settle_not_applied_v2(self, operation_id: str, authorization: object) -> JsonDict:
+        """Settle pending only when forced evidence proves no frozen write landed."""
+
+        operation = self.host_get_operation_v2(operation_id)
+        if operation is None or operation.state != "pending":
+            return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "That operation is not pending for this account."}
+        if self._journal.verify_v2_authorization(operation, "settle_not_applied", authorization) is None:
+            return {"state": "rejected", "code": "validation_error", "next_action": "run_cli", "instruction": "Verified CLI authorization is required.", "operation_id": operation_id}
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud evidence is unavailable.", "operation_id": operation_id}
+        writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
+        if any(self._writes_match([write]) for write in writes):
+            return self.host_reconcile_v2(operation_id)
+        before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
+        response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "Forced read-back proved that no frozen write landed; nothing was replayed.", "operation_id": operation_id}
+        rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
+        self._journal.settle_v2(
+            operation_id, expected="pending", state="not_applied", response=response,
+            rows=rows, authorization=authorization, action="settle_not_applied",
+        )
+        return response
+
+    def host_reconcile_v1_pending(self, intent_id: str) -> JsonDict:
+        """Classify retained v1 pending evidence once, without replaying its writes."""
+
+        record = self._journal.get(intent_id)
+        if record is None or record.state != "pending":
+            return {"status": "rejected", "code": "missing_target", "instruction": "That retained v1 operation is not pending."}
+        try:
+            writes = self._writes_from_plan(record.plan)
+        except (KeyError, TypeError, ValueError):
+            writes = []
+        if not writes:
+            return {"status": "pending", "code": "pending_unknown", "instruction": "The retained v1 row has no complete frozen write evidence and remains fenced."}
+        failed = self._refresh(force=True)
+        if failed is not None:
+            return {"status": "pending", "code": "pending_unknown", "instruction": "Cloud read-back is unavailable; nothing was replayed."}
+        matched = [self._writes_match([write]) for write in writes]
+        classification = "applied" if all(matched) else "partial" if any(matched) else "not_applied"
+        result: JsonDict = {
+            "status": "reconciled_no_replay",
+            "classification": classification,
+            "instruction": "Forced Cloud read-back classified the retained v1 operation; no write was replayed.",
+        }
+        if not self._journal.resolve_v1_pending(intent_id, result=result):
+            return {"status": "rejected", "code": "request_conflict", "instruction": "The retained v1 operation changed during reconciliation."}
+        return result
 
     def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
         operation = self._journal.get_v2_operation(operation_id)
@@ -2448,7 +2569,7 @@ class ThingsWorkspace:
             )
         )
 
-    def _save_v2_receipts(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None], outcome: str) -> None:
+    def _v2_receipt_rows(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None], outcome: str) -> list[JsonDict]:
         rows: list[JsonDict] = []
         touched = cast(list[list[str]], operation.manifest["touched"])
         for index, write in enumerate(writes, start=1):
@@ -2457,11 +2578,19 @@ class ThingsWorkspace:
             result = outcome
             if outcome == "partial":
                 result = "applied" if self._writes_match([write]) else "not_applied"
-            rows.append({"sequence": index, "action": write.action, "target_id": f"{write.kind}:{write.uuid}", "before": _taint_things_text(before[index - 1]), "desired": {key: value for key, value in _write_json(write).items() if key in set(touched[index - 1]) | {"action", "uuid", "kind"}}, "observed": _taint_things_text(observed), "result": result})
-        self._journal.append_v2_receipts(operation.operation_id, rows)
+            desired_fields = set(touched[index - 1]) | {"action", "uuid", "kind"}
+            desired = {key: value for key, value in _write_json(write).items() if key in desired_fields}
+            if "remind_at" in touched[index - 1]:
+                desired["remind_at"] = None if write.clear_remind else self._reminder_from_write(write)
+            rows.append({"sequence": index, "action": write.action, "target_id": f"{write.kind}:{write.uuid}", "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
+        return rows
 
-    @staticmethod
-    def _v2_observed(item: Record, fields: Sequence[str]) -> JsonDict:
+    def _reminder_from_write(self, write: Write) -> str | None:
+        if write.remind is None or write.start is None:
+            return None
+        return datetime.combine(write.start, time.fromisoformat(write.remind), tzinfo=self._clock().tzinfo).isoformat()
+
+    def _v2_observed(self, item: Record, fields: Sequence[str]) -> JsonDict:
         values: JsonDict = {"id": item.id}
         selected = set(fields) or {"title", "notes", "status", "trashed", "start", "deadline", "into"}
         if "title" in selected:
@@ -2476,9 +2605,12 @@ class ThingsWorkspace:
             values["start"] = item.start.isoformat() if item.start else None
         if "deadline" in selected:
             values["deadline"] = item.deadline.isoformat() if item.deadline else None
+        if "remind_at" in selected:
+            values["remind_at"] = self._reminder(item)
         if "into" in selected:
             values["into_id"] = f"project:{item.parent_uuid}" if item.parent_uuid else f"area:{item.area_uuid}" if item.area_uuid else None
         return values
+
 
     def commit(self, call: CommitCall) -> Result:
         fingerprint = _fingerprint(call.model_dump(mode="json", by_alias=True))

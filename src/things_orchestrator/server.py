@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 from contextlib import asynccontextmanager
 from secrets import token_urlsafe
@@ -93,21 +92,14 @@ class ThingsMCPServer:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         try:
             if name not in {tool.name for tool in _TOOLS}:
-                raise ValidationError.from_exception_data(
-                    "Tool",
-                    [
-                        {
-                            "type": "literal_error",
-                            "loc": ("name",),
-                            "input": name,
-                            "ctx": {"expected": json.dumps([tool.name for tool in _TOOLS])},
-                        }
-                    ],
-                )
+                return _domain_result(PublicResult(
+                    state="rejected", code="unknown_tool", next_action="correct_request",
+                    instruction="That tool is not part of the bounded v2 interface.",
+                ))
             MODELS[name].model_validate(arguments)
         except ValidationError as error:
             instruction = _safe_validation_error(error)
-            return _domain_result(PublicResult(state="rejected", instruction=instruction))
+            return _domain_result(PublicResult(state="rejected", code="validation_error", next_action="correct_request", instruction=instruction))
         try:
             async with self._lock:
                 result = await anyio.to_thread.run_sync(self._dispatch, name, arguments)
@@ -120,10 +112,10 @@ class ThingsMCPServer:
                 package_version(),
                 type(error).__name__,
             )
-            return _domain_result(PublicResult(state="rejected", instruction=(
+            return _domain_result(PublicResult(state="rejected", code="internal_error", next_action="contact_operator", instruction=(
                 "The server stopped because of an internal error "
-                f"({correlation_id}). Do not assume that a write started. "
-                "See server logs for this correlation ID."
+                f"({correlation_id}). A mutation outcome may be unknown; do not "
+                "repost it as new work. See server logs and the receipt for this correlation ID."
             )), is_error=True)
         return _domain_result(result)
 

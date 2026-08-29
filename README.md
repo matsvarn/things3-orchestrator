@@ -19,7 +19,7 @@ Read [Trust](docs/trust.md), [Security](SECURITY.md), and the
 ## Install on this Mac
 
 You need [uv](https://docs.astral.sh/uv/) and a Git clone. The package is not on PyPI.
-Use the clone because it contains the server, plugin, and host-only commands.
+Use the clone because it contains the server, plugin, and CLI-only commands.
 
 ```console
 scripts/setup
@@ -47,16 +47,18 @@ the title, notes, start, deadline, or reminder. Use `things_complete` and
 
 The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.
-Pending and partial outcomes block every write path until they settle or the
-owner resolves the partial on the host.
+Pending and partial outcomes block every write path until CLI-only read-back
+reconciliation settles them or the owner resolves the partial.
 
-Recoverable Trash requires host approval. MCP has no approval tool. Enroll the
-owner factor and use the host-only commands from a private local or SSH
+Recoverable Trash requires CLI approval. MCP has no approval tool. Enroll the
+owner factor and use the CLI-only commands from a private local or SSH
 terminal:
 
 ```console
 uv run things-orchestrator owner-factor
 uv run things-orchestrator operation-show op_EXAMPLE
+uv run things-orchestrator operation-reconcile op_EXAMPLE
+uv run things-orchestrator operation-settle-not-applied op_EXAMPLE
 uv run things-orchestrator operation-approve op_EXAMPLE
 uv run things-orchestrator operation-decline op_EXAMPLE
 uv run things-orchestrator operation-accept-partial op_EXAMPLE accepted_as_is
@@ -65,9 +67,12 @@ uv run things-orchestrator operation-accept-partial op_EXAMPLE accepted_as_is
 Restart the server after enrolling or rotating the owner factor so it pins the
 new public verification key.
 
-The approval passphrase is read from `/dev/tty`. It is never accepted through
-arguments, environment variables, or pipes. The MCP server does not load the
-encrypted owner signing key. The server loads only its pinned public key.
+The approval passphrase is read from `/dev/tty`, not from arguments,
+environment variables, or ordinary stdin pipes. This is a CLI routing control,
+not proof that a human is present. The MCP server does not load the encrypted
+owner signing key. The server loads only its pinned public key. Code running as
+the same OS user can still replace these local files or control the process;
+use a separate OS identity or host for a stronger boundary.
 
 Advanced scope editing, mutation coaching, and permanent deletion are not
 available in this release.

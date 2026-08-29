@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.server import ThingsMCPServer
@@ -175,3 +176,138 @@ def test_receipt_text_is_tainted_and_invalid_receipts_are_typed_rejections() -> 
     missing = asyncio.run(server.call_tool("things_receipt", {"operation_id": "op_missing000"}))
     assert invalid.structured_content["state"] == "rejected"
     assert missing.structured_content["state"] == "rejected"
+
+
+def test_public_failures_have_machine_readable_code_and_next_action() -> None:
+    invalid = asyncio.run(_server().call_tool("things_get", {"ids": ["task:a", "task:a"]}))
+    missing = asyncio.run(_server().call_tool("things_get", {"ids": ["task:missing"]}))
+    unknown = asyncio.run(_server().call_tool("things_nope", {}))
+    assert (invalid.structured_content["code"], invalid.structured_content["next_action"]) == ("validation_error", "correct_request")
+    assert missing.structured_content["code"] == "missing_target"
+    assert missing.structured_content["missing_ids"] == ["task:missing"]
+    assert unknown.structured_content["code"] == "unknown_tool"
+
+
+def test_capture_destination_is_discriminated_active_and_bounded() -> None:
+    project = Record(uuid="p", kind="project", title="P")
+    trashed_area = Record(uuid="a", kind="area", title="A", trashed=True)
+    server = _server(project, trashed_area)
+    cases = [
+        {"items": [{"kind": "task", "title": "T", "tasks": [{"title": "No"}]}]},
+        {"items": [{"kind": "project", "title": "P2", "into_id": "project:p"}]},
+        {"items": [{"kind": "task", "title": "T", "into_id": "area:a"}]},
+        {"items": [{"kind": "project", "title": str(i), "tasks": [{"title": str(j)} for j in range(4)]} for i in range(25)]},
+    ]
+    for offset, payload in enumerate(cases):
+        payload["request_id"] = f"0198f0ee-98d4-7bd5-91ba-8e76019b27{offset}"
+        result = asyncio.run(server.call_tool("things_capture", payload))
+        assert result.structured_content["state"] == "rejected"
+
+
+def test_update_rejects_null_text_and_duplicate_targets() -> None:
+    server = _server(Record(uuid="a", kind="task", title="A"))
+    for items in (
+        [{"id": "task:a", "set": {"title": None}}],
+        [{"id": "task:a", "set": {"notes": None}}],
+        [{"id": "task:a", "set": {"title": "B"}}, {"id": "task:a", "set": {"title": "C"}}],
+    ):
+        result = asyncio.run(server.call_tool("things_update", {"request_id": REQUEST, "items": items}))
+        assert result.structured_content["code"] == "validation_error"
+
+
+def test_project_trash_manifest_expands_descendants_and_freezes_titles() -> None:
+    from things_orchestrator.owner_authority import render_operation
+
+    journal = MemoryJournal()
+    server = _server(
+        Record(uuid="p", kind="project", title="Project"),
+        Record(uuid="h", kind="task", title="Heading", parent_uuid="p", heading=True),
+        Record(uuid="t", kind="task", title="Task", parent_uuid="h"),
+        journal=journal,
+    )
+    result = asyncio.run(server.call_tool("things_trash", {"request_id": REQUEST, "ids": ["project:p"]}))
+    operation = journal.get_v2_operation(result.structured_content["operation_id"])
+    assert operation is not None
+    assert [row["uuid"] for row in operation.manifest["writes"]] == ["t", "h", "p"]
+    assert operation.manifest["display_titles"] == ["Task", "Heading", "Project"]
+    rendered = render_operation(operation)
+    assert "title | Task" in rendered
+    assert "title | Heading" in rendered
+    assert "title | Project" in rendered
+
+
+def test_reminder_receipt_uses_public_remind_at_alias_for_set_and_clear() -> None:
+    record = Record(uuid="a", kind="task", title="A", start=date(2026, 8, 30))
+    server = _server(record)
+    result = asyncio.run(server.call_tool(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"remind_at": "2026-08-30T09:00:00+00:00"}}]},
+    ))
+    receipt = asyncio.run(server.call_tool("things_receipt", {"operation_id": result.structured_content["operation_id"]}))
+    row = receipt.structured_content["rows"][0]
+    assert "remind" not in row["desired"]
+    assert row["desired"]["remind_at"] == "2026-08-30T09:00:00+00:00"
+    assert "remind_at" in row["before"] and "remind_at" in row["observed"]
+    cleared = asyncio.run(server.call_tool(
+        "things_update",
+        {"request_id": "0198f0ef-3923-79b6-96a8-2bf28eac0d67", "items": [{"id": "task:a", "set": {"remind_at": None}}]},
+    ))
+    cleared_receipt = asyncio.run(server.call_tool("things_receipt", {"operation_id": cleared.structured_content["operation_id"]}))
+    cleared_row = cleared_receipt.structured_content["rows"][0]
+    assert cleared_row["desired"]["remind_at"] is None
+    assert cleared_row["before"]["remind_at"] == "2026-08-30T09:00:00+00:00"
+    assert cleared_row["observed"]["remind_at"] is None
+
+
+def test_reminder_does_not_implicitly_change_an_omitted_start() -> None:
+    result = asyncio.run(_server(Record(uuid="a", kind="task", title="A")).call_tool(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"remind_at": "2026-08-30T09:00:00+00:00"}}]},
+    ))
+    assert result.structured_content["code"] == "validation_error"
+
+
+def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> None:
+    class RacingLibrary(MemoryLibrary):
+        refreshes = 0
+        applied = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                self.records["a"].title = "Concurrent change"
+
+        def apply(self, writes: list[object]) -> object:
+            self.applied = True
+            return super().apply(writes)  # type: ignore[arg-type]
+
+    library = RacingLibrary([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
+    result = ThingsV2(workspace).dispatch("things_update", {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"notes": "N"}}]})
+    assert result.state == "not_applied"
+    assert result.code == "not_applied_precondition"
+    assert library.applied is False
+
+
+def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:
+    class AppliedThenUnreachable(MemoryLibrary):
+        refreshes = 0
+        apply_calls = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes >= 3:
+                raise CloudError("HTTP 500 after remote commit")
+
+        def apply(self, writes: list[object]) -> object:
+            self.apply_calls += 1
+            super().apply(writes)  # type: ignore[arg-type]
+            raise CloudError("HTTP 500 after remote commit")
+
+    library = AppliedThenUnreachable([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
+    first = ThingsV2(workspace).dispatch("things_update", {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]})
+    second = ThingsV2(workspace).dispatch("things_update", {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]})
+    assert first.state == second.state == "pending"
+    assert first.code == "pending_unknown"
+    assert library.apply_calls == 1

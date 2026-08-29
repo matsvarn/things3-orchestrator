@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="{login,configure,serve,serve-http,print-config,doctor,owner-factor,migration-report,operation-show,operation-approve,operation-decline,operation-accept-partial}",
+        metavar="{login,configure,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,operation-show,operation-reconcile,operation-settle-not-applied,operation-approve,operation-decline,operation-accept-partial}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -141,10 +141,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="also GET {origin}/health (no bearer)",
     )
-    commands.add_parser("owner-factor", help="enroll the host-only approval passphrase")
+    commands.add_parser("owner-factor", help="enroll the CLI-only approval passphrase")
     commands.add_parser("migration-report", help="quarantine and report retained v1 operations")
+    legacy_reconcile = commands.add_parser("legacy-reconcile", help="classify one retained v1 pending row from Cloud evidence without replay")
+    legacy_reconcile.add_argument("intent_id")
     operation_show = commands.add_parser("operation-show", help="render one exact operation manifest")
     operation_show.add_argument("operation_id")
+    operation_reconcile = commands.add_parser("operation-reconcile", help="force read-back for one pending operation without replay")
+    operation_reconcile.add_argument("operation_id")
+    operation_settle = commands.add_parser("operation-settle-not-applied", help="settle pending only when read-back proves no write landed")
+    operation_settle.add_argument("operation_id")
     operation_approve = commands.add_parser("operation-approve", help="approve one awaiting-owner operation")
     operation_approve.add_argument("operation_id")
     operation_decline = commands.add_parser("operation-decline", help="decline one awaiting-owner operation")
@@ -210,6 +216,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.action == "migration-report":
         _migration_report(parser)
+        return
+    if args.action == "legacy-reconcile":
+        print(json.dumps(_workspace(parser).host_reconcile_v1_pending(args.intent_id), sort_keys=True))
         return
     if args.action.startswith("operation-"):
         _operation_command(
@@ -700,6 +709,9 @@ def _operation_command(
     print(render_operation(operation))
     if action == "operation-show":
         return
+    if action == "operation-reconcile":
+        print(json.dumps(workspace.host_reconcile_v2(operation_id), sort_keys=True))
+        return
     with _private_tty(parser) as terminal:
         passphrase = getpass("Owner approval passphrase: ", stream=terminal)
     try:
@@ -708,6 +720,8 @@ def _operation_command(
             if action == "operation-approve"
             else "decline"
             if action == "operation-decline"
+            else "settle_not_applied"
+            if action == "operation-settle-not-applied"
             else str(resolution)
         )
         authorization = verified_authorization(
@@ -726,6 +740,9 @@ def _operation_command(
         if not workspace.host_decline_v2(operation_id, authorization):
             parser.error("operation cannot be declined")
         print("declined")
+        return
+    if action == "operation-settle-not-applied":
+        print(json.dumps(workspace.host_settle_not_applied_v2(operation_id, authorization), sort_keys=True))
         return
     assert resolution in {"accepted_as_is", "superseded"}
     if not workspace.host_resolve_partial_v2(operation_id, cast(Any, resolution), authorization):

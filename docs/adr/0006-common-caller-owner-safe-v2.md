@@ -2,9 +2,8 @@
 
 ## Status
 
-Proposed. The default-eight cutover may ship only after the authority, state,
-fence, idempotency, taint, migration, and private-domain gates in this ADR are
-implemented and proved. Advanced scopes and coaching are later gates.
+Accepted and implemented for the default-eight cutover. Advanced scopes and
+coaching remain deferred release gates.
 
 ## Problem
 
@@ -103,8 +102,7 @@ returns the same immutable operation; a different payload is rejected.
 Terminal operations never reprepare. A request rejected by an existing account
 fence creates no operation and does not consume its request ID.
 
-Permanent deletion does not appear in MCP discovery. The owner performs it
-through a host command after reviewing the exact manifest.
+Permanent deletion is not available in MCP or the current CLI release.
 
 ## Domain shape
 
@@ -177,14 +175,15 @@ renders every manifest entry, warning, preservation claim, and destructive
 effect. A TTY is only a routing boundary; it is not proof of a human owner. The
 command therefore requires a second owner factor that is unavailable to MCP.
 The initial implementation uses a human-entered approval passphrase whose
-salted `scrypt` verifier is available only to the host approval component. The
+salted `scrypt` verifier is available only to the CLI approval component. The
 raw passphrase is never stored, accepted through arguments, environment
-variables, pipes, pseudo-TTYs, or generic `yes`, or emitted to logs. The MCP
+variables, ordinary stdin pipes, or generic `yes`, or emitted to logs. A
+terminal can still be automated and does not prove human presence. The MCP
 server and agent runtime receive no approving capability. A deployment without
 this separation cannot execute approval-required operations or permanent
 deletion.
 
-The owner session must be a local or SSH TTY with access to the private account
+The CLI session uses a local or SSH terminal with access to the private account
 configuration. Approval binds successful owner-factor verification, the
 account, action, operation ID, canonical manifest hash, safety-policy digest,
 and expiry.
@@ -212,16 +211,22 @@ creation, the `pending` state, and account-fence claim happen in one
 Two processes that use the same state database cannot claim different
 operations for the same account.
 
+Terminal settlement, its response, all receipt rows, and the receipt hash are
+one journal transaction. Creation of an `unchanged` operation and its receipt
+rows is also one transaction, so a crash cannot expose a terminal state without
+its immutable evidence.
+
 The fence remains for `pending` and `partial`. It covers every write path:
-ordinary MCP mutation, scoped submission, host approval, permanent deletion,
-retained-v1 reconciliation, and future adapters. Read-only calls and receipt
+ordinary MCP mutation, CLI approval, retained-v1 reconciliation, and future
+adapters. Read-only calls and receipt
 inspection continue. Another mutation returns the blocking operation ID,
 creates no operation, consumes no request ID, and writes nothing. A pending
-fence cannot be force-cleared.
+fence cannot be blindly force-cleared.
 
-Recovery may observe a pending operation and reconcile it. Recovery never
-reposts the old writes. A partial operation records every applied and
-not-applied row and never replays the remainder. Exact host-only resolution
+Recovery may force-refresh and observe a pending operation from the CLI. If
+read-back proves that no frozen write landed, a signed CLI action can settle it
+as `not_applied`. Recovery never reposts the old writes. A partial operation records every applied and
+not-applied row and never replays the remainder. Exact CLI-only resolution
 records `accepted_as_is` or `superseded`, atomically moves
 `partial -> partial_resolved`, and releases the fence without Cloud I/O. Any
 corrective work is a fresh operation with a fresh request ID and manifest.
@@ -248,10 +253,10 @@ cannot create duplicate work. It retains no raw request ID or owner text.
 - `workspace.py` remains the one transaction engine during migration. It owns
   preparation, preconditions, risk, plans, application, and reconciliation.
 - `journal.py` owns immutable operation creation, compare-and-set state
-  transitions, host approval state, the account fence, append-only exact
+  transitions, CLI approval state, the account fence, append-only exact
   receipt rows, tombstones, and retention.
 - `server.py` is the MCP adapter. It exposes v2 tools and no approval path.
-- `cli.py` owns host-only operation display, owner-factor enrollment and
+- `cli.py` owns CLI-only operation display, owner-factor enrollment and
   verification, approval, decline, partial resolution, and retention and
   caution configuration.
 - `cloud.py` remains the Things Cloud adapter and forced read-back authority.
@@ -290,12 +295,20 @@ when that extraction deletes duplicated ownership.
 - More tool names make ordinary calls smaller and independently testable.
 - A stable request ID remains public because transport retries need an owner
   operation identity.
-- Host approval adds one terminal interaction for risky work.
+- CLI approval adds one terminal interaction for risky work.
 - A partial outcome blocks unrelated writes until the owner resolves it.
 - Advanced desired-state editing is deferred and separately gated because its
   document grammar costs more caller attention than ordinary tools.
 - Old public calls break at the version boundary. Pending old receipts remain
   observable so the migration cannot cause a blind replay.
+- Things Cloud has no conditional-write primitive. The server force-refreshes
+  and rechecks every frozen precondition immediately before POST, but another
+  writer can still change Cloud state between that read and the write. Receipt
+  read-back and the account fence detect outcomes; they cannot eliminate this
+  external read-to-write race.
+- CLI separation is not a same-UID security boundary. Code running as the
+  serving OS identity can replace the journal, pinned key, or process. Stronger
+  adversaries require a separate OS account or host.
 
 ## Alternatives rejected
 

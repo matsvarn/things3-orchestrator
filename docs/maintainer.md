@@ -25,7 +25,7 @@ Keep one production server and one stable model Interface.
   It coalesces one envelope per UUID and verifies a forced Cloud pull.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
-- `owner_authority.py` is host-only. The MCP server must not import it or gain
+- `owner_authority.py` is CLI-only. The MCP server must not import it or gain
   access to its passphrase verifier or encrypted signing key. The journal pins
   only the Ed25519 public key used to verify host signatures. `server.py` is
   the v2 MCP adapter.

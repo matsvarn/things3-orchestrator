@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from hashlib import sha256
-from typing import Any, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -51,6 +52,7 @@ class OperationManifest:
     write_json: tuple[str, ...]
     touched: tuple[tuple[str, ...], ...]
     before_json: tuple[str | None, ...]
+    display_titles: tuple[str, ...]
     requires_owner: bool
     safety_policy_digest: str
     expires_at: str | None
@@ -66,6 +68,7 @@ class OperationManifest:
         writes: list[dict[str, object]],
         touched: list[list[str]],
         before: list[dict[str, object] | None],
+        display_titles: list[str],
         requires_owner: bool,
         clock: datetime,
     ) -> OperationManifest:
@@ -81,6 +84,7 @@ class OperationManifest:
             "writes": writes,
             "touched": touched,
             "before": before,
+            "display_titles": display_titles,
             "requires_owner": requires_owner,
             "safety_policy_digest": SAFETY_POLICY_DIGEST,
             "expires_at": expires_at,
@@ -92,6 +96,7 @@ class OperationManifest:
             write_json=tuple(_canonical(row) for row in writes),
             touched=tuple(tuple(row) for row in touched),
             before_json=tuple(_canonical(row) if row is not None else None for row in before),
+            display_titles=tuple(display_titles),
             requires_owner=requires_owner,
             safety_policy_digest=SAFETY_POLICY_DIGEST,
             expires_at=expires_at,
@@ -105,6 +110,7 @@ class OperationManifest:
             "writes": [json.loads(row) for row in self.write_json],
             "touched": [list(row) for row in self.touched],
             "before": [json.loads(row) if row is not None else None for row in self.before_json],
+            "display_titles": list(self.display_titles),
             "requires_owner": self.requires_owner,
         }
 
@@ -139,6 +145,18 @@ class PublicTag(StrictModel):
 class PublicResult(StrictModel):
     state: Literal["ok", "awaiting_owner", "pending", "applied", "unchanged", "not_applied", "partial", "partial_resolved", "stale", "declined", "rejected"]
     instruction: str
+    code: Literal[
+        "ok", "validation_error", "unknown_tool", "request_conflict",
+        "write_fenced", "missing_target", "invalid_destination",
+        "inactive_destination", "expanded_write_limit", "awaiting_owner",
+        "pending_unknown", "applied", "unchanged", "not_applied_precondition",
+        "partial", "partial_resolved", "stale", "declined", "receipt_missing",
+        "cursor_invalid", "internal_error",
+    ] = "ok"
+    next_action: Literal[
+        "none", "correct_request", "retry_same", "read_receipt", "run_cli",
+        "wait", "contact_operator",
+    ] = "none"
     operation_id: str | None = None
     blocking_operation_ids: list[str] = Field(default_factory=list)
     items: list[PublicItem] = Field(default_factory=list)
@@ -146,6 +164,29 @@ class PublicResult(StrictModel):
     rows: list[dict[str, object]] = Field(default_factory=list)
     cursor: str | None = None
     receipt_hash: str | None = None
+    missing_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def coherent_outcome(self) -> Self:
+        state_codes = {
+            "ok": "ok", "awaiting_owner": "awaiting_owner", "pending": "pending_unknown",
+            "applied": "applied", "unchanged": "unchanged",
+            "not_applied": "not_applied_precondition", "partial": "partial",
+            "partial_resolved": "partial_resolved", "stale": "stale", "declined": "declined",
+        }
+        if self.state in state_codes and self.code != state_codes[self.state]:
+            raise ValueError("state and code disagree")
+        if self.state == "rejected" and self.code == "ok":
+            raise ValueError("rejected needs a rejection code")
+        if self.state not in {"ok", "rejected"} and self.operation_id is None:
+            raise ValueError("operation states require operation_id")
+        if self.blocking_operation_ids and self.code != "write_fenced":
+            raise ValueError("blocking IDs require write_fenced")
+        if self.missing_ids and self.code != "missing_target":
+            raise ValueError("missing IDs require missing_target")
+        if self.rows and self.receipt_hash is None:
+            raise ValueError("receipt rows require receipt_hash")
+        return self
 
 
 class ViewCall(StrictModel):
@@ -163,20 +204,26 @@ class FindCall(StrictModel):
 class GetCall(StrictModel):
     ids: list[str] = Field(min_length=1, max_length=50)
 
+    @field_validator("ids")
+    @classmethod
+    def exact_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("ids must be unique")
+        if any(re.fullmatch(r"(?:task|project|area|heading):[^\s:]+", item) is None for item in value):
+            raise ValueError("ids must be exact typed Things IDs")
+        return value
+
 
 class NestedTask(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     notes: str | None = Field(default=None, max_length=50_000)
 
 
-class CaptureItem(StrictModel):
-    kind: Literal["task", "project"]
+class _CaptureBase(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     notes: str | None = Field(default=None, max_length=50_000)
     start: str | None = None
     deadline: str | None = None
-    into_id: str | None = Field(default=None, pattern=r"^(project|area):[^\s:]+$")
-    tasks: list[NestedTask] = Field(default_factory=list, max_length=40)
 
     @field_validator("start")
     @classmethod
@@ -188,16 +235,32 @@ class CaptureItem(StrictModel):
     def valid_deadline(cls, value: str | None) -> str | None:
         return _valid_date(value)
 
-    @model_validator(mode="after")
-    def tasks_need_project(self) -> Self:
-        if self.tasks and self.kind != "project":
-            raise ValueError("nested tasks need a new Project")
-        return self
+
+
+class TaskCapture(_CaptureBase):
+    kind: Literal["task"]
+    into_id: str | None = Field(default=None, pattern=r"^(project|area):[^\s:]+$")
+
+
+class ProjectCapture(_CaptureBase):
+    kind: Literal["project"]
+    into_id: str | None = Field(default=None, pattern=r"^area:[^\s:]+$")
+    tasks: list[NestedTask] = Field(default_factory=list, max_length=40)
+
+
+CaptureItem = Annotated[TaskCapture | ProjectCapture, Field(discriminator="kind")]
 
 
 class CaptureCall(StrictModel):
     request_id: str = Field(pattern=REQUEST_ID)
     items: list[CaptureItem] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def bounded_expansion(self) -> Self:
+        total = len(self.items) + sum(len(item.tasks) for item in self.items if isinstance(item, ProjectCapture))
+        if total > 120:
+            raise ValueError("capture expands to at most 120 writes")
+        return self
 
 
 class UpdateFields(StrictModel):
@@ -206,6 +269,13 @@ class UpdateFields(StrictModel):
     start: str | None = None
     deadline: str | None = None
     remind_at: str | None = None
+
+    @field_validator("title", "notes")
+    @classmethod
+    def no_implicit_clear(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("null is not a supported clear operation")
+        return value
 
     @field_validator("start")
     @classmethod
@@ -245,6 +315,14 @@ class UpdateCall(StrictModel):
     request_id: str = Field(pattern=REQUEST_ID)
     items: list[UpdateItem] = Field(min_length=1, max_length=120)
 
+    @field_validator("items")
+    @classmethod
+    def unique_targets(cls, value: list[UpdateItem]) -> list[UpdateItem]:
+        ids = [item.id for item in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("update targets must be unique")
+        return value
+
 
 class IdBatchCall(StrictModel):
     request_id: str = Field(pattern=REQUEST_ID)
@@ -255,7 +333,7 @@ class IdBatchCall(StrictModel):
     def unique(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
             raise ValueError("ids must be unique")
-        if any(not item.startswith(("task:", "project:")) for item in value):
+        if any(re.fullmatch(r"(?:task|project):[^\s:]+", item) is None for item in value):
             raise ValueError("mutation ids must be exact Task or Project IDs")
         return value
 
@@ -350,12 +428,12 @@ class ThingsV2:
         if isinstance(call, ReceiptCall):
             operation = self.workspace._journal.get_v2_operation(call.operation_id)
             if operation is None or operation.account_id != self.workspace._account_id:
-                return PublicResult(state="rejected", instruction="That receipt does not exist for this account.")
+                return PublicResult(state="rejected", code="receipt_missing", next_action="correct_request", instruction="That receipt does not exist for this account.")
             try:
                 page = self.workspace._journal.v2_receipt_page(self.workspace._account_id, call.operation_id, limit=call.limit, cursor=call.cursor)
             except (KeyError, ValueError):
-                return PublicResult(state="rejected", instruction="That receipt cursor is invalid or no longer retained.", operation_id=call.operation_id)
-            return PublicResult(state=cast(Any, operation.state), instruction="Immutable receipt rows.", operation_id=call.operation_id, rows=page.rows, cursor=page.cursor, receipt_hash=page.receipt_hash)
+                return PublicResult(state="rejected", code="cursor_invalid", next_action="correct_request", instruction="That receipt cursor is invalid or no longer retained.", operation_id=call.operation_id)
+            return PublicResult(state=cast(Any, operation.state), code=cast(Any, operation.state if operation.state != "not_applied" else "not_applied_precondition"), next_action="none", instruction="Immutable receipt rows.", operation_id=call.operation_id, rows=page.rows, cursor=page.cursor, receipt_hash=page.receipt_hash)
         payload = call.model_dump(mode="json", exclude_unset=True)
         request_id = cast(str, payload.pop("request_id"))
         result = self.workspace.execute_v2(OperationDraft.build(name, request_id, payload))
@@ -367,6 +445,8 @@ class ThingsV2:
         if call.view == "tags":
             return PublicResult(
                 state="ok" if result.status == "ok" else "rejected",
+                code="ok" if result.status == "ok" else "internal_error",
+                next_action="none" if result.status == "ok" else "retry_same",
                 instruction=(
                     "Current Things tags."
                     if result.status == "ok"
@@ -386,13 +466,24 @@ class ThingsV2:
         items: list[Any] = []
         for offset in range(0, len(ids), 10):
             items.extend(self.workspace.read(ReadCall(ids=ids[offset:offset + 10], fields=["notes", "tags"])).items)
-        return PublicResult(state="ok", instruction="Current exact items.", items=[self._item(item) for item in items])
+        found = {item.id for item in items}
+        missing = [item_id for item_id in ids if item_id not in found]
+        return PublicResult(
+            state="rejected" if missing else "ok",
+            code="missing_target" if missing else "ok",
+            next_action="correct_request" if missing else "none",
+            instruction="Some exact IDs were not found." if missing else "Current exact items.",
+            items=[self._item(item) for item in items],
+            missing_ids=missing,
+        )
 
     def _mutation(self, result: dict[str, object]) -> PublicResult:
         item_ids = cast(list[str], result.pop("item_ids", []))
         items = self._get(item_ids).items if item_ids else []
         return PublicResult(
             state=cast(Any, result["state"]),
+            code=cast(Any, result.get("code", _result_code(cast(str, result["state"])))),
+            next_action=cast(Any, result.get("next_action", _result_next_action(cast(str, result["state"])))),
             instruction=cast(str, result["instruction"]),
             operation_id=cast(str | None, result.get("operation_id")),
             blocking_operation_ids=cast(list[str], result.get("blocking_operation_ids", [])),
@@ -403,6 +494,8 @@ class ThingsV2:
         ok = result.status == "ok"
         return PublicResult(
             state="ok" if ok else "rejected",
+            code="ok" if ok else "internal_error",
+            next_action="none" if ok else "retry_same",
             instruction="Current Things facts." if ok else "The Things read could not be completed.",
             items=[self._item(item) for item in (result.items if items is None else items)],
             cursor=result.cursor,
@@ -421,3 +514,20 @@ class ThingsV2:
             deadline=item.deadline,
             tags=[TaintedText(value=tag.title) for tag in [*item.direct_tags, *item.inherited_tags]],
         )
+
+
+def _result_code(state: str) -> str:
+    return {
+        "awaiting_owner": "awaiting_owner", "pending": "pending_unknown",
+        "applied": "applied", "unchanged": "unchanged", "not_applied": "not_applied_precondition",
+        "partial": "partial", "partial_resolved": "partial_resolved",
+        "stale": "stale", "declined": "declined",
+    }.get(state, "validation_error" if state == "rejected" else "ok")
+
+
+def _result_next_action(state: str) -> str:
+    if state in {"awaiting_owner", "pending", "partial"}:
+        return "run_cli"
+    if state in {"applied", "unchanged", "not_applied"}:
+        return "read_receipt"
+    return "correct_request" if state == "rejected" else "none"
