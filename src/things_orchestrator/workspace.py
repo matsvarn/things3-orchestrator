@@ -78,11 +78,13 @@ from .library import (
     ChecklistLine,
     Kind,
     MemoryLibrary,
+    PublicKind,
     Record,
     Status,
     Write,
     new_uuid,
     parse_id,
+    public_id,
     template_uuid_of,
 )
 from .preferences import Preferences, PreferencesError
@@ -594,6 +596,29 @@ class ThingsWorkspace:
             ),
             membership_revision=audit_membership_revision,
             call=call,
+        )
+
+    def read_v2_registry(
+        self, *, kind: Literal["project", "area"], limit: int
+    ) -> Result:
+        """Page one homogeneous v2 registry without leaking mixed internal views."""
+
+        failed = self._refresh()
+        if failed is not None:
+            return failed
+        view: View = "audit" if kind == "project" else "system"
+        source = self._library.audit() if kind == "project" else self._library.system()
+        visible = [item for item in source if item.public_kind == kind]
+        return self._page(
+            visible,
+            limit,
+            full=False,
+            instruction=f"Current Things {kind}s.",
+            view=view,
+            public_scope=self._area_scope_revision(),
+            membership_revision=(
+                self._scope_revision(source) if view == "audit" else None
+            ),
         )
 
     def _diagnostics_page(
@@ -2459,15 +2484,16 @@ class ThingsWorkspace:
                 operation.operation_id
             )
         try:
-            self._library.apply(writes)
+            applied = self._library.apply(writes)
         except CloudError:
             failed = self._refresh(force=True)
             if failed is not None:
                 return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The commit outcome is unknown and will never be replayed.", "operation_id": operation.operation_id}
             return self._reconcile_v2(operation, writes, before)
-        failed = self._refresh(force=True)
-        if failed is not None:
-            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
+        if not applied.read_back_verified:
+            failed = self._refresh(force=True)
+            if failed is not None:
+                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
         return self._reconcile_v2(operation, writes, before)
 
     def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
@@ -2480,7 +2506,7 @@ class ThingsWorkspace:
             state = "partial"
         else:
             return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The Cloud outcome remains unresolved.", "operation_id": operation.operation_id}
-        item_ids = [f"{'heading' if write.heading else write.kind}:{write.uuid}" for write in writes]
+        item_ids = [_write_public_id(write) for write in writes]
         response: JsonDict = {"state": state, "code": state, "next_action": "run_cli" if state == "partial" else "read_receipt", "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
         rows = self._v2_receipt_rows(operation, writes, before, state)
         settled = self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
@@ -2772,7 +2798,7 @@ class ThingsWorkspace:
             desired = {key: value for key, value in _write_json(write).items() if key in desired_fields}
             if "remind_at" in touched[index - 1]:
                 desired["remind_at"] = None if write.clear_remind else self._reminder_from_write(write)
-            rows.append({"sequence": index, "action": write.action, "target_id": f"{write.kind}:{write.uuid}", "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
+            rows.append({"sequence": index, "action": write.action, "target_id": _write_public_id(write), "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
         return rows
 
     def _reminder_from_write(self, write: Write) -> str | None:
@@ -7669,8 +7695,8 @@ class ThingsWorkspace:
         missing_ids = all_missing_ids[:_CONTEXT_LIMIT]
         missing_ids_omitted = max(len(all_missing_ids) - len(missing_ids), 0)
         unchanged_items: list[ReceiptItemFact] = []
-        for public_id in already_correct:
-            item = self._exact_item(public_id)
+        for item_id in already_correct:
+            item = self._exact_item(item_id)
             if item is not None:
                 unchanged_items.append(
                     ReceiptItemFact(id=item.id, title=_bounded_title(item.title))
@@ -7929,21 +7955,21 @@ class ThingsWorkspace:
 
     def _preconditions_changed(self, plan: JsonDict) -> bool:
         raw = cast(dict[str, object], plan.get("preconditions", {}))
-        for public_id, expected in raw.items():
-            if public_id == "scope:areas":
+        for item_id, expected in raw.items():
+            if item_id == "scope:areas":
                 if self._area_scope_revision() != expected:
                     return True
                 continue
-            if public_id == "scope:tags":
+            if item_id == "scope:tags":
                 if self._tag_revision() != expected:
                     return True
                 continue
-            if public_id == "scope:today":
+            if item_id == "scope:today":
                 if self._today_scope_revision() != expected:
                     return True
                 continue
-            if public_id.startswith("scope:list:"):
-                encoded_scope = public_id.removeprefix("scope:list:")
+            if item_id.startswith("scope:list:"):
+                encoded_scope = item_id.removeprefix("scope:list:")
                 try:
                     kind, scope_name, scope_uuid = json.loads(encoded_scope)
                 except (TypeError, ValueError):
@@ -7954,17 +7980,17 @@ class ThingsWorkspace:
                 if self._list_scope_revision(cast(Kind, kind), scope) != expected:
                     return True
                 continue
-            if public_id.startswith("scope:project:"):
-                uuid = public_id.removeprefix("scope:project:")
+            if item_id.startswith("scope:project:"):
+                uuid = item_id.removeprefix("scope:project:")
                 if self._project_scope_revision(uuid) != expected:
                     return True
                 continue
-            if public_id.startswith("scope:repeat:"):
-                uuid = public_id.removeprefix("scope:repeat:")
+            if item_id.startswith("scope:repeat:"):
+                uuid = item_id.removeprefix("scope:repeat:")
                 if self._recurrence_scope_revision(uuid) != expected:
                     return True
                 continue
-            item = self._exact_item(public_id)
+            item = self._exact_item(item_id)
             if item is None or self._revision(item) != expected:
                 return True
         return False
@@ -8680,6 +8706,11 @@ def _outcome_unknown(error: CloudError) -> bool:
     return any(
         term in text for term in ("timed out", "unknown", "read-back", "read back")
     )
+
+
+def _write_public_id(write: Write) -> str:
+    kind: PublicKind = "heading" if write.heading else write.kind
+    return public_id(kind, write.uuid)
 
 
 def _write_json(write: Write) -> JsonDict:

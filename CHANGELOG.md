@@ -22,14 +22,17 @@ The public MCP interface is now the bounded owner-safe v2 contract.
   quarantined and unresolved v1 writes fence all new writes without replay.
 - Things-origin text is explicitly untrusted in reads and receipt snapshots.
 - Read cursors remain bound to `things_view` or `things_find` across pages.
-  Capture and update reject whitespace-only titles.
+  Project and Area registries paginate only their requested kind, and stale
+  continuations require a fresh read. Capture and update reject whitespace-only
+  titles.
 - Rich-note replacement and recurrence-template mutations are rejected instead
   of flattening or changing deferred structures. Unchanged mutations claim the
   fence and recheck frozen state before settling without a Cloud write.
 - Project completion rejects Projects with open actions and freezes the complete
   clear Project scope so a concurrent action cannot bypass that check.
 - Project Trash freezes the full Project scope, including children added after
-  review. Clearing a start cannot implicitly delete an omitted reminder.
+  review, and receipt rows retain Heading identities. Clearing a start cannot
+  implicitly delete an omitted reminder.
 - Retention maintenance is throttled to once per day per server process, and a
   successful mutation reuses its verified post-write snapshot for the response.
   Idempotent retries deliberately reread those item IDs instead of dropping the

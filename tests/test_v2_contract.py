@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -107,6 +107,40 @@ def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
     assert library.refreshes == 4
 
 
+def test_adapter_verified_read_back_skips_a_duplicate_post_write_refresh() -> None:
+    class VerifiedReadBackLibrary(MemoryLibrary):
+        refreshes = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            result = super().apply(writes)
+            return ApplyResult(
+                verified=result.verified,
+                created=result.created,
+                read_back_verified=True,
+            )
+
+    library = VerifiedReadBackLibrary(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    assert result.state == "applied"
+    assert library.refreshes == 2
+
+
 def test_read_cursors_continue_find_projects_and_tags_without_repeating_selectors() -> None:
     library = MemoryLibrary(
         [
@@ -167,6 +201,125 @@ def test_read_cursors_continue_find_projects_and_tags_without_repeating_selector
     )
     assert second_tags.structured_content["state"] == "ok"
     assert [tag["id"] for tag in second_tags.structured_content["tags"]] == ["tag:t2"]
+
+
+@pytest.mark.parametrize(
+    ("view", "records", "expected_ids"),
+    [
+        (
+            "projects",
+            [
+                Record(uuid="p1", kind="project", title="One"),
+                Record(uuid="p2", kind="project", title="Two"),
+                Record(uuid="t", kind="task", title="Trailing task"),
+            ],
+            ["project:p1", "project:p2"],
+        ),
+        (
+            "areas",
+            [
+                Record(uuid="a1", kind="area", title="One"),
+                Record(uuid="a2", kind="area", title="Two"),
+                Record(uuid="p", kind="project", title="Trailing project"),
+            ],
+            ["area:a1", "area:a2"],
+        ),
+    ],
+)
+def test_filtered_registry_views_page_only_the_requested_kind(
+    view: str, records: list[Record], expected_ids: list[str]
+) -> None:
+    server = _server(*records)
+    arguments: dict[str, object] = {"view": view, "limit": 1}
+    observed: list[str] = []
+
+    while True:
+        result = asyncio.run(server.call_tool("things_view", arguments))
+        items = result.structured_content["items"]
+        assert len(items) == 1
+        observed.append(items[0]["id"])
+        cursor = result.structured_content.get("cursor")
+        if cursor is None:
+            break
+        arguments = {"cursor": cursor, "limit": 1}
+
+    assert observed == expected_ids
+
+
+def test_changed_item_cursor_requires_a_fresh_read() -> None:
+    first = Record(uuid="p1", kind="project", title="One")
+    library = MemoryLibrary(
+        [first, Record(uuid="p2", kind="project", title="Two")]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    server = ThingsMCPServer(ThingsV2(workspace))
+    page = asyncio.run(
+        server.call_tool("things_view", {"view": "projects", "limit": 1})
+    )
+    first.title = "Changed"
+
+    stale = asyncio.run(
+        server.call_tool(
+            "things_view",
+            {"cursor": page.structured_content["cursor"], "limit": 1},
+        )
+    )
+
+    assert (stale.structured_content["code"], stale.structured_content["next_action"]) == (
+        "cursor_invalid",
+        "correct_request",
+    )
+
+
+def test_expired_tag_cursor_requires_a_fresh_read() -> None:
+    now = [NOW]
+    library = MemoryLibrary()
+    library.tags = {"a": "Alpha", "b": "Beta"}
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: now[0],
+        account_id="owner@example.com",
+    )
+    server = ThingsMCPServer(ThingsV2(workspace))
+    page = asyncio.run(
+        server.call_tool("things_view", {"view": "tags", "limit": 1})
+    )
+    now[0] += timedelta(minutes=11)
+
+    stale = asyncio.run(
+        server.call_tool(
+            "things_view",
+            {"cursor": page.structured_content["cursor"], "limit": 1},
+        )
+    )
+
+    assert (stale.structured_content["code"], stale.structured_content["next_action"]) == (
+        "cursor_invalid",
+        "correct_request",
+    )
+
+
+def test_view_cloud_outage_remains_retryable() -> None:
+    class UnavailableLibrary(MemoryLibrary):
+        def refresh(self, *, force: bool = False) -> None:
+            raise CloudError("unavailable")
+
+    result = ThingsV2(
+        ThingsWorkspace(
+            UnavailableLibrary(),
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch("things_view", {"view": "today"})
+
+    assert (result.code, result.next_action) == ("read_unavailable", "retry_same")
 
 
 @pytest.mark.parametrize(
@@ -408,6 +561,44 @@ def test_project_trash_manifest_expands_descendants_and_freezes_titles() -> None
     assert "title | Task" in rendered
     assert "title | Heading" in rendered
     assert "title | Project" in rendered
+
+
+def test_project_trash_receipt_preserves_heading_identity(tmp_path: Path) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    project = Record(uuid="p", kind="project", title="Project")
+    heading = Record(
+        uuid="h", kind="task", title="Heading", parent_uuid="p", heading=True
+    )
+    workspace = ThingsWorkspace(
+        MemoryLibrary([project, heading]),
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    staged = ThingsV2(workspace).dispatch(
+        "things_trash", {"request_id": REQUEST, "ids": [project.id]}
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    assert workspace.host_approve_v2(operation.operation_id, authorization)["state"] == "applied"
+
+    receipt = journal.v2_receipt_page(
+        "owner@example.com", operation.operation_id, limit=10, cursor=None
+    )
+    assert [row["target_id"] for row in receipt.rows] == ["heading:h", "project:p"]
+    assert receipt.rows[0]["before"]["id"] == "heading:h"
+    assert receipt.rows[0]["observed"]["id"] == "heading:h"
 
 
 def test_project_trash_scope_rejects_a_child_added_after_owner_review(

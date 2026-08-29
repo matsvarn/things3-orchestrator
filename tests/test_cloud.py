@@ -1885,6 +1885,7 @@ def test_new_waiting_task_is_one_complete_create(tmp_path: Path) -> None:
     assert task.payload["tg"] == ["waiting"]
     assert task.payload["nt"]["v"] == "## Next\nEmail support"
     assert result.verified == ["Wait for refund"]
+    assert result.read_back_verified is True
     assert library.records["task"].tag_uuids == ["waiting"]
 
 

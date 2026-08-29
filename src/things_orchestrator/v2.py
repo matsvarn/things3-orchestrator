@@ -539,29 +539,28 @@ class ThingsV2:
             result = self.workspace.read(ReadCall(limit=call.limit, cursor=call.cursor))
         else:
             public_view = call.view or "today"
-            mapping = {"projects": "audit", "areas": "system"}
-            result = self.workspace.read(
-                ReadCall(view=cast(Any, mapping.get(public_view, public_view)), limit=call.limit)
+            result = (
+                self.workspace.read_v2_registry(
+                    kind="project" if public_view == "projects" else "area",
+                    limit=call.limit,
+                )
+                if public_view in {"projects", "areas"}
+                else self.workspace.read(
+                    ReadCall(view=cast(Any, public_view), limit=call.limit)
+                )
             )
         if public_view == "tags":
+            if result.status != "ok":
+                return self._read_failure(result)
             return PublicResult(
-                state="ok" if result.status == "ok" else "rejected",
-                code="ok" if result.status == "ok" else "internal_error",
-                next_action="none" if result.status == "ok" else "retry_same",
-                instruction=(
-                    "Current Things tags."
-                    if result.status == "ok"
-                    else "The Things tags could not be read."
-                ),
+                state="ok",
+                code="ok",
+                next_action="none",
+                instruction="Current Things tags.",
                 tags=[PublicTag(id=tag.id, title=TaintedText(value=tag.title)) for tag in result.tags],
                 cursor=self._remember_cursor(result.cursor, f"view:{public_view}"),
             )
-        items = result.items
-        if public_view == "projects":
-            items = [item for item in items if item.kind == "project"]
-        elif public_view == "areas":
-            items = [item for item in items if item.kind == "area"]
-        return self._project_read(result, items=items, route=f"view:{public_view}")
+        return self._project_read(result, route=f"view:{public_view}")
 
     def _find(self, call: FindCall) -> PublicResult:
         if call.cursor is not None:
@@ -629,13 +628,38 @@ class ThingsV2:
         route: str | None = None,
     ) -> PublicResult:
         ok = result.status == "ok"
+        if not ok:
+            return self._read_failure(result)
         return PublicResult(
-            state="ok" if ok else "rejected",
-            code="ok" if ok else "internal_error",
-            next_action="none" if ok else "retry_same",
-            instruction="Current Things facts." if ok else "The Things read could not be completed.",
+            state="ok",
+            code="ok",
+            next_action="none",
+            instruction="Current Things facts.",
             items=[self._item(item) for item in (result.items if items is None else items)],
             cursor=self._remember_cursor(result.cursor, route),
+        )
+
+    @staticmethod
+    def _read_failure(result: Any) -> PublicResult:
+        if result.status == "stale":
+            return PublicResult(
+                state="rejected",
+                code="cursor_invalid",
+                next_action="correct_request",
+                instruction="That cursor is invalid or stale. Start the read again.",
+            )
+        if result.status == "unavailable":
+            return PublicResult(
+                state="rejected",
+                code="read_unavailable",
+                next_action="retry_same",
+                instruction="Things Cloud is unavailable; retry this read.",
+            )
+        return PublicResult(
+            state="rejected",
+            code="validation_error",
+            next_action="correct_request",
+            instruction="That read request is not valid for the current Things state.",
         )
 
     def _remember_cursor(self, cursor: str | None, route: str | None) -> str | None:

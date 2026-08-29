@@ -314,6 +314,7 @@ def _compile_mutation(write: Write) -> _Mutation:
 class ApplyResult:
     verified: list[str]
     created: dict[str, str]
+    read_back_verified: bool = False
 
 
 class Library(Protocol):
