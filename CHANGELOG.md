@@ -13,9 +13,14 @@ The public MCP interface is now the bounded owner-safe v2 contract.
   `things_receipt`.
 - Mutations use opaque request IDs, immutable private manifests, one
   cross-process account fence, append-only receipts, and Cloud read-back.
+- The journal rehashes each persisted manifest before review, authorization,
+  reconciliation, or application. Altered manifest content cannot inherit an
+  earlier owner signature.
 - Recoverable Trash requires the host-only owner factor. Legacy approvals are
   quarantined and unresolved v1 writes fence all new writes without replay.
 - Things-origin text is explicitly untrusted in reads and receipt snapshots.
+- Read cursors remain bound to `things_view` or `things_find` across pages.
+  Capture and update reject whitespace-only titles.
 - Advanced scopes and the mutation coach profile are deferred until the
   default-eight safety contract is proven in use.
 

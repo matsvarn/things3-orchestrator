@@ -28,7 +28,14 @@ from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from .deployment import health_payload, package_version
-from .v2 import DESCRIPTIONS, MODELS, PublicResult, ThingsV2, flat_schema
+from .v2 import (
+    DESCRIPTIONS,
+    DISCOVERY_MODELS,
+    MODELS,
+    PublicResult,
+    ThingsV2,
+    flat_schema,
+)
 from .workspace import ThingsWorkspace
 
 _LOGGER = logging.getLogger("things_orchestrator")
@@ -62,7 +69,7 @@ _TOOLS = tuple(
     Tool(
         name=name,
         description=DESCRIPTIONS[name],
-        input_schema=flat_schema(MODELS[name]),
+        input_schema=flat_schema(DISCOVERY_MODELS[name]),
         output_schema=flat_schema(PublicResult),
         annotations=_READ_ONLY if name in _READ_NAMES else _IDEMPOTENT_WRITE,
     )

@@ -42,6 +42,111 @@ def test_default_discovery_is_exactly_the_bounded_eight() -> None:
         assert forbidden not in update
 
 
+def test_read_cursors_continue_find_projects_and_tags_without_repeating_selectors() -> None:
+    library = MemoryLibrary(
+        [
+            Record(uuid="p1", kind="project", title="Match one"),
+            Record(uuid="p2", kind="project", title="Match two"),
+        ]
+    )
+    library.tags = {"t1": "Alpha", "t2": "Beta"}
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    server = ThingsMCPServer(ThingsV2(workspace))
+
+    first_find = asyncio.run(
+        server.call_tool("things_find", {"text": "Match", "limit": 1})
+    )
+    second_find = asyncio.run(
+        server.call_tool(
+            "things_find", {"cursor": first_find.structured_content["cursor"], "limit": 1}
+        )
+    )
+    assert second_find.structured_content["state"] == "ok"
+    assert [item["id"] for item in second_find.structured_content["items"]] == [
+        "project:p2"
+    ]
+    cross_tool = asyncio.run(
+        server.call_tool(
+            "things_view", {"cursor": first_find.structured_content["cursor"]}
+        )
+    )
+    assert cross_tool.structured_content["code"] == "cursor_invalid"
+
+    first_projects = asyncio.run(
+        server.call_tool("things_view", {"view": "projects", "limit": 1})
+    )
+    second_projects = asyncio.run(
+        server.call_tool(
+            "things_view",
+            {"cursor": first_projects.structured_content["cursor"], "limit": 1},
+        )
+    )
+    assert second_projects.structured_content["state"] == "ok"
+    assert all(
+        item["kind"] == "project"
+        for item in second_projects.structured_content["items"]
+    )
+
+    first_tags = asyncio.run(
+        server.call_tool("things_view", {"view": "tags", "limit": 1})
+    )
+    second_tags = asyncio.run(
+        server.call_tool(
+            "things_view", {"cursor": first_tags.structured_content["cursor"], "limit": 1}
+        )
+    )
+    assert second_tags.structured_content["state"] == "ok"
+    assert [tag["id"] for tag in second_tags.structured_content["tags"]] == ["tag:t2"]
+
+
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        (
+            "things_capture",
+            {"request_id": REQUEST, "items": [{"kind": "task", "title": " \t "}]},
+        ),
+        (
+            "things_capture",
+            {"request_id": REQUEST, "items": [{"kind": "project", "title": "\n"}]},
+        ),
+        (
+            "things_capture",
+            {
+                "request_id": REQUEST,
+                "items": [
+                    {
+                        "kind": "project",
+                        "title": "Project",
+                        "tasks": [{"title": "\n "}],
+                    }
+                ],
+            },
+        ),
+        (
+            "things_update",
+            {
+                "request_id": REQUEST,
+                "items": [{"id": "task:a", "set": {"title": "   "}}],
+            },
+        ),
+    ],
+)
+def test_v2_rejects_visually_blank_titles(
+    tool: str, arguments: dict[str, object]
+) -> None:
+    result = asyncio.run(
+        _server(Record(uuid="a", kind="task", title="A")).call_tool(tool, arguments)
+    )
+    assert result.structured_content["state"] == "rejected"
+    assert result.structured_content["code"] == "validation_error"
+
+
 def test_mutation_request_id_is_an_opaque_uuid_or_ulid() -> None:
     result = asyncio.run(
         _server().call_tool(
@@ -308,23 +413,46 @@ def test_output_and_flattened_capture_schemas_are_closed() -> None:
     notes_schema = tools["things_update"].input_schema["properties"]["items"]["items"]["properties"]["set"]["properties"]["notes"]
     assert title_schema["type"] == "string"
     assert notes_schema["type"] == "string"
+    for tool in tools.values():
+        schema = str(tool.input_schema)
+        assert "oneOf" not in schema
+        assert "anyOf" not in schema
     capture = str(tools["things_capture"].input_schema)
     assert "#/$defs" not in capture
     assert "discriminator" not in capture
 
 
 def test_receipt_next_action_follows_operation_state() -> None:
-    from things_orchestrator.journal import V2Operation
+    from things_orchestrator.journal import V2Operation, v2_manifest_hash
 
     for state, next_action in (("awaiting_owner", "run_cli"), ("pending", "run_cli"), ("partial", "run_cli"), ("applied", "read_receipt"), ("stale", "read_fresh")):
         journal = MemoryJournal()
         initial_state = state if state in {"awaiting_owner", "pending"} else "awaiting_owner" if state == "stale" else "pending"
+        request_hash = "sha256:test"
+        manifest = {
+            "version": "v1",
+            "account_id": "owner@example.com",
+            "api_version": "2",
+            "schema_version": "v2.0",
+            "request_hash": request_hash,
+            "tool": "things_update",
+            "preconditions": {},
+            "writes": [
+                {"action": "update", "uuid": "a", "kind": "task", "title": "B"}
+            ],
+            "touched": [["title"]],
+            "before": [{"title": "A"}],
+            "display_titles": ["A"],
+            "requires_owner": initial_state == "awaiting_owner",
+            "safety_policy_digest": "sha256:test",
+            "expires_at": None,
+        }
         operation = V2Operation(
             account_id="owner@example.com", api_version="2",
-            request_id=REQUEST, request_hash="sha256:test", operation_id=f"op_{state}12345678",
+            request_id=REQUEST, request_hash=request_hash, operation_id=f"op_{state}12345678",
             tool="things_update", state=initial_state,
-            manifest={"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "B"}], "touched": [], "before": []},
-            manifest_hash="sha256:test", safety_policy_digest="sha256:test",
+            manifest=manifest,
+            manifest_hash=v2_manifest_hash(manifest), safety_policy_digest="sha256:test",
         )
         journal.create_v2(operation, claim_fence=initial_state == "pending")
         if state in {"partial", "applied"}:

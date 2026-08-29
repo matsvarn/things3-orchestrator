@@ -72,6 +72,7 @@ from .journal import (
     MemoryJournal,
     V2Operation,
     V2State,
+    v2_manifest_is_valid,
 )
 from .library import (
     ChecklistLine,
@@ -2375,6 +2376,8 @@ class ThingsWorkspace:
         writes: list[Write] | None = None,
         before: list[JsonDict | None] | None = None,
     ) -> JsonDict:
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
         writes = writes or [
             _write_from_json(cast(dict[str, object], row))
             for row in cast(list[object], operation.manifest["writes"])
@@ -2401,6 +2404,8 @@ class ThingsWorkspace:
         return self._reconcile_v2(operation, writes, before)
 
     def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
         matched = [self._writes_match([write]) for write in writes]
         if all(matched):
             state = "applied"
@@ -2430,6 +2435,8 @@ class ThingsWorkspace:
     def _resume_v2(self, operation: V2Operation) -> JsonDict:
         if operation.response is not None:
             return operation.response
+        if not v2_manifest_is_valid(operation):
+            return self._invalid_v2_manifest(operation.operation_id)
         if operation.state == "pending":
             failed = self._refresh(force=True)
             if failed is not None:
@@ -2443,9 +2450,23 @@ class ThingsWorkspace:
         """Return an operation only when it belongs to this workspace account."""
 
         operation = self._journal.get_v2_operation(operation_id)
-        if operation is None or operation.account_id != self._account_id:
+        if (
+            operation is None
+            or operation.account_id != self._account_id
+            or not v2_manifest_is_valid(operation)
+        ):
             return None
         return operation
+
+    @staticmethod
+    def _invalid_v2_manifest(operation_id: str) -> JsonDict:
+        return {
+            "state": "rejected",
+            "code": "internal_error",
+            "next_action": "contact_operator",
+            "instruction": "The persisted operation manifest failed its integrity check; no write was made.",
+            "operation_id": operation_id,
+        }
 
     def host_reconcile_v2(self, operation_id: str) -> JsonDict:
         """Force current evidence for one pending operation without replaying it."""

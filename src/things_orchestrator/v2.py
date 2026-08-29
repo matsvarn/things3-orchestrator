@@ -81,7 +81,7 @@ class OperationManifest:
             "schema_version": draft.schema_version,
             "request_hash": draft.request_hash,
             "tool": draft.tool,
-            "preconditions": sorted(preconditions.items()),
+            "preconditions": dict(sorted(preconditions.items())),
             "writes": writes,
             "touched": touched,
             "before": before,
@@ -107,12 +107,19 @@ class OperationManifest:
     def to_json(self) -> dict[str, object]:
         return {
             "version": MANIFEST_VERSION,
+            "account_id": self.account_id,
+            "api_version": self.draft.api_version,
+            "schema_version": self.draft.schema_version,
+            "request_hash": self.draft.request_hash,
+            "tool": self.draft.tool,
             "preconditions": dict(self.preconditions),
             "writes": [json.loads(row) for row in self.write_json],
             "touched": [list(row) for row in self.touched],
             "before": [json.loads(row) if row is not None else None for row in self.before_json],
             "display_titles": list(self.display_titles),
             "requires_owner": self.requires_owner,
+            "safety_policy_digest": self.safety_policy_digest,
+            "expires_at": self.expires_at,
         }
 
 
@@ -199,15 +206,24 @@ class PublicResult(StrictModel):
 
 
 class ViewCall(StrictModel):
-    view: Literal["today", "inbox", "week", "logbook", "projects", "areas", "tags", "trash"] = "today"
+    view: Literal["today", "inbox", "week", "logbook", "projects", "areas", "tags", "trash"] | None = None
     limit: int = Field(default=20, ge=1, le=40)
     cursor: str | None = None
 
 
 class FindCall(StrictModel):
-    text: str = Field(min_length=1, max_length=500)
+    text: str | None = Field(default=None, min_length=1, max_length=500)
     within: str | None = Field(default=None, pattern=r"^(project|area):[^\s:]+$")
     limit: int = Field(default=20, ge=1, le=40)
+    cursor: str | None = None
+
+    @model_validator(mode="after")
+    def initial_or_continuation(self) -> Self:
+        if (self.text is None) == (self.cursor is None):
+            raise ValueError("find needs exactly one of text or cursor")
+        if self.cursor is not None and self.within is not None:
+            raise ValueError("a find cursor already binds its search scope")
+        return self
 
 
 class GetCall(StrictModel):
@@ -227,12 +243,22 @@ class NestedTask(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     notes: str | None = Field(default=None, max_length=50_000)
 
+    @field_validator("title")
+    @classmethod
+    def visible_title(cls, value: str) -> str:
+        return _visible_title(value)
+
 
 class _CaptureBase(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     notes: str | None = Field(default=None, max_length=50_000)
     start: str | None = None
     deadline: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def visible_title(cls, value: str) -> str:
+        return _visible_title(value)
 
     @field_validator("start")
     @classmethod
@@ -272,6 +298,35 @@ class CaptureCall(StrictModel):
         return self
 
 
+class CaptureDiscoveryItem(_CaptureBase):
+    """Union-free discovery shape; runtime models enforce kind-specific fields."""
+
+    kind: Literal["task", "project"] = Field(
+        description="Tasks may use a Project or Area destination. Projects may use only an Area."
+    )
+    into_id: str | None = Field(
+        default=None,
+        pattern=r"^(project|area):[^\s:]+$",
+        description="Optional exact destination. A Project destination is valid only for a Task.",
+    )
+    tasks: list[NestedTask] = Field(
+        default_factory=list,
+        max_length=40,
+        description="Nested new Tasks. Valid only when kind is project.",
+    )
+
+
+class CaptureDiscoveryCall(StrictModel):
+    request_id: str = Field(pattern=REQUEST_ID)
+    items: list[CaptureDiscoveryItem] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def bounded_expansion(self) -> Self:
+        if len(self.items) + sum(len(item.tasks) for item in self.items) > 120:
+            raise ValueError("capture expands to at most 120 writes")
+        return self
+
+
 class UpdateFields(StrictModel):
     title: str | SkipJsonSchema[None] = Field(default=None, min_length=1, max_length=1000)
     notes: str | SkipJsonSchema[None] = Field(default=None, max_length=50_000)
@@ -285,6 +340,11 @@ class UpdateFields(StrictModel):
         if value is None:
             raise ValueError("null is not a supported clear operation")
         return value
+
+    @field_validator("title")
+    @classmethod
+    def visible_title(cls, value: str) -> str:
+        return _visible_title(value)
 
     @field_validator("start")
     @classmethod
@@ -364,6 +424,11 @@ MODELS: dict[str, type[StrictModel]] = {
     "things_receipt": ReceiptCall,
 }
 
+DISCOVERY_MODELS: dict[str, type[StrictModel]] = {
+    **MODELS,
+    "things_capture": CaptureDiscoveryCall,
+}
+
 DESCRIPTIONS = {
     "things_view": "Read one current Things list.",
     "things_find": "Search by owner text and optional exact container.",
@@ -380,6 +445,12 @@ def _valid_start(value: str | None) -> str | None:
     if value is None or value in {"today", "tomorrow", "evening", "someday"}:
         return value
     return _valid_date(value)
+
+
+def _visible_title(value: str) -> str:
+    if not value.strip():
+        raise ValueError("title cannot be blank")
+    return value
 
 
 def _valid_date(value: str | None) -> str | None:
@@ -426,6 +497,7 @@ def flat_schema(model: type[BaseModel]) -> dict[str, Any]:
 class ThingsV2:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
+        self._cursor_routes: dict[str, str] = {}
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
         self.workspace._journal.prune_v2(
@@ -435,7 +507,7 @@ class ThingsV2:
         if isinstance(call, ViewCall):
             return self._view(call)
         if isinstance(call, FindCall):
-            return self._project_read(self.workspace.read(ReadCall(find=call.text, within=call.within, limit=call.limit)))
+            return self._find(call)
         if isinstance(call, GetCall):
             return self._get(call.ids)
         if isinstance(call, ReceiptCall):
@@ -453,9 +525,21 @@ class ThingsV2:
         return self._mutation(result)
 
     def _view(self, call: ViewCall) -> PublicResult:
-        mapping = {"projects": "audit", "areas": "system"}
-        result = self.workspace.read(ReadCall(view=cast(Any, mapping.get(call.view, call.view)), limit=call.limit, cursor=call.cursor))
-        if call.view == "tags":
+        if call.cursor is not None:
+            route = self._cursor_routes.get(call.cursor)
+            if route is None or not route.startswith("view:"):
+                return self._invalid_read_cursor()
+            public_view = route.removeprefix("view:")
+            if call.view is not None and call.view != public_view:
+                return self._invalid_read_cursor()
+            result = self.workspace.read(ReadCall(limit=call.limit, cursor=call.cursor))
+        else:
+            public_view = call.view or "today"
+            mapping = {"projects": "audit", "areas": "system"}
+            result = self.workspace.read(
+                ReadCall(view=cast(Any, mapping.get(public_view, public_view)), limit=call.limit)
+            )
+        if public_view == "tags":
             return PublicResult(
                 state="ok" if result.status == "ok" else "rejected",
                 code="ok" if result.status == "ok" else "internal_error",
@@ -466,14 +550,26 @@ class ThingsV2:
                     else "The Things tags could not be read."
                 ),
                 tags=[PublicTag(id=tag.id, title=TaintedText(value=tag.title)) for tag in result.tags],
-                cursor=result.cursor,
+                cursor=self._remember_cursor(result.cursor, f"view:{public_view}"),
             )
         items = result.items
-        if call.view == "projects":
+        if public_view == "projects":
             items = [item for item in items if item.kind == "project"]
-        elif call.view == "areas":
+        elif public_view == "areas":
             items = [item for item in items if item.kind == "area"]
-        return self._project_read(result, items=items)
+        return self._project_read(result, items=items, route=f"view:{public_view}")
+
+    def _find(self, call: FindCall) -> PublicResult:
+        if call.cursor is not None:
+            if self._cursor_routes.get(call.cursor) != "find":
+                return self._invalid_read_cursor()
+            result = self.workspace.read(ReadCall(cursor=call.cursor, limit=call.limit))
+        else:
+            assert call.text is not None
+            result = self.workspace.read(
+                ReadCall(find=call.text, within=call.within, limit=call.limit)
+            )
+        return self._project_read(result, route="find")
 
     def _get(self, ids: list[str]) -> PublicResult:
         items: list[Any] = []
@@ -509,7 +605,13 @@ class ThingsV2:
             items=items,
         )
 
-    def _project_read(self, result: Any, *, items: list[Any] | None = None) -> PublicResult:
+    def _project_read(
+        self,
+        result: Any,
+        *,
+        items: list[Any] | None = None,
+        route: str | None = None,
+    ) -> PublicResult:
         ok = result.status == "ok"
         return PublicResult(
             state="ok" if ok else "rejected",
@@ -517,7 +619,24 @@ class ThingsV2:
             next_action="none" if ok else "retry_same",
             instruction="Current Things facts." if ok else "The Things read could not be completed.",
             items=[self._item(item) for item in (result.items if items is None else items)],
-            cursor=result.cursor,
+            cursor=self._remember_cursor(result.cursor, route),
+        )
+
+    def _remember_cursor(self, cursor: str | None, route: str | None) -> str | None:
+        if cursor is None or route is None:
+            return cursor
+        self._cursor_routes[cursor] = route
+        while len(self._cursor_routes) > 256:
+            del self._cursor_routes[next(iter(self._cursor_routes))]
+        return cursor
+
+    @staticmethod
+    def _invalid_read_cursor() -> PublicResult:
+        return PublicResult(
+            state="rejected",
+            code="cursor_invalid",
+            next_action="correct_request",
+            instruction="That read cursor is invalid or belongs to another tool.",
         )
 
     @staticmethod

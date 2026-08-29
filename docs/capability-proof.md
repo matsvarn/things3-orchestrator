@@ -15,10 +15,11 @@ The current public proof target is the exact default eight: bounded reads,
 Task/Project capture, ordinary explicit-field updates, completion, recoverable
 Trash, and immutable receipts. Focused regression tests cover opaque
 idempotency keys, immutable private manifests, cross-process fencing, signed
-host authorization, legacy quarantine, receipt HMAC cursors, taint propagation,
-retention, and permanent content-minimized tombstones. The v0.6.0 migration did
-not make live Things Cloud calls; retained Cloud fixtures and earlier live
-probes establish only the private batch and read-back primitives.
+host authorization, persisted-manifest integrity, legacy quarantine, bounded
+read cursors, receipt HMAC cursors, taint propagation, retention, and permanent
+content-minimized tombstones. The v0.6.0 migration did not make live Things
+Cloud calls; retained Cloud fixtures and earlier live probes establish only the
+private batch and read-back primitives.
 
 Advanced Project scopes, mutation coaching, registries, recurrence, checklist
 editing, rich-note replacement, and permanent deletion are not public v0.6.0

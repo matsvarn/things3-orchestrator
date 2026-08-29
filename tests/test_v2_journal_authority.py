@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from hashlib import sha256
@@ -12,6 +13,8 @@ from things_orchestrator.journal import (
     MemoryJournal,
     SQLiteJournal,
     V2Operation,
+    v2_manifest_hash,
+    v2_manifest_is_valid,
 )
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.owner_authority import (
@@ -31,18 +34,57 @@ def _operation(
     request_id: str,
     state: str = "pending",
 ) -> V2Operation:
+    request_hash = "sha256:v1:" + sha256(request_id.encode()).hexdigest()
+    expires_at = "2099-01-01T00:00:00+00:00" if state == "awaiting_owner" else None
+    manifest = {
+        "version": "v1",
+        "account_id": "owner@example.com",
+        "api_version": "2",
+        "schema_version": "v2.0",
+        "request_hash": request_hash,
+        "tool": "things_capture",
+        "preconditions": {},
+        "writes": [
+            {"action": "create", "uuid": "a", "kind": "task", "title": "A"}
+        ],
+        "touched": [["title"]],
+        "before": [None],
+        "display_titles": ["A"],
+        "requires_owner": state == "awaiting_owner",
+        "safety_policy_digest": "sha256:v1:policy",
+        "expires_at": expires_at,
+    }
     return V2Operation(
         account_id="owner@example.com",
         api_version="2",
         request_id=request_id,
-        request_hash="sha256:v1:" + sha256(request_id.encode()).hexdigest(),
+        request_hash=request_hash,
         operation_id=operation_id,
         tool="things_capture",
         state=state,  # type: ignore[arg-type]
-        manifest={"writes": [{"action": "create", "uuid": "a", "kind": "task", "title": "A"}]},
-        manifest_hash="sha256:v1:manifest",
+        manifest=manifest,
+        manifest_hash=v2_manifest_hash(manifest),
         safety_policy_digest="sha256:v1:policy",
-        expires_at="2026-08-29T13:00:00+00:00" if state == "awaiting_owner" else None,
+        expires_at=expires_at,
+    )
+
+
+def _with_manifest(operation: V2Operation, **changes: object) -> V2Operation:
+    manifest = {**operation.manifest, **changes}
+    if "tool" in changes:
+        operation = replace(operation, tool=str(changes["tool"]))
+    if "expires_at" in changes:
+        operation = replace(operation, expires_at=str(changes["expires_at"]))
+    manifest["tool"] = operation.tool
+    manifest["account_id"] = operation.account_id
+    manifest["api_version"] = operation.api_version
+    manifest["request_hash"] = operation.request_hash
+    manifest["safety_policy_digest"] = operation.safety_policy_digest
+    manifest["expires_at"] = operation.expires_at
+    return replace(
+        operation,
+        manifest=manifest,
+        manifest_hash=v2_manifest_hash(manifest),
     )
 
 
@@ -275,6 +317,80 @@ def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> 
     assert correct.verify_v2_authorization(operation, "approve", object()) is None
 
 
+def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal_path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(
+        journal_path,
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_manifest_tamper",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        expires_at="2099-01-01T00:00:00+00:00",
+        tool="things_trash",
+        writes=[{"action": "trash", "uuid": "a", "kind": "task"}],
+        before=[{"id": "task:a", "trashed": False}],
+        touched=[["trashed"]],
+        preconditions={},
+        display_titles=["A"],
+        requires_owner=True,
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    tampered = {
+        **operation.manifest,
+        "writes": [
+            {
+                "action": "complete",
+                "uuid": "a",
+                "kind": "task",
+                "status": "done",
+            }
+        ],
+        "touched": [["status"]],
+    }
+    with sqlite3.connect(journal_path) as connection:
+        connection.execute(
+            "UPDATE owner_operations_v2 SET manifest_json=? WHERE operation_id=?",
+            (
+                json.dumps(tampered, separators=(",", ":"), sort_keys=True),
+                operation.operation_id,
+            ),
+        )
+    library = MemoryLibrary([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id=operation.account_id,
+    )
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert not v2_manifest_is_valid(stored)
+    with pytest.raises(ValueError, match="integrity"):
+        render_operation(stored)
+    assert journal.verify_v2_authorization(stored, "approve", authorization) is None
+    direct_apply = workspace._apply_v2(stored)  # noqa: SLF001
+    reconcile = workspace.host_reconcile_v2(operation.operation_id)
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert direct_apply["state"] == "rejected"
+    assert reconcile["state"] == "rejected"
+    assert result["state"] == "rejected"
+    assert library.records["a"].status == "open"
+
+
 def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> None:
     journal = MemoryJournal()
     operation = _operation(
@@ -373,22 +489,20 @@ def test_host_rendering_escapes_control_ansi_newline_and_delimiter() -> None:
         host_escape("safe\u202evil\u2066x\u2069\u200b")
         == "safe\\u202evil\\u2066x\\u2069\\u200b"
     )
-    operation = replace(
+    operation = _with_manifest(
         _operation(
             "op_render",
             request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
             state="awaiting_owner",
         ),
-        manifest={
-            "writes": [
-                {
-                    "action": "trash",
-                    "kind": "task",
-                    "uuid": "abc",
-                    "title": "\x1b[31mApprove\n| now",
-                }
-            ]
-        },
+        writes=[
+            {
+                "action": "trash",
+                "kind": "task",
+                "uuid": "abc",
+                "title": "\x1b[31mApprove\n| now",
+            }
+        ],
     )
     rendered = render_operation(operation)
     assert "\x1b" not in rendered
@@ -423,13 +537,13 @@ def test_host_operation_lookup_is_scoped_to_workspace_account() -> None:
         "op_owned",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    foreign = replace(
+    foreign = _with_manifest(replace(
         _operation(
             "op_foreign",
             request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
         ),
         account_id="other@example.com",
-    )
+    ))
     journal.create_v2(owned, claim_fence=True)
     journal.create_v2(foreign, claim_fence=True)
     workspace = ThingsWorkspace(
@@ -659,15 +773,13 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
     journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
-    operation = replace(
+    operation = _with_manifest(
         _operation("op_recover", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        manifest={
-            "writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "New"}],
-            "before": [{"id": "task:a", "title": "Old"}],
-            "touched": [["title"]],
-            "preconditions": {"task:a": "frozen"},
-            "display_titles": ["Old"],
-        },
+        writes=[{"action": "update", "uuid": "a", "kind": "task", "title": "New"}],
+        before=[{"id": "task:a", "title": "Old"}],
+        touched=[["title"]],
+        preconditions={"task:a": "frozen"},
+        display_titles=["Old"],
     )
     journal.create_v2(operation, claim_fence=True)
     workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Old")]), journal=journal, account_id=operation.account_id)
@@ -687,13 +799,11 @@ def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> No
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
     journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
-    operation = replace(
+    operation = _with_manifest(
         _operation("op_diverged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        manifest={
-            "writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "Desired"}],
-            "before": [{"id": "task:a", "title": "Before"}],
-            "touched": [["title"]], "preconditions": {"task:a": "frozen"}, "display_titles": ["Before"],
-        },
+        writes=[{"action": "update", "uuid": "a", "kind": "task", "title": "Desired"}],
+        before=[{"id": "task:a", "title": "Before"}],
+        touched=[["title"]], preconditions={"task:a": "frozen"}, display_titles=["Before"],
     )
     journal.create_v2(operation, claim_fence=True)
     workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Applied then overwritten")]), journal=journal, account_id=operation.account_id)

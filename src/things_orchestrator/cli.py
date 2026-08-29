@@ -712,7 +712,10 @@ def _operation_command(
     operation = workspace.host_get_operation_v2(operation_id)
     if operation is None:
         parser.error("operation not found for this account")
-    print(render_operation(operation))
+    try:
+        print(render_operation(operation))
+    except ValueError as error:
+        parser.error(str(error))
     if action == "operation-show":
         return
     if action == "operation-reconcile":

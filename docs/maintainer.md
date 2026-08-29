@@ -18,8 +18,9 @@ Keep one production server and one stable model Interface.
   capabilities, `tool_schema_hash`, and `tool_contract_hash`.
 - `journal.py` creates immutable v2 operations, performs legal compare-and-set
   transitions, claims the account fence, and appends exact receipt rows. The
-  journal path is namespaced by account. Retained v1 rows stay private for
-  recovery only.
+  journal path is namespaced by account. It rehashes the complete persisted
+  manifest before review, authorization, reconciliation, and application.
+  Retained v1 rows stay private for recovery only.
 - `library.py` is the in-memory Things graph used by tests and Cloud.
 - `cloud.py` syncs and commits through the unofficial Things Cloud API.
   It coalesces one envelope per UUID and verifies a forced Cloud pull.

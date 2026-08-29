@@ -24,6 +24,7 @@ from .journal import (
     V2Operation,
     owner_authorization_binding_json,
     owner_public_key_path,
+    v2_manifest_is_valid,
 )
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)")
@@ -112,6 +113,8 @@ def verified_authorization(
 
 
 def render_operation(operation: V2Operation) -> str:
+    if not v2_manifest_is_valid(operation):
+        raise ValueError("operation manifest failed its integrity check")
     lines = [
         f"operation_id | {host_escape(operation.operation_id)}",
         f"state | {operation.state}",

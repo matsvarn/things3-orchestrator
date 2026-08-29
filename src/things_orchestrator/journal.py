@@ -223,6 +223,8 @@ class MemoryJournal:
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
         with self._lock:
+            if not v2_manifest_is_valid(operation):
+                raise ValueError("v2 manifest hash does not match its persisted content")
             if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
                 raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
             if operation.state != "unchanged" and receipt_rows:
@@ -722,6 +724,8 @@ class SQLiteJournal:
     def create_v2(
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
+        if not v2_manifest_is_valid(operation):
+            raise ValueError("v2 manifest hash does not match its persisted content")
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1188,7 +1192,11 @@ def _verify_owner_authorization(
     authorization: object,
     public_key: bytes | None,
 ) -> str | None:
-    if not isinstance(authorization, OwnerAuthorization) or public_key is None:
+    if (
+        not v2_manifest_is_valid(operation)
+        or not isinstance(authorization, OwnerAuthorization)
+        or public_key is None
+    ):
         return None
     expected = owner_authorization_binding_json(operation, action=action)
     if not hmac.compare_digest(expected, authorization.binding_json):
@@ -1210,6 +1218,30 @@ def _ensure_private_dir(path: Path) -> None:
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def v2_manifest_hash(manifest: JsonDict) -> str:
+    return "sha256:v1:" + sha256(_json(manifest).encode()).hexdigest()
+
+
+def v2_manifest_is_valid(operation: V2Operation) -> bool:
+    if operation.api_version != "2":
+        return True
+    manifest = operation.manifest
+    envelope = {
+        "account_id": operation.account_id,
+        "api_version": operation.api_version,
+        "request_hash": operation.request_hash,
+        "tool": operation.tool,
+        "safety_policy_digest": operation.safety_policy_digest,
+        "expires_at": operation.expires_at,
+    }
+    return (
+        manifest.get("version") == "v1"
+        and manifest.get("schema_version") == "v2.0"
+        and all(manifest.get(key) == value for key, value in envelope.items())
+        and hmac.compare_digest(v2_manifest_hash(manifest), operation.manifest_hash)
+    )
 
 
 def _legacy_plan_digest(plan: JsonDict) -> str:
@@ -1455,6 +1487,8 @@ def _validate_v2_receipts(rows: list[JsonDict]) -> list[JsonDict]:
 def _validate_v2_operation_receipts(
     operation: V2Operation, rows: list[JsonDict]
 ) -> list[JsonDict]:
+    if not v2_manifest_is_valid(operation):
+        raise ValueError("v2 manifest hash does not match its persisted content")
     normalized = _validate_v2_receipts(rows)
     writes = operation.manifest.get("writes")
     if not isinstance(writes, list) or not writes or len(normalized) != len(writes):
