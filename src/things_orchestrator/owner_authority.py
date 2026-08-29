@@ -133,6 +133,12 @@ def render_operation(operation: V2Operation) -> str:
                 if field in {"action", "kind", "uuid"} or value is None:
                     continue
                 lines.append(f"  {host_escape(str(field))} | {host_escape(str(value))}")
+    legacy_plan = operation.manifest.get("legacy_plan")
+    if isinstance(legacy_plan, dict):
+        canonical_plan = json.dumps(
+            legacy_plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        lines.append(f"legacy_plan | {host_escape(canonical_plan)}")
     lines.append("preserves | every omitted field and member")
     if operation.tool == "things_trash":
         lines.append("warning | moves exact items to recoverable Trash")

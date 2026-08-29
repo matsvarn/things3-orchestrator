@@ -118,7 +118,7 @@ class Journal(Protocol):
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
     def cutover_v1(self) -> JsonDict: ...
     def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool: ...
-    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool: ...
+    def resolve_v1_pending(self, intent_id: str, *, expected_fingerprint: str, expected_plan_digest: str, state: Literal["applied", "stale"], result: JsonDict) -> bool: ...
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
 
 
@@ -223,6 +223,10 @@ class MemoryJournal:
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
         with self._lock:
+            if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
+                raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
+            if operation.state == "unchanged" and not receipt_rows:
+                raise ValueError("unchanged creation requires atomic receipt rows")
             existing = self.get_v2_request(
                 operation.account_id, operation.api_version, operation.request_id
             )
@@ -296,7 +300,7 @@ class MemoryJournal:
         resolution: Literal["accepted_as_is", "superseded"] | None = None,
     ) -> bool:
         with self._lock:
-            if expected == "awaiting_owner" and state == "pending":
+            if expected == "pending" or (expected == "awaiting_owner" and state == "pending"):
                 return False
             current = self._v2_operations.get(operation_id)
             if current is None or current.state != expected or not _legal_v2_transition(expected, state):
@@ -426,6 +430,7 @@ class MemoryJournal:
                     self._records[intent_id] = replace(
                         record,
                         state="stale",
+                        plan={},
                         result={
                             "status": "quarantined",
                             "instruction": "This v1 operation cannot be approved or replayed after the v2 cutover.",
@@ -437,6 +442,11 @@ class MemoryJournal:
                         partial_like.append(intent_id)
                 else:
                     terminal.append(intent_id)
+                    self._records[intent_id] = replace(
+                        record,
+                        plan={},
+                        result={"status": "legacy_tombstone", "state": record.state},
+                    )
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
 
     def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
@@ -447,12 +457,16 @@ class MemoryJournal:
             self._records[intent_id] = replace(current, result=_copy_json(result))
             return True
 
-    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool:
+    def resolve_v1_pending(self, intent_id: str, *, expected_fingerprint: str, expected_plan_digest: str, state: Literal["applied", "stale"], result: JsonDict) -> bool:
         with self._lock:
             current = self._records.get(intent_id)
-            if current is None or current.state != "pending":
+            if (
+                current is None or current.state != "pending"
+                or current.fingerprint != expected_fingerprint
+                or _legacy_plan_digest(current.plan) != expected_plan_digest
+            ):
                 return False
-            self._records[intent_id] = replace(current, state=state, result=_copy_json(result))
+            self._records[intent_id] = replace(current, state=state, plan={}, result=_copy_json(result))
             return True
 
     def verify_v2_authorization(
@@ -711,6 +725,12 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
+                connection.rollback()
+                raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
+            if operation.state == "unchanged" and not receipt_rows:
+                connection.rollback()
+                raise ValueError("unchanged creation requires atomic receipt rows")
             existing = connection.execute(
                 """SELECT * FROM owner_operations_v2
                    WHERE account_id=? AND api_version=? AND request_id=?""",
@@ -792,7 +812,7 @@ class SQLiteJournal:
         authorization: object = None,
         resolution: Literal["accepted_as_is", "superseded"] | None = None,
     ) -> bool:
-        if expected == "awaiting_owner" and state == "pending":
+        if expected == "pending" or (expected == "awaiting_owner" and state == "pending"):
             return False
         if not _legal_v2_transition(expected, state):
             return False
@@ -1053,10 +1073,17 @@ class SQLiteJournal:
                 }
             )
             connection.execute(
-                """UPDATE intents SET state='stale', result_json=?
+                """UPDATE intents SET state='stale', plan_json='{}', result_json=?
                    WHERE state IN ('prepared','needs_approval')""",
                 (reason,),
             )
+            for row in rows:
+                if row["state"] in {"prepared", "needs_approval", "pending"}:
+                    continue
+                connection.execute(
+                    "UPDATE intents SET plan_json='{}', result_json=? WHERE intent_id=?",
+                    (_json({"status": "legacy_tombstone", "state": str(row["state"])}), str(row["intent_id"])),
+                )
             connection.commit()
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
         except BaseException:
@@ -1073,12 +1100,32 @@ class SQLiteJournal:
                 (_json(result), intent_id),
             ).rowcount == 1
 
-    def resolve_v1_pending(self, intent_id: str, *, state: Literal["applied", "stale"], result: JsonDict) -> bool:
-        with self._connect() as connection:
-            return connection.execute(
-                "UPDATE intents SET state=?, result_json=? WHERE intent_id=? AND state='pending'",
-                (state, _json(result), intent_id),
+    def resolve_v1_pending(self, intent_id: str, *, expected_fingerprint: str, expected_plan_digest: str, state: Literal["applied", "stale"], result: JsonDict) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT fingerprint, plan_json FROM intents WHERE intent_id=? AND state='pending'",
+                (intent_id,),
+            ).fetchone()
+            if (
+                row is None or str(row["fingerprint"]) != expected_fingerprint
+                or _legacy_plan_digest(cast(JsonDict, json.loads(str(row["plan_json"])))) != expected_plan_digest
+            ):
+                connection.rollback()
+                return False
+            changed = connection.execute(
+                "UPDATE intents SET state=?, plan_json='{}', result_json=? WHERE intent_id=? AND state='pending' AND fingerprint=?",
+                (state, _json(result), intent_id, expected_fingerprint),
             ).rowcount == 1
+            connection.commit()
+            return changed
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def verify_v2_authorization(
         self, operation: V2Operation, action: str, authorization: object
@@ -1162,6 +1209,10 @@ def _ensure_private_dir(path: Path) -> None:
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _legacy_plan_digest(plan: JsonDict) -> str:
+    return "sha256:v1:" + sha256(_json(plan).encode()).hexdigest()
 
 
 def _insert_v2_receipts(

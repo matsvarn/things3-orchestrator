@@ -287,7 +287,9 @@ when that extraction deletes duplicated ownership.
    Only all-desired-matched evidence may settle a retained row as applied.
    Partial, none-matched without frozen-before proof, malformed, and unknown
    evidence remains fenced until a signed CLI-only owner resolution records
-   `accepted_as_is` or `superseded` without Cloud I/O. Tombstone terminal rows. If more
+   `accepted_as_is` or `superseded` without Cloud I/O. Tombstone quarantined,
+   auto-applied, signed-resolved, and already-terminal v1 rows by scrubbing
+   owner plan content while pending rows retain their exact recovery evidence. If more
    than one unresolved retained row exists, block all writes and surface every
    ID rather than choosing or discarding one.
 5. Only after that gate, evaluate and implement the Project-only advanced scope

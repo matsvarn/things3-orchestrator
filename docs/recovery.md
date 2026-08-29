@@ -56,4 +56,7 @@ uv run things-orchestrator legacy-resolve INTENT_ID superseded
 
 This resolution requires the CLI-only owner factor and durably records the
 classification, resolution, and signed authorization before releasing the
-legacy fence.
+legacy fence. The CLI renders the complete retained plan with terminal-control
+escaping before it asks for the passphrase. Resolution atomically verifies the
+signed fingerprint and full-plan digest, then scrubs the legacy plan into a
+content-minimized tombstone.

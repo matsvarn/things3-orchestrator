@@ -313,17 +313,34 @@ def test_output_and_flattened_capture_schemas_are_closed() -> None:
 def test_receipt_next_action_follows_operation_state() -> None:
     from things_orchestrator.journal import V2Operation
 
-    for state, next_action in (("awaiting_owner", "run_cli"), ("pending", "run_cli"), ("partial", "run_cli"), ("applied", "read_receipt")):
+    for state, next_action in (("awaiting_owner", "run_cli"), ("pending", "run_cli"), ("partial", "run_cli"), ("applied", "read_receipt"), ("stale", "read_fresh")):
         journal = MemoryJournal()
+        initial_state = state if state in {"awaiting_owner", "pending"} else "awaiting_owner" if state == "stale" else "pending"
         operation = V2Operation(
             account_id="owner@example.com", api_version="2",
             request_id=REQUEST, request_hash="sha256:test", operation_id=f"op_{state}12345678",
-            tool="things_update", state=state, manifest={"writes": [], "touched": [], "before": []},
+            tool="things_update", state=initial_state, manifest={"writes": [], "touched": [], "before": []},
             manifest_hash="sha256:test", safety_policy_digest="sha256:test",
         )
-        journal.create_v2(operation, claim_fence=state == "pending")
+        journal.create_v2(operation, claim_fence=initial_state == "pending")
+        if state in {"partial", "applied"}:
+            journal.settle_v2(operation.operation_id, expected="pending", state=state, response={"state": state}, rows=[])
+        elif state == "stale":
+            journal.transition_v2(operation.operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "stale", "operation_id": operation.operation_id})
         result = asyncio.run(_server(journal=journal).call_tool("things_receipt", {"operation_id": operation.operation_id}))
         assert result.structured_content["next_action"] == next_action
+
+
+def test_stale_mutation_projection_requires_fresh_read() -> None:
+    journal = MemoryJournal()
+    server = _server(Record(uuid="a", kind="task", title="A"), journal=journal)
+    arguments = {"request_id": REQUEST, "ids": ["task:a"]}
+    first = asyncio.run(server.call_tool("things_trash", arguments))
+    operation_id = first.structured_content["operation_id"]
+    journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "stale", "operation_id": operation_id})
+    repeated = asyncio.run(server.call_tool("things_trash", arguments))
+    assert repeated.structured_content["state"] == "stale"
+    assert repeated.structured_content["next_action"] == "read_fresh"
 
 
 def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> None:

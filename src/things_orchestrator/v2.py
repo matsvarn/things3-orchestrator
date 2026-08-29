@@ -155,7 +155,7 @@ class PublicResult(StrictModel):
         "cursor_invalid", "read_unavailable", "internal_error",
     ]
     next_action: Literal[
-        "none", "correct_request", "retry_same", "read_receipt", "run_cli",
+        "none", "correct_request", "retry_same", "read_fresh", "read_receipt", "run_cli",
         "wait", "contact_operator",
     ]
     operation_id: str | None = None
@@ -537,6 +537,8 @@ def _result_code(state: str) -> str:
 
 
 def _result_next_action(state: str) -> str:
+    if state == "stale":
+        return "read_fresh"
     if state in {"awaiting_owner", "pending", "partial"}:
         return "run_cli"
     if state in {"applied", "unchanged", "not_applied"}:

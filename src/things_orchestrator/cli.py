@@ -761,12 +761,13 @@ def _legacy_resolution_command(
     intent_id: str,
     resolution: str,
 ) -> None:
-    from .owner_authority import verified_authorization
+    from .owner_authority import render_operation, verified_authorization
 
     workspace = _workspace(parser)
     operation = workspace.host_get_legacy_resolution_v1(intent_id)
     if operation is None:
         parser.error("retained v1 operation is not pending")
+    print(render_operation(operation))
     with _private_tty(parser) as terminal:
         passphrase = getpass("Owner approval passphrase: ", stream=terminal)
     try:

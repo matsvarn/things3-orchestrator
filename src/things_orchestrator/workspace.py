@@ -2527,7 +2527,13 @@ class ThingsWorkspace:
             ),
         }
         changed = (
-            self._journal.resolve_v1_pending(intent_id, state="applied", result=result)
+            self._journal.resolve_v1_pending(
+                intent_id,
+                expected_fingerprint=record.fingerprint,
+                expected_plan_digest=_legacy_plan_digest(record.plan),
+                state="applied",
+                result=result,
+            )
             if classification == "applied"
             else self._journal.annotate_v1_pending(intent_id, result=result)
         )
@@ -2539,8 +2545,15 @@ class ThingsWorkspace:
         record = self._journal.get(intent_id)
         if record is None or record.state != "pending":
             return None
-        plan_json = json.dumps(record.plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        digest = "sha256:v1:" + sha256(plan_json.encode()).hexdigest()
+        digest = _legacy_plan_digest(record.plan)
+        raw_writes = record.plan.get("writes", [])
+        writes = raw_writes if isinstance(raw_writes, list) else []
+        display_titles = [
+            cast(str, row["title"])
+            if isinstance(row, dict) and isinstance(row.get("title"), str)
+            else ""
+            for row in writes
+        ]
         return V2Operation(
             account_id=self._account_id,
             api_version="legacy-v1",
@@ -2549,7 +2562,12 @@ class ThingsWorkspace:
             operation_id="legacy_" + sha256((intent_id + record.fingerprint).encode()).hexdigest()[:24],
             tool="legacy_pending_resolution",
             state="pending",
-            manifest={"intent_id_hash": "sha256:v1:" + sha256(intent_id.encode()).hexdigest()},
+            manifest={
+                "intent_id_hash": "sha256:v1:" + sha256(intent_id.encode()).hexdigest(),
+                "writes": json.loads(json.dumps(writes)),
+                "display_titles": display_titles,
+                "legacy_plan": json.loads(json.dumps(record.plan)),
+            },
             manifest_hash=digest,
             safety_policy_digest="sha256:v1:legacy-no-replay-resolution",
         )
@@ -2573,6 +2591,8 @@ class ThingsWorkspace:
         prior = record.result or {}
         return self._journal.resolve_v1_pending(
             intent_id,
+            expected_fingerprint=operation.request_id,
+            expected_plan_digest=operation.manifest_hash,
             state="stale",
             result={
                 "status": "owner_resolved_no_replay",
@@ -8599,7 +8619,13 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
             return False
         action = value.get("action")
         uuid = value.get("uuid")
-        if not isinstance(action, str) or not isinstance(uuid, str) or not uuid:
+        kind = value.get("kind")
+        if (
+            action not in _LEGACY_WRITE_ACTIONS
+            or kind not in _LEGACY_WRITE_KINDS
+            or not isinstance(uuid, str)
+            or not uuid
+        ):
             return False
         try:
             write = _write_from_json(cast(dict[str, object], value))
@@ -8616,6 +8642,20 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
         ):
             return False
     return True
+
+
+_LEGACY_WRITE_ACTIONS = frozenset({
+    "create", "create_heading", "update", "complete", "cancel", "move", "tags",
+    "rename_area", "delete_area", "trash", "restore", "permanent_delete",
+    "ensure_tag", "rename_tag", "reparent_tag", "delete_tag", "checklist",
+    "repeat", "repeat_link",
+})
+_LEGACY_WRITE_KINDS = frozenset({"task", "project", "area"})
+
+
+def _legacy_plan_digest(plan: JsonDict) -> str:
+    canonical = json.dumps(plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return "sha256:v1:" + sha256(canonical.encode()).hexdigest()
 
 
 def _taint_things_text(value: object) -> object:

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import URLError
 
 import pytest
 
-from things_orchestrator.cli import _server, build_parser, main
+from things_orchestrator.cli import (
+    _legacy_resolution_command,
+    _server,
+    build_parser,
+    main,
+)
 from things_orchestrator.cloud import CloudError
-from things_orchestrator.journal import IntentRecord, SQLiteJournal
+from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 
 ROOT = Path(__file__).parents[1]
 
@@ -859,6 +865,46 @@ def test_plugin_wrapper_routes_every_recovery_command() -> None:
     usage = next(line for line in script.splitlines() if line.startswith('    echo "Usage:'))
     for command in ("legacy-reconcile", "legacy-resolve", "operation-reconcile", "operation-settle-not-applied"):
         assert command in usage
+
+
+def test_legacy_resolution_renders_before_reading_passphrase(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    operation = V2Operation(
+        account_id="owner@example.com", api_version="legacy-v1", request_id="fp",
+        request_hash="sha256:plan", operation_id="legacy_render", tool="legacy_pending_resolution",
+        state="pending", manifest={
+            "writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "\x1b[31mOwner\n|\u202e"}],
+            "display_titles": ["\x1b[31mOwner\n|\u202e"],
+            "legacy_plan": {"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "\x1b[31mOwner\n|\u202e"}]},
+        }, manifest_hash="sha256:plan", safety_policy_digest="sha256:policy",
+    )
+
+    class Workspace:
+        def host_get_legacy_resolution_v1(self, _intent_id: str) -> V2Operation:
+            return operation
+
+        def host_resolve_legacy_v1(self, *_args: object) -> bool:
+            return True
+
+    @contextmanager
+    def tty(_parser: object) -> object:
+        yield object()
+
+    monkeypatch.setattr("things_orchestrator.cli._workspace", lambda _parser: Workspace())
+    monkeypatch.setattr("things_orchestrator.cli._private_tty", tty)
+
+    def getpass_after_render(_prompt: str, *, stream: object) -> str:
+        assert stream is not None
+        rendered = capsys.readouterr().out
+        assert "legacy_plan |" in rendered
+        assert "\x1b" not in rendered and "\\u000a" in rendered and "\\u202e" in rendered
+        return "passphrase"
+
+    monkeypatch.setattr("things_orchestrator.cli.getpass", getpass_after_render)
+    monkeypatch.setattr("things_orchestrator.owner_authority.verified_authorization", lambda *_args, **_kwargs: object())
+    _legacy_resolution_command(build_parser(), "legacy", "accepted_as_is")
 
 
 def test_login_password_confirm_mismatch(
