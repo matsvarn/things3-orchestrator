@@ -225,7 +225,9 @@ class MemoryJournal:
         with self._lock:
             if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
                 raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else _validate_v2_receipts(receipt_rows or [])
+            if operation.state != "unchanged" and receipt_rows:
+                raise ValueError("nonterminal creation cannot preseed receipt rows")
+            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else []
             existing = self.get_v2_request(
                 operation.account_id, operation.api_version, operation.request_id
             )
@@ -726,7 +728,10 @@ class SQLiteJournal:
             if operation.state not in {"pending", "awaiting_owner", "unchanged"}:
                 connection.rollback()
                 raise ValueError("v2 operation must start pending, awaiting_owner, or unchanged")
-            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else _validate_v2_receipts(receipt_rows or [])
+            if operation.state != "unchanged" and receipt_rows:
+                connection.rollback()
+                raise ValueError("nonterminal creation cannot preseed receipt rows")
+            normalized = _validate_v2_operation_receipts(operation, receipt_rows or []) if operation.state == "unchanged" else []
             existing = connection.execute(
                 """SELECT * FROM owner_operations_v2
                    WHERE account_id=? AND api_version=? AND request_id=?""",

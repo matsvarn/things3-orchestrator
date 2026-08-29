@@ -173,6 +173,12 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
         else:
             raise AssertionError("unchanged without atomic receipts was accepted")
         pending = _operation("op_pending_owned", request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67")
+        with pytest.raises(ValueError, match="cannot preseed receipt rows"):
+            journal.create_v2(
+                pending,
+                claim_fence=True,
+                receipt_rows=[{"sequence": 1, "result": "applied"}],
+            )
         journal.create_v2(pending, claim_fence=True)
         with pytest.raises(ValueError, match="one receipt row per manifest write"):
             journal.settle_v2(
