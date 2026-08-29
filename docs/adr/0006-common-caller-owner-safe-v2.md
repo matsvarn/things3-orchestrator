@@ -84,6 +84,7 @@ The default MCP interface has eight tools:
 - `things_complete` completes one atomic batch. A Project must have no open
   actions, and its complete Project scope stays frozen through application.
 - `things_trash` moves one atomic batch to recoverable Trash.
+  Project Trash freezes and renders the complete descendant scope.
 - `things_receipt` returns immutable operation rows with restart-safe
   pagination.
 

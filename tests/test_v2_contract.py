@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import pytest
@@ -10,6 +11,10 @@ from pydantic import ValidationError
 from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import JsonDict, MemoryJournal, V2Operation
 from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
+from things_orchestrator.owner_authority import (
+    enroll_owner_factor,
+    verified_authorization,
+)
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.server import ThingsMCPServer
 from things_orchestrator.v2 import PublicResult, ThingsV2
@@ -42,6 +47,55 @@ def test_default_discovery_is_exactly_the_bounded_eight() -> None:
         "checklist", "recurrence", "registry", "delete", "approval",
     ):
         assert forbidden not in update
+
+
+def test_retention_maintenance_runs_once_per_day_not_once_per_read() -> None:
+    class CountingJournal(MemoryJournal):
+        prune_calls = 0
+
+        def prune_v2(self, *, now: str, retention_days: int = 7) -> int:
+            self.prune_calls += 1
+            return super().prune_v2(now=now, retention_days=retention_days)
+
+    journal = CountingJournal()
+    interface = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary(),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+
+    interface.dispatch("things_view", {"view": "today"})
+    interface.dispatch("things_view", {"view": "today"})
+
+    assert journal.prune_calls == 1
+
+
+def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
+    class CountingLibrary(MemoryLibrary):
+        refreshes = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    assert result.state == "applied"
+    assert [item.title.value for item in result.items] == ["B"]
+    assert library.refreshes == 3
 
 
 def test_read_cursors_continue_find_projects_and_tags_without_repeating_selectors() -> None:
@@ -339,11 +393,51 @@ def test_project_trash_manifest_expands_descendants_and_freezes_titles() -> None
     operation = journal.get_v2_operation(result.structured_content["operation_id"])
     assert operation is not None
     assert [row["uuid"] for row in operation.manifest["writes"]] == ["t", "h", "p"]
+    assert "scope:project:p" in operation.manifest["preconditions"]
     assert operation.manifest["display_titles"] == ["Task", "Heading", "Project"]
     rendered = render_operation(operation)
     assert "title | Task" in rendered
     assert "title | Heading" in rendered
     assert "title | Project" in rendered
+
+
+def test_project_trash_scope_rejects_a_child_added_after_owner_review(
+    tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    project = Record(uuid="p", kind="project", title="Project")
+    original = Record(uuid="a", kind="task", title="Original", parent_uuid="p")
+    library = MemoryLibrary([project, original])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    staged = ThingsV2(workspace).dispatch(
+        "things_trash", {"request_id": REQUEST, "ids": [project.id]}
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    library.records["late"] = Record(
+        uuid="late", kind="task", title="Late", parent_uuid="p"
+    )
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "stale"
+    assert all(not record.trashed for record in (project, original, library.records["late"]))
 
 
 def test_reminder_receipt_uses_public_remind_at_alias_for_set_and_clear() -> None:
@@ -367,6 +461,71 @@ def test_reminder_receipt_uses_public_remind_at_alias_for_set_and_clear() -> Non
     assert cleared_row["desired"]["remind_at"] is None
     assert cleared_row["before"]["remind_at"] == "2026-08-30T09:00:00+00:00"
     assert cleared_row["observed"]["remind_at"] is None
+
+
+def test_start_clear_cannot_implicitly_delete_an_omitted_reminder() -> None:
+    record = Record(
+        uuid="a",
+        kind="task",
+        title="A",
+        start=date(2026, 8, 30),
+        remind="09:00",
+    )
+    journal = MemoryJournal()
+    server = _server(record, journal=journal)
+
+    rejected = asyncio.run(
+        server.call_tool(
+            "things_update",
+            {
+                "request_id": REQUEST,
+                "items": [{"id": record.id, "set": {"start": None}}],
+            },
+        )
+    )
+
+    assert rejected.structured_content["state"] == "rejected"
+    assert record.start == date(2026, 8, 30) and record.remind == "09:00"
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+
+    explicit = asyncio.run(
+        server.call_tool(
+            "things_update",
+            {
+                "request_id": "0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+                "items": [
+                    {
+                        "id": record.id,
+                        "set": {"start": None, "remind_at": None},
+                    }
+                ],
+            },
+        )
+    )
+    assert explicit.structured_content["state"] == "applied"
+    assert record.start is None and record.remind is None
+
+
+def test_start_change_preserves_an_omitted_existing_reminder() -> None:
+    record = Record(
+        uuid="a",
+        kind="task",
+        title="A",
+        start=date(2026, 8, 30),
+        remind="09:00",
+    )
+    result = asyncio.run(
+        _server(record).call_tool(
+            "things_update",
+            {
+                "request_id": REQUEST,
+                "items": [{"id": record.id, "set": {"start": "2026-08-31"}}],
+            },
+        )
+    )
+
+    assert result.structured_content["state"] == "applied"
+    assert record.start == date(2026, 8, 31) and record.remind == "09:00"
 
 
 def test_reminder_does_not_implicitly_change_an_omitted_start() -> None:

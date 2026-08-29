@@ -2217,7 +2217,10 @@ class ThingsWorkspace:
                 "operation_id": operation_id,
             }
             return response
-        return self._apply_v2(operation, writes=writes, before=before)
+        result = self._apply_v2(operation, writes=writes, before=before)
+        if result.get("item_ids"):
+            return {**result, "_fresh_items": True}
+        return result
 
     def _prepare_v2_manifest(
         self, draft: object
@@ -2287,6 +2290,10 @@ class ThingsWorkspace:
                 target = self._exact_item(item_id)
                 if target is None or target.kind not in {"task", "project"} or target.heading:
                     return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "Mutation targets must be exact Tasks or Projects."}
+                if draft.tool == "things_trash" and target.kind == "project":
+                    preconditions[f"scope:project:{target.uuid}"] = (
+                        self._project_scope_revision(target.uuid)
+                    )
                 candidates = [*self._project_descendants(target.uuid), target] if draft.tool == "things_trash" and target.kind == "project" else [target]
                 for candidate in candidates:
                     if candidate.recurrence.role == "template":
@@ -2350,7 +2357,31 @@ class ThingsWorkspace:
                         }
                     start_set = "start" in fields
                     start, tonight, someday = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
-                    reminder_date, reminder = self._remind_input(cast(str | None, fields.get("remind_at")))
+                    remind_set = "remind_at" in fields
+                    if (
+                        start_set
+                        and fields.get("start") is None
+                        and target.remind is not None
+                        and not remind_set
+                    ):
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "Clearing a start with an existing reminder also requires remind_at=null.",
+                        }
+                    reminder_date, reminder = (
+                        self._remind_input(
+                            cast(str | None, fields.get("remind_at"))
+                        )
+                        if remind_set
+                        else (
+                            None,
+                            target.remind
+                            if start_set and fields.get("start") is not None
+                            else None,
+                        )
+                    )
                     if reminder_date is not None:
                         if start_set and (start is None or start != reminder_date):
                             return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "start and remind_at must use the same local date."}
@@ -2681,13 +2712,10 @@ class ThingsWorkspace:
         failed = self._refresh(force=True)
         if failed is not None:
             return {"state": "awaiting_owner", "instruction": "Cloud state could not be rechecked.", "operation_id": operation_id}
-        preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
-        for item_id, expected in preconditions.items():
-            item = self._exact_item(item_id)
-            if item is None or self._revision(item) != expected:
-                response = {"state": "stale", "instruction": "A private operation precondition changed.", "operation_id": operation_id}
-                self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
-                return response
+        if not self._v2_preconditions_match(operation):
+            response = {"state": "stale", "instruction": "A private operation precondition changed.", "operation_id": operation_id}
+            self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
+            return response
         authorized, blockers = self._journal.authorize_v2(operation_id, authorization)
         if not authorized:
             return {"state": "rejected", "instruction": "Another unresolved operation blocks approval.", "operation_id": operation_id, "blocking_operation_ids": blockers}

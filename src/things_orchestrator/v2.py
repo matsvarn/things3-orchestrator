@@ -498,11 +498,15 @@ class ThingsV2:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
         self._cursor_routes: dict[str, str] = {}
+        self._last_prune_date: date | None = None
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
-        self.workspace._journal.prune_v2(
-            now=self.workspace._clock().isoformat(), retention_days=7
-        )
+        current = self.workspace._clock()
+        if self._last_prune_date != current.date():
+            self.workspace._journal.prune_v2(
+                now=current.isoformat(), retention_days=7
+            )
+            self._last_prune_date = current.date()
         call = MODELS[name].model_validate(arguments)
         if isinstance(call, ViewCall):
             return self._view(call)
@@ -594,7 +598,23 @@ class ThingsV2:
 
     def _mutation(self, result: dict[str, object]) -> PublicResult:
         item_ids = cast(list[str], result.pop("item_ids", []))
-        items = self._get(item_ids).items if item_ids else []
+        fresh_items = result.pop("_fresh_items", False) is True
+        items = (
+            [
+                self._item(
+                    self.workspace._fact(
+                        item,
+                        full=True,
+                        include_revision=False,
+                        detail=("notes", "tags"),
+                    )
+                )
+                for item_id in item_ids
+                if (item := self.workspace._exact_item(item_id)) is not None
+            ]
+            if fresh_items
+            else []
+        )
         return PublicResult(
             state=cast(Any, result["state"]),
             code=cast(Any, result.get("code", _result_code(cast(str, result["state"])))),

@@ -28,6 +28,10 @@ The public MCP interface is now the bounded owner-safe v2 contract.
   fence and recheck frozen state before settling without a Cloud write.
 - Project completion rejects Projects with open actions and freezes the complete
   clear Project scope so a concurrent action cannot bypass that check.
+- Project Trash freezes the full Project scope, including children added after
+  review. Clearing a start cannot implicitly delete an omitted reminder.
+- Retention maintenance is throttled to once per day per server process, and a
+  successful mutation reuses its verified post-write snapshot for the response.
 - Advanced scopes and the mutation coach profile are deferred until the
   default-eight safety contract is proven in use.
 
