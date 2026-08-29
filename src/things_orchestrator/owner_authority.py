@@ -1,6 +1,6 @@
-"""Host-only owner factor and safe operation rendering.
+"""CLI-only owner signing and spoof-resistant operation rendering.
 
-The MCP server does not import this module or receive access to its verifier.
+The MCP request path does not import this module or request the passphrase.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from base64 import b64decode, b64encode
 from hashlib import scrypt, sha256
 from pathlib import Path
@@ -140,7 +141,10 @@ def host_escape(value: str) -> str:
     pieces: list[str] = []
     for character in cleaned:
         code = ord(character)
-        if character in {"\n", "\r", "\t", "|", "\\"} or code < 32 or code == 127:
+        if (
+            character in {"\n", "\r", "\t", "|", "\\"}
+            or unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        ):
             pieces.append(f"\\u{code:04x}")
         else:
             pieces.append(character)

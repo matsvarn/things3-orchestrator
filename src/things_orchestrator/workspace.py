@@ -2375,6 +2375,14 @@ class ThingsWorkspace:
             return self._reconcile_v2(operation, writes, before)
         return {"state": operation.state, "instruction": "This immutable operation is unchanged.", "operation_id": operation.operation_id}
 
+    def host_get_operation_v2(self, operation_id: str) -> V2Operation | None:
+        """Return an operation only when it belongs to this workspace account."""
+
+        operation = self._journal.get_v2_operation(operation_id)
+        if operation is None or operation.account_id != self._account_id:
+            return None
+        return operation
+
     def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
         operation = self._journal.get_v2_operation(operation_id)
         if operation is None or operation.account_id != self._account_id:

@@ -48,6 +48,12 @@ All clients share one MCP bearer. There is no per-client identity. The bearer
 cannot approve operations. Enroll and use the separate host-only owner factor
 from a private local or SSH terminal.
 
+The owner factor separates MCP access from CLI approval, not processes that
+share the serving OS identity. An agent or plugin with arbitrary code execution
+as that user can replace the server, public key, or journal. Run untrusted agent
+runtimes under a different OS user from the serving process, or treat their
+host access as owner authority.
+
 `login` and `print-config` print snippet *paths* only. Snippet files
 are mode 0600. To print bodies, including the MCP bearer, use
 `--show-secrets` in a private terminal on the VPS.

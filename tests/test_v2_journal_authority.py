@@ -237,6 +237,10 @@ def test_authorization_binding_covers_action_and_operation_contract() -> None:
 
 def test_host_rendering_escapes_control_ansi_newline_and_delimiter() -> None:
     assert host_escape("\x1b]0;owned\x07\nA|B") == "\\u000aA\\u007cB"
+    assert (
+        host_escape("safe\u202evil\u2066x\u2069\u200b")
+        == "safe\\u202evil\\u2066x\\u2069\\u200b"
+    )
     operation = replace(
         _operation(
             "op_render",
@@ -257,6 +261,30 @@ def test_host_rendering_escapes_control_ansi_newline_and_delimiter() -> None:
     rendered = render_operation(operation)
     assert "\x1b" not in rendered
     assert "Approve\\u000a\\u007c now" in rendered
+
+
+def test_host_operation_lookup_is_scoped_to_workspace_account() -> None:
+    journal = MemoryJournal()
+    owned = _operation(
+        "op_owned",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    foreign = replace(
+        _operation(
+            "op_foreign",
+            request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+        ),
+        account_id="other@example.com",
+    )
+    journal.create_v2(owned, claim_fence=True)
+    journal.create_v2(foreign, claim_fence=True)
+    workspace = ThingsWorkspace(
+        MemoryLibrary(), journal=journal, account_id=owned.account_id
+    )
+
+    assert workspace.host_get_operation_v2(owned.operation_id) == owned
+    assert workspace.host_get_operation_v2(foreign.operation_id) is None
+    assert workspace.host_get_operation_v2("missing") is None
 
 
 def test_server_runtime_does_not_import_owner_authority() -> None:

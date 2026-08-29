@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from getpass import getpass
 from pathlib import Path
@@ -652,25 +654,24 @@ def _migration_report(parser: argparse.ArgumentParser) -> None:
     print(json.dumps(journal.cutover_v1(), sort_keys=True))
 
 
-def _private_tty(parser: argparse.ArgumentParser) -> tuple[TextIO, TextIO]:
+@contextmanager
+def _private_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
     try:
-        reader = open("/dev/tty", encoding="utf-8")  # noqa: SIM115
-        writer = open("/dev/tty", "w", encoding="utf-8")  # noqa: SIM115
+        terminal = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
         parser.error("This host command needs a private local or SSH terminal.")
-    return reader, writer
+    try:
+        yield terminal
+    finally:
+        terminal.close()
 
 
 def _owner_factor(parser: argparse.ArgumentParser) -> None:
     from .owner_authority import enroll_owner_factor
 
-    reader, writer = _private_tty(parser)
-    try:
-        passphrase = getpass("New owner approval passphrase: ", stream=writer)
-        confirm = getpass("Confirm owner approval passphrase: ", stream=writer)
-    finally:
-        reader.close()
-        writer.close()
+    with _private_tty(parser) as terminal:
+        passphrase = getpass("New owner approval passphrase: ", stream=terminal)
+        confirm = getpass("Confirm owner approval passphrase: ", stream=terminal)
     if passphrase != confirm:
         parser.error("owner passphrase confirmation did not match")
     try:
@@ -693,18 +694,14 @@ def _operation_command(
     )
 
     workspace = _workspace(parser)
-    operation = workspace._journal.get_v2_operation(operation_id)  # noqa: SLF001
-    if operation is None or operation.account_id != workspace._account_id:  # noqa: SLF001
+    operation = workspace.host_get_operation_v2(operation_id)
+    if operation is None:
         parser.error("operation not found for this account")
     print(render_operation(operation))
     if action == "operation-show":
         return
-    reader, writer = _private_tty(parser)
-    try:
-        passphrase = getpass("Owner approval passphrase: ", stream=writer)
-    finally:
-        reader.close()
-        writer.close()
+    with _private_tty(parser) as terminal:
+        passphrase = getpass("Owner approval passphrase: ", stream=terminal)
     try:
         requested_action = (
             "approve"
