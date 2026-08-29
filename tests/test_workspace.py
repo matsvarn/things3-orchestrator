@@ -2814,6 +2814,36 @@ def test_thirty_today_items_page_without_loss() -> None:
     assert ids == [f"task:today-{index}" for index in range(30)]
 
 
+def test_today_matches_native_scheduling_and_excludes_waiting_only() -> None:
+    records = [
+        Record(
+            uuid="past",
+            kind="task",
+            title="Past scheduled",
+            start=NOW.date() - timedelta(days=3),
+        ),
+        Record(uuid="today", kind="task", title="Today", start=NOW.date()),
+        Record(
+            uuid="future",
+            kind="task",
+            title="Future",
+            start=NOW.date() + timedelta(days=1),
+        ),
+        Record(
+            uuid="waiting",
+            kind="task",
+            title="Waiting only",
+            tag_uuids=["waiting-tag"],
+        ),
+    ]
+    module = workspace(records)
+    module._library.tags["waiting-tag"] = "Waiting"  # noqa: SLF001
+
+    result = module.read(ReadCall(view="today"))
+
+    assert {item.id for item in result.items} == {"task:past", "task:today"}
+
+
 def test_system_pages_keep_one_scope_revision_and_section_shape() -> None:
     records = [
         Record(

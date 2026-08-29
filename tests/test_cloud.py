@@ -120,6 +120,91 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["repeat"].is_open() is False
 
 
+def test_fold_accepts_task7_and_preserves_its_entity_for_updates(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    fold_events(
+        [
+            {
+                "uuid": "new-task",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "New task",
+                    "tp": 0,
+                    "ss": 0,
+                    "st": 0,
+                    "tr": False,
+                },
+            }
+        ],
+        library=library,
+    )
+
+    item = library.records["new-task"]
+    assert item.inbox is True
+    assert item.entity == "Task7"
+
+    library.apply([Write(action="update", uuid=item.uuid, title="Renamed")])
+
+    assert client.committed[0].kind == "Task7"
+
+
+def test_task_creates_and_legacy_mutations_emit_task7(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["legacy"] = Record(
+        uuid="legacy", kind="task", title="Legacy", entity="Task6"
+    )
+
+    created = library._envelope(  # noqa: SLF001
+        Write(action="create", uuid="new", kind="task", title="New")
+    )
+    heading = library._envelope(  # noqa: SLF001
+        Write(
+            action="create_heading",
+            uuid="heading",
+            kind="task",
+            title="Heading",
+            heading=True,
+        )
+    )
+    updated = library._envelope(  # noqa: SLF001
+        Write(action="update", uuid="legacy", kind="task", title="Updated")
+    )
+    completed = library._envelope(  # noqa: SLF001
+        Write(action="complete", uuid="legacy", kind="task")
+    )
+    trashed = library._envelope(  # noqa: SLF001
+        Write(action="trash", uuid="legacy", kind="task")
+    )
+
+    assert {created.kind, heading.kind, updated.kind, completed.kind, trashed.kind} == {
+        "Task7"
+    }
+
+
+@pytest.mark.parametrize("entity", ["Task8", "Area4", "Tag5", "ChecklistItem4"])
+def test_fold_rejects_unknown_versioned_entities(entity: str) -> None:
+    library = MemoryLibrary()
+    with pytest.raises(CloudError, match="unsupported Things Cloud entity"):
+        fold_events(
+            [
+                {
+                    "uuid": "known",
+                    "e": "Task7",
+                    "t": 0,
+                    "p": {"tt": "Known", "tp": 0, "ss": 0, "st": 0},
+                },
+                {"uuid": "future", "e": entity, "t": 0, "p": {"tt": "Future"}},
+            ],
+            library=library,
+        )
+    assert library.records == {}
+
+
 def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
     rule = {
         "tp": 1,
@@ -257,7 +342,7 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
     assert len(client.committed) == 1
     envelope = client.committed[0]
     assert envelope.action == 1
-    assert envelope.kind == "Task6"
+    assert envelope.kind == "Task7"
     assert envelope.payload["rr"] == changed
     assert set(envelope.payload) == {"rr", "md"}
     assert library.records["template"].recurrence.rule == changed
@@ -600,6 +685,69 @@ def test_malformed_cache_is_discarded_before_fresh_replay(tmp_path: Path) -> Non
 
     assert client.starts == [0]
     assert list(library.records) == ["fresh"]
+
+
+def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "history_id": "hist",
+                "loaded_index": 9,
+                "server_index": 9,
+                "records": [],
+                "tags": {},
+                "tag_parents": {},
+            }
+        )
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.starts: list[int] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.starts.append(start_index)
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "task7",
+                            "e": "Task7",
+                            "t": 0,
+                            "p": {
+                                "tt": "Recovered",
+                                "tp": 0,
+                                "ss": 0,
+                                "st": 0,
+                                "tr": False,
+                            },
+                        }
+                    ],
+                    current=1,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
+
+    client = FakeClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+
+    library.refresh()
+
+    assert client.starts == [0]
+    assert list(library.records) == ["task7"]
 
 
 @pytest.mark.parametrize(
@@ -1970,7 +2118,7 @@ def test_trash_is_a_recoverable_task_patch(tmp_path: Path) -> None:
     library.apply([Write(action="trash", uuid="task")])
 
     assert client.committed[0].action == 1
-    assert client.committed[0].kind == "Task6"
+    assert client.committed[0].kind == "Task7"
     assert client.committed[0].payload["tr"] is True
     assert library.records["task"].trashed is True
 
@@ -2336,7 +2484,7 @@ def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
     assert len(client.committed) == 3
     restore = next(item for item in client.committed if item.uuid == "task")
     assert restore.action == 1
-    assert restore.kind == "Task6"
+    assert restore.kind == "Task7"
     assert restore.payload["tr"] is False
     assert set(restore.payload) == {"tr", "md"}
     tag = next(item for item in client.committed if item.uuid == "old")
@@ -2347,7 +2495,7 @@ def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
     assert set(tag.payload) == {"tt", "pn", "md"}
     heading = next(item for item in client.committed if item.uuid == "heading")
     assert heading.action == 2
-    assert heading.kind == "Task6"
+    assert heading.kind == "Task7"
     assert heading.payload == {}
     assert result.verified == ["Call", "New", "Next"]
     assert library.records["task"].trashed is False
