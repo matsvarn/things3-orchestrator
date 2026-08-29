@@ -8632,6 +8632,18 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
         except (TypeError, ValueError):
             return False
         action = write.action
+        if (write.into_uuid is None) != (write.into_kind is None):
+            return False
+        if write.into_kind not in {None, "project", "area"}:
+            return False
+        if action == "move" and write.kind not in {"task", "project"}:
+            return False
+        if action == "move" and write.kind == "project" and write.into_kind == "project":
+            return False
+        if action in {"rename_area", "delete_area"} and write.kind != "area":
+            return False
+        if action == "create_heading" and write.kind != "task":
+            return False
         if action in {"create", "create_heading", "rename_area", "ensure_tag", "rename_tag"} and not write.title:
             return False
         if action == "update" and not _legacy_has_effective_field(write, (

@@ -634,13 +634,17 @@ def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: P
 @pytest.mark.parametrize("write", [
     {"action": "create"}, {"action": "move"},
     {"action": "move", "into_uuid": "project-a"}, {"action": "tags"},
+    {"action": "move", "into_uuid": "ghost", "into_kind": "task"},
+    {"action": "move", "kind": "project", "into_uuid": "p", "into_kind": "project"},
+    {"action": "rename_area", "kind": "task", "title": "Wrong kind"},
+    {"action": "create_heading", "kind": "project", "title": "Wrong kind"},
     {"action": "checklist"}, {"action": "repeat"}, {"action": "repeat_link"},
 ])
 def test_action_incomplete_legacy_plan_remains_fenced(write: dict[str, object]) -> None:
     journal = MemoryJournal()
     journal.save(IntentRecord(
         intent_id="legacy-incomplete", fingerprint="sha256:legacy", state="pending",
-        plan={"writes": [{**write, "uuid": "a", "kind": "task"}]},
+        plan={"writes": [{"uuid": "a", "kind": "task", **write}]},
     ))
     workspace = ThingsWorkspace(
         MemoryLibrary([Record(uuid="a", kind="task", title="A")]),
