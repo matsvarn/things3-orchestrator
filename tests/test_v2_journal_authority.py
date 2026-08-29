@@ -514,13 +514,27 @@ def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None
         "op_receipt",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    journal.create_v2(operation, claim_fence=True)
-    journal.append_v2_receipts(
-        operation.operation_id,
-        [
-            {"sequence": index, "action": "update", "target_id": f"task:{index}", "desired": {"title": str(index)}, "observed": {"title": str(index)}, "result": "applied"}
+    operation = _with_manifest(
+        operation,
+        writes=[
+            {"action": "create", "uuid": str(index), "kind": "task", "title": str(index)}
             for index in range(1, 4)
         ],
+        touched=[["title"] for _index in range(3)],
+        before=[None, None, None],
+        display_titles=[str(index) for index in range(1, 4)],
+    )
+    journal.create_v2(operation, claim_fence=True)
+    rows = [
+        {"sequence": index, "action": "create", "target_id": f"task:{index}", "desired": {"title": str(index)}, "observed": {"title": str(index)}, "result": "applied"}
+        for index in range(1, 4)
+    ]
+    assert journal.settle_v2(
+        operation.operation_id,
+        expected="pending",
+        state="applied",
+        response={"state": "applied"},
+        rows=rows,
     )
     first = journal.v2_receipt_page(operation.account_id, operation.operation_id, limit=2)
     assert [row["sequence"] for row in first.rows] == [1, 2]

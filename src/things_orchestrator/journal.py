@@ -112,7 +112,6 @@ class Journal(Protocol):
     def create_v2(self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def transition_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict | None = None, authorization: object = None, resolution: Literal["accepted_as_is", "superseded"] | None = None) -> bool: ...
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]: ...
-    def append_v2_receipts(self, operation_id: str, rows: list[JsonDict]) -> str: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
@@ -351,19 +350,6 @@ class MemoryJournal:
                 authorization=cast(OwnerAuthorization, authorization).record,
             )
             return True, []
-
-    def append_v2_receipts(self, operation_id: str, rows: list[JsonDict]) -> str:
-        with self._lock:
-            normalized = _validate_v2_receipts(rows)
-            existing = self._v2_receipts.get(operation_id)
-            if existing is not None and existing != normalized:
-                raise ValueError("receipt rows are append-only and immutable")
-            self._v2_receipts[operation_id] = normalized
-            digest = _v2_receipt_hash(normalized)
-            operation = self._v2_operations.get(operation_id)
-            if operation is not None:
-                self._v2_operations[operation_id] = replace(operation, receipt_hash=digest)
-            return digest
 
     def v2_receipt_page(
         self,
@@ -884,28 +870,6 @@ class SQLiteJournal:
             return changed == 1, []
         finally:
             connection.close()
-
-    def append_v2_receipts(self, operation_id: str, rows: list[JsonDict]) -> str:
-        normalized = _validate_v2_receipts(rows)
-        digest = _v2_receipt_hash(normalized)
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT row_json FROM owner_receipts_v2 WHERE operation_id=? ORDER BY sequence",
-                (operation_id,),
-            ).fetchall()
-            current = [cast(JsonDict, json.loads(row["row_json"])) for row in existing]
-            if current and current != normalized:
-                raise ValueError("receipt rows are append-only and immutable")
-            for row in normalized:
-                connection.execute(
-                    "INSERT OR IGNORE INTO owner_receipts_v2 VALUES (?,?,?)",
-                    (operation_id, int(cast(int, row["sequence"])), _json(row)),
-                )
-            connection.execute(
-                "UPDATE owner_operations_v2 SET receipt_hash=? WHERE operation_id=?",
-                (digest, operation_id),
-            )
-        return digest
 
     def settle_v2(
         self,

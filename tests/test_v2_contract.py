@@ -706,6 +706,63 @@ def test_start_clear_cannot_implicitly_delete_an_omitted_reminder() -> None:
     assert record.start is None and record.remind is None
 
 
+def test_someday_cannot_implicitly_delete_an_omitted_reminder() -> None:
+    record = Record(
+        uuid="a",
+        kind="task",
+        title="A",
+        start=date(2026, 8, 30),
+        remind="09:00",
+    )
+    journal = MemoryJournal()
+    server = _server(record, journal=journal)
+
+    rejected = asyncio.run(
+        server.call_tool(
+            "things_update",
+            {
+                "request_id": REQUEST,
+                "items": [{"id": record.id, "set": {"start": "someday"}}],
+            },
+        )
+    )
+    assert rejected.structured_content["state"] == "rejected"
+    assert (record.start, record.someday, record.remind) == (
+        date(2026, 8, 30),
+        False,
+        "09:00",
+    )
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+
+    explicit = asyncio.run(
+        server.call_tool(
+            "things_update",
+            {
+                "request_id": "0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+                "items": [
+                    {
+                        "id": record.id,
+                        "set": {"start": "someday", "remind_at": None},
+                    }
+                ],
+            },
+        )
+    )
+    assert explicit.structured_content["state"] == "applied"
+    assert (record.start, record.someday, record.remind) == (None, True, None)
+    receipt = asyncio.run(
+        server.call_tool(
+            "things_receipt",
+            {"operation_id": explicit.structured_content["operation_id"]},
+        )
+    )
+    row = receipt.structured_content["rows"][0]
+    assert row["desired"]["start"] == "someday"
+    assert row["desired"]["remind_at"] is None
+    assert row["observed"]["start"] == "someday"
+    assert row["observed"]["remind_at"] is None
+
+
 def test_start_change_preserves_an_omitted_existing_reminder() -> None:
     record = Record(
         uuid="a",

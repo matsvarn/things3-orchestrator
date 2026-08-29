@@ -2385,7 +2385,7 @@ class ThingsWorkspace:
                     remind_set = "remind_at" in fields
                     if (
                         start_set
-                        and fields.get("start") is None
+                        and (fields.get("start") is None or someday)
                         and target.remind is not None
                         and not remind_set
                     ):
@@ -2393,7 +2393,7 @@ class ThingsWorkspace:
                             "state": "rejected",
                             "code": "validation_error",
                             "next_action": "correct_request",
-                            "instruction": "Clearing a start with an existing reminder also requires remind_at=null.",
+                            "instruction": "Clearing a start or moving it to Someday with an existing reminder also requires remind_at=null.",
                         }
                     reminder_date, reminder = (
                         self._remind_input(
