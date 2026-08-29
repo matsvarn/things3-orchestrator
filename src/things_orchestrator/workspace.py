@@ -2280,7 +2280,7 @@ class ThingsWorkspace:
                         area_uuid = destination.uuid
                 uuid = new_uuid()
                 start_value = cast(str | None, capture_item.get("start"))
-                start, tonight, someday = self._start(start_value)
+                start, someday, tonight = self._start(start_value)
                 write = Write(
                     action="create", uuid=uuid, kind=kind,
                     title=cast(str, capture_item["title"]),
@@ -2381,7 +2381,7 @@ class ThingsWorkspace:
                             "instruction": "The bounded v2 update cannot replace a rich-text note.",
                         }
                     start_set = "start" in fields
-                    start, tonight, someday = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
+                    start, someday, tonight = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
                     remind_set = "remind_at" in fields
                     if (
                         start_set
@@ -2794,12 +2794,54 @@ class ThingsWorkspace:
             result = outcome
             if outcome == "partial":
                 result = "applied" if self._writes_match([write]) else "not_applied"
-            desired_fields = set(touched[index - 1]) | {"action", "uuid", "kind"}
-            desired = {key: value for key, value in _write_json(write).items() if key in desired_fields}
-            if "remind_at" in touched[index - 1]:
-                desired["remind_at"] = None if write.clear_remind else self._reminder_from_write(write)
+            desired = self._v2_desired(write, touched[index - 1])
             rows.append({"sequence": index, "action": write.action, "target_id": _write_public_id(write), "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
         return rows
+
+    def _v2_desired(self, write: Write, fields: Sequence[str]) -> JsonDict:
+        selected = set(fields)
+        desired: JsonDict = {
+            "action": write.action,
+            "uuid": write.uuid,
+            "kind": "heading" if write.heading else write.kind,
+        }
+        if "title" in selected:
+            desired["title"] = write.title
+        if "notes" in selected:
+            desired["notes"] = write.notes
+        if "status" in selected:
+            desired["status"] = _public_status(write.status or "open")
+        if "trashed" in selected:
+            desired["trashed"] = write.action == "trash"
+        if "start" in selected:
+            desired["start"] = self._v2_write_start(write)
+        if "deadline" in selected:
+            desired["deadline"] = (
+                None
+                if write.clear_deadline or write.deadline is None
+                else write.deadline.isoformat()
+            )
+        if "remind_at" in selected:
+            desired["remind_at"] = (
+                None if write.clear_remind else self._reminder_from_write(write)
+            )
+        if "into" in selected:
+            desired["into_id"] = (
+                f"{write.into_kind}:{write.into_uuid}"
+                if write.into_kind is not None and write.into_uuid is not None
+                else None
+            )
+        return desired
+
+    @staticmethod
+    def _v2_write_start(write: Write) -> str | None:
+        if write.clear_start:
+            return None
+        if write.tonight:
+            return "evening"
+        if write.someday:
+            return "someday"
+        return write.start.isoformat() if write.start is not None else None
 
     def _reminder_from_write(self, write: Write) -> str | None:
         if write.remind is None or write.start is None:
@@ -2818,7 +2860,15 @@ class ThingsWorkspace:
         if "trashed" in selected:
             values["trashed"] = item.trashed
         if "start" in selected:
-            values["start"] = item.start.isoformat() if item.start else None
+            values["start"] = (
+                "evening"
+                if item.tonight
+                else "someday"
+                if item.someday
+                else item.start.isoformat()
+                if item.start
+                else None
+            )
         if "deadline" in selected:
             values["deadline"] = item.deadline.isoformat() if item.deadline else None
         if "remind_at" in selected:
@@ -3974,10 +4024,12 @@ class ThingsWorkspace:
             direct_tags=direct_tags,
             inherited_tags=inherited_tags,
             direct_tag_ids=compact_direct_tag_ids,
-            start=item.start.isoformat()
-            if item.start
+            start="evening"
+            if item.tonight
             else "someday"
             if item.someday
+            else item.start.isoformat()
+            if item.start
             else None,
             deadline=item.deadline.isoformat() if item.deadline else None,
             remind_at=self._reminder(item),

@@ -747,6 +747,120 @@ def test_reminder_only_update_preserves_tonight() -> None:
     assert record.tonight is True
 
 
+@pytest.mark.parametrize(
+    ("mode", "scheduled", "tonight", "someday"),
+    [
+        ("evening", NOW.date(), True, False),
+        ("someday", None, False, True),
+    ],
+)
+def test_capture_and_update_preserve_public_schedule_modes(
+    mode: str,
+    scheduled: date | None,
+    tonight: bool,
+    someday: bool,
+) -> None:
+    existing = Record(uuid="existing", kind="task", title="Existing")
+    library = MemoryLibrary([existing])
+    server = ThingsMCPServer(
+        ThingsV2(
+            ThingsWorkspace(
+                library,
+                journal=MemoryJournal(),
+                clock=lambda: NOW,
+                account_id="owner@example.com",
+            )
+        )
+    )
+
+    captured = asyncio.run(
+        server.call_tool(
+            "things_capture",
+            {
+                "request_id": REQUEST,
+                "items": [{"kind": "task", "title": "Captured", "start": mode}],
+            },
+        )
+    )
+    captured_record = next(
+        record for record in library.records.values() if record.title == "Captured"
+    )
+    assert (
+        captured_record.start,
+        captured_record.tonight,
+        captured_record.someday,
+    ) == (scheduled, tonight, someday)
+    assert captured.structured_content["items"][0]["start"] == mode
+    captured_receipt = asyncio.run(
+        server.call_tool(
+            "things_receipt",
+            {"operation_id": captured.structured_content["operation_id"]},
+        )
+    )
+    assert captured_receipt.structured_content["rows"][0]["desired"]["start"] == mode
+
+    updated = asyncio.run(
+        server.call_tool(
+            "things_update",
+            {
+                "request_id": "0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+                "items": [{"id": existing.id, "set": {"start": mode}}],
+            },
+        )
+    )
+    assert (existing.start, existing.tonight, existing.someday) == (
+        scheduled,
+        tonight,
+        someday,
+    )
+    assert updated.structured_content["items"][0]["start"] == mode
+    updated_receipt = asyncio.run(
+        server.call_tool(
+            "things_receipt",
+            {"operation_id": updated.structured_content["operation_id"]},
+        )
+    )
+    assert updated_receipt.structured_content["rows"][0]["desired"]["start"] == mode
+
+
+@pytest.mark.parametrize(
+    ("destination", "container"),
+    [
+        ("project:p", Record(uuid="p", kind="project", title="Project")),
+        ("area:a", Record(uuid="a", kind="area", title="Area")),
+    ],
+)
+def test_capture_receipt_uses_public_destination_id(
+    destination: str, container: Record
+) -> None:
+    server = _server(container)
+    captured = asyncio.run(
+        server.call_tool(
+            "things_capture",
+            {
+                "request_id": REQUEST,
+                "items": [
+                    {
+                        "kind": "task",
+                        "title": "Placed",
+                        "into_id": destination,
+                    }
+                ],
+            },
+        )
+    )
+    receipt = asyncio.run(
+        server.call_tool(
+            "things_receipt",
+            {"operation_id": captured.structured_content["operation_id"]},
+        )
+    )
+
+    desired = receipt.structured_content["rows"][0]["desired"]
+    assert desired["into_id"] == destination
+    assert "into_uuid" not in desired and "into_kind" not in desired
+
+
 def test_get_chunk_outage_is_not_reported_as_missing_ids() -> None:
     class SecondRefreshFails(MemoryLibrary):
         refreshes = 0
