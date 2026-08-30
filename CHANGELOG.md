@@ -2,6 +2,75 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-08-30
+
+### Added
+
+- The eight-tool v2 interface can create fixed or after-completion repeats for
+  Tasks and Projects. Semantic rules cover day, week, month, and year
+  intervals, selected dates, end dates, pause, and resume.
+- `things_update` can edit or stop an RT1 repeat and can run Things' "Create
+  Next Copy" action. Public recurrence facts now include the engine, pause
+  state, generated-copy count, generation horizon, last completion date, and
+  next date. Stop is owner-approved, keeps generated copies, and turns the
+  hidden template into a fresh ordinary item on its next date. Stopped Projects
+  preserve their complete graph with fresh IDs.
+- Repeating Projects preserve their complete native graph. Generated copies
+  remap headings, heading assignments, Tasks, and checklist rows to fresh IDs.
+- `things_view` exposes the native Repeating list. RT2 rules remain readable
+  but reject rule, schedule, and lifecycle mutations until native write deltas
+  are proven.
+
+### Changed
+
+- Completing a Project now completes its open action descendants and the
+  Project in one frozen operation, excluding structural headings and hidden
+  repeat templates. Completing an after-completion copy advances the template
+  once.
+- Cloud writes use the native sparse bookkeeping payloads for pause, resume,
+  completion progress, and "Create Next Copy". The cache stores generated-copy
+  counts and native leavable flags.
+
+### Fixed
+
+- Completing a Project skips structural headings and hidden repeat templates,
+  while still completing its open generated and ordinary actions.
+- Today ordering now covers the same overdue-start and overdue-deadline items
+  that the Today read exposes, and same-commit edits cannot move an ordering
+  anchor out of the final Today list.
+- Repeat end dates cannot precede the first occurrence, and Create Next/Stop
+  fail closed when native bookkeeping does not include the next date. Missing,
+  non-finite, and out-of-range native repeat anchors return a fresh-read action
+  instead of escaping as timestamp errors. Create Next also waits for native
+  date advancement instead of materializing the same occurrence twice, and a
+  successful count advance now reconciles from its post-write state instead of
+  being reported as partial. Malformed native date, completion-time, and
+  reminder fields now fold as missing state, and malformed generated counts
+  stay explicitly unavailable, instead of disabling Cloud reads and writes or
+  authorizing a fabricated Create Next. Exhausted counts also require a fresh
+  read. Malformed native pause state remains explicitly unavailable. Corrupt
+  generated-copy provenance remains untrusted when native `lt` is malformed,
+  preventing duplicate same-date copies. Corrupt cached recurrence dates,
+  counts, pause state, provenance, and trust markers force a history replay
+  instead of being coerced into writable state. Corrupt rule anchors require a
+  fresh read for end-date and unit edits.
+- Repeating Project templates and future copies reset completed Tasks and
+  checklist rows to open, so finished work does not leak into a new occurrence.
+- Repeat Stop removes the hidden template's checklist records before deleting
+  its Task or Project graph, preventing orphaned Cloud rows.
+- The retained v1 recurrence inspection and Stop paths now match v2 for
+  Projects and next-date materialization.
+- Cloud history now folds `Task7` records and emits `Task7` for current
+  task-family creates and mutations. Cache version 10 replays histories that
+  previously advanced past ignored Task7 events and reconstructs the original
+  date of manually generated repeat copies.
+- Today now matches the native Things list. Open items scheduled on or before
+  today remain visible, and Waiting-only items are no longer injected.
+- Future numbered Task, Area, Tag, and ChecklistItem entities fail before a
+  history page can partially change the in-memory snapshot.
+- The read-only live probe can compare every paginated Today and Inbox ID with
+  native Things without printing task content.
+
 ## 0.6.0 — 2026-08-29
 
 The public MCP interface is now the bounded owner-safe v2 contract.

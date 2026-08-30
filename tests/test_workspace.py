@@ -549,6 +549,38 @@ def test_recurrence_read_verifies_template_and_generated_copy_relationship() -> 
     assert copy_result.items[0].recurrence.template_id == template.id
 
 
+def test_recurrence_read_verifies_repeating_project_relationship() -> None:
+    template = Record(
+        uuid="inspect-project-template",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+    )
+    copy = Record(
+        uuid="inspect-project-copy",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, copy])
+
+    template_result = module.read(ReadCall(purpose="recurrence", id=template.id))
+    copy_result = module.read(ReadCall(purpose="recurrence", id=copy.id))
+
+    assert template_result.status == copy_result.status == "ok"
+    assert copy.id in template_result.items[0].recurrence.linked_item_ids
+    assert copy_result.items[0].recurrence.template_id == template.id
+
+
 def test_recurrence_read_rejects_dangling_generated_copy() -> None:
     copy = Record(
         uuid="dangling-copy",
@@ -2814,6 +2846,36 @@ def test_thirty_today_items_page_without_loss() -> None:
     assert ids == [f"task:today-{index}" for index in range(30)]
 
 
+def test_today_matches_native_scheduling_and_excludes_waiting_only() -> None:
+    records = [
+        Record(
+            uuid="past",
+            kind="task",
+            title="Past scheduled",
+            start=NOW.date() - timedelta(days=3),
+        ),
+        Record(uuid="today", kind="task", title="Today", start=NOW.date()),
+        Record(
+            uuid="future",
+            kind="task",
+            title="Future",
+            start=NOW.date() + timedelta(days=1),
+        ),
+        Record(
+            uuid="waiting",
+            kind="task",
+            title="Waiting only",
+            tag_uuids=["waiting-tag"],
+        ),
+    ]
+    module = workspace(records)
+    module._library.tags["waiting-tag"] = "Waiting"
+
+    result = module.read(ReadCall(view="today"))
+
+    assert {item.id for item in result.items} == {"task:past", "task:today"}
+
+
 def test_system_pages_keep_one_scope_revision_and_section_shape() -> None:
     records = [
         Record(
@@ -2875,6 +2937,146 @@ def test_today_after_uses_a_local_anchor_without_raw_indexes() -> None:
         module._library.records.values(), key=lambda item: item.today_index
     )
     assert [item.title for item in ordered] == ["First", "Second"]
+
+
+@pytest.mark.parametrize(
+    "overdue_schedule",
+    [
+        {"start": NOW.date() - timedelta(days=1)},
+        {"deadline": NOW.date() - timedelta(days=1)},
+    ],
+    ids=["overdue_start", "overdue_deadline"],
+)
+def test_today_after_can_order_after_every_displayed_overdue_item(
+    overdue_schedule: dict[str, object],
+) -> None:
+    overdue = Record(
+        uuid="overdue",
+        kind="task",
+        title="Overdue",
+        today_index=0,
+        **overdue_schedule,
+    )
+    module = workspace(
+        [
+            overdue,
+            Record(
+                uuid="later",
+                kind="task",
+                title="Later",
+                start=NOW.date(),
+                today_index=2048,
+            ),
+        ]
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-after-{next(iter(overdue_schedule))}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": overdue.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    ordered = sorted(
+        module._library.today(today=NOW.date()),  # noqa: SLF001
+        key=lambda item: item.today_index,
+    )
+    assert [item.title for item in ordered] == ["Overdue", "Between", "Later"]
+    assert detail(module, overdue.id).today_order is not None
+
+
+@pytest.mark.parametrize(
+    "schedule_field",
+    ["start", "deadline"],
+)
+def test_today_after_rejects_an_anchor_moved_off_today_in_the_same_commit(
+    schedule_field: str,
+) -> None:
+    anchor = Record(
+        uuid="anchor",
+        kind="task",
+        title="Anchor",
+        today_index=0,
+        **{schedule_field: NOW.date() - timedelta(days=1)},
+    )
+    module = workspace([anchor])
+    revision = detail(module, anchor.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-anchor-moved-{schedule_field}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": anchor.id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": anchor.id,
+                        "if_revision": revision,
+                        schedule_field: (NOW.date() + timedelta(days=1)).isoformat(),
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert set(module._library.records) == {anchor.uuid}  # noqa: SLF001
+    assert getattr(anchor, schedule_field) == NOW.date() - timedelta(days=1)
+
+
+@pytest.mark.parametrize("destination", ["inbox", "anytime"])
+def test_today_after_rejects_an_anchor_unscheduled_in_the_same_commit(
+    destination: str,
+) -> None:
+    anchor = Record(
+        uuid="anchor",
+        kind="task",
+        title="Anchor",
+        start=NOW.date(),
+        today_index=0,
+    )
+    module = workspace([anchor])
+    revision = detail(module, anchor.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-anchor-moved-{destination}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": anchor.id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": anchor.id,
+                        "if_revision": revision,
+                        "into": destination,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert set(module._library.records) == {anchor.uuid}  # noqa: SLF001
+    assert anchor.start == NOW.date()
 
 
 def test_after_rebalances_dense_native_indexes() -> None:
@@ -5321,8 +5523,10 @@ def test_repeat_mode_unit_and_interval_change_in_one_approved_plan() -> None:
         "tp": 1,
         "fu": 256,
         "fa": 2,
-        "of": [],
-        "sr": 1_775_232_000,
+            "of": [],
+            "ed": 64_092_211_200,
+            "rc": 0,
+            "sr": 1_775_232_000,
         "ts": 0,
         "rrv": 99,
     }
@@ -5585,6 +5789,7 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert template.recurrence.rule["of"] == [{"wd": 1}, {"wd": 5}]
     assert [row.title for row in template.checklists] == ["Open dashboard"]
     assert [row.title for row in instance.checklists] == ["Open dashboard"]
+    template.recurrence_next_on = NOW.date() + timedelta(days=7)
 
     current = detail(module, template.id)
     stop_plan = module.commit(
@@ -5607,6 +5812,14 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert stopped.status == "applied"
     assert template.uuid not in module._library.records  # noqa: SLF001
     assert instance.recurrence.role == "none"
+    ordinary = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != instance.uuid and item.title == template.title
+    )
+    assert ordinary.recurrence == RecurrenceState()
+    assert [row.title for row in ordinary.checklists] == ["Open dashboard"]
+    assert ordinary.checklists[0].status == "open"
 
 
 def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
@@ -5619,6 +5832,7 @@ def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
             repeat_type="fixed",
             rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
     )
     current = Record(
         uuid="report-current",
@@ -5658,6 +5872,39 @@ def test_stop_repeat_on_current_copy_deletes_the_template() -> None:
     assert stopped.status == "applied"
     assert template.uuid not in module._library.records  # noqa: SLF001
     assert current.recurrence.role == "none"
+    ordinary = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != current.uuid and item.title == template.title
+    ]
+    assert len(ordinary) == 1
+    assert ordinary[0].recurrence == RecurrenceState()
+
+
+def test_v1_stop_repeat_requires_the_native_next_date() -> None:
+    module, template, current = _repeating_pair()
+    template.recurrence_next_on = None
+    revision = detail(module, current.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-report-repeat-without-next-date",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "stale"
+    assert result.next == "read"
+    assert template.uuid in module._library.records  # noqa: SLF001
+    assert current.recurrence.role == "instance"
 
 
 def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
@@ -5690,6 +5937,219 @@ def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
     assert stopped.status == "applied"
     assert template.uuid not in module._library.records  # noqa: SLF001
     assert current.recurrence.role == "none"
+    ordinary = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != current.uuid and item.title == template.title
+    ]
+    assert len(ordinary) == 1
+
+
+def test_v1_stop_repeating_project_materializes_open_graph_and_deletes_template() -> (
+    None
+):
+    template = Record(
+        uuid="v1-project-template",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
+    )
+    heading = Record(
+        uuid="v1-template-heading",
+        kind="task",
+        title="Ship",
+        heading=True,
+        parent_uuid=template.uuid,
+    )
+    task = Record(
+        uuid="v1-template-task",
+        kind="task",
+        title="Deploy",
+        status="done",
+        heading_uuid=heading.uuid,
+        checklists=[
+            ChecklistLine("v1-template-check", "Smoke test", status="done")
+        ],
+    )
+    current = Record(
+        uuid="v1-project-current",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, heading, task, current])
+    revision = detail(module, current.id).revision
+
+    planned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-v1-project-repeat",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+    assert planned.status == "needs_approval"
+    stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
+
+    assert stopped.status == "applied"
+    assert current.recurrence == RecurrenceState()
+    assert not {template.uuid, heading.uuid, task.uuid}.intersection(
+        module._library.records  # noqa: SLF001
+    )
+    ordinary = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "project" and item.uuid != current.uuid
+    )
+    ordinary_heading = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.heading and item.parent_uuid == ordinary.uuid
+    )
+    ordinary_task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.heading_uuid == ordinary_heading.uuid
+    )
+    assert ordinary.start == NOW.date() + timedelta(days=7)
+    assert ordinary_task.status == "open"
+    assert ordinary_task.checklists[0].status == "open"
+
+
+@pytest.mark.parametrize(
+    ("task_count", "expected_status", "expected_write_count"),
+    [(29, "needs_approval", 120), (30, "rejected", None)],
+)
+def test_v1_project_stop_enforces_expanded_write_limit(
+    task_count: int,
+    expected_status: str,
+    expected_write_count: int | None,
+) -> None:
+    template = Record(
+        uuid=f"v1-limit-template-{task_count}",
+        kind="project",
+        title="Large repeat",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
+    )
+    currents = [
+        Record(
+            uuid=f"v1-limit-current-{task_count}-{index}",
+            kind="project",
+            title="Large repeat",
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="fixed",
+                template_uuid=template.uuid,
+                links=(template.uuid,),
+            ),
+        )
+        for index in range(2)
+    ]
+    children = [
+        Record(
+            uuid=f"v1-limit-task-{task_count}-{index}",
+            kind="task",
+            title=f"Step {index}",
+            parent_uuid=template.uuid,
+            checklists=[
+                ChecklistLine(
+                    f"v1-limit-check-{task_count}-{index}",
+                    f"Check {index}",
+                )
+            ],
+        )
+        for index in range(task_count)
+    ]
+    module = workspace([template, *currents, *children])
+    revision = detail(module, currents[0].id).revision
+    intent_id = f"stop-v1-limit-{task_count}"
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": intent_id,
+                "change": [
+                    {
+                        "id": currents[0].id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == expected_status
+    stored = module._journal.get(intent_id)  # noqa: SLF001
+    if expected_write_count is None:
+        assert stored is None
+        assert set(module._library.records) == {  # noqa: SLF001
+            template.uuid,
+            *(item.uuid for item in currents),
+            *(item.uuid for item in children),
+        }
+    else:
+        assert stored is not None
+        assert len(stored.plan["writes"]) == expected_write_count
+
+
+def test_v1_project_repeat_rule_edit_keeps_project_entity_kind() -> None:
+    template = Record(
+        uuid="v1-rule-project",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+    )
+    module = workspace([template])
+    revision = detail(module, template.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "edit-v1-project-repeat",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": revision,
+                        "repeat": {"interval": 2},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    stored = module._journal.get("edit-v1-project-repeat")  # noqa: SLF001
+    assert stored is not None
+    repeat_write = next(
+        write for write in stored.plan["writes"] if write["action"] == "repeat"
+    )
+    assert repeat_write["kind"] == "project"
 
 
 def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> None:
@@ -5755,9 +6215,10 @@ def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> 
     assert task.recurrence.template_uuid == template.uuid
     assert template.title == task.title
     assert template.notes == task.notes
-    assert template.start == task.start
+    assert template.start is None
     assert template.deadline == task.deadline
-    assert template.remind == task.remind
+    assert template.remind is None
+    assert template.someday is True
     assert template.parent_uuid == task.parent_uuid
     assert template.heading_uuid == task.heading_uuid
     assert template.tag_uuids == task.tag_uuids
@@ -5860,11 +6321,15 @@ def test_repeat_conversion_projects_one_desired_state_to_copy_and_template() -> 
         assert record.title == "New routine"
         assert record.parent_uuid == new_project.uuid
         assert record.heading_uuid == heading.uuid
-        assert record.start == NOW.date()
         assert record.deadline == NOW.date() + timedelta(days=3)
-        assert record.remind == "09:30"
         assert record.sort_index > list_anchor.sort_index
-        assert record.today_index > today_anchor.today_index
+    assert task.start == NOW.date()
+    assert task.remind == "09:30"
+    assert task.today_index > today_anchor.today_index
+    assert template.start is None
+    assert template.remind is None
+    assert template.someday is True
+    assert template.today_index == 0
     assert [(row.uuid, row.title, row.status) for row in task.checklists] == [
         ("row-c", "Keep", "done"),
         (task.checklists[1].uuid, "Added", "open"),
@@ -5922,11 +6387,14 @@ def test_repeat_conversion_projects_schedule_clearing_semantics(
         for item in module._library.records.values()  # noqa: SLF001
         if item.recurrence.role == "template"
     )
-    for record in (task, template):
-        assert record.start is None
-        assert record.remind is None
-        assert record.inbox is expected_inbox
-        assert record.someday is expected_someday
+    assert task.start is None
+    assert task.remind is None
+    assert task.inbox is expected_inbox
+    assert task.someday is expected_someday
+    assert template.start is None
+    assert template.remind is None
+    assert template.inbox is False
+    assert template.someday is True
 
 
 @pytest.mark.parametrize("replacement", [False, True])

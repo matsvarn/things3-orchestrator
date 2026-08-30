@@ -20,6 +20,7 @@ from things_orchestrator.cloud import (
 from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import (
+    MAX_RECURRENCE_INSTANCE_COUNT,
     ChecklistLine,
     MemoryLibrary,
     Record,
@@ -28,8 +29,23 @@ from things_orchestrator.library import (
     from_ts,
     new_uuid,
 )
+from things_orchestrator.owner_authority import (
+    enroll_owner_factor,
+    verified_authorization,
+)
 from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
+
+_MALFORMED_NATIVE_NUMBERS: tuple[object, ...] = (
+    "invalid",
+    True,
+    float("inf"),
+    float("-inf"),
+    float("nan"),
+    10**100,
+    -(10**100),
+)
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
@@ -120,6 +136,467 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["repeat"].is_open() is False
 
 
+@pytest.mark.parametrize(
+    "field", ["sp", "sr", "dd", "ato", "icsd", "icc", "acrd", "tir"]
+)
+@pytest.mark.parametrize(
+    "value", _MALFORMED_NATIVE_NUMBERS
+)
+def test_malformed_native_numeric_fields_fold_as_missing(
+    field: str, value: object
+) -> None:
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    field: value,
+                },
+            }
+        ],
+        library=library,
+    )
+
+    template = library.records["template"]
+    assert template.completed_at is None
+    assert template.start is None
+    assert template.deadline is None
+    assert template.remind is None
+    assert template.recurrence_created_through is None
+    assert template.recurrence_instance_count == 0
+    assert template.recurrence_instance_count_known is False
+    assert template.recurrence_completed_on is None
+    assert template.recurrence_next_on is None
+
+
+@pytest.mark.parametrize("value", _MALFORMED_NATIVE_NUMBERS)
+def test_malformed_native_generated_count_preserves_the_last_valid_count(
+    value: object,
+) -> None:
+    library = MemoryLibrary(
+        [
+            Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+                ),
+                recurrence_instance_count=3,
+            )
+        ]
+    )
+
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"icc": value},
+            }
+        ],
+        library=library,
+    )
+
+    assert library.records["template"].recurrence_instance_count == 3
+    assert library.records["template"].recurrence_instance_count_known is True
+
+
+@pytest.mark.parametrize("paused", ["false", 0, 1, None, [], {}])
+def test_malformed_native_paused_state_is_unavailable_and_not_writable(
+    paused: object,
+) -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "icp": paused,
+                },
+            }
+        ],
+        library=library,
+    )
+    template = library.records["template"]
+    assert template.recurrence.paused is False
+    assert template.recurrence_paused_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2992"
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    )
+    recurrence = interface.dispatch(
+        "things_get", {"ids": ["task:template"]}
+    ).items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.paused is None
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {"id": "task:template", "set": {"repeat": {"paused": True}}}
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
+def test_malformed_sparse_native_paused_state_preserves_last_valid_state() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "icp": True,
+                },
+            },
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"icp": "false"},
+            },
+        ],
+        library=library,
+    )
+
+    assert library.records["template"].recurrence.paused is True
+    assert library.records["template"].recurrence_paused_known is True
+
+
+@pytest.mark.parametrize("leavable", ["false", 0, 1, None, [], {}])
+def test_malformed_native_generated_origin_blocks_duplicate_create_next(
+    leavable: object,
+) -> None:
+    occurrence = date(2026, 9, 6)
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(occurrence),
+                    "icc": 1,
+                    "icp": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(occurrence),
+                    "rt": ["template"],
+                    "lt": leavable,
+                },
+            },
+        ],
+        library=library,
+    )
+    existing = library.records["existing"]
+    assert existing.recurrence_generated_on is None
+    assert existing.recurrence_generated_on_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2993"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:existing",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "existing"}
+    assert library.records["template"].recurrence_instance_count == 1
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
+def test_sparse_leavable_activation_invalidates_missing_generated_origin() -> None:
+    occurrence = date(2026, 9, 6)
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(occurrence),
+                    "icc": 1,
+                    "icp": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(occurrence),
+                    "rt": ["template"],
+                    "lt": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 1,
+                "p": {"lt": True},
+            },
+        ],
+        library=library,
+    )
+    existing = library.records["existing"]
+    assert existing.leavable is True
+    assert existing.recurrence_generated_on is None
+    assert existing.recurrence_generated_on_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2994"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:existing",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "existing"}
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
+@pytest.mark.parametrize(
+    "count", ["invalid", MAX_RECURRENCE_INSTANCE_COUNT], ids=["unknown", "exhausted"]
+)
+def test_create_next_rejects_unavailable_or_exhausted_native_counts(
+    count: object,
+) -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(date(2026, 9, 6)),
+                    "icc": count,
+                },
+            },
+            {
+                "uuid": "current",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(date(2026, 8, 30)),
+                    "rt": ["template"],
+                    "lt": True,
+                },
+            },
+        ],
+        library=library,
+    )
+    journal = MemoryJournal()
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            account_id="owner@example.com",
+        )
+    )
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2990"
+
+    recurrence = interface.dispatch(
+        "things_get", {"ids": ["task:current"]}
+    ).items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.generated_count == (
+        MAX_RECURRENCE_INSTANCE_COUNT
+        if count == MAX_RECURRENCE_INSTANCE_COUNT
+        else None
+    )
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:current",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "current"}
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
+def test_fold_accepts_task7_and_preserves_its_entity_for_updates(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    fold_events(
+        [
+            {
+                "uuid": "new-task",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "New task",
+                    "tp": 0,
+                    "ss": 0,
+                    "st": 0,
+                    "tr": False,
+                },
+            }
+        ],
+        library=library,
+    )
+
+    item = library.records["new-task"]
+    assert item.inbox is True
+    assert item.entity == "Task7"
+
+    library.apply([Write(action="update", uuid=item.uuid, title="Renamed")])
+
+    assert client.committed[0].kind == "Task7"
+
+
+def test_task_creates_and_legacy_mutations_emit_task7(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["legacy"] = Record(
+        uuid="legacy", kind="task", title="Legacy", entity="Task6"
+    )
+
+    created = library._envelope(
+        Write(action="create", uuid="new", kind="task", title="New")
+    )
+    heading = library._envelope(
+        Write(
+            action="create_heading",
+            uuid="heading",
+            kind="task",
+            title="Heading",
+            heading=True,
+        )
+    )
+    updated = library._envelope(
+        Write(action="update", uuid="legacy", kind="task", title="Updated")
+    )
+    completed = library._envelope(
+        Write(action="complete", uuid="legacy", kind="task")
+    )
+    trashed = library._envelope(
+        Write(action="trash", uuid="legacy", kind="task")
+    )
+
+    assert {created.kind, heading.kind, updated.kind, completed.kind, trashed.kind} == {
+        "Task7"
+    }
+
+
+@pytest.mark.parametrize("entity", ["Task8", "Area4", "Tag5", "ChecklistItem4"])
+def test_fold_rejects_unknown_versioned_entities(entity: str) -> None:
+    library = MemoryLibrary()
+    with pytest.raises(CloudError, match="unsupported Things Cloud entity"):
+        fold_events(
+            [
+                {
+                    "uuid": "known",
+                    "e": "Task7",
+                    "t": 0,
+                    "p": {"tt": "Known", "tp": 0, "ss": 0, "st": 0},
+                },
+                {"uuid": "future", "e": entity, "t": 0, "p": {"tt": "Future"}},
+            ],
+            library=library,
+        )
+    assert library.records == {}
+
+
 def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
     rule = {
         "tp": 1,
@@ -172,6 +649,108 @@ def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
     assert library.records["template"].recurrence.role == "none"
 
 
+def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -> None:
+    repeater = {
+        "v": 1,
+        "t": 0,
+        "pfu": 1,
+        "pfa": 2,
+        "po": [{"wd": 1}, {"wd": 4}],
+        "future": {"preserve": True},
+    }
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "rt2",
+                "e": "Task7",
+                "t": 0,
+                "p": {"tt": "Future repeater", "tp": 0, "rp": repeater},
+            }
+        ],
+        library=library,
+    )
+
+    assert library.records["rt2"].repeater == repeater
+    assert library.records["rt2"].repeater is not repeater
+    assert library.records["rt2"].recurrence_instance_count_known is False
+    assert library.records["rt2"].recurrence_paused_known is False
+
+    cache = tmp_path / "state.json"
+    cloud = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
+    cloud.records = library.records
+    cloud.client.history_id = "history"
+    cloud._save_cache()
+
+    restored = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
+    assert restored._restore_cache("history") is True
+    assert restored.records["rt2"].repeater == repeater
+    assert restored.records["rt2"].recurrence_instance_count_known is False
+    assert restored.records["rt2"].recurrence_paused_known is False
+
+
+def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
+        ),
+        entity="Task7",
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat",
+                uuid="template",
+                recurrence_paused=True,
+            )
+        ]
+    )
+
+    assert set(client.committed[0].payload) == {"md", "icp"}
+    assert client.committed[0].payload["icp"] is True
+    assert library.records["template"].recurrence.paused is True
+
+
+def test_task7_sparse_rule_clear_keeps_the_record(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
+        ),
+        entity="Task7",
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat",
+                uuid="template",
+                clear_recurrence_rule=True,
+            )
+        ]
+    )
+
+    assert client.committed[0].action == 1
+    assert client.committed[0].payload["rr"] is None
+    assert "template" in library.records
+    assert library.records["template"].recurrence == RecurrenceState()
+
+
 def test_fold_sparse_placement_clears_incompatible_home() -> None:
     library = MemoryLibrary()
     fold_events(
@@ -211,6 +790,42 @@ def test_fold_sparse_placement_clears_incompatible_home() -> None:
         library=library,
     )
     assert task.inbox is True
+
+
+def test_fold_preserves_a_generated_occurrence_date_after_rescheduling() -> None:
+    original = date(2026, 9, 6)
+    rescheduled = date(2026, 9, 20)
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "generated",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Generated",
+                    "tp": 0,
+                    "sr": day_ts(original),
+                    "rt": ["template"],
+                    "lt": True,
+                },
+            },
+            {
+                "uuid": "generated",
+                "e": "Task7",
+                "t": 1,
+                "p": {"sr": day_ts(rescheduled), "lt": []},
+            },
+        ],
+        library=library,
+    )
+
+    generated = library.records["generated"]
+    assert generated.start == rescheduled
+    assert generated.leavable is True
+    assert generated.recurrence_generated_on == original
+    assert generated.recurrence_generated_on_known is True
 
 
 def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
@@ -257,7 +872,7 @@ def test_repeat_interval_preserves_opaque_rule_and_emits_sparse_patch(
     assert len(client.committed) == 1
     envelope = client.committed[0]
     assert envelope.action == 1
-    assert envelope.kind == "Task6"
+    assert envelope.kind == "Task7"
     assert envelope.payload["rr"] == changed
     assert set(envelope.payload) == {"rr", "md"}
     assert library.records["template"].recurrence.rule == changed
@@ -302,7 +917,7 @@ def test_memory_repeat_rejects_non_template_or_inconsistent_records(
 ) -> None:
     library = MemoryLibrary([record])
 
-    with pytest.raises(ValueError, match="exact repeating Task template"):
+    with pytest.raises(ValueError, match="exact repeating Task or Project template"):
         library.apply(
             [
                 Write(
@@ -355,7 +970,7 @@ def test_cloud_repeat_rejects_non_template_or_inconsistent_records(
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records[record.uuid] = record
 
-    with pytest.raises(CloudError, match="exact repeating Task template"):
+    with pytest.raises(CloudError, match="exact repeating Task or Project template"):
         library.apply(
             [
                 Write(
@@ -496,6 +1111,7 @@ def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
 def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None:
     cache = tmp_path / "state.json"
     rule = {"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 0}], "rrv": 42}
+    generated_on = date(2026, 9, 6)
 
     class FakeClient:
         def __init__(self) -> None:
@@ -524,7 +1140,13 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
                             "uuid": "instance",
                             "e": "Task6",
                             "t": 0,
-                            "p": {"tt": "Weekly copy", "tp": 0, "rt": ["template"]},
+                            "p": {
+                                "tt": "Weekly copy",
+                                "tp": 0,
+                                "sr": day_ts(generated_on),
+                                "rt": ["template"],
+                                "lt": True,
+                            },
                         },
                     ],
                     current=2,
@@ -544,6 +1166,7 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
     assert second.records["template"].recurrence.rule == rule
     assert second.records["instance"].recurrence.links == ("template",)
     assert second.records["instance"].recurrence.template_uuid == "template"
+    assert second.records["instance"].recurrence_generated_on == generated_on
     assert second.client.pages == 1  # type: ignore[attr-defined]
 
 
@@ -602,11 +1225,97 @@ def test_malformed_cache_is_discarded_before_fresh_replay(tmp_path: Path) -> Non
     assert list(library.records) == ["fresh"]
 
 
+def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "version": _CACHE_VERSION - 1,
+                "history_id": "hist",
+                "loaded_index": 9,
+                "server_index": 9,
+                "records": [],
+                "tags": {},
+                "tag_parents": {},
+            }
+        )
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.starts: list[int] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            self.starts.append(start_index)
+            if start_index == 0:
+                return HistoryPage(
+                    events=[
+                        {
+                            "uuid": "task7",
+                            "e": "Task7",
+                            "t": 0,
+                            "p": {
+                                "tt": "Recovered",
+                                "tp": 0,
+                                "ss": 0,
+                                "st": 0,
+                                "tr": False,
+                            },
+                        }
+                    ],
+                    current=1,
+                    groups=1,
+                    end_size=1,
+                    latest_size=1,
+                )
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
+
+    client = FakeClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+
+    library.refresh()
+
+    assert client.starts == [0]
+    assert list(library.records) == ["task7"]
+
+
 @pytest.mark.parametrize(
     "bad_field",
     [
         ("recurrence_rule", ["not", "an", "object"]),
         ("recurrence_links", "template-id"),
+        ("recurrence_instance_count", -1),
+        ("recurrence_instance_count", False),
+        ("recurrence_instance_count", 1.5),
+        ("recurrence_instance_count", MAX_RECURRENCE_INSTANCE_COUNT + 1),
+        ("recurrence_instance_count_known", "false"),
+        ("recurrence_paused", "false"),
+        ("recurrence_paused", 0),
+        ("recurrence_paused", 1),
+        ("recurrence_paused", None),
+        ("recurrence_paused", []),
+        ("recurrence_paused", {}),
+        ("recurrence_paused_known", "false"),
+        ("recurrence_created_through", False),
+        ("recurrence_completed_on", []),
+        ("recurrence_next_on", 0),
+        ("recurrence_generated_on", False),
+        ("recurrence_generated_on_known", "false"),
+        ("leavable", "false"),
+        ("leavable", 0),
+        ("leavable", 1),
+        ("leavable", None),
+        ("leavable", []),
+        ("leavable", {}),
     ],
 )
 def test_malformed_cached_recurrence_is_discarded_before_replay(
@@ -619,6 +1328,16 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
         "title": "Bad cache",
         "recurrence_rule": {"tp": 0, "fu": 256, "fa": 1},
         "recurrence_links": [],
+        "recurrence_instance_count": 0,
+        "recurrence_instance_count_known": False,
+        "recurrence_paused": False,
+        "recurrence_paused_known": False,
+        "recurrence_created_through": None,
+        "recurrence_completed_on": None,
+        "recurrence_next_on": None,
+        "recurrence_generated_on": None,
+        "recurrence_generated_on_known": True,
+        "leavable": False,
     }
     record[bad_field[0]] = bad_field[1]
     cache.write_text(
@@ -679,6 +1398,26 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
 
     assert client.starts == [0]
     assert list(library.records) == ["fresh"]
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2991"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {"id": "task:fresh", "set": {"repeat": {"create_next": True}}}
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
 
 
 def test_create_ix_follows_siblings() -> None:
@@ -1970,7 +2709,7 @@ def test_trash_is_a_recoverable_task_patch(tmp_path: Path) -> None:
     library.apply([Write(action="trash", uuid="task")])
 
     assert client.committed[0].action == 1
-    assert client.committed[0].kind == "Task6"
+    assert client.committed[0].kind == "Task7"
     assert client.committed[0].payload["tr"] is True
     assert library.records["task"].trashed is True
 
@@ -2000,13 +2739,13 @@ def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
                 uuid="template-new",
                 title="Routine",
                 recurrence_rule=rule,
+                recurrence_created_through=date(2026, 4, 3),
             ),
             Write(
                 action="create",
                 uuid="instance-new",
                 title="Routine",
                 recurrence_links=["template-new"],
-                recurrence_generated=True,
             ),
         ]
     )
@@ -2016,9 +2755,11 @@ def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
     instance = next(item for item in client.committed if item.uuid == "instance-new")
     assert template.payload["rr"] == rule
     assert template.payload["rt"] == []
+    assert template.payload["icsd"] == day_ts(date(2026, 4, 3))
+    assert template.payload["md"] is None
     assert instance.payload["rr"] is None
     assert instance.payload["rt"] == ["template-new"]
-    assert instance.payload["lt"] is True
+    assert instance.payload["lt"] is False
     assert library.records["template-new"].recurrence.role == "template"
     assert library.records["instance-new"].recurrence.template_uuid == "template-new"
 
@@ -2068,7 +2809,453 @@ def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> No
     assert "template" not in library.records
 
 
-def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
+def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template-project": Record(
+                uuid="template-project",
+                kind="project",
+                title="Release train",
+                entity="Task7",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 256, "fa": 1},
+                ),
+            ),
+            "template-heading": Record(
+                uuid="template-heading",
+                kind="task",
+                title="Ship",
+                entity="Task7",
+                heading=True,
+                parent_uuid="template-project",
+            ),
+            "template-task": Record(
+                uuid="template-task",
+                kind="task",
+                title="Deploy",
+                status="done",
+                entity="Task7",
+                heading_uuid="template-heading",
+                checklists=[
+                    ChecklistLine(
+                        uuid="template-check", title="Verify", status="done"
+                    )
+                ],
+            ),
+            "current-project": Record(
+                uuid="current-project",
+                kind="project",
+                title="Release train",
+                entity="Task7",
+                recurrence=RecurrenceState(
+                    role="instance",
+                    repeat_type="fixed",
+                    template_uuid="template-project",
+                    links=("template-project",),
+                ),
+            ),
+        }
+    )
+    library.records["template-project"].recurrence_next_on = date(2026, 9, 6)
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+        account_id="owner@example.com",
+    )
+    staged = ThingsV2(workspace).dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2901",
+            "items": [
+                {
+                    "id": "project:current-project",
+                    "set": {"repeat": {"remove": True}},
+                }
+            ],
+        },
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert staged.state == "awaiting_owner" and operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "applied"
+
+    by_uuid = {row.uuid: row for row in client.committed}
+    assert by_uuid["current-project"].payload["rt"] == []
+    assert set(by_uuid["current-project"].payload) == {"rt", "md"}
+    root = next(
+        row
+        for row in client.committed
+        if row.action == 0 and row.payload.get("tp") == 1
+    )
+    assert root.action == 0 and root.kind == "Task7"
+    assert root.payload["tp"] == 1
+    assert root.payload["st"] == 2
+    assert root.payload["sr"] == root.payload["tir"] == day_ts(date(2026, 9, 6))
+    assert root.payload["rr"] is None
+    assert root.payload["rt"] == []
+    assert root.payload["rp"] is None
+    assert root.payload["lt"] is True
+    heading = next(
+        row
+        for row in client.committed
+        if row.action == 0 and row.payload.get("tp") == 2
+    )
+    assert heading.payload["tp"] == 2
+    assert heading.payload["pr"] == [root.uuid]
+    assert heading.payload["lt"] is True
+    task = next(
+        row
+        for row in client.committed
+        if row.action == 0
+        and row.payload.get("tp") == 0
+        and row.payload.get("tt") == "Deploy"
+    )
+    assert task.payload["pr"] == []
+    assert task.payload["agr"] == [heading.uuid]
+    assert task.payload["lt"] is True
+    assert task.payload["ss"] == 0
+    checklist = next(
+        row
+        for row in client.committed
+        if row.kind == "ChecklistItem3" and row.action == 0
+    )
+    assert checklist.kind == "ChecklistItem3"
+    assert checklist.payload["ts"] == [task.uuid]
+    assert checklist.payload["ss"] == 0
+    checklist_delete = by_uuid["template-check"]
+    assert checklist_delete.kind == "ChecklistItem3"
+    assert checklist_delete.action == 2
+    assert checklist_delete.payload == {}
+    committed_order = [row.uuid for row in client.committed]
+    assert committed_order.index("template-check") < committed_order.index(
+        "template-task"
+    )
+    assert committed_order.index("template-task") < committed_order.index(
+        "template-heading"
+    )
+    assert committed_order.index("template-heading") < committed_order.index(
+        "template-project"
+    )
+    assert all(
+        by_uuid[item_uuid].action == 2 and by_uuid[item_uuid].payload == {}
+        for item_uuid in ("template-task", "template-heading", "template-project")
+    )
+    assert library.records["current-project"].recurrence == RecurrenceState()
+    assert library.records[root.uuid].recurrence == RecurrenceState()
+    assert library.records[root.uuid].leavable is True
+    assert not {
+        "template-task",
+        "template-heading",
+        "template-project",
+    }.intersection(library.records)
+
+
+def test_project_create_next_emits_native_count_and_leavable_copy(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template-project"] = Record(
+        uuid="template-project",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 256, "fa": 1, "of": []},
+        ),
+        recurrence_instance_count=1,
+    )
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="next-project",
+                kind="project",
+                title="Release train",
+                start=date(2026, 8, 30),
+                recurrence_links=["template-project"],
+                leavable=True,
+            ),
+            Write(
+                action="create_heading",
+                uuid="next-heading",
+                kind="task",
+                title="Ship",
+                into_uuid="next-project",
+                into_kind="project",
+                leavable=True,
+            ),
+            Write(
+                action="create",
+                uuid="next-task",
+                kind="task",
+                title="Deploy",
+                heading_uuid="next-heading",
+                leavable=True,
+            ),
+            Write(
+                action="checklist",
+                uuid="next-check",
+                title="Verify",
+                checklist_parent_uuid="next-task",
+            ),
+            Write(
+                action="repeat_next",
+                uuid="template-project",
+                kind="project",
+                recurrence_instance_count=2,
+            ),
+        ]
+    )
+
+    current = next(row for row in client.committed if row.uuid == "next-project")
+    advance = next(
+        row for row in client.committed if row.uuid == "template-project"
+    )
+    heading = next(row for row in client.committed if row.uuid == "next-heading")
+    task = next(row for row in client.committed if row.uuid == "next-task")
+    checklist = next(row for row in client.committed if row.uuid == "next-check")
+    assert current.payload["tp"] == 1
+    assert current.payload["rt"] == ["template-project"]
+    assert current.payload["lt"] is True
+    assert heading.payload["tp"] == 2
+    assert heading.payload["pr"] == ["next-project"]
+    assert task.payload["pr"] == []
+    assert task.payload["agr"] == ["next-heading"]
+    assert task.payload["lt"] is True
+    assert checklist.payload["ts"] == ["next-task"]
+    assert advance.payload == {"icc": 2}
+    assert library.records["template-project"].recurrence_instance_count == 2
+    assert library.records["next-project"].leavable is True
+
+
+def test_cloud_repeat_next_matches_applied_post_state(tmp_path: Path) -> None:
+    library = CloudLibrary(  # type: ignore[arg-type]
+        _CaptureClient(), cache=tmp_path / "state.json"
+    )
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+        recurrence_instance_count=2,
+    )
+
+    assert library.matches(
+        [
+            Write(
+                action="repeat_next",
+                uuid="template",
+                recurrence_instance_count=2,
+            )
+        ]
+    )
+
+
+def test_v2_create_next_reconciles_after_reschedule_cache_restart_and_native_advance(
+    tmp_path: Path,
+) -> None:
+    original = date(2026, 9, 6)
+    advanced = date(2026, 9, 13)
+    rescheduled = date(2026, 9, 20)
+    rule = {
+        "tp": 0,
+        "fu": 256,
+        "fa": 1,
+        "of": [{"wd": 1}],
+        "sr": day_ts(date(2026, 8, 30)),
+    }
+
+    class ReplayClient:
+        def __init__(self, initial: list[dict[str, object]] | None = None) -> None:
+            self.email = "owner@example.com"
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.batches = [initial] if initial else []
+            self.commits: list[list[Envelope]] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            if self.batches:
+                events = self.batches.pop(0)
+                self.server_index += 1
+                return HistoryPage(
+                    events=events,
+                    current=self.server_index,
+                    groups=1,
+                    end_size=self.server_index,
+                    latest_size=self.server_index,
+                )
+            return HistoryPage(
+                events=[],
+                current=self.server_index,
+                groups=0,
+                end_size=self.server_index,
+                latest_size=self.server_index,
+            )
+
+        def commit(self, envelopes: list[Envelope]) -> None:
+            self.commits.append(list(envelopes))
+            self.batches.append(
+                [
+                    {
+                        "uuid": envelope.uuid,
+                        "e": envelope.kind,
+                        "t": envelope.action,
+                        "p": envelope.payload,
+                    }
+                    for envelope in envelopes
+                ]
+            )
+
+    initial = [
+        {
+            "uuid": "template",
+            "e": "Task7",
+            "t": 0,
+            "p": {
+                "tt": "Weekly",
+                "tp": 0,
+                "rr": rule,
+                "rt": [],
+                "tir": day_ts(original),
+                "icc": 1,
+                "st": 2,
+            },
+        },
+        {
+            "uuid": "generated",
+            "e": "Task7",
+            "t": 0,
+            "p": {
+                "tt": "Weekly",
+                "tp": 0,
+                "sr": day_ts(original),
+                "rt": ["template"],
+                "lt": True,
+                "st": 2,
+            },
+        },
+        {
+            "uuid": "generated",
+            "e": "Task7",
+            "t": 1,
+            "p": {
+                "sr": day_ts(rescheduled),
+                "tir": day_ts(rescheduled),
+            },
+        },
+    ]
+    cache = tmp_path / "state.json"
+    first = CloudLibrary(ReplayClient(initial), cache=cache)  # type: ignore[arg-type]
+    first.refresh()
+
+    client = ReplayClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+    library.refresh()
+
+    generated = library.records["generated"]
+    assert generated.start == rescheduled
+    assert generated.recurrence_generated_on == original
+
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            account_id="owner@example.com",
+        )
+    )
+    stale = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2901",
+            "items": [
+                {
+                    "id": generated.id,
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert stale.state == "rejected"
+    assert stale.code == "validation_error"
+    assert stale.next_action == "read_fresh"
+    assert client.commits == []
+
+    client.batches.append(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"tir": day_ts(advanced)},
+            }
+        ]
+    )
+    library.refresh(force=True)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2902",
+            "items": [
+                {
+                    "id": generated.id,
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert result.state == "applied"
+
+    origins = sorted(
+        (item.start, item.recurrence_generated_on)
+        for item in library.recurrence_instances("template")
+    )
+    assert origins == [(advanced, advanced), (rescheduled, original)]
+    assert library.records["template"].recurrence_instance_count == 2
+    assert len(client.commits) == 1
+
+    receipt = interface.dispatch(
+        "things_receipt", {"operation_id": result.operation_id}
+    )
+    assert receipt.state == "applied"
+    assert [row["result"] for row in receipt.rows] == ["applied", "applied"]
+
+
+def test_existing_task_repeat_link_preserves_leavable_flag_and_reads_back(
     tmp_path: Path,
 ) -> None:
     client = _CaptureClient()
@@ -2098,15 +3285,46 @@ def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
                 action="repeat_link",
                 uuid="existing",
                 recurrence_links=["template"],
-                recurrence_generated=True,
             )
         ]
     )
 
     assert client.committed[0].payload["rt"] == ["template"]
-    assert client.committed[0].payload["lt"] is True
+    assert "lt" not in client.committed[0].payload
     assert library.records["existing"].recurrence.role == "instance"
     assert library.records["existing"].recurrence.template_uuid == "template"
+
+
+def test_after_completion_progress_updates_template_dates(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        entity="Task7",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 256, "fa": 1},
+        ),
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat_progress",
+                uuid="template",
+                recurrence_completed_on=date(2026, 8, 30),
+                recurrence_next_on=date(2026, 9, 6),
+            )
+        ]
+    )
+
+    assert client.committed[0].payload["acrd"] == day_ts(date(2026, 8, 30))
+    assert client.committed[0].payload["tir"] == day_ts(date(2026, 9, 6))
+    assert library.records["template"].recurrence_completed_on == date(2026, 8, 30)
+    assert library.records["template"].recurrence_next_on == date(2026, 9, 6)
 
 
 @pytest.mark.parametrize(
@@ -2164,11 +3382,14 @@ def test_cloud_repeat_conversion_reads_back_final_schedule_semantics(
     template = next(
         item for item in library.records.values() if item.recurrence.role == "template"
     )
-    for record in (task, template):
-        assert record.start is None
-        assert record.remind is None
-        assert record.inbox is expected_inbox
-        assert record.someday is expected_someday
+    assert task.start is None
+    assert task.remind is None
+    assert task.inbox is expected_inbox
+    assert task.someday is expected_someday
+    assert template.start is None
+    assert template.remind is None
+    assert template.inbox is False
+    assert template.someday is True
 
 
 @pytest.mark.parametrize("replacement", [False, True])
@@ -2336,7 +3557,7 @@ def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
     assert len(client.committed) == 3
     restore = next(item for item in client.committed if item.uuid == "task")
     assert restore.action == 1
-    assert restore.kind == "Task6"
+    assert restore.kind == "Task7"
     assert restore.payload["tr"] is False
     assert set(restore.payload) == {"tr", "md"}
     tag = next(item for item in client.committed if item.uuid == "old")
@@ -2347,7 +3568,7 @@ def test_cloud_lifecycle_and_tag_admin_actions_batch_and_read_back(
     assert set(tag.payload) == {"tt", "pn", "md"}
     heading = next(item for item in client.committed if item.uuid == "heading")
     assert heading.action == 2
-    assert heading.kind == "Task6"
+    assert heading.kind == "Task7"
     assert heading.payload == {}
     assert result.verified == ["Call", "New", "Next"]
     assert library.records["task"].trashed is False

@@ -41,18 +41,37 @@ fresh opaque UUID or ULID `request_id`. Reuse it only to retry the exact same
 transport request.
 
 `things_capture` creates Tasks and Projects. A new Project may contain nested
-new Tasks. `things_update` changes only explicit ordinary item-local fields:
-the title, notes, start, deadline, or reminder. Use `things_complete` and
-`things_trash` for lifecycle changes.
+new Tasks. Add `repeat` to create a fixed or after-completion rule for either
+kind. Rules support day, week, month, and year intervals, selected dates, an
+optional end date, and a paused state.
+
+`things_update` changes only explicit item-local fields. It can change the
+title, notes, start, deadline, reminder, or an RT1 repeat rule. Use
+`{repeat: {paused: true}}`, `{repeat: {paused: false}}`,
+`{repeat: {create_next: true}}`, or `{repeat: {remove: true}}` for repeat
+lifecycle actions. Stopping keeps generated copies, materializes the hidden
+template as a fresh ordinary item on its next date, then removes its old graph.
+For a Project, the ordinary replacement includes its headings, Tasks, and
+checklist rows with fresh IDs. Stop returns `awaiting_owner` for CLI approval.
+Create Next and Stop require Things' native next date; if it is absent, the
+server returns `read_fresh` and writes nothing. Create Next also returns
+`read_fresh` when that native date already has a generated copy.
+Do not send `repeat: null`.
+
+Use `things_complete` and `things_trash` for item lifecycle changes. Completing
+a Project also completes its open action descendants in the same frozen
+operation, excluding structural headings and hidden repeat templates.
+RT2 repeat facts are read-only. The server rejects RT2 schedule, repeat, and
+lifecycle writes instead of guessing at an unproven Cloud payload.
 
 The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.
 Pending and partial outcomes block every write path until CLI-only read-back
 reconciliation settles them or the owner resolves the partial.
 
-Recoverable Trash requires CLI approval. MCP has no approval tool. Enroll the
-owner factor and use the CLI-only commands from a private local or SSH
-terminal:
+Recoverable Trash and stopping a repeat require CLI approval. MCP has no
+approval tool. Enroll the owner factor and use the CLI-only commands from a
+private local or SSH terminal:
 
 ```console
 uv run things-orchestrator owner-factor

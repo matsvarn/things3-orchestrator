@@ -1741,10 +1741,11 @@ def test_manual_schemas_are_flat_and_compact() -> None:
     # Review completeness, DiagnosticFact, named homes, and compact Project
     # headings and native checklists. Keep the contract compact, but allow that
     # justified expansion.
-    # Semantic notes, exact no-op receipts, and the weekly category vocabulary
-    # add explicit fields.
-    assert discovery_chars < 20_500
-    assert discovery_chars - 13_406 < 7_100
+    # Semantic notes, exact no-op receipts, weekly category vocabulary, and the
+    # lossless recurrence projection and native generated-copy bookkeeping add
+    # explicit fields.
+    assert discovery_chars < 21_300
+    assert discovery_chars - 13_406 < 7_900
     wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
     wire_chars = sum(
         len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
@@ -1773,7 +1774,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "select exactly one view",
         "purpose=change is one item",
         "organize is the draft",
-        "recurrence is one task",
+        "recurrence is one task or project",
         "local neighborhood",
         "include a destination",
         "within=trash searches trash",

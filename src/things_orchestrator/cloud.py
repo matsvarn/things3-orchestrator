@@ -17,6 +17,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .library import (
+    MAX_RECURRENCE_INSTANCE_COUNT,
     ApplyResult,
     ChecklistLine,
     Kind,
@@ -55,11 +56,11 @@ CLIENT_INFO = {
     "ul": "en-Latn-US",
 }
 
-_TASK_KINDS = {"Task6", "Task4", "Task3", "Task"}
+_TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 4
+_CACHE_VERSION = 10
 
 
 class CloudError(RuntimeError):
@@ -114,6 +115,47 @@ def _note_metadata(
     if isinstance(value, dict) and value.get("t") == 2:
         return "structured", "rich"
     return "structured", "markdown"
+
+
+def _native_date(value: object) -> date | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return from_ts(value)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _native_datetime(value: object) -> datetime | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return (
+            datetime.fromtimestamp(value, timezone.utc) if value > 0 else None
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _native_reminder(value: object) -> str | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value < 86_400
+        or value % 60 != 0
+    ):
+        return None
+    return remind_from_offset(value)
+
+
+def _native_count(value: object) -> int | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_RECURRENCE_INSTANCE_COUNT
+    ):
+        return None
+    return value
 
 
 @dataclass
@@ -369,6 +411,11 @@ def _event_matches_envelope(event: dict[str, Any], envelope: Envelope) -> bool:
 
 
 def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None:
+    for event in events:
+        kind = str(event.get("e") or "")
+        if _unsupported_versioned_entity(kind):
+            raise CloudError(f"unsupported Things Cloud entity: {kind}")
+
     checklists: list[dict[str, Any]] = []
     for event in events:
         kind = str(event.get("e") or "")
@@ -434,11 +481,25 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             continue
         existing = library.records.get(uuid)
         if action == 0:
-            item = Record(uuid=uuid, kind="task", title="")
+            item = Record(
+                uuid=uuid,
+                kind="task",
+                title="",
+                recurrence_instance_count_known=False,
+                recurrence_paused_known=False,
+                recurrence_generated_on_known=False,
+            )
             if existing is not None:
                 item.checklists = existing.checklists
         else:
-            item = existing or Record(uuid=uuid, kind="task", title="")
+            item = existing or Record(
+                uuid=uuid,
+                kind="task",
+                title="",
+                recurrence_instance_count_known=False,
+                recurrence_paused_known=False,
+                recurrence_generated_on_known=False,
+            )
         item.entity = kind
         if "tt" in payload and payload["tt"] is not None:
             item.title = str(payload["tt"])
@@ -459,26 +520,17 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 "done" if status == 3 else "dropped" if status == 2 else "open"
             )
         if "sp" in payload:
-            raw_completed = payload.get("sp")
-            item.completed_at = (
-                datetime.fromtimestamp(float(raw_completed), timezone.utc)
-                if raw_completed is not None and float(raw_completed) > 0
-                else None
-            )
+            item.completed_at = _native_datetime(payload.get("sp"))
         if "tr" in payload and payload["tr"] is not None:
             item.trashed = bool(payload["tr"])
         if "sr" in payload:
-            item.start = from_ts(payload["sr"] if payload["sr"] is not None else None)
+            item.start = _native_date(payload.get("sr"))
             if item.start is not None:
                 item.someday = False
         if "dd" in payload:
-            item.deadline = from_ts(
-                payload["dd"] if payload["dd"] is not None else None
-            )
+            item.deadline = _native_date(payload.get("dd"))
         if "ato" in payload:
-            item.remind = remind_from_offset(
-                int(payload["ato"]) if payload["ato"] is not None else None
-            )
+            item.remind = _native_reminder(payload.get("ato"))
         if "sb" in payload and payload["sb"] is not None:
             item.tonight = int(payload["sb"]) == 1
         if "ix" in payload and payload["ix"] is not None:
@@ -510,6 +562,36 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.recurrence = item.recurrence.fold_rule(payload.get("rr"))
         if "rt" in payload:
             item.recurrence = item.recurrence.fold_links(payload.get("rt"))
+        if "rp" in payload:
+            item.repeater = deepcopy(payload.get("rp"))
+        if "icp" in payload:
+            paused = payload.get("icp")
+            if isinstance(paused, bool):
+                item.recurrence = item.recurrence.fold_paused(paused)
+                item.recurrence_paused_known = True
+        if "icsd" in payload:
+            item.recurrence_created_through = _native_date(payload.get("icsd"))
+        if "icc" in payload and payload["icc"] is not None:
+            count = _native_count(payload["icc"])
+            if count is not None:
+                item.recurrence_instance_count = count
+                item.recurrence_instance_count_known = True
+        if "acrd" in payload:
+            item.recurrence_completed_on = _native_date(payload.get("acrd"))
+        if "tir" in payload and item.recurrence.role == "template":
+            item.recurrence_next_on = _native_date(payload.get("tir"))
+        if "lt" in payload and isinstance(payload["lt"], bool):
+            was_leavable = item.leavable
+            item.leavable = payload["lt"]
+            if not item.leavable:
+                item.recurrence_generated_on = None
+                item.recurrence_generated_on_known = True
+            elif action == 0 and item.recurrence.role == "instance":
+                item.recurrence_generated_on = item.start
+                item.recurrence_generated_on_known = item.start is not None
+            elif not was_leavable:
+                item.recurrence_generated_on = None
+                item.recurrence_generated_on_known = False
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -520,6 +602,20 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             library,
         )
     library.resolve_instance_types()
+
+
+def _unsupported_versioned_entity(kind: str) -> bool:
+    families = (
+        ("ChecklistItem", _CHECKLIST_KINDS),
+        ("Task", _TASK_KINDS),
+        ("Area", _AREA_KINDS),
+        ("Tag", _TAG_KINDS),
+    )
+    for prefix, supported in families:
+        generation = kind.removeprefix(prefix)
+        if generation != kind and generation.isdecimal():
+            return kind not in supported
+    return False
 
 
 def _fold_checklist(
@@ -649,15 +745,19 @@ class CloudLibrary(MemoryLibrary):
         )
 
     def matches(self, writes: list[Write]) -> bool:
-        """Match the safe Cloud envelopes, including Task6 index normalization."""
-
+        repeat_next = [write for write in writes if write.action == "repeat_next"]
+        if repeat_next and not super().matches(repeat_next):
+            return False
+        envelope_writes = [write for write in writes if write.action != "repeat_next"]
+        if not envelope_writes:
+            return True
         try:
-            envelopes, _ = self._plan(writes)
+            envelopes, _ = self._plan(envelope_writes)
         except CloudError:
             return False
         dynamic_indexes = {
             write.uuid
-            for write in writes
+            for write in envelope_writes
             if write.action in {"create", "create_heading"}
             and write.kind in {"task", "project"}
             and write.sort_index is None
@@ -870,8 +970,18 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "rr" not in payload or item.recurrence.rule == payload["rr"],
         "rt" not in payload
         or list(item.recurrence.links) == [str(link) for link in payload["rt"]],
-        "lt" not in payload
-        or bool(payload["lt"]) == (item.recurrence.role == "instance"),
+        "rp" not in payload or item.repeater == payload["rp"],
+        "icp" not in payload or item.recurrence.paused == bool(payload["icp"]),
+        "icsd" not in payload
+        or item.recurrence_created_through == from_ts(payload.get("icsd")),
+        "icc" not in payload
+        or item.recurrence_instance_count == int(payload.get("icc") or 0),
+        "acrd" not in payload
+        or item.recurrence_completed_on == from_ts(payload.get("acrd")),
+        "tir" not in payload
+        or payload.get("acrd") is None
+        or item.recurrence_next_on == from_ts(payload.get("tir")),
+        "lt" not in payload or item.leavable == bool(payload.get("lt")),
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
@@ -955,7 +1065,12 @@ class _CloudPlanHandler(_MutationHandler[None]):
             raise CloudError("Projects cannot enter Inbox")
         if write.heading_uuid is not None:
             heading = self.library.records.get(write.heading_uuid)
-            project_uuid = write.into_uuid or (current.parent_uuid if current else None)
+            project_uuid = (
+                write.into_uuid
+                or (current.parent_uuid if current else None)
+                or self.created_headings.get(write.heading_uuid)
+                or (heading.parent_uuid if heading is not None else None)
+            )
             existing = (
                 heading is not None
                 and heading.heading
@@ -1088,12 +1203,35 @@ class _CloudPlanHandler(_MutationHandler[None]):
         write = mutation.write
         current = self.library.records.get(write.uuid)
         if write.action == "repeat":
-            if current is None or write.recurrence_rule is None:
+            if current is None or (
+                write.recurrence_rule is None and not write.clear_recurrence_rule
+                and write.recurrence_paused is None
+            ):
                 raise CloudError("Repeat changes need an exact repeating Task template")
             try:
                 current.recurrence.validate_interval_template(kind=current.kind)
             except ValueError as error:
                 raise CloudError(str(error)) from error
+        if write.action == "repeat_progress" and (
+            current is None
+            or current.recurrence.role != "template"
+            or current.recurrence.repeat_type != "after_completion"
+            or write.recurrence_completed_on is None
+            or write.recurrence_next_on is None
+        ):
+            raise CloudError(
+                "Repeat progress needs an after-completion template and two dates"
+            )
+        if write.action == "repeat_next" and (
+            current is None
+            or current.recurrence.role != "template"
+            or write.recurrence_instance_count is None
+            or write.recurrence_instance_count
+            != current.recurrence_instance_count + 1
+        ):
+            raise CloudError(
+                "Create Next Copy needs the next count for an exact repeat template"
+            )
         self._emit(write)
 
 
@@ -1103,9 +1241,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
 
     def _entity(self, write: Write) -> str:
         existing = self.library.records.get(write.uuid)
-        return (existing.entity if existing and existing.entity else "") or (
-            "Area3" if write.kind == "area" else "Task6"
-        )
+        if write.kind == "area":
+            return (existing.entity if existing and existing.entity else "") or "Area3"
+        return "Task7"
 
     def create(self, mutation: _CreateMutation) -> Envelope:
         write = mutation.write
@@ -1115,7 +1253,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
         return Envelope(
             uuid=write.uuid,
             action=0,
-            kind="Area3" if write.kind == "area" else "Task6",
+            kind="Area3" if write.kind == "area" else "Task7",
             payload=payload,
         )
 
@@ -1150,7 +1288,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                     "ts": [parent_uuid] if parent_uuid else [],
                     "ix": index,
                     "cd": now,
-                    "md": now,
+                    "md": None,
                     "lt": False,
                     "xx": {"sn": {}, "_t": "oo"},
                 },
@@ -1214,13 +1352,33 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
     def recurrence(self, mutation: _RecurrenceMutation) -> Envelope:
         write = mutation.write
         payload: dict[str, Any] = {"md": _now()}
-        payload["rr" if write.action == "repeat" else "rt"] = deepcopy(
-            write.recurrence_rule
-            if write.action == "repeat"
-            else list(write.recurrence_links or [])
-        )
-        if write.action == "repeat_link" and write.recurrence_generated:
-            payload["lt"] = True
+        if write.action == "repeat_progress":
+            payload.update(
+                {
+                    "acrd": day_ts(write.recurrence_completed_on)
+                    if write.recurrence_completed_on
+                    else None,
+                    "tir": day_ts(write.recurrence_next_on)
+                    if write.recurrence_next_on
+                    else None,
+                }
+            )
+        elif write.action == "repeat_next":
+            payload = {"icc": write.recurrence_instance_count}
+        elif write.action != "repeat" or (
+            write.recurrence_rule is not None or write.clear_recurrence_rule
+        ):
+            payload["rr" if write.action == "repeat" else "rt"] = (
+                None
+                if write.action == "repeat" and write.clear_recurrence_rule
+                else deepcopy(
+                    write.recurrence_rule
+                    if write.action == "repeat"
+                    else list(write.recurrence_links or [])
+                )
+            )
+        if write.recurrence_paused is not None:
+            payload["icp"] = write.recurrence_paused
         return Envelope(
             uuid=write.uuid, action=1, kind=self._entity(write), payload=payload
         )
@@ -1417,7 +1575,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
             "tt": write.title,
             "ix": write.sort_index or 0,
             "tg": write.tag_uuids or [],
-            "md": now,
+            "md": None,
             "xx": {"sn": {}, "_t": "oo"},
         }
     st = (
@@ -1459,7 +1617,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "ss": _status_code(write.status or "open"),
         "tr": False,
         "dl": [],
-        "icp": False,
+        "icp": bool(write.recurrence_paused),
         "st": st,
         "ar": ar,
         "tt": write.title,
@@ -1470,14 +1628,16 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "agr": [write.heading_uuid] if write.heading_uuid else [],
         "ix": write.sort_index or 0,
         "cd": now,
-        "lt": write.recurrence_generated,
-        "icc": 0,
-        "md": now,
+        "lt": write.leavable,
+        "icc": write.recurrence_instance_count or 0,
+        "md": None,
         "ti": write.today_index or 0,
         "dd": day_ts(write.deadline) if write.deadline else None,
         "ato": schedule.get("ato"),
         "nt": _note(write.notes) if write.notes else None,
-        "icsd": None,
+        "icsd": day_ts(write.recurrence_created_through)
+        if write.recurrence_created_through
+        else None,
         "pr": pr,
         "rp": None,
         "acrd": None,
@@ -1534,10 +1694,29 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_template_uuid": item.recurrence.template_uuid,
         "recurrence_rule": item.recurrence.rule,
         "recurrence_links": list(item.recurrence.links),
+        "recurrence_paused": item.recurrence.paused,
+        "recurrence_paused_known": item.recurrence_paused_known,
+        "repeater": deepcopy(item.repeater),
+        "recurrence_created_through": item.recurrence_created_through.isoformat()
+        if item.recurrence_created_through
+        else None,
+        "recurrence_instance_count": item.recurrence_instance_count,
+        "recurrence_instance_count_known": item.recurrence_instance_count_known,
+        "recurrence_completed_on": item.recurrence_completed_on.isoformat()
+        if item.recurrence_completed_on
+        else None,
+        "recurrence_next_on": item.recurrence_next_on.isoformat()
+        if item.recurrence_next_on
+        else None,
+        "recurrence_generated_on": item.recurrence_generated_on.isoformat()
+        if item.recurrence_generated_on
+        else None,
+        "recurrence_generated_on_known": item.recurrence_generated_on_known,
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
         "entity": item.entity,
+        "leavable": item.leavable,
         "checklists": [
             {
                 "uuid": line.uuid,
@@ -1549,6 +1728,17 @@ def _record_to_json(item: Record) -> dict[str, Any]:
             for line in item.checklists
         ],
     }
+
+
+def _cached_optional_date(payload: dict[str, Any], field: str) -> date | None:
+    if field not in payload:
+        raise ValueError(f"missing cached {field}")
+    raw = payload[field]
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"invalid cached {field}")
+    return date.fromisoformat(raw)
 
 
 def _record_from_json(payload: dict[str, Any]) -> Record:
@@ -1576,6 +1766,38 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         not isinstance(link, str) for link in raw_links
     ):
         raise ValueError("invalid cached recurrence links")
+    raw_instance_count = payload.get("recurrence_instance_count")
+    instance_count = _native_count(raw_instance_count)
+    if instance_count is None:
+        raise ValueError("invalid cached recurrence instance count")
+    instance_count_known = payload.get("recurrence_instance_count_known")
+    if not isinstance(instance_count_known, bool):
+        raise ValueError("invalid cached recurrence instance count trust marker")
+    paused = payload.get("recurrence_paused")
+    if not isinstance(paused, bool):
+        raise ValueError("invalid cached recurrence paused state")
+    paused_known = payload.get("recurrence_paused_known")
+    if not isinstance(paused_known, bool):
+        raise ValueError("invalid cached recurrence paused trust marker")
+    generated_on_known = payload.get("recurrence_generated_on_known")
+    if not isinstance(generated_on_known, bool):
+        raise ValueError("invalid cached recurrence origin trust marker")
+    leavable = payload.get("leavable")
+    if not isinstance(leavable, bool):
+        raise ValueError("invalid cached leavable state")
+    created_through = _cached_optional_date(payload, "recurrence_created_through")
+    completed_on = _cached_optional_date(payload, "recurrence_completed_on")
+    next_on = _cached_optional_date(payload, "recurrence_next_on")
+    generated_on = _cached_optional_date(payload, "recurrence_generated_on")
+    if not generated_on_known and generated_on is not None:
+        raise ValueError("untrusted cached recurrence origin has a date")
+    if (
+        payload.get("recurrence_role") == "instance"
+        and generated_on_known
+        and leavable
+        and generated_on is None
+    ):
+        raise ValueError("cached generated instance has no occurrence date")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1608,11 +1830,22 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             template_uuid=payload.get("recurrence_template_uuid"),
             rule=raw_rule,
             links=tuple(raw_links),
+            paused=paused,
         ),
+        repeater=deepcopy(payload.get("repeater")),
+        recurrence_created_through=created_through,
+        recurrence_instance_count=instance_count,
+        recurrence_instance_count_known=instance_count_known,
+        recurrence_paused_known=paused_known,
+        recurrence_completed_on=completed_on,
+        recurrence_next_on=next_on,
+        recurrence_generated_on=generated_on,
+        recurrence_generated_on_known=generated_on_known,
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),
         entity=str(payload.get("entity") or ""),
+        leavable=leavable,
         checklists=[
             ChecklistLine(
                 uuid=str(line["uuid"]),

@@ -82,7 +82,9 @@ Do not teach the agent its expected tool calls.
 6. **Exact change and scheduling — Queued.** Rename, complete, and cancel exact
    items. Set Today, Evening, a start, a deadline, and a timed reminder.
 7. **Recurrence lifecycle — Queued.** Create a repeat, edit its rule, change the
-   current copy, complete it, and stop repetition while the Task remains.
+   current copy, complete it, and stop repetition. Check that generated copies
+   lose their repeat links and that the template becomes one fresh ordinary
+   next-date item or Project graph before its hidden graph is removed.
 8. **Tags and Waiting — Queued.** Rename, reparent, assign, and delete tags.
    Preserve direct assignments and delegated meaning.
 9. **Project organization and merge — Queued.** Add, reorder, and delete native

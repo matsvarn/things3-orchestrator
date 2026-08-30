@@ -37,6 +37,17 @@ def test_discovery_is_exactly_eight_bounded_v2_tools() -> None:
         )
 
 
+def test_discovery_exposes_repeat_contract_without_adding_tools() -> None:
+    tools = {tool.name: tool for tool in asyncio.run(_server().list_tools())}
+    assert len(tools) == 8
+    capture_schema = str(tools["things_capture"].input_schema)
+    update_schema = str(tools["things_update"].input_schema)
+    assert "repeat" in capture_schema
+    assert "repeat" in update_schema
+    assert "semantic repeat" in tools["things_capture"].description
+    assert "repeat rule" in tools["things_update"].description
+
+
 def test_validation_errors_are_domain_results() -> None:
     result = asyncio.run(
         _server().call_tool(

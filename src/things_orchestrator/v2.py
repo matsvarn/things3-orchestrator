@@ -19,6 +19,7 @@ SCHEMA_VERSION = "v2.0"
 MANIFEST_VERSION = "v1"
 SAFETY_POLICY_DIGEST = "sha256:v1:" + sha256(b"preserve-omitted-fields;host-approval-for-trash").hexdigest()
 REQUEST_ID = r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[0-9A-HJKMNP-TV-Z]{26})$"
+ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 
 
 def _canonical(value: object) -> str:
@@ -54,6 +55,7 @@ class OperationManifest:
     touched: tuple[tuple[str, ...], ...]
     before_json: tuple[str | None, ...]
     display_titles: tuple[str, ...]
+    result_ids: tuple[str, ...]
     requires_owner: bool
     safety_policy_digest: str
     expires_at: str | None
@@ -70,6 +72,7 @@ class OperationManifest:
         touched: list[list[str]],
         before: list[dict[str, object] | None],
         display_titles: list[str],
+        result_ids: list[str],
         requires_owner: bool,
         clock: datetime,
     ) -> OperationManifest:
@@ -86,6 +89,7 @@ class OperationManifest:
             "touched": touched,
             "before": before,
             "display_titles": display_titles,
+            "result_ids": result_ids,
             "requires_owner": requires_owner,
             "safety_policy_digest": SAFETY_POLICY_DIGEST,
             "expires_at": expires_at,
@@ -96,8 +100,11 @@ class OperationManifest:
             preconditions=tuple(sorted(preconditions.items())),
             write_json=tuple(_canonical(row) for row in writes),
             touched=tuple(tuple(row) for row in touched),
-            before_json=tuple(_canonical(row) if row is not None else None for row in before),
+            before_json=tuple(
+                _canonical(row) if row is not None else None for row in before
+            ),
             display_titles=tuple(display_titles),
+            result_ids=tuple(result_ids),
             requires_owner=requires_owner,
             safety_policy_digest=SAFETY_POLICY_DIGEST,
             expires_at=expires_at,
@@ -115,8 +122,11 @@ class OperationManifest:
             "preconditions": dict(self.preconditions),
             "writes": [json.loads(row) for row in self.write_json],
             "touched": [list(row) for row in self.touched],
-            "before": [json.loads(row) if row is not None else None for row in self.before_json],
+            "before": [
+                json.loads(row) if row is not None else None for row in self.before_json
+            ],
             "display_titles": list(self.display_titles),
+            "result_ids": list(self.result_ids),
             "requires_owner": self.requires_owner,
             "safety_policy_digest": self.safety_policy_digest,
             "expires_at": self.expires_at,
@@ -133,6 +143,170 @@ class TaintedText(StrictModel):
     trust: Literal["untrusted"] = "untrusted"
 
 
+Weekday = Literal[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+
+
+class RepeatOn(StrictModel):
+    """One semantic selected date in a regular repeat pattern."""
+
+    month: int | None = Field(default=None, ge=1, le=12)
+    day: int | None = None
+    weekday: Weekday | None = None
+    ordinal: int | None = None
+
+    @model_validator(mode="after")
+    def coherent_selector(self) -> Self:
+        if (self.day is None) == (self.weekday is None):
+            raise ValueError("on needs exactly one day or weekday")
+        if self.day is not None and self.day not in {-1, *range(1, 32)}:
+            raise ValueError("day needs 1 through 31, or -1 for the last day")
+        if self.weekday is None and self.ordinal is not None:
+            raise ValueError("ordinal needs a weekday")
+        if self.weekday is not None and self.ordinal not in {None, -1, 1, 2, 3, 4, 5}:
+            raise ValueError("ordinal needs 1 through 5, or -1 for the last weekday")
+        return self
+
+
+class RepeatCreate(StrictModel):
+    """Complete semantic repeat rule for a newly captured Task or Project."""
+
+    unit: Literal["day", "week", "month", "year"]
+    mode: Literal["fixed", "after_completion"] = "fixed"
+    interval: int = Field(default=1, ge=1, le=366)
+    weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
+    on: list[RepeatOn] = Field(default_factory=list, max_length=64)
+    until: str | None = None
+    paused: bool = False
+
+    @field_validator("weekdays")
+    @classmethod
+    def unique_weekdays(cls, value: list[Weekday]) -> list[Weekday]:
+        if len(value) != len(set(value)):
+            raise ValueError("weekdays cannot contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def valid_pattern(self) -> Self:
+        if "on" in self.model_fields_set and not self.on:
+            raise ValueError("on needs at least one selected date")
+        if self.weekdays and self.on:
+            raise ValueError("use either weekdays or on")
+        if self.weekdays and self.unit != "week":
+            raise ValueError("weekdays need a weekly repeat rule")
+        if self.weekdays and self.mode != "fixed":
+            raise ValueError("weekdays need fixed repeat mode")
+        _validate_repeat_on(self.unit, self.mode, self.on)
+        if self.until is not None:
+            _valid_date(self.until)
+        if self.mode == "after_completion" and self.until is not None:
+            raise ValueError("after-completion repeats do not use an end date")
+        return self
+
+
+class RepeatEdit(StrictModel):
+    """Start or edit repetition, create a copy, or stop a repeat series."""
+
+    mode: Literal["fixed", "after_completion"] | None = None
+    unit: Literal["day", "week", "month", "year"] | None = None
+    interval: int | None = Field(default=None, ge=1, le=366)
+    weekdays: list[Weekday] | None = Field(default=None, max_length=7)
+    on: list[RepeatOn] | None = Field(default=None, max_length=64)
+    until: str | None = None
+    remove: Literal[True] | None = None
+    create_next: Literal[True] | None = None
+    paused: bool | None = None
+
+    @model_validator(mode="after")
+    def valid_edit(self) -> Self:
+        null_fields = {
+            field
+            for field in self.model_fields_set - {"until"}
+            if getattr(self, field) is None
+        }
+        if null_fields:
+            raise ValueError("repeat fields other than until cannot be null")
+        if self.create_next:
+            if self.model_fields_set != {"create_next"}:
+                raise ValueError("repeat create next cannot combine with other fields")
+            return self
+        if self.remove:
+            if self.model_fields_set != {"remove"}:
+                raise ValueError("repeat removal cannot combine with rule fields")
+            return self
+        if not self.model_fields_set:
+            raise ValueError("repeat needs a mode, unit, interval, or remove")
+        if self.weekdays is not None and len(self.weekdays) != len(set(self.weekdays)):
+            raise ValueError("weekdays cannot contain duplicates")
+        if self.unit is not None and self.unit != "week" and self.weekdays:
+            raise ValueError("weekdays need a weekly repeat rule")
+        if self.mode == "after_completion" and self.weekdays:
+            raise ValueError("weekdays need fixed repeat mode")
+        if self.weekdays is not None and self.on is not None:
+            raise ValueError("use either weekdays or on")
+        if self.on is not None:
+            if not self.on:
+                raise ValueError("on needs at least one selected date")
+            if self.unit is not None:
+                _validate_repeat_on(self.unit, self.mode or "fixed", self.on)
+        if self.until is not None:
+            _valid_date(self.until)
+        if self.mode == "after_completion" and self.until is not None:
+            raise ValueError("after-completion repeats do not use an end date")
+        return self
+
+
+class PublicRecurrence(StrictModel):
+    """Semantic recurrence fact projected from an existing ItemFact."""
+
+    kind: Literal[
+        "none", "fixed_instance", "after_completion_instance", "template", "unknown"
+    ]
+    engine: Literal["rt1", "rt2"] = "rt1"
+    template_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
+    mode: Literal["fixed", "after_completion"] | None = None
+    unit: Literal["day", "week", "month", "year"] | None = None
+    interval: int | None = Field(default=None, ge=1, le=366)
+    weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
+    linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
+    paused: bool | None = None
+    created_through: str | None = None
+    generated_count: int | None = Field(default=None, ge=0)
+    completed_on: str | None = None
+    next_on: str | None = None
+    on: list[RepeatOn] = Field(default_factory=list, max_length=64)
+    until: str | None = None
+    start_early_days: int | None = Field(default=None, ge=0, le=366)
+    reminder_time: str | None = None
+    adds_deadline: bool = False
+
+    @field_validator("weekdays")
+    @classmethod
+    def unique_weekdays(cls, value: list[Weekday]) -> list[Weekday]:
+        if len(value) != len(set(value)):
+            raise ValueError("weekdays cannot contain duplicates")
+        return value
+
+    @field_validator("linked_item_ids")
+    @classmethod
+    def valid_linked_items(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(
+            re.fullmatch(ITEM_ID, item) is None for item in value
+        ):
+            raise ValueError("linked_item_ids need unique exact item IDs")
+        return value
+
+
+RecurrenceFact = PublicRecurrence
+
+
 class PublicItem(StrictModel):
     id: str
     kind: Literal["task", "project", "area", "heading"]
@@ -143,6 +317,7 @@ class PublicItem(StrictModel):
     start: str | None = None
     deadline: str | None = None
     tags: list[TaintedText] = Field(default_factory=list)
+    recurrence: PublicRecurrence | None = None
 
 
 class PublicTag(StrictModel):
@@ -206,7 +381,7 @@ class PublicResult(StrictModel):
 
 
 class ViewCall(StrictModel):
-    view: Literal["today", "inbox", "week", "logbook", "projects", "areas", "tags", "trash"] | None = None
+    view: Literal["today", "inbox", "week", "repeating", "logbook", "projects", "areas", "tags", "trash"] | None = None
     limit: int = Field(default=20, ge=1, le=40)
     cursor: str | None = None
 
@@ -275,12 +450,20 @@ class _CaptureBase(StrictModel):
 class TaskCapture(_CaptureBase):
     kind: Literal["task"]
     into_id: str | None = Field(default=None, pattern=r"^(project|area):[^\s:]+$")
+    repeat: RepeatCreate | None = Field(
+        default=None,
+        description="Optional complete semantic repeat rule for this Task.",
+    )
 
 
 class ProjectCapture(_CaptureBase):
     kind: Literal["project"]
     into_id: str | None = Field(default=None, pattern=r"^area:[^\s:]+$")
     tasks: list[NestedTask] = Field(default_factory=list, max_length=40)
+    repeat: RepeatCreate | None = Field(
+        default=None,
+        description="Optional complete semantic repeat rule for this Project.",
+    )
 
 
 CaptureItem = Annotated[TaskCapture | ProjectCapture, Field(discriminator="kind")]
@@ -292,7 +475,11 @@ class CaptureCall(StrictModel):
 
     @model_validator(mode="after")
     def bounded_expansion(self) -> Self:
-        total = len(self.items) + sum(len(item.tasks) for item in self.items if isinstance(item, ProjectCapture))
+        total = sum(
+            (1 + len(item.tasks) if isinstance(item, ProjectCapture) else 1)
+            * (2 if item.repeat is not None else 1)
+            for item in self.items
+        )
         if total > 120:
             raise ValueError("capture expands to at most 120 writes")
         return self
@@ -309,6 +496,10 @@ class CaptureDiscoveryItem(_CaptureBase):
         pattern=r"^(project|area):[^\s:]+$",
         description="Optional exact destination. A Project destination is valid only for a Task.",
     )
+    repeat: RepeatCreate | None = Field(
+        default=None,
+        description="Optional complete semantic repeat rule for a Task or Project.",
+    )
     tasks: list[NestedTask] = Field(
         default_factory=list,
         max_length=40,
@@ -322,7 +513,12 @@ class CaptureDiscoveryCall(StrictModel):
 
     @model_validator(mode="after")
     def bounded_expansion(self) -> Self:
-        if len(self.items) + sum(len(item.tasks) for item in self.items) > 120:
+        total = sum(
+            (1 + len(item.tasks) if item.kind == "project" else 1)
+            * (2 if item.repeat is not None else 1)
+            for item in self.items
+        )
+        if total > 120:
             raise ValueError("capture expands to at most 120 writes")
         return self
 
@@ -333,6 +529,21 @@ class UpdateFields(StrictModel):
     start: str | None = None
     deadline: str | None = None
     remind_at: str | None = None
+    repeat: RepeatEdit | None = Field(
+        default=None,
+        description=(
+            "Optional semantic repeat change, {create_next: true} for Create Next "
+            "Copy, or {remove: true} to materialize the template as a fresh "
+            "ordinary next-date item and delete the hidden template graph."
+        ),
+    )
+
+    @field_validator("repeat", mode="before")
+    @classmethod
+    def no_null_repeat(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("repeat null is not supported; use {remove: true}")
+        return value
 
     @field_validator("title", "notes", mode="before")
     @classmethod
@@ -372,6 +583,12 @@ class UpdateFields(StrictModel):
     def nonempty(self) -> Self:
         if not self.model_fields_set:
             raise ValueError("set needs an explicit ordinary field")
+        if (
+            self.repeat is not None
+            and self.repeat.remove
+            and self.model_fields_set != {"repeat"}
+        ):
+            raise ValueError("repeat removal cannot combine with ordinary fields")
         return self
 
 
@@ -433,12 +650,38 @@ DESCRIPTIONS = {
     "things_view": "Read one current Things list.",
     "things_find": "Search by owner text and optional exact container.",
     "things_get": "Read one to fifty exact item IDs.",
-    "things_capture": "Create an atomic batch of Tasks or Projects with optional nested Project Tasks.",
-    "things_update": "Set only named ordinary item-local fields. Preservation is invariant.",
+    "things_capture": "Create an atomic batch of Tasks or Projects with optional nested Project Tasks and a semantic repeat rule for Tasks or Projects.",
+    "things_update": "Set only named ordinary item-local fields, including a semantic repeat rule, Create Next Copy, or owner-approved Stop that materializes the template as a fresh ordinary next-date item before deleting its hidden graph.",
     "things_complete": "Complete one atomic batch of exact items.",
     "things_trash": "Stage one atomic batch for recoverable Trash.",
     "things_receipt": "Read immutable content-minimized receipt rows.",
 }
+
+
+def _validate_repeat_on(
+    unit: Literal["day", "week", "month", "year"],
+    mode: Literal["fixed", "after_completion"],
+    values: list[RepeatOn],
+) -> None:
+    if values and mode != "fixed":
+        raise ValueError("selected dates need fixed repeat mode")
+    if values and unit == "day":
+        raise ValueError("daily repeats do not use selected dates")
+    for value in values:
+        if unit == "week" and (
+            value.weekday is None
+            or value.month is not None
+            or value.ordinal is not None
+        ):
+            raise ValueError("weekly selected dates need plain weekdays")
+        if unit == "month" and value.month is not None:
+            raise ValueError("monthly selected dates do not name a month")
+        if unit == "month" and value.weekday is not None and value.ordinal is None:
+            raise ValueError("monthly weekdays need an ordinal")
+        if unit == "year" and value.month is None:
+            raise ValueError("yearly selected dates need a month")
+        if unit == "year" and value.weekday is not None and value.ordinal is None:
+            raise ValueError("yearly weekdays need an ordinal")
 
 
 def _valid_start(value: str | None) -> str | None:
@@ -577,7 +820,12 @@ class ThingsV2:
     def _get(self, ids: list[str]) -> PublicResult:
         items: list[Any] = []
         for offset in range(0, len(ids), 10):
-            result = self.workspace.read(ReadCall(ids=ids[offset:offset + 10], fields=["notes", "tags"]))
+            result = self.workspace.read(
+                ReadCall(
+                    ids=ids[offset : offset + 10],
+                    fields=["notes", "tags", "recurrence"],
+                )
+            )
             if result.status == "unavailable":
                 return PublicResult(
                     state="rejected", code="read_unavailable", next_action="retry_same",
@@ -604,7 +852,7 @@ class ThingsV2:
                     item,
                     full=True,
                     include_revision=False,
-                    detail=("notes", "tags"),
+                    detail=("notes", "tags", "recurrence"),
                 )
             )
             for item_id in item_ids
@@ -686,20 +934,35 @@ class ThingsV2:
             kind=item.kind,
             title=TaintedText(value=item.title),
             status=item.status,
-            notes=TaintedText(value=item.notes_markdown) if item.notes_markdown else None,
+            notes=TaintedText(value=item.notes_markdown)
+            if item.notes_markdown
+            else None,
             into_id=item.into_id,
             start=item.start,
             deadline=item.deadline,
-            tags=[TaintedText(value=tag.title) for tag in [*item.direct_tags, *item.inherited_tags]],
+            tags=[
+                TaintedText(value=tag.title)
+                for tag in [*item.direct_tags, *item.inherited_tags]
+            ],
+            recurrence=(
+                PublicRecurrence.model_validate(item.recurrence.model_dump())
+                if item.recurrence is not None
+                else None
+            ),
         )
 
 
 def _result_code(state: str) -> str:
     return {
-        "awaiting_owner": "awaiting_owner", "pending": "pending_unknown",
-        "applied": "applied", "unchanged": "unchanged", "not_applied": "not_applied_precondition",
-        "partial": "partial", "partial_resolved": "partial_resolved",
-        "stale": "stale", "declined": "declined",
+        "awaiting_owner": "awaiting_owner",
+        "pending": "pending_unknown",
+        "applied": "applied",
+        "unchanged": "unchanged",
+        "not_applied": "not_applied_precondition",
+        "partial": "partial",
+        "partial_resolved": "partial_resolved",
+        "stale": "stale",
+        "declined": "declined",
     }.get(state, "validation_error" if state == "rejected" else "ok")
 
 

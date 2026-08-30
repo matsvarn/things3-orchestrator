@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from things_orchestrator.recurrence import RecurrenceState, new_rule
+from things_orchestrator.recurrence import (
+    RecurrenceReadError,
+    RecurrenceState,
+    new_rule,
+)
 
 
 def template(
@@ -45,9 +49,11 @@ def test_transition_changes_selected_fields_and_preserves_opaque_fields() -> Non
     assert changed.interval == 3
     assert changed.rule == {
         "tp": 1,
-        "fu": 16,
+        "fu": 8,
         "fa": 3,
         "of": [],
+        "ed": 64_092_211_200,
+        "rc": 0,
         "future_rule_key": ["preserve", 4],
     }
     assert original.rule is not None
@@ -60,7 +66,7 @@ def test_transition_changes_selected_fields_and_preserves_opaque_fields() -> Non
     ("kwargs", "expected"),
     [
         ({"mode": "after_completion"}, {"tp": 1}),
-        ({"unit": "day"}, {"fu": 8}),
+        ({"unit": "day"}, {"fu": 16}),
         ({"interval": 4}, {"fa": 4}),
     ],
 )
@@ -129,9 +135,18 @@ def test_transition_rejects_non_template_or_inconsistent_state(
         state.transition(kind="task", interval=2)
 
 
-def test_transition_rejects_non_task_templates() -> None:
-    with pytest.raises(ValueError, match="Task template"):
-        template().transition(kind="project", interval=2)
+def test_transition_accepts_exact_project_templates() -> None:
+    changed = template().transition(kind="project", interval=2)
+
+    assert changed.interval == 2
+    assert changed.rule is not None
+    assert changed.rule["future_rule_key"] == ["preserve", 4]
+
+
+@pytest.mark.parametrize("kind", ["area", "heading"])
+def test_transition_rejects_non_task_or_project_templates(kind: str) -> None:
+    with pytest.raises(ValueError, match="Task or Project template"):
+        template().transition(kind=kind, interval=2)
 
 
 def test_change_interval_uses_the_atomic_transition() -> None:
@@ -172,7 +187,7 @@ def test_fixed_unit_change_rebuilds_offsets_from_anchor(
     unit: str, expected: list[dict[str, int]]
 ) -> None:
     original = template(
-        unit=8,
+        unit=16,
         anchor=datetime(2026, 5, 14, tzinfo=timezone.utc),
     )
 
@@ -186,7 +201,7 @@ def test_fixed_unit_change_rebuilds_offsets_from_anchor(
 def test_switch_from_after_completion_to_fixed_rebuilds_current_unit() -> None:
     original = template(
         mode="after_completion",
-        unit=16,
+        unit=8,
         anchor=datetime(2026, 5, 14, tzinfo=timezone.utc),
     )
 
@@ -197,7 +212,7 @@ def test_switch_from_after_completion_to_fixed_rebuilds_current_unit() -> None:
 
 
 def test_explicit_weekdays_do_not_need_an_anchor() -> None:
-    original = template(mode="after_completion", unit=16)
+    original = template(mode="after_completion", unit=8)
 
     changed = original.transition(
         kind="task",
@@ -212,16 +227,16 @@ def test_explicit_weekdays_do_not_need_an_anchor() -> None:
 
 @pytest.mark.parametrize("unit", ["week", "month", "year"])
 def test_fixed_unit_change_rejects_missing_required_anchor(unit: str) -> None:
-    with pytest.raises(ValueError, match="start anchor"):
-        template(unit=8).transition(kind="task", unit=unit)  # type: ignore[arg-type]
+    with pytest.raises(RecurrenceReadError, match="repeat anchor"):
+        template(unit=16).transition(kind="task", unit=unit)  # type: ignore[arg-type]
 
 
 def test_day_and_after_completion_changes_do_not_need_an_anchor() -> None:
-    fixed_day = template(unit=16).transition(kind="task", unit="day")
-    fixed_from_after_completion = template(mode="after_completion", unit=8).transition(
+    fixed_day = template(unit=8).transition(kind="task", unit="day")
+    fixed_from_after_completion = template(mode="after_completion", unit=16).transition(
         kind="task", mode="fixed"
     )
-    after_completion = template(unit=16).transition(
+    after_completion = template(unit=8).transition(
         kind="task", mode="after_completion", unit="year"
     )
 
@@ -242,7 +257,7 @@ def test_transition_rejects_invalid_weekday_selectors(
 
 
 def test_after_completion_rejects_weekday_selectors() -> None:
-    with pytest.raises(ValueError, match="fixed weekly"):
+    with pytest.raises(ValueError, match="fixed repeat"):
         template().transition(
             kind="task",
             mode="after_completion",
@@ -259,3 +274,67 @@ def test_new_after_completion_rule_has_no_fixed_offsets() -> None:
     )
 
     assert rule["of"] == []
+
+
+def test_new_rule_supports_selected_dates_and_an_end_date() -> None:
+    until = datetime(2026, 12, 31, tzinfo=timezone.utc).date()
+    selected = [{"wd": 2, "wdo": 3}, {"dy": -1}]
+
+    dated = new_rule(
+        mode="fixed",
+        unit="month",
+        interval=1,
+        anchor=datetime(2026, 8, 30, tzinfo=timezone.utc).date(),
+        offsets=selected,
+        until=until,
+    )
+    assert dated["of"] == selected
+    assert dated["ed"] == int(datetime(2026, 12, 31, tzinfo=timezone.utc).timestamp())
+    assert dated["rc"] == 0
+
+
+def test_new_rule_rejects_an_end_before_its_anchor() -> None:
+    anchor = datetime(2026, 8, 30, tzinfo=timezone.utc).date()
+
+    with pytest.raises(ValueError, match="before the first occurrence"):
+        new_rule(
+            mode="fixed",
+            unit="week",
+            interval=1,
+            anchor=anchor,
+            until=anchor - timedelta(days=1),
+        )
+
+
+def test_transition_changes_selected_dates_and_end_without_losing_opaque_fields() -> None:
+    original = template(anchor=datetime(2026, 8, 30, tzinfo=timezone.utc))
+
+    changed = original.transition(
+        kind="task",
+        unit="year",
+        offsets=[{"mo": 0, "dy": 0}, {"mo": 11, "dy": -1}],
+        until=datetime(2027, 12, 31, tzinfo=timezone.utc).date(),
+        until_set=True,
+    )
+
+    assert changed.rule is not None
+    assert changed.rule["of"] == [{"mo": 0, "dy": 0}, {"mo": 11, "dy": -1}]
+    assert changed.rule["rc"] == 0
+    assert changed.rule["ed"] == int(
+        datetime(2027, 12, 31, tzinfo=timezone.utc).timestamp()
+    )
+    assert changed.rule["future_rule_key"] == ["preserve", 4]
+
+
+def test_transition_rejects_an_end_before_the_stored_anchor() -> None:
+    anchor = datetime(2026, 8, 30, tzinfo=timezone.utc).date()
+    original = template(
+        anchor=datetime.combine(anchor, datetime.min.time(), tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(ValueError, match="before the first occurrence"):
+        original.transition(
+            kind="task",
+            until=anchor - timedelta(days=1),
+            until_set=True,
+        )
