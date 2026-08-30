@@ -44,11 +44,6 @@
   its Task or Project graph, preventing orphaned Cloud rows.
 - The retained v1 recurrence inspection and Stop paths now match v2 for
   Projects and next-date materialization.
-
-## 0.6.1 — 2026-08-30
-
-### Fixed
-
 - Cloud history now folds `Task7` records and emits `Task7` for current
   task-family creates and mutations. Cache version 6 replays histories that
   previously advanced past ignored Task7 events.
