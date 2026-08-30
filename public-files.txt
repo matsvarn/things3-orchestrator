@@ -79,6 +79,7 @@ tests/test_server.py
 tests/test_source_document.py
 tests/test_v2_contract.py
 tests/test_v2_journal_authority.py
+tests/test_v2_recurrence.py
 tests/test_workflow_skill.py
 tests/test_workspace.py
 tests/test_workspace_context.py

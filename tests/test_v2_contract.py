@@ -17,7 +17,15 @@ from things_orchestrator.owner_authority import (
 )
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.server import ThingsMCPServer
-from things_orchestrator.v2 import PublicResult, ThingsV2
+from things_orchestrator.v2 import (
+    CaptureCall,
+    CaptureDiscoveryCall,
+    ProjectCapture,
+    PublicResult,
+    TaskCapture,
+    ThingsV2,
+    UpdateFields,
+)
 from things_orchestrator.workspace import ThingsWorkspace
 
 NOW = datetime(2026, 8, 29, 12, tzinfo=timezone.utc)
@@ -37,16 +45,160 @@ def _server(*records: Record, journal: MemoryJournal | None = None) -> ThingsMCP
 def test_default_discovery_is_exactly_the_bounded_eight() -> None:
     tools = {tool.name: tool for tool in asyncio.run(_server().list_tools())}
     assert set(tools) == {
-        "things_view", "things_find", "things_get", "things_capture",
-        "things_update", "things_complete", "things_trash", "things_receipt",
+        "things_view",
+        "things_find",
+        "things_get",
+        "things_capture",
+        "things_update",
+        "things_complete",
+        "things_trash",
+        "things_receipt",
     }
     assert "things_approve" not in tools
     update = str(tools["things_update"].input_schema)
     for forbidden in (
-        "revision", "context", "local", "complete", "trash", "reorder",
-        "checklist", "recurrence", "registry", "delete", "approval",
+        "revision",
+        "context",
+        "local",
+        "complete",
+        "trash",
+        "reorder",
+        "checklist",
+        "registry",
+        "delete",
+        "approval",
     ):
         assert forbidden not in update
+
+
+def test_repeat_contract_is_semantic_and_bounded() -> None:
+    capture = TaskCapture.model_validate(
+        {
+            "kind": "task",
+            "title": "Every other day",
+            "repeat": {"unit": "day", "interval": 2},
+        }
+    )
+    assert capture.repeat is not None
+    assert capture.repeat.mode == "fixed"
+    assert capture.repeat.interval == 2
+
+    project = ProjectCapture.model_validate(
+        {
+            "kind": "project",
+            "title": "Monthly close",
+            "tasks": [{"title": "Reconcile"}],
+            "repeat": {"unit": "month"},
+        }
+    )
+    assert project.repeat is not None
+    assert project.repeat.unit == "month"
+
+    update = UpdateFields.model_validate(
+        {
+            "repeat": {
+                "mode": "fixed",
+                "unit": "week",
+                "weekdays": ["monday", "wednesday"],
+            }
+        }
+    )
+    assert update.repeat is not None
+    assert update.repeat.unit == "week"
+    assert update.repeat.weekdays == ["monday", "wednesday"]
+
+    with pytest.raises(ValidationError):
+        TaskCapture.model_validate(
+            {
+                "kind": "task",
+                "title": "Invalid",
+                "repeat": {"unit": "day", "weekdays": ["monday"]},
+            }
+        )
+    with pytest.raises(ValidationError):
+        UpdateFields.model_validate({"repeat": {"remove": True, "unit": "week"}})
+
+    with pytest.raises(ValidationError, match="cannot be null"):
+        UpdateFields.model_validate({"repeat": {"weekdays": None}})
+
+    with pytest.raises(ValidationError, match="at least one selected date"):
+        TaskCapture.model_validate(
+            {
+                "kind": "task",
+                "title": "Invalid",
+                "repeat": {"unit": "week", "on": []},
+            }
+        )
+
+
+def test_repeat_create_next_is_an_exclusive_lifecycle_action() -> None:
+    update = UpdateFields.model_validate({"repeat": {"create_next": True}})
+
+    assert update.repeat is not None
+    assert update.repeat.create_next is True
+    for conflicting in ({"interval": 2}, {"paused": True}, {"remove": True}):
+        with pytest.raises(ValidationError, match="create next"):
+            UpdateFields.model_validate(
+                {"repeat": {"create_next": True, **conflicting}}
+            )
+
+
+def test_repeating_project_capture_counts_both_complete_graphs() -> None:
+    items = [
+        {
+            "kind": "project",
+            "title": f"Project {index}",
+            "tasks": [{"title": f"Task {task}"} for task in range(40)],
+            "repeat": {"unit": "week"},
+        }
+        for index in range(3)
+    ]
+
+    with pytest.raises(ValidationError, match="at most 120 writes"):
+        CaptureCall.model_validate({"request_id": REQUEST, "items": items})
+    with pytest.raises(ValidationError, match="at most 120 writes"):
+        CaptureDiscoveryCall.model_validate({"request_id": REQUEST, "items": items})
+
+
+def test_repeat_discovery_names_projects_and_create_next() -> None:
+    tools = {tool.name: tool for tool in asyncio.run(_server().list_tools())}
+    capture = tools["things_capture"]
+    update = tools["things_update"]
+
+    assert "Projects" in capture.description
+    assert "create_next" in str(update.input_schema)
+    assert "Create Next Copy" in update.description
+
+
+def test_public_get_maps_item_recurrence_fact() -> None:
+    result = asyncio.run(
+        _server(
+            Record(
+                uuid="repeat",
+                kind="task",
+                title="Repeating",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 16, "fa": 2, "of": []},
+                ),
+            )
+        ).call_tool("things_get", {"ids": ["task:repeat"]})
+    )
+    item = result.structured_content["items"][0]
+    assert item["recurrence"] == {
+        "engine": "rt1",
+        "kind": "template",
+        "mode": "fixed",
+        "unit": "day",
+        "interval": 2,
+        "weekdays": [],
+        "linked_item_ids": [],
+        "paused": False,
+        "generated_count": 0,
+        "on": [],
+        "adds_deadline": False,
+    }
 
 
 def test_retention_maintenance_runs_once_per_day_not_once_per_read() -> None:
@@ -1106,7 +1258,7 @@ def test_v2_rejects_rich_note_replacement_before_journaling(
     assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
 
 
-@pytest.mark.parametrize("tool", ["things_update", "things_complete", "things_trash"])
+@pytest.mark.parametrize("tool", ["things_complete", "things_trash"])
 def test_v2_rejects_recurrence_templates_before_journaling(tool: str) -> None:
     record = Record(
         uuid="a",
@@ -1118,11 +1270,6 @@ def test_v2_rejects_recurrence_templates_before_journaling(tool: str) -> None:
     )
     journal = MemoryJournal()
     arguments: dict[str, object] = {"request_id": REQUEST, "ids": [record.id]}
-    if tool == "things_update":
-        arguments = {
-            "request_id": REQUEST,
-            "items": [{"id": record.id, "set": {"title": "Changed"}}],
-        }
     result = ThingsV2(
         ThingsWorkspace(
             MemoryLibrary([record]),
@@ -1137,22 +1284,19 @@ def test_v2_rejects_recurrence_templates_before_journaling(tool: str) -> None:
     assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
 
 
-def test_v2_rejects_project_completion_with_open_actions_before_journaling() -> None:
+def test_v2_project_completion_completes_open_actions_atomically() -> None:
     project = Record(uuid="p", kind="project", title="Project")
+    action = Record(
+        uuid="a",
+        kind="task",
+        title="Open action",
+        parent_uuid=project.uuid,
+    )
+    library = MemoryLibrary([project, action])
     journal = MemoryJournal()
     result = ThingsV2(
         ThingsWorkspace(
-            MemoryLibrary(
-                [
-                    project,
-                    Record(
-                        uuid="a",
-                        kind="task",
-                        title="Open action",
-                        parent_uuid=project.uuid,
-                    ),
-                ]
-            ),
+            library,
             journal=journal,
             clock=lambda: NOW,
             account_id="owner@example.com",
@@ -1161,9 +1305,10 @@ def test_v2_rejects_project_completion_with_open_actions_before_journaling() -> 
         "things_complete", {"request_id": REQUEST, "ids": [project.id]}
     )
 
-    assert result.state == "rejected"
-    assert result.code == "validation_error"
-    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is None
+    assert result.state == "applied"
+    assert library.records["p"].status == "done"
+    assert library.records["a"].status == "done"
+    assert journal.get_v2_request("owner@example.com", "2", REQUEST) is not None
 
 
 def test_project_completion_freezes_the_clear_project_scope() -> None:

@@ -2837,7 +2837,7 @@ def test_today_matches_native_scheduling_and_excludes_waiting_only() -> None:
         ),
     ]
     module = workspace(records)
-    module._library.tags["waiting-tag"] = "Waiting"  # noqa: SLF001
+    module._library.tags["waiting-tag"] = "Waiting"
 
     result = module.read(ReadCall(view="today"))
 
@@ -5351,8 +5351,10 @@ def test_repeat_mode_unit_and_interval_change_in_one_approved_plan() -> None:
         "tp": 1,
         "fu": 256,
         "fa": 2,
-        "of": [],
-        "sr": 1_775_232_000,
+            "of": [],
+            "ed": 64_092_211_200,
+            "rc": 0,
+            "sr": 1_775_232_000,
         "ts": 0,
         "rrv": 99,
     }
@@ -5635,7 +5637,9 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert stop_plan.plan is not None
     stopped = module.approve(ApproveCall(plan_id=stop_plan.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert template.uuid in module._library.records  # noqa: SLF001
+    assert template.recurrence == RecurrenceState()
+    assert [row.title for row in template.checklists] == ["Open dashboard"]
     assert instance.recurrence.role == "none"
 
 
@@ -5686,7 +5690,8 @@ def test_stop_repeat_on_current_copy_deletes_the_template() -> None:
     assert planned.plan is not None
     stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert template.uuid in module._library.records  # noqa: SLF001
+    assert template.recurrence == RecurrenceState()
     assert current.recurrence.role == "none"
 
 
@@ -5718,7 +5723,8 @@ def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
     assert planned.plan is not None
     stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid not in module._library.records  # noqa: SLF001
+    assert template.uuid in module._library.records  # noqa: SLF001
+    assert template.recurrence == RecurrenceState()
     assert current.recurrence.role == "none"
 
 
@@ -5785,9 +5791,10 @@ def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> 
     assert task.recurrence.template_uuid == template.uuid
     assert template.title == task.title
     assert template.notes == task.notes
-    assert template.start == task.start
+    assert template.start is None
     assert template.deadline == task.deadline
-    assert template.remind == task.remind
+    assert template.remind is None
+    assert template.someday is True
     assert template.parent_uuid == task.parent_uuid
     assert template.heading_uuid == task.heading_uuid
     assert template.tag_uuids == task.tag_uuids
@@ -5890,11 +5897,15 @@ def test_repeat_conversion_projects_one_desired_state_to_copy_and_template() -> 
         assert record.title == "New routine"
         assert record.parent_uuid == new_project.uuid
         assert record.heading_uuid == heading.uuid
-        assert record.start == NOW.date()
         assert record.deadline == NOW.date() + timedelta(days=3)
-        assert record.remind == "09:30"
         assert record.sort_index > list_anchor.sort_index
-        assert record.today_index > today_anchor.today_index
+    assert task.start == NOW.date()
+    assert task.remind == "09:30"
+    assert task.today_index > today_anchor.today_index
+    assert template.start is None
+    assert template.remind is None
+    assert template.someday is True
+    assert template.today_index == 0
     assert [(row.uuid, row.title, row.status) for row in task.checklists] == [
         ("row-c", "Keep", "done"),
         (task.checklists[1].uuid, "Added", "open"),
@@ -5952,11 +5963,14 @@ def test_repeat_conversion_projects_schedule_clearing_semantics(
         for item in module._library.records.values()  # noqa: SLF001
         if item.recurrence.role == "template"
     )
-    for record in (task, template):
-        assert record.start is None
-        assert record.remind is None
-        assert record.inbox is expected_inbox
-        assert record.someday is expected_someday
+    assert task.start is None
+    assert task.remind is None
+    assert task.inbox is expected_inbox
+    assert task.someday is expected_someday
+    assert template.start is None
+    assert template.remind is None
+    assert template.inbox is False
+    assert template.someday is True
 
 
 @pytest.mark.parametrize("replacement", [False, True])

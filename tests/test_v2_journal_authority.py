@@ -887,6 +887,7 @@ def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: P
     {"action": "rename_area", "kind": "task", "title": "Wrong kind"},
     {"action": "create_heading", "kind": "project", "title": "Wrong kind"},
     {"action": "checklist"}, {"action": "repeat"}, {"action": "repeat_link"},
+    {"action": "repeat_progress"},
 ])
 def test_action_incomplete_legacy_plan_remains_fenced(write: dict[str, object]) -> None:
     journal = MemoryJournal()

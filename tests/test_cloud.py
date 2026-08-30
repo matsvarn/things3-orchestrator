@@ -159,10 +159,10 @@ def test_task_creates_and_legacy_mutations_emit_task7(tmp_path: Path) -> None:
         uuid="legacy", kind="task", title="Legacy", entity="Task6"
     )
 
-    created = library._envelope(  # noqa: SLF001
+    created = library._envelope(
         Write(action="create", uuid="new", kind="task", title="New")
     )
-    heading = library._envelope(  # noqa: SLF001
+    heading = library._envelope(
         Write(
             action="create_heading",
             uuid="heading",
@@ -171,13 +171,13 @@ def test_task_creates_and_legacy_mutations_emit_task7(tmp_path: Path) -> None:
             heading=True,
         )
     )
-    updated = library._envelope(  # noqa: SLF001
+    updated = library._envelope(
         Write(action="update", uuid="legacy", kind="task", title="Updated")
     )
-    completed = library._envelope(  # noqa: SLF001
+    completed = library._envelope(
         Write(action="complete", uuid="legacy", kind="task")
     )
-    trashed = library._envelope(  # noqa: SLF001
+    trashed = library._envelope(
         Write(action="trash", uuid="legacy", kind="task")
     )
 
@@ -255,6 +255,104 @@ def test_fold_preserves_opaque_repeat_rules_and_partial_updates() -> None:
     )
     assert library.records["template"].recurrence.rule is None
     assert library.records["template"].recurrence.role == "none"
+
+
+def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -> None:
+    repeater = {
+        "v": 1,
+        "t": 0,
+        "pfu": 1,
+        "pfa": 2,
+        "po": [{"wd": 1}, {"wd": 4}],
+        "future": {"preserve": True},
+    }
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "rt2",
+                "e": "Task7",
+                "t": 0,
+                "p": {"tt": "Future repeater", "tp": 0, "rp": repeater},
+            }
+        ],
+        library=library,
+    )
+
+    assert library.records["rt2"].repeater == repeater
+    assert library.records["rt2"].repeater is not repeater
+
+    cache = tmp_path / "state.json"
+    cloud = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
+    cloud.records = library.records
+    cloud.client.history_id = "history"
+    cloud._save_cache()
+
+    restored = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
+    assert restored._restore_cache("history") is True
+    assert restored.records["rt2"].repeater == repeater
+
+
+def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
+        ),
+        entity="Task7",
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat",
+                uuid="template",
+                recurrence_rule=library.records["template"].recurrence.rule,
+                recurrence_paused=True,
+            )
+        ]
+    )
+
+    assert client.committed[0].payload["icp"] is True
+    assert library.records["template"].recurrence.paused is True
+
+
+def test_task7_stop_repeat_clears_rule_without_deleting_template(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
+        ),
+        entity="Task7",
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat",
+                uuid="template",
+                clear_recurrence_rule=True,
+            )
+        ]
+    )
+
+    assert client.committed[0].action == 1
+    assert client.committed[0].payload["rr"] is None
+    assert "template" in library.records
+    assert library.records["template"].recurrence == RecurrenceState()
 
 
 def test_fold_sparse_placement_clears_incompatible_home() -> None:
@@ -387,7 +485,7 @@ def test_memory_repeat_rejects_non_template_or_inconsistent_records(
 ) -> None:
     library = MemoryLibrary([record])
 
-    with pytest.raises(ValueError, match="exact repeating Task template"):
+    with pytest.raises(ValueError, match="exact repeating Task or Project template"):
         library.apply(
             [
                 Write(
@@ -440,7 +538,7 @@ def test_cloud_repeat_rejects_non_template_or_inconsistent_records(
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records[record.uuid] = record
 
-    with pytest.raises(CloudError, match="exact repeating Task template"):
+    with pytest.raises(CloudError, match="exact repeating Task or Project template"):
         library.apply(
             [
                 Write(
@@ -2148,13 +2246,13 @@ def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
                 uuid="template-new",
                 title="Routine",
                 recurrence_rule=rule,
+                recurrence_created_through=date(2026, 4, 3),
             ),
             Write(
                 action="create",
                 uuid="instance-new",
                 title="Routine",
                 recurrence_links=["template-new"],
-                recurrence_generated=True,
             ),
         ]
     )
@@ -2164,9 +2262,11 @@ def test_repeat_template_and_generated_copy_create_in_one_cloud_commit(
     instance = next(item for item in client.committed if item.uuid == "instance-new")
     assert template.payload["rr"] == rule
     assert template.payload["rt"] == []
+    assert template.payload["icsd"] == day_ts(date(2026, 4, 3))
+    assert template.payload["md"] is None
     assert instance.payload["rr"] is None
     assert instance.payload["rt"] == ["template-new"]
-    assert instance.payload["lt"] is True
+    assert instance.payload["lt"] is False
     assert library.records["template-new"].recurrence.role == "template"
     assert library.records["instance-new"].recurrence.template_uuid == "template-new"
 
@@ -2216,7 +2316,88 @@ def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> No
     assert "template" not in library.records
 
 
-def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
+def test_project_create_next_emits_native_count_and_leavable_copy(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template-project"] = Record(
+        uuid="template-project",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 256, "fa": 1, "of": []},
+        ),
+        recurrence_instance_count=1,
+    )
+
+    library.apply(
+        [
+            Write(
+                action="create",
+                uuid="next-project",
+                kind="project",
+                title="Release train",
+                start=date(2026, 8, 30),
+                recurrence_links=["template-project"],
+                leavable=True,
+            ),
+            Write(
+                action="create_heading",
+                uuid="next-heading",
+                kind="task",
+                title="Ship",
+                into_uuid="next-project",
+                into_kind="project",
+                leavable=True,
+            ),
+            Write(
+                action="create",
+                uuid="next-task",
+                kind="task",
+                title="Deploy",
+                heading_uuid="next-heading",
+                leavable=True,
+            ),
+            Write(
+                action="checklist",
+                uuid="next-check",
+                title="Verify",
+                checklist_parent_uuid="next-task",
+            ),
+            Write(
+                action="repeat_next",
+                uuid="template-project",
+                kind="project",
+                recurrence_instance_count=2,
+            ),
+        ]
+    )
+
+    current = next(row for row in client.committed if row.uuid == "next-project")
+    advance = next(
+        row for row in client.committed if row.uuid == "template-project"
+    )
+    heading = next(row for row in client.committed if row.uuid == "next-heading")
+    task = next(row for row in client.committed if row.uuid == "next-task")
+    checklist = next(row for row in client.committed if row.uuid == "next-check")
+    assert current.payload["tp"] == 1
+    assert current.payload["rt"] == ["template-project"]
+    assert current.payload["lt"] is True
+    assert heading.payload["tp"] == 2
+    assert heading.payload["pr"] == ["next-project"]
+    assert task.payload["pr"] == []
+    assert task.payload["agr"] == ["next-heading"]
+    assert task.payload["lt"] is True
+    assert checklist.payload["ts"] == ["next-task"]
+    assert advance.payload == {"icc": 2}
+    assert library.records["template-project"].recurrence_instance_count == 2
+    assert library.records["next-project"].leavable is True
+
+
+def test_existing_task_repeat_link_preserves_leavable_flag_and_reads_back(
     tmp_path: Path,
 ) -> None:
     client = _CaptureClient()
@@ -2246,15 +2427,46 @@ def test_existing_task_repeat_link_sets_generated_flag_and_reads_back(
                 action="repeat_link",
                 uuid="existing",
                 recurrence_links=["template"],
-                recurrence_generated=True,
             )
         ]
     )
 
     assert client.committed[0].payload["rt"] == ["template"]
-    assert client.committed[0].payload["lt"] is True
+    assert "lt" not in client.committed[0].payload
     assert library.records["existing"].recurrence.role == "instance"
     assert library.records["existing"].recurrence.template_uuid == "template"
+
+
+def test_after_completion_progress_updates_template_dates(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        entity="Task7",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="after_completion",
+            rule={"tp": 1, "fu": 256, "fa": 1},
+        ),
+    )
+
+    library.apply(
+        [
+            Write(
+                action="repeat_progress",
+                uuid="template",
+                recurrence_completed_on=date(2026, 8, 30),
+                recurrence_next_on=date(2026, 9, 6),
+            )
+        ]
+    )
+
+    assert client.committed[0].payload["acrd"] == day_ts(date(2026, 8, 30))
+    assert client.committed[0].payload["tir"] == day_ts(date(2026, 9, 6))
+    assert library.records["template"].recurrence_completed_on == date(2026, 8, 30)
+    assert library.records["template"].recurrence_next_on == date(2026, 9, 6)
 
 
 @pytest.mark.parametrize(
@@ -2312,11 +2524,14 @@ def test_cloud_repeat_conversion_reads_back_final_schedule_semantics(
     template = next(
         item for item in library.records.values() if item.recurrence.role == "template"
     )
-    for record in (task, template):
-        assert record.start is None
-        assert record.remind is None
-        assert record.inbox is expected_inbox
-        assert record.someday is expected_someday
+    assert task.start is None
+    assert task.remind is None
+    assert task.inbox is expected_inbox
+    assert task.someday is expected_someday
+    assert template.start is None
+    assert template.remind is None
+    assert template.inbox is False
+    assert template.someday is True
 
 
 @pytest.mark.parametrize("replacement", [False, True])
