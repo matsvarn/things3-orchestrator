@@ -212,6 +212,90 @@ def test_malformed_native_generated_count_preserves_the_last_valid_count(
     assert library.records["template"].recurrence_instance_count_known is True
 
 
+@pytest.mark.parametrize("paused", ["false", 0, 1, None, [], {}])
+def test_malformed_native_paused_state_is_unavailable_and_not_writable(
+    paused: object,
+) -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "icp": paused,
+                },
+            }
+        ],
+        library=library,
+    )
+    template = library.records["template"]
+    assert template.recurrence.paused is False
+    assert template.recurrence_paused_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2992"
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    )
+    recurrence = interface.dispatch(
+        "things_get", {"ids": ["task:template"]}
+    ).items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.paused is None
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {"id": "task:template", "set": {"repeat": {"paused": True}}}
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
+def test_malformed_sparse_native_paused_state_preserves_last_valid_state() -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "icp": True,
+                },
+            },
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"icp": "false"},
+            },
+        ],
+        library=library,
+    )
+
+    assert library.records["template"].recurrence.paused is True
+    assert library.records["template"].recurrence_paused_known is True
+
+
 @pytest.mark.parametrize(
     "count", ["invalid", MAX_RECURRENCE_INSTANCE_COUNT], ids=["unknown", "exhausted"]
 )
@@ -452,6 +536,7 @@ def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -
     assert library.records["rt2"].repeater == repeater
     assert library.records["rt2"].repeater is not repeater
     assert library.records["rt2"].recurrence_instance_count_known is False
+    assert library.records["rt2"].recurrence_paused_known is False
 
     cache = tmp_path / "state.json"
     cloud = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
@@ -463,6 +548,7 @@ def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -
     assert restored._restore_cache("history") is True
     assert restored.records["rt2"].repeater == repeater
     assert restored.records["rt2"].recurrence_instance_count_known is False
+    assert restored.records["rt2"].recurrence_paused_known is False
 
 
 def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) -> None:
@@ -1071,6 +1157,13 @@ def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
         ("recurrence_instance_count", 1.5),
         ("recurrence_instance_count", MAX_RECURRENCE_INSTANCE_COUNT + 1),
         ("recurrence_instance_count_known", "false"),
+        ("recurrence_paused", "false"),
+        ("recurrence_paused", 0),
+        ("recurrence_paused", 1),
+        ("recurrence_paused", None),
+        ("recurrence_paused", []),
+        ("recurrence_paused", {}),
+        ("recurrence_paused_known", "false"),
     ],
 )
 def test_malformed_cached_recurrence_is_discarded_before_replay(
@@ -1085,6 +1178,8 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
         "recurrence_links": [],
         "recurrence_instance_count": 0,
         "recurrence_instance_count_known": False,
+        "recurrence_paused": False,
+        "recurrence_paused_known": False,
     }
     record[bad_field[0]] = bad_field[1]
     cache.write_text(

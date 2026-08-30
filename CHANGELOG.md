@@ -48,7 +48,8 @@
   reminder fields now fold as missing state, and malformed generated counts
   stay explicitly unavailable, instead of disabling Cloud reads and writes or
   authorizing a fabricated Create Next. Exhausted counts also require a fresh
-  read. Corrupt cached counts and trust markers force a history replay instead
+  read. Malformed native pause state remains explicitly unavailable. Corrupt
+  cached counts, pause state, and trust markers force a history replay instead
   of being coerced into writable state. Corrupt rule anchors require a fresh
   read for end-date and unit edits.
 - Repeating Project templates and future copies reset completed Tasks and
@@ -58,7 +59,7 @@
 - The retained v1 recurrence inspection and Stop paths now match v2 for
   Projects and next-date materialization.
 - Cloud history now folds `Task7` records and emits `Task7` for current
-  task-family creates and mutations. Cache version 8 replays histories that
+  task-family creates and mutations. Cache version 9 replays histories that
   previously advanced past ignored Task7 events and reconstructs the original
   date of manually generated repeat copies.
 - Today now matches the native Things list. Open items scheduled on or before

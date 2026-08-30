@@ -1564,7 +1564,7 @@ class RecurrenceFact(StrictModel):
     interval: int | None = Field(default=None, ge=1, le=366)
     weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
-    paused: bool = False
+    paused: bool | None = None
     created_through: str | None = Field(default=None, max_length=10)
     generated_count: int | None = Field(default=None, ge=0)
     completed_on: str | None = Field(default=None, max_length=10)
@@ -2397,7 +2397,7 @@ _RECURRENCE: dict[str, Any] = {
             "uniqueItems": True,
             "items": _EXACT_ITEM,
         },
-        "paused": {"type": "boolean", "default": False},
+        "paused": {"type": "boolean"},
         "created_through": {"type": "string", "maxLength": 10},
         "generated_count": {"type": "integer", "minimum": 0},
         "completed_on": {"type": "string", "maxLength": 10},

@@ -276,7 +276,7 @@ class PublicRecurrence(StrictModel):
     interval: int | None = Field(default=None, ge=1, le=366)
     weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
-    paused: bool = False
+    paused: bool | None = None
     created_through: str | None = None
     generated_count: int | None = Field(default=None, ge=0)
     completed_on: str | None = None

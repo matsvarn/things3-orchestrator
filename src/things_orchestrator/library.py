@@ -100,6 +100,7 @@ class Record:
     recurrence_created_through: date | None = None
     recurrence_instance_count: int = 0
     recurrence_instance_count_known: bool = True
+    recurrence_paused_known: bool = True
     recurrence_completed_on: date | None = None
     recurrence_next_on: date | None = None
     recurrence_generated_on: date | None = None
@@ -1183,6 +1184,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
             item.recurrence = item.recurrence.fold_paused(
                 mutation.write.recurrence_paused
             )
+            item.recurrence_paused_known = True
         self.verified.append(item.title)
 
     def finish(self) -> None:

@@ -3148,6 +3148,16 @@ class ThingsWorkspace:
                 "next_action": "read_fresh",
                 "instruction": "The repeat template is unavailable; read the item again.",
             }
+        if "paused" in repeat and not template.recurrence_paused_known:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "read_fresh",
+                "instruction": (
+                    "The native repeat pause state is unavailable; read the series "
+                    "again before changing it."
+                ),
+            }
         try:
             template.recurrence.validate_interval_template(kind=template.kind)
         except ValueError as error:
@@ -3990,7 +4000,11 @@ class ThingsWorkspace:
                 for code in resolved.weekday_codes
                 if code in _WEEKDAY_NAMES
             ],
-            "paused": resolved.paused,
+            "paused": (
+                resolved.paused
+                if bookkeeping is not None and bookkeeping.recurrence_paused_known
+                else None
+            ),
             "created_through": (
                 bookkeeping.recurrence_created_through.isoformat()
                 if bookkeeping is not None
@@ -5151,7 +5165,9 @@ class ThingsWorkspace:
                     if code in _WEEKDAY_NAMES
                 ],
                 linked_item_ids=linked_ids[:40],
-                paused=rule.paused,
+                paused=(
+                    rule.paused if bookkeeping.recurrence_paused_known else None
+                ),
                 created_through=(
                     bookkeeping.recurrence_created_through.isoformat()
                     if bookkeeping.recurrence_created_through
@@ -9489,6 +9505,7 @@ class ThingsWorkspace:
             "recurrence_instance_count_known": (
                 item.recurrence_instance_count_known
             ),
+            "recurrence_paused_known": item.recurrence_paused_known,
             "recurrence_completed_on": (
                 item.recurrence_completed_on.isoformat()
                 if item.recurrence_completed_on

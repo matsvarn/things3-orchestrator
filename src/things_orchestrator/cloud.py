@@ -60,7 +60,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 8
+_CACHE_VERSION = 9
 
 
 class CloudError(RuntimeError):
@@ -486,6 +486,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 kind="task",
                 title="",
                 recurrence_instance_count_known=False,
+                recurrence_paused_known=False,
             )
             if existing is not None:
                 item.checklists = existing.checklists
@@ -495,6 +496,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 kind="task",
                 title="",
                 recurrence_instance_count_known=False,
+                recurrence_paused_known=False,
             )
         item.entity = kind
         if "tt" in payload and payload["tt"] is not None:
@@ -561,7 +563,10 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "rp" in payload:
             item.repeater = deepcopy(payload.get("rp"))
         if "icp" in payload:
-            item.recurrence = item.recurrence.fold_paused(payload.get("icp"))
+            paused = payload.get("icp")
+            if isinstance(paused, bool):
+                item.recurrence = item.recurrence.fold_paused(paused)
+                item.recurrence_paused_known = True
         if "icsd" in payload:
             item.recurrence_created_through = _native_date(payload.get("icsd"))
         if "icc" in payload and payload["icc"] is not None:
@@ -1685,6 +1690,7 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_rule": item.recurrence.rule,
         "recurrence_links": list(item.recurrence.links),
         "recurrence_paused": item.recurrence.paused,
+        "recurrence_paused_known": item.recurrence_paused_known,
         "repeater": deepcopy(item.repeater),
         "recurrence_created_through": item.recurrence_created_through.isoformat()
         if item.recurrence_created_through
@@ -1750,6 +1756,12 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
     instance_count_known = payload.get("recurrence_instance_count_known")
     if not isinstance(instance_count_known, bool):
         raise ValueError("invalid cached recurrence instance count trust marker")
+    paused = payload.get("recurrence_paused")
+    if not isinstance(paused, bool):
+        raise ValueError("invalid cached recurrence paused state")
+    paused_known = payload.get("recurrence_paused_known")
+    if not isinstance(paused_known, bool):
+        raise ValueError("invalid cached recurrence paused trust marker")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1782,7 +1794,7 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             template_uuid=payload.get("recurrence_template_uuid"),
             rule=raw_rule,
             links=tuple(raw_links),
-            paused=bool(payload.get("recurrence_paused")),
+            paused=paused,
         ),
         repeater=deepcopy(payload.get("repeater")),
         recurrence_created_through=(
@@ -1792,6 +1804,7 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         ),
         recurrence_instance_count=instance_count,
         recurrence_instance_count_known=instance_count_known,
+        recurrence_paused_known=paused_known,
         recurrence_completed_on=(
             date.fromisoformat(payload["recurrence_completed_on"])
             if payload.get("recurrence_completed_on")
