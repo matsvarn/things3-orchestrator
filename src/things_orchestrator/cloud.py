@@ -117,7 +117,7 @@ def _note_metadata(
 
 
 def _native_date(value: object) -> date | None:
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
         return from_ts(value)

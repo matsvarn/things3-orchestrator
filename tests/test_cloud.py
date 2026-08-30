@@ -126,7 +126,9 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
 
 
 @pytest.mark.parametrize("field", ["sr", "dd", "icsd", "acrd", "tir"])
-@pytest.mark.parametrize("value", ["invalid", float("inf"), float("nan"), 10**100])
+@pytest.mark.parametrize(
+    "value", ["invalid", True, float("inf"), float("nan"), 10**100]
+)
 def test_malformed_native_repeat_dates_fold_as_missing(
     field: str, value: object
 ) -> None:
