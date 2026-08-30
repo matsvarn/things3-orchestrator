@@ -597,7 +597,7 @@ def test_v2_edits_future_rule_through_current_copy_and_preserves_opaque_fields()
     assert result.items[0].recurrence.interval == 2
 
 
-def test_v2_stop_repeat_needs_owner_and_removes_hidden_template(
+def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     tmp_path: Path,
 ) -> None:
     factor = tmp_path / "owner-factor.json"
@@ -606,7 +606,27 @@ def test_v2_stop_repeat_needs_owner_and_removes_hidden_template(
         owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
     )
     template, current = _repeating_pair()
-    library = MemoryLibrary([template, current])
+    template.notes = "Choose the three outcomes."
+    template.start = date(2026, 9, 1)
+    template.deadline = date(2026, 9, 7)
+    template.remind = "09:30"
+    template.tag_uuids = ["tag-planning"]
+    template.recurrence_next_on = date(2026, 9, 6)
+    template.checklists = [
+        ChecklistLine(uuid="template-check", title="Review calendar", sort_index=7)
+    ]
+    other = Record(
+        uuid="current-two",
+        kind="task",
+        title="Plan week",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    library = MemoryLibrary([template, current, other])
     workspace = ThingsWorkspace(
         library,
         journal=journal,
@@ -638,8 +658,92 @@ def test_v2_stop_repeat_needs_owner_and_removes_hidden_template(
     assert result["state"] == "applied"
     assert "template" not in library.records
     assert library.records["current"].recurrence == RecurrenceState()
+    assert library.records["current-two"].recurrence == RecurrenceState()
+    ordinary = next(
+        item
+        for item in library.records.values()
+        if item.uuid not in {current.uuid, other.uuid} and item.title == template.title
+    )
+    assert ordinary.recurrence == RecurrenceState()
+    assert ordinary.start == date(2026, 9, 6)
+    assert ordinary.deadline == template.deadline
+    assert ordinary.remind == template.remind
+    assert ordinary.notes == template.notes
+    assert ordinary.tag_uuids == template.tag_uuids
+    assert ordinary.leavable is True
+    assert [row.title for row in ordinary.checklists] == ["Review calendar"]
+    assert result["item_ids"] == [current.id, ordinary.id]
+    receipt = interface.dispatch(
+        "things_receipt", {"operation_id": operation.operation_id}
+    )
+    link_rows = [row for row in receipt.rows if row["action"] == "repeat_link"]
+    assert {row["target_id"] for row in link_rows} == {current.id, other.id}
+    assert all(row["desired"]["recurrence"] is None for row in link_rows)
+    replacement_row = next(
+        row
+        for row in receipt.rows
+        if row["action"] == "create" and row["target_id"] == ordinary.id
+    )
+    assert replacement_row["desired"]["start"] == "2026-09-06"
+    assert replacement_row["desired"]["recurrence"] is None
+    assert any(
+        row["action"] == "permanent_delete"
+        and row["target_id"] == template.id
+        for row in receipt.rows
+    )
     found = interface.dispatch("things_find", {"text": "Plan week"})
-    assert [item.id for item in found.items] == ["task:current"]
+    assert {item.id for item in found.items} == {
+        "task:current",
+        "task:current-two",
+        ordinary.id,
+    }
+
+
+def test_v2_stop_template_without_generated_copies_returns_ordinary_replacement(
+    tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    template, _ = _repeating_pair()
+    template.recurrence_next_on = date(2026, 9, 6)
+    library = MemoryLibrary([template])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    interface = ThingsV2(workspace)
+
+    staged = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2826",
+            "items": [
+                {"id": template.id, "set": {"repeat": {"remove": True}}}
+            ],
+        },
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert staged.state == "awaiting_owner" and operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    ordinary = next(iter(library.records.values()))
+    assert ordinary.uuid != template.uuid
+    assert ordinary.recurrence == RecurrenceState()
+    assert ordinary.start == date(2026, 9, 6)
+    assert result["item_ids"] == [ordinary.id]
 
 
 def test_v2_rejects_stop_combined_with_an_ordinary_template_update() -> None:
@@ -791,7 +895,7 @@ def test_v2_rejects_conflicting_rule_edits_for_one_series_in_one_batch() -> None
     assert library.records[template.uuid].recurrence.rule["fa"] == 1
 
 
-def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
+def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
     tmp_path: Path,
 ) -> None:
     factor = tmp_path / "owner-factor.json"
@@ -808,6 +912,7 @@ def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
             repeat_type="fixed",
             rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
         ),
+        recurrence_next_on=date(2026, 9, 6),
     )
     template_heading = Record(
         uuid="project-template-heading",
@@ -821,6 +926,7 @@ def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
         kind="task",
         title="Deploy",
         heading_uuid=template_heading.uuid,
+        checklists=[ChecklistLine(uuid="template-check", title="Smoke test")],
     )
     current = Record(
         uuid="project-current",
@@ -843,8 +949,19 @@ def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
     current_task = Record(
         uuid="project-current-task",
         kind="task",
-        title="Deploy",
+        title="Already deployed",
         heading_uuid=current_heading.uuid,
+    )
+    other_current = Record(
+        uuid="project-current-two",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
     )
     library = MemoryLibrary(
         [
@@ -854,6 +971,7 @@ def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
             current,
             current_heading,
             current_task,
+            other_current,
         ]
     )
     workspace = ThingsWorkspace(
@@ -887,12 +1005,106 @@ def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
     result = workspace.host_approve_v2(operation.operation_id, authorization)
 
     assert result["state"] == "applied"
-    assert set(library.records) == {
-        current.uuid,
-        current_heading.uuid,
-        current_task.uuid,
-    }
+    assert not {
+        template.uuid,
+        template_heading.uuid,
+        template_task.uuid,
+    }.intersection(library.records)
     assert library.records[current.uuid].recurrence == RecurrenceState()
+    assert library.records[other_current.uuid].recurrence == RecurrenceState()
+    ordinary = next(
+        item
+        for item in library.records.values()
+        if item.kind == "project"
+        and item.uuid not in {current.uuid, other_current.uuid}
+        and item.recurrence.role == "none"
+    )
+    assert ordinary.title == template.title
+    assert ordinary.start == date(2026, 9, 6)
+    assert ordinary.leavable is True
+    ordinary_heading = next(
+        item
+        for item in library.records.values()
+        if item.heading and item.parent_uuid == ordinary.uuid
+    )
+    ordinary_task = next(
+        item
+        for item in library.records.values()
+        if item.heading_uuid == ordinary_heading.uuid
+    )
+    assert ordinary_heading.title == template_heading.title
+    assert ordinary_task.title == template_task.title
+    assert ordinary_heading.uuid != template_heading.uuid
+    assert ordinary_task.uuid != template_task.uuid
+    assert ordinary_heading.leavable is ordinary_task.leavable is True
+    assert [row.title for row in ordinary_task.checklists] == ["Smoke test"]
+    assert library.records[current_task.uuid].title == "Already deployed"
+    assert result["item_ids"] == [current.id, ordinary.id]
+    receipt = interface.dispatch(
+        "things_receipt", {"operation_id": operation.operation_id}
+    )
+    link_rows = [row for row in receipt.rows if row["action"] == "repeat_link"]
+    assert {row["target_id"] for row in link_rows} == {
+        current.id,
+        other_current.id,
+    }
+    assert all(row["desired"]["recurrence"] is None for row in link_rows)
+    replacement_row = next(
+        row
+        for row in receipt.rows
+        if row["action"] == "create" and row["target_id"] == ordinary.id
+    )
+    assert replacement_row["desired"]["start"] == "2026-09-06"
+    assert replacement_row["desired"]["recurrence"] is None
+    delete_targets = {
+        row["target_id"]
+        for row in receipt.rows
+        if row["action"] == "permanent_delete"
+    }
+    assert delete_targets == {
+        template_task.id,
+        template_heading.id,
+        template.id,
+    }
+
+
+def test_v2_stop_repeating_project_counts_replacement_and_deletes_in_write_limit() -> (
+    None
+):
+    template = Record(
+        uuid="large-template",
+        kind="project",
+        title="Large repeat",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+    )
+    children = [
+        Record(
+            uuid=f"large-child-{index}",
+            kind="task",
+            title=f"Step {index}",
+            parent_uuid=template.uuid,
+        )
+        for index in range(60)
+    ]
+    interface, library = _interface(template, *children)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2827",
+            "items": [
+                {"id": template.id, "set": {"repeat": {"remove": True}}}
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "expanded_write_limit"
+    assert set(library.records) == {template.uuid, *(child.uuid for child in children)}
 
 
 def test_v2_pauses_and_resumes_the_template_through_the_current_copy() -> None:

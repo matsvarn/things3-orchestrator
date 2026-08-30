@@ -28,7 +28,12 @@ from things_orchestrator.library import (
     from_ts,
     new_uuid,
 )
+from things_orchestrator.owner_authority import (
+    enroll_owner_factor,
+    verified_authorization,
+)
 from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
 
 
@@ -324,7 +329,7 @@ def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) 
     assert library.records["template"].recurrence.paused is True
 
 
-def test_task7_stop_repeat_clears_rule_without_deleting_template(tmp_path: Path) -> None:
+def test_task7_sparse_rule_clear_keeps_the_record(tmp_path: Path) -> None:
     client = _CaptureClient()
     library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
     library.records["template"] = Record(
@@ -2314,6 +2319,145 @@ def test_repeat_link_can_be_cleared_before_template_delete(tmp_path: Path) -> No
     assert link.payload["rt"] == []
     assert library.records["instance"].recurrence.role == "none"
     assert "template" not in library.records
+
+
+def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
+    tmp_path: Path,
+) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records.update(
+        {
+            "template-project": Record(
+                uuid="template-project",
+                kind="project",
+                title="Release train",
+                entity="Task7",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 256, "fa": 1},
+                ),
+            ),
+            "template-heading": Record(
+                uuid="template-heading",
+                kind="task",
+                title="Ship",
+                entity="Task7",
+                heading=True,
+                parent_uuid="template-project",
+            ),
+            "template-task": Record(
+                uuid="template-task",
+                kind="task",
+                title="Deploy",
+                entity="Task7",
+                heading_uuid="template-heading",
+                checklists=[
+                    ChecklistLine(uuid="template-check", title="Verify")
+                ],
+            ),
+            "current-project": Record(
+                uuid="current-project",
+                kind="project",
+                title="Release train",
+                entity="Task7",
+                recurrence=RecurrenceState(
+                    role="instance",
+                    repeat_type="fixed",
+                    template_uuid="template-project",
+                    links=("template-project",),
+                ),
+            ),
+        }
+    )
+    library.records["template-project"].recurrence_next_on = date(2026, 9, 6)
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+        account_id="owner@example.com",
+    )
+    staged = ThingsV2(workspace).dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2901",
+            "items": [
+                {
+                    "id": "project:current-project",
+                    "set": {"repeat": {"remove": True}},
+                }
+            ],
+        },
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert staged.state == "awaiting_owner" and operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "applied"
+
+    by_uuid = {row.uuid: row for row in client.committed}
+    assert by_uuid["current-project"].payload["rt"] == []
+    assert set(by_uuid["current-project"].payload) == {"rt", "md"}
+    root = next(
+        row
+        for row in client.committed
+        if row.action == 0 and row.payload.get("tp") == 1
+    )
+    assert root.action == 0 and root.kind == "Task7"
+    assert root.payload["tp"] == 1
+    assert root.payload["st"] == 2
+    assert root.payload["sr"] == root.payload["tir"] == day_ts(date(2026, 9, 6))
+    assert root.payload["rr"] is None
+    assert root.payload["rt"] == []
+    assert root.payload["rp"] is None
+    assert root.payload["lt"] is True
+    heading = next(
+        row
+        for row in client.committed
+        if row.action == 0 and row.payload.get("tp") == 2
+    )
+    assert heading.payload["tp"] == 2
+    assert heading.payload["pr"] == [root.uuid]
+    assert heading.payload["lt"] is True
+    task = next(
+        row
+        for row in client.committed
+        if row.action == 0
+        and row.payload.get("tp") == 0
+        and row.payload.get("tt") == "Deploy"
+    )
+    assert task.payload["pr"] == []
+    assert task.payload["agr"] == [heading.uuid]
+    assert task.payload["lt"] is True
+    checklist = next(row for row in client.committed if row.kind == "ChecklistItem3")
+    assert checklist.kind == "ChecklistItem3"
+    assert checklist.payload["ts"] == [task.uuid]
+    assert all(
+        by_uuid[item_uuid].action == 2 and by_uuid[item_uuid].payload == {}
+        for item_uuid in ("template-task", "template-heading", "template-project")
+    )
+    assert library.records["current-project"].recurrence == RecurrenceState()
+    assert library.records[root.uuid].recurrence == RecurrenceState()
+    assert library.records[root.uuid].leavable is True
+    assert not {
+        "template-task",
+        "template-heading",
+        "template-project",
+    }.intersection(library.records)
 
 
 def test_project_create_next_emits_native_count_and_leavable_copy(
