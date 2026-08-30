@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-08-30
+
+### Added
+
+- The eight-tool v2 interface can create fixed or after-completion repeats for
+  Tasks and Projects. Semantic rules cover day, week, month, and year
+  intervals, selected dates, end dates, pause, and resume.
+- `things_update` can edit or stop an RT1 repeat and can run Things' "Create
+  Next Copy" action. Public recurrence facts now include the engine, pause
+  state, generated-copy count, generation horizon, last completion date, and
+  next date.
+- Repeating Projects preserve their complete native graph. Generated copies
+  remap headings, heading assignments, Tasks, and checklist rows to fresh IDs.
+- `things_view` exposes the native Repeating list. RT2 rules remain readable
+  but reject rule, schedule, and lifecycle mutations until native write deltas
+  are proven.
+
+### Changed
+
+- Completing a Project now completes its open descendants and the Project in
+  one frozen operation. Completing an after-completion copy advances the
+  template once.
+- Cloud writes use the native sparse bookkeeping payloads for pause, resume,
+  completion progress, and "Create Next Copy". The cache stores generated-copy
+  counts and native leavable flags.
+
 ## 0.6.1 — 2026-08-30
 
 ### Fixed

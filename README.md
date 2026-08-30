@@ -41,9 +41,20 @@ fresh opaque UUID or ULID `request_id`. Reuse it only to retry the exact same
 transport request.
 
 `things_capture` creates Tasks and Projects. A new Project may contain nested
-new Tasks. `things_update` changes only explicit ordinary item-local fields:
-the title, notes, start, deadline, or reminder. Use `things_complete` and
-`things_trash` for lifecycle changes.
+new Tasks. Add `repeat` to create a fixed or after-completion rule for either
+kind. Rules support day, week, month, and year intervals, selected dates, an
+optional end date, and a paused state.
+
+`things_update` changes only explicit item-local fields. It can change the
+title, notes, start, deadline, reminder, or an RT1 repeat rule. Use
+`{repeat: {paused: true}}`, `{repeat: {paused: false}}`,
+`{repeat: {create_next: true}}`, or `{repeat: {remove: true}}` for repeat
+lifecycle actions. Do not send `repeat: null`.
+
+Use `things_complete` and `things_trash` for item lifecycle changes. Completing
+a Project also completes its open descendants in the same frozen operation.
+RT2 repeat facts are read-only. The server rejects RT2 schedule, repeat, and
+lifecycle writes instead of guessing at an unproven Cloud payload.
 
 The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.

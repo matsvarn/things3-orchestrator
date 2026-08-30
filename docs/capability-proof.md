@@ -9,6 +9,21 @@ read-back behavior agree.
 Human workflow runs are tracked separately in
 [`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
 
+## v0.7.0 recurrence gate
+
+The v2 contract and memory adapter cover RT1 repeat inspection, creation,
+conversion, rule edits, pause, resume, stop, completion, and "Create Next
+Copy" for Tasks and Projects. The Project cases clone the native root,
+headings, heading assignments, Tasks, and checklist rows with fresh IDs.
+Cloud fixture tests assert each entity type and sparse bookkeeping payload.
+
+A disposable native Things Project established the observed graph and
+lifecycle payloads. The run covered pause, resume, "Create Next Copy", and
+after-completion advancement. It also confirmed that a Task assigned to a
+heading uses `agr` without a duplicate `pr`. The v2 live-host proof remains a
+separate deployment gate. RT2 stays read-only because this proof did not
+establish native RT2 write deltas.
+
 ## v0.6.0 owner-safe interface gate
 
 The current public proof target is the exact default eight: bounded reads,
