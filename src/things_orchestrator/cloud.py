@@ -689,13 +689,19 @@ class CloudLibrary(MemoryLibrary):
         )
 
     def matches(self, writes: list[Write]) -> bool:
+        repeat_next = [write for write in writes if write.action == "repeat_next"]
+        if repeat_next and not super().matches(repeat_next):
+            return False
+        envelope_writes = [write for write in writes if write.action != "repeat_next"]
+        if not envelope_writes:
+            return True
         try:
-            envelopes, _ = self._plan(writes)
+            envelopes, _ = self._plan(envelope_writes)
         except CloudError:
             return False
         dynamic_indexes = {
             write.uuid
-            for write in writes
+            for write in envelope_writes
             if write.action in {"create", "create_heading"}
             and write.kind in {"task", "project"}
             and write.sort_index is None

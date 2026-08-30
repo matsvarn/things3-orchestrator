@@ -42,7 +42,9 @@
   fail closed when native bookkeeping does not include the next date. Missing,
   non-finite, and out-of-range native repeat anchors return a fresh-read action
   instead of escaping as timestamp errors. Create Next also waits for native
-  date advancement instead of materializing the same occurrence twice.
+  date advancement instead of materializing the same occurrence twice, and a
+  successful count advance now reconciles from its post-write state instead of
+  being reported as partial.
 - Repeating Project templates and future copies reset completed Tasks and
   checklist rows to open, so finished work does not leak into a new occurrence.
 - Repeat Stop removes the hidden template's checklist records before deleting

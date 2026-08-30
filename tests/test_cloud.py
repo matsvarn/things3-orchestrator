@@ -2606,6 +2606,209 @@ def test_project_create_next_emits_native_count_and_leavable_copy(
     assert library.records["next-project"].leavable is True
 
 
+def test_cloud_repeat_next_matches_applied_post_state(tmp_path: Path) -> None:
+    library = CloudLibrary(  # type: ignore[arg-type]
+        _CaptureClient(), cache=tmp_path / "state.json"
+    )
+    library.records["template"] = Record(
+        uuid="template",
+        kind="task",
+        title="Routine",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+        recurrence_instance_count=2,
+    )
+
+    assert library.matches(
+        [
+            Write(
+                action="repeat_next",
+                uuid="template",
+                recurrence_instance_count=2,
+            )
+        ]
+    )
+
+
+def test_v2_create_next_reconciles_after_reschedule_cache_restart_and_native_advance(
+    tmp_path: Path,
+) -> None:
+    original = date(2026, 9, 6)
+    advanced = date(2026, 9, 13)
+    rescheduled = date(2026, 9, 20)
+    rule = {
+        "tp": 0,
+        "fu": 256,
+        "fa": 1,
+        "of": [{"wd": 1}],
+        "sr": day_ts(date(2026, 8, 30)),
+    }
+
+    class ReplayClient:
+        def __init__(self, initial: list[dict[str, object]] | None = None) -> None:
+            self.email = "owner@example.com"
+            self.history_id = ""
+            self.server_index = 0
+            self.loaded_index = 0
+            self.batches = [initial] if initial else []
+            self.commits: list[list[Envelope]] = []
+
+        def verify(self) -> str:
+            self.history_id = "hist"
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            if self.batches:
+                events = self.batches.pop(0)
+                self.server_index += 1
+                return HistoryPage(
+                    events=events,
+                    current=self.server_index,
+                    groups=1,
+                    end_size=self.server_index,
+                    latest_size=self.server_index,
+                )
+            return HistoryPage(
+                events=[],
+                current=self.server_index,
+                groups=0,
+                end_size=self.server_index,
+                latest_size=self.server_index,
+            )
+
+        def commit(self, envelopes: list[Envelope]) -> None:
+            self.commits.append(list(envelopes))
+            self.batches.append(
+                [
+                    {
+                        "uuid": envelope.uuid,
+                        "e": envelope.kind,
+                        "t": envelope.action,
+                        "p": envelope.payload,
+                    }
+                    for envelope in envelopes
+                ]
+            )
+
+    initial = [
+        {
+            "uuid": "template",
+            "e": "Task7",
+            "t": 0,
+            "p": {
+                "tt": "Weekly",
+                "tp": 0,
+                "rr": rule,
+                "rt": [],
+                "tir": day_ts(original),
+                "icc": 1,
+                "st": 2,
+            },
+        },
+        {
+            "uuid": "generated",
+            "e": "Task7",
+            "t": 0,
+            "p": {
+                "tt": "Weekly",
+                "tp": 0,
+                "sr": day_ts(original),
+                "rt": ["template"],
+                "lt": True,
+                "st": 2,
+            },
+        },
+        {
+            "uuid": "generated",
+            "e": "Task7",
+            "t": 1,
+            "p": {
+                "sr": day_ts(rescheduled),
+                "tir": day_ts(rescheduled),
+            },
+        },
+    ]
+    cache = tmp_path / "state.json"
+    first = CloudLibrary(ReplayClient(initial), cache=cache)  # type: ignore[arg-type]
+    first.refresh()
+
+    client = ReplayClient()
+    library = CloudLibrary(client, cache=cache)  # type: ignore[arg-type]
+    library.refresh()
+
+    generated = library.records["generated"]
+    assert generated.start == rescheduled
+    assert generated.recurrence_generated_on == original
+
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            account_id="owner@example.com",
+        )
+    )
+    stale = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2901",
+            "items": [
+                {
+                    "id": generated.id,
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert stale.state == "rejected"
+    assert stale.code == "validation_error"
+    assert stale.next_action == "read_fresh"
+    assert client.commits == []
+
+    client.batches.append(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"tir": day_ts(advanced)},
+            }
+        ]
+    )
+    library.refresh(force=True)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2902",
+            "items": [
+                {
+                    "id": generated.id,
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert result.state == "applied"
+
+    origins = sorted(
+        (item.start, item.recurrence_generated_on)
+        for item in library.recurrence_instances("template")
+    )
+    assert origins == [(advanced, advanced), (rescheduled, original)]
+    assert library.records["template"].recurrence_instance_count == 2
+    assert len(client.commits) == 1
+
+    receipt = interface.dispatch(
+        "things_receipt", {"operation_id": result.operation_id}
+    )
+    assert receipt.state == "applied"
+    assert [row["result"] for row in receipt.rows] == ["applied", "applied"]
+
+
 def test_existing_task_repeat_link_preserves_leavable_flag_and_reads_back(
     tmp_path: Path,
 ) -> None:
