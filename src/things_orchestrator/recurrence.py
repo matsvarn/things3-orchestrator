@@ -143,6 +143,17 @@ class RecurrenceState:
                 raise ValueError("Selected dates need a fixed repeat rule")
             if until_set and until is not None:
                 raise ValueError("After-completion repeats do not use an end date")
+        if until_set and until is not None:
+            anchor_stamp = rule.get("sr")
+            if not isinstance(anchor_stamp, (int, float)) or isinstance(
+                anchor_stamp, bool
+            ):
+                raise ValueError("The repeat anchor is unavailable; read it again")
+            anchor = datetime.fromtimestamp(anchor_stamp, timezone.utc).date()
+            if until < anchor:
+                raise ValueError(
+                    "The repeat end cannot be before the first occurrence"
+                )
         if offsets is not None:
             _validate_offsets(offsets, unit=target_unit)
         if weekday_codes is not None and target_unit != "week":
@@ -308,6 +319,10 @@ def new_rule(
     """Build the complete observed Cloud rule for a new repeat template."""
     if not 1 <= interval <= _MAX_INTERVAL:
         raise ValueError(f"Repeat interval must be between 1 and {_MAX_INTERVAL}")
+    if until is not None and until < anchor:
+        raise ValueError("The repeat end cannot be before the first occurrence")
+    if mode == "after_completion" and until is not None:
+        raise ValueError("After-completion repeats do not use an end date")
     codes = list(weekday_codes or [])
     if codes and unit != "week":
         raise ValueError("Weekday selectors need a weekly repeat rule")

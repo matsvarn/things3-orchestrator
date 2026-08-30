@@ -32,6 +32,12 @@
 
 ### Fixed
 
+- Completing a Project skips structural headings and hidden repeat templates,
+  while still completing its open generated and ordinary actions.
+- Today ordering now covers the same overdue-start and overdue-deadline items
+  that the Today read exposes.
+- Repeat end dates cannot precede the first occurrence, and Create Next/Stop
+  fail closed when native bookkeeping does not include the next date.
 - Repeating Project templates and future copies reset completed Tasks and
   checklist rows to open, so finished work does not leak into a new occurrence.
 - Repeat Stop removes the hidden template's checklist records before deleting

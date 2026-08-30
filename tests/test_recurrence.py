@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -289,8 +289,21 @@ def test_new_rule_supports_selected_dates_and_an_end_date() -> None:
     assert dated["rc"] == 0
 
 
+def test_new_rule_rejects_an_end_before_its_anchor() -> None:
+    anchor = datetime(2026, 8, 30, tzinfo=timezone.utc).date()
+
+    with pytest.raises(ValueError, match="before the first occurrence"):
+        new_rule(
+            mode="fixed",
+            unit="week",
+            interval=1,
+            anchor=anchor,
+            until=anchor - timedelta(days=1),
+        )
+
+
 def test_transition_changes_selected_dates_and_end_without_losing_opaque_fields() -> None:
-    original = template()
+    original = template(anchor=datetime(2026, 8, 30, tzinfo=timezone.utc))
 
     changed = original.transition(
         kind="task",
@@ -307,3 +320,17 @@ def test_transition_changes_selected_dates_and_end_without_losing_opaque_fields(
         datetime(2027, 12, 31, tzinfo=timezone.utc).timestamp()
     )
     assert changed.rule["future_rule_key"] == ["preserve", 4]
+
+
+def test_transition_rejects_an_end_before_the_stored_anchor() -> None:
+    anchor = datetime(2026, 8, 30, tzinfo=timezone.utc).date()
+    original = template(
+        anchor=datetime.combine(anchor, datetime.min.time(), tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(ValueError, match="before the first occurrence"):
+        original.transition(
+            kind="task",
+            until=anchor - timedelta(days=1),
+            until_set=True,
+        )

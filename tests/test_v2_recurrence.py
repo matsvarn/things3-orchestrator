@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -122,6 +122,34 @@ def test_v2_capture_creates_one_visible_current_copy_and_hidden_template() -> No
     assert desired[0]["generated_count"] == 1
     assert desired[1]["kind"] == "fixed_instance"
     assert desired[1]["template_id"] == templates[0].id
+
+
+def test_v2_rejects_repeat_end_before_the_first_occurrence() -> None:
+    interface, library = _interface()
+
+    result = interface.dispatch(
+        "things_capture",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2829",
+            "items": [
+                {
+                    "kind": "task",
+                    "title": "Impossible series",
+                    "start": "2026-09-01",
+                    "repeat": {
+                        "mode": "fixed",
+                        "unit": "week",
+                        "until": "2026-08-31",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "correct_request"
+    assert not library.records
 
 
 def test_v2_capture_clones_a_repeating_project_graph() -> None:
@@ -403,6 +431,7 @@ def test_v2_create_next_copy_clones_the_project_template_and_advances_count() ->
             repeat_type="after_completion",
             rule={"tp": 1, "fu": 256, "fa": 1, "of": []},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
         recurrence_instance_count=1,
         someday=True,
     )
@@ -459,7 +488,7 @@ def test_v2_create_next_copy_clones_the_project_template_and_advances_count() ->
     ]
     assert len(copies) == 1
     next_copy = copies[0]
-    assert next_copy.start == NOW.date()
+    assert next_copy.start == NOW.date() + timedelta(days=7)
     assert next_copy.leavable is True
     cloned_heading = next(
         item
@@ -486,6 +515,7 @@ def test_v2_rejects_create_next_for_project_with_nested_repeat_items() -> None:
             repeat_type="fixed",
             rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
         recurrence_instance_count=1,
     )
     nested = Record(
@@ -856,6 +886,7 @@ def test_v2_rejects_stopping_the_same_series_twice_in_one_batch() -> None:
 
 def test_v2_rejects_create_next_twice_for_one_series_in_one_batch() -> None:
     template, current = _repeating_pair()
+    template.recurrence_next_on = NOW.date() + timedelta(days=7)
     other = Record(
         uuid="current-two",
         kind="task",
@@ -884,6 +915,33 @@ def test_v2_rejects_create_next_twice_for_one_series_in_one_batch() -> None:
     assert result.code == "validation_error"
     assert set(library.records) == {template.uuid, current.uuid, other.uuid}
     assert library.records[template.uuid].recurrence_instance_count == 0
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [{"create_next": True}, {"remove": True}],
+    ids=["create_next", "remove"],
+)
+def test_v2_repeat_lifecycle_rejects_a_missing_next_date(
+    lifecycle: dict[str, bool],
+) -> None:
+    template, current = _repeating_pair()
+    template.recurrence_next_on = None
+    interface, library = _interface(template, current)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2828",
+            "items": [{"id": current.id, "set": {"repeat": lifecycle}}],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {template.uuid, current.uuid}
+    assert current.recurrence.role == "instance"
 
 
 def test_v2_rejects_conflicting_rule_edits_for_one_series_in_one_batch() -> None:
@@ -1117,6 +1175,7 @@ def test_v2_stop_repeating_project_counts_replacement_and_deletes_in_write_limit
             repeat_type="fixed",
             rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
     )
     children = [
         Record(

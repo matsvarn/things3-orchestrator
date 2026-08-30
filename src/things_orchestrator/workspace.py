@@ -2534,29 +2534,37 @@ class ThingsWorkspace:
                 )
                 if isinstance(repeat, dict):
                     template_uuid = new_uuid()
-                    rule = new_rule(
-                        mode=cast(RepeatMode, repeat.get("mode", "fixed")),
-                        unit=cast(Any, repeat["unit"]),
-                        interval=cast(int, repeat.get("interval", 1)),
-                        anchor=start or self._clock().date(),
-                        weekday_codes=[
-                            _WEEKDAY_CODES[cast(Any, weekday)]
-                            for weekday in cast(
-                                list[object], repeat.get("weekdays", [])
-                            )
-                        ]
-                        if "on" not in repeat
-                        else None,
-                        offsets=cast(
-                            Any,
-                            _repeat_offsets(repeat, cast(str, repeat["unit"])),
-                        ),
-                        until=(
-                            date.fromisoformat(cast(str, repeat["until"]))
-                            if repeat.get("until")
-                            else None
-                        ),
-                    )
+                    try:
+                        rule = new_rule(
+                            mode=cast(RepeatMode, repeat.get("mode", "fixed")),
+                            unit=cast(Any, repeat["unit"]),
+                            interval=cast(int, repeat.get("interval", 1)),
+                            anchor=start or self._clock().date(),
+                            weekday_codes=[
+                                _WEEKDAY_CODES[cast(Any, weekday)]
+                                for weekday in cast(
+                                    list[object], repeat.get("weekdays", [])
+                                )
+                            ]
+                            if "on" not in repeat
+                            else None,
+                            offsets=cast(
+                                Any,
+                                _repeat_offsets(repeat, cast(str, repeat["unit"])),
+                            ),
+                            until=(
+                                date.fromisoformat(cast(str, repeat["until"]))
+                                if repeat.get("until")
+                                else None
+                            ),
+                        )
+                    except ValueError as error:
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": str(error),
+                        }
                     template_write = replace(
                         write,
                         uuid=template_uuid,
@@ -2674,7 +2682,12 @@ class ThingsWorkspace:
                             child
                             for child in self._project_descendants(target.uuid)
                             if draft.tool != "things_complete"
-                            or (child.status == "open" and not child.trashed)
+                            or (
+                                child.status == "open"
+                                and not child.trashed
+                                and not child.heading
+                                and child.recurrence.role != "template"
+                            )
                         ),
                         target,
                     ]
@@ -2999,24 +3012,32 @@ class ThingsWorkspace:
                     "instruction": "Starting repetition needs a unit.",
                 }
             template_uuid = new_uuid()
-            rule = new_rule(
-                mode=cast(RepeatMode, repeat.get("mode", "fixed")),
-                unit=cast(Any, unit),
-                interval=cast(int, repeat.get("interval", 1)),
-                anchor=projected.start or self._clock().date(),
-                weekday_codes=[
-                    _WEEKDAY_CODES[cast(Any, weekday)]
-                    for weekday in cast(list[object], repeat.get("weekdays", []))
-                ]
-                if "on" not in repeat
-                else None,
-                offsets=cast(Any, _repeat_offsets(repeat, unit)),
-                until=(
-                    date.fromisoformat(cast(str, repeat["until"]))
-                    if repeat.get("until")
-                    else None
-                ),
-            )
+            try:
+                rule = new_rule(
+                    mode=cast(RepeatMode, repeat.get("mode", "fixed")),
+                    unit=cast(Any, unit),
+                    interval=cast(int, repeat.get("interval", 1)),
+                    anchor=projected.start or self._clock().date(),
+                    weekday_codes=[
+                        _WEEKDAY_CODES[cast(Any, weekday)]
+                        for weekday in cast(list[object], repeat.get("weekdays", []))
+                    ]
+                    if "on" not in repeat
+                    else None,
+                    offsets=cast(Any, _repeat_offsets(repeat, unit)),
+                    until=(
+                        date.fromisoformat(cast(str, repeat["until"]))
+                        if repeat.get("until")
+                        else None
+                    ),
+                )
+            except ValueError as error:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": str(error),
+                }
             template_write = Write(
                 action="create",
                 uuid=template_uuid,
@@ -3139,9 +3160,22 @@ class ThingsWorkspace:
         preconditions[f"scope:repeat:{template.uuid}"] = (
             self._recurrence_scope_revision(template.uuid)
         )
+        if (
+            repeat.get("create_next") is True or remove
+        ) and template.recurrence_next_on is None:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "read_fresh",
+                "instruction": (
+                    "The repeat template has no native next date; read the series "
+                    "again before changing its lifecycle."
+                ),
+            }
         if repeat.get("create_next") is True:
             next_uuid = new_uuid()
-            next_on = template.recurrence_next_on or self._clock().date()
+            next_on = template.recurrence_next_on
+            assert next_on is not None
             mapped_heading = template.heading_uuid
             current_write = Write(
                 action="create",
@@ -5143,7 +5177,12 @@ class ThingsWorkspace:
             order=_bounded_order(item.sort_index) if full else None,
             today_order=(
                 _bounded_order(item.today_index)
-                if item.start == self._clock().date() or item.tonight
+                if self._is_today_member(
+                    start=item.start,
+                    deadline=item.deadline,
+                    tonight=item.tonight,
+                    today=self._clock().date(),
+                )
                 else None
             ),
             truncated_fields=_truncated_fields(
@@ -5527,12 +5566,18 @@ class ThingsWorkspace:
                 present="after" in entry.model_fields_set,
                 preconditions=preconditions,
             )
+            deadline = date.fromisoformat(entry.deadline) if entry.deadline else None
             today_index = self._today_after_index(
                 entry.today_after,
                 local,
                 writes,
                 present="today_after" in entry.model_fields_set,
-                on_today=start == self._clock().date() or tonight,
+                on_today=self._is_today_member(
+                    start=start,
+                    deadline=deadline,
+                    tonight=tonight,
+                    today=self._clock().date(),
+                ),
                 new_item=True,
                 preconditions=preconditions,
             )
@@ -5547,7 +5592,7 @@ class ThingsWorkspace:
                 inbox=home[2],
                 anytime=home[3],
                 start=start,
-                deadline=date.fromisoformat(entry.deadline) if entry.deadline else None,
+                deadline=deadline,
                 remind=remind,
                 tonight=tonight,
                 someday=someday,
@@ -5780,6 +5825,13 @@ class ThingsWorkspace:
                     for write in writes
                 ):
                     return True
+                if target.recurrence_next_on is None:
+                    raise _Abort(
+                        self._stale(
+                            "The repeat template has no native next date; read the "
+                            "series again before stopping it."
+                        )
+                    )
                 try:
                     plan = self._repeat_stop_plan(target)
                 except ValueError as error:
@@ -6048,7 +6100,12 @@ class ThingsWorkspace:
             local,
             context.writes,
             present="today_after" in change.model_fields_set,
-            on_today=(desired_start == self._clock().date() or desired_tonight),
+            on_today=self._is_today_member(
+                start=desired_start,
+                deadline=desired_deadline,
+                tonight=desired_tonight,
+                today=self._clock().date(),
+            ),
             new_item=False,
             preconditions=context.preconditions,
             moving_uuid=item.uuid,
@@ -7891,6 +7948,20 @@ class ThingsWorkspace:
                 planned[index] = replace(planned[index], checklist_index=new_index)
         return positions
 
+    @staticmethod
+    def _is_today_member(
+        *,
+        start: date | None,
+        deadline: date | None,
+        tonight: bool,
+        today: date,
+    ) -> bool:
+        return (
+            tonight
+            or (start is not None and start <= today)
+            or (deadline is not None and deadline <= today)
+        )
+
     def _today_after_index(
         self,
         reference: str | None,
@@ -7912,14 +7983,24 @@ class ThingsWorkspace:
             for item in self._library.records.values()
             if item.uuid != moving_uuid
             and item.is_open()
-            and (item.start == today or item.tonight)
+            and self._is_today_member(
+                start=item.start,
+                deadline=item.deadline,
+                tonight=item.tonight,
+                today=today,
+            )
         ]
         indexes.extend(
             write.today_index
             for write in planned
             if write.uuid != moving_uuid
             and write.today_index is not None
-            and (write.start == today or write.tonight)
+            and self._is_today_member(
+                start=write.start,
+                deadline=write.deadline,
+                tonight=write.tonight,
+                today=today,
+            )
         )
         if not present:
             return max(indexes, default=-1024) + 1024 if new_item and on_today else None
@@ -7934,7 +8015,12 @@ class ThingsWorkspace:
             previous = next(
                 (write for write in reversed(planned) if write.uuid == uuid), None
             )
-            if previous is None or not (previous.start == today or previous.tonight):
+            if previous is None or not self._is_today_member(
+                start=previous.start,
+                deadline=previous.deadline,
+                tonight=previous.tonight,
+                today=today,
+            ):
                 raise _Abort(
                     self._rejected(
                         "A today_after reference must be earlier and on Today."
@@ -7952,11 +8038,21 @@ class ThingsWorkspace:
                     for write in reversed(planned)
                     if write.uuid == item.uuid
                     and write.action == "update"
-                    and (write.start == today or write.tonight)
+                    and self._is_today_member(
+                        start=write.start,
+                        deadline=write.deadline,
+                        tonight=write.tonight,
+                        today=today,
+                    )
                 ),
                 None,
             )
-            on_today = item.is_open() and (item.start == today or item.tonight)
+            on_today = item.is_open() and self._is_today_member(
+                start=item.start,
+                deadline=item.deadline,
+                tonight=item.tonight,
+                today=today,
+            )
             if not on_today:
                 if companion is None:
                     raise _Abort(
@@ -7996,7 +8092,12 @@ class ThingsWorkspace:
             for write in planned
             if write.uuid != moving_uuid
             and write.today_index is not None
-            and (write.start == today or write.tonight)
+            and self._is_today_member(
+                start=write.start,
+                deadline=write.deadline,
+                tonight=write.tonight,
+                today=today,
+            )
         }
         existing = sorted(
             (
@@ -8005,7 +8106,12 @@ class ThingsWorkspace:
                 if item.uuid != moving_uuid
                 and item.uuid not in planned_today
                 and item.is_open()
-                and (item.start == today or item.tonight)
+                and self._is_today_member(
+                    start=item.start,
+                    deadline=item.deadline,
+                    tonight=item.tonight,
+                    today=today,
+                )
             ),
             key=lambda item: (item.today_index, item.uuid),
         )
@@ -8015,7 +8121,12 @@ class ThingsWorkspace:
                 for index, write in enumerate(planned)
                 if write.uuid != moving_uuid
                 and write.today_index is not None
-                and (write.start == today or write.tonight)
+                and self._is_today_member(
+                    start=write.start,
+                    deadline=write.deadline,
+                    tonight=write.tonight,
+                    today=today,
+                )
             ),
             key=lambda pair: (pair[1].today_index or 0, pair[1].uuid),
         )
@@ -9330,7 +9441,13 @@ class ThingsWorkspace:
             (
                 item
                 for item in self._library.records.values()
-                if item.is_open() and (item.start == today or item.tonight)
+                if item.is_open()
+                and self._is_today_member(
+                    start=item.start,
+                    deadline=item.deadline,
+                    tonight=item.tonight,
+                    today=today,
+                )
             ),
             key=lambda item: item.id,
         )
@@ -9528,6 +9645,10 @@ class ThingsWorkspace:
 
     def _repeat_stop_plan(self, template: Record) -> _RepeatStopPlan:
         template.recurrence.validate_interval_template(kind=template.kind)
+        if template.recurrence_next_on is None:
+            raise ValueError(
+                "The repeat template has no native next date; read the series again"
+            )
         replacement = Write(
             action="create",
             uuid=new_uuid(),
@@ -9549,7 +9670,7 @@ class ThingsWorkspace:
                 if template.area_uuid
                 else None
             ),
-            start=template.recurrence_next_on or self._clock().date(),
+            start=template.recurrence_next_on,
             deadline=template.deadline,
             remind=template.remind,
             tag_uuids=list(template.tag_uuids),

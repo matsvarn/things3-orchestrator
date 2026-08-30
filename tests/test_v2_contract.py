@@ -1311,6 +1311,57 @@ def test_v2_project_completion_completes_open_actions_atomically() -> None:
     assert journal.get_v2_request("owner@example.com", "2", REQUEST) is not None
 
 
+def test_v2_project_completion_skips_headings_and_hidden_repeat_templates() -> None:
+    project = Record(uuid="p", kind="project", title="Project")
+    heading = Record(
+        uuid="h",
+        kind="task",
+        title="Section",
+        heading=True,
+        parent_uuid=project.uuid,
+    )
+    template = Record(
+        uuid="template",
+        kind="task",
+        title="Recurring action",
+        parent_uuid=project.uuid,
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+    )
+    current = Record(
+        uuid="current",
+        kind="task",
+        title="Recurring action",
+        heading_uuid=heading.uuid,
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    library = MemoryLibrary([project, heading, template, current])
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_complete", {"request_id": REQUEST, "ids": [project.id]}
+    )
+
+    assert result.state == "applied"
+    assert project.status == current.status == "done"
+    assert heading.status == "open"
+    assert template.status == "open"
+    assert template.recurrence.role == "template"
+
+
 def test_project_completion_freezes_the_clear_project_scope() -> None:
     class RacingProjectLibrary(MemoryLibrary):
         refreshes = 0

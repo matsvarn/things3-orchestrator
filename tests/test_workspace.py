@@ -2939,6 +2939,61 @@ def test_today_after_uses_a_local_anchor_without_raw_indexes() -> None:
     assert [item.title for item in ordered] == ["First", "Second"]
 
 
+@pytest.mark.parametrize(
+    "overdue_schedule",
+    [
+        {"start": NOW.date() - timedelta(days=1)},
+        {"deadline": NOW.date() - timedelta(days=1)},
+    ],
+    ids=["overdue_start", "overdue_deadline"],
+)
+def test_today_after_can_order_after_every_displayed_overdue_item(
+    overdue_schedule: dict[str, object],
+) -> None:
+    overdue = Record(
+        uuid="overdue",
+        kind="task",
+        title="Overdue",
+        today_index=0,
+        **overdue_schedule,
+    )
+    module = workspace(
+        [
+            overdue,
+            Record(
+                uuid="later",
+                kind="task",
+                title="Later",
+                start=NOW.date(),
+                today_index=2048,
+            ),
+        ]
+    )
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-after-{next(iter(overdue_schedule))}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": overdue.id,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "applied"
+    ordered = sorted(
+        module._library.today(today=NOW.date()),  # noqa: SLF001
+        key=lambda item: item.today_index,
+    )
+    assert [item.title for item in ordered] == ["Overdue", "Between", "Later"]
+    assert detail(module, overdue.id).today_order is not None
+
+
 def test_after_rebalances_dense_native_indexes() -> None:
     module = workspace(
         [
@@ -5649,6 +5704,7 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert template.recurrence.rule["of"] == [{"wd": 1}, {"wd": 5}]
     assert [row.title for row in template.checklists] == ["Open dashboard"]
     assert [row.title for row in instance.checklists] == ["Open dashboard"]
+    template.recurrence_next_on = NOW.date() + timedelta(days=7)
 
     current = detail(module, template.id)
     stop_plan = module.commit(
@@ -5691,6 +5747,7 @@ def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
             repeat_type="fixed",
             rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
     )
     current = Record(
         uuid="report-current",
@@ -5737,6 +5794,32 @@ def test_stop_repeat_on_current_copy_deletes_the_template() -> None:
     ]
     assert len(ordinary) == 1
     assert ordinary[0].recurrence == RecurrenceState()
+
+
+def test_v1_stop_repeat_requires_the_native_next_date() -> None:
+    module, template, current = _repeating_pair()
+    template.recurrence_next_on = None
+    revision = detail(module, current.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-report-repeat-without-next-date",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "stale"
+    assert result.next == "read"
+    assert template.uuid in module._library.records  # noqa: SLF001
+    assert current.recurrence.role == "instance"
 
 
 def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
@@ -5882,6 +5965,7 @@ def test_v1_project_stop_enforces_expanded_write_limit(
             repeat_type="fixed",
             rule={"tp": 0, "fu": 256, "fa": 1},
         ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
     )
     currents = [
         Record(
