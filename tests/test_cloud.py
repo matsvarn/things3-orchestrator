@@ -36,6 +36,16 @@ from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
 
+_MALFORMED_NATIVE_NUMBERS: tuple[object, ...] = (
+    "invalid",
+    True,
+    float("inf"),
+    float("-inf"),
+    float("nan"),
+    10**100,
+    -(10**100),
+)
+
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX timezone control")
 def test_wire_calendar_dates_do_not_depend_on_host_timezone(
@@ -126,21 +136,12 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["sp", "sr", "dd", "ato", "icsd", "acrd", "tir"]
+    "field", ["sp", "sr", "dd", "ato", "icsd", "icc", "acrd", "tir"]
 )
 @pytest.mark.parametrize(
-    "value",
-    [
-        "invalid",
-        True,
-        float("inf"),
-        float("-inf"),
-        float("nan"),
-        10**100,
-        -(10**100),
-    ],
+    "value", _MALFORMED_NATIVE_NUMBERS
 )
-def test_malformed_native_temporal_fields_fold_as_missing(
+def test_malformed_native_numeric_fields_fold_as_missing(
     field: str, value: object
 ) -> None:
     library = MemoryLibrary()
@@ -168,8 +169,44 @@ def test_malformed_native_temporal_fields_fold_as_missing(
     assert template.deadline is None
     assert template.remind is None
     assert template.recurrence_created_through is None
+    assert template.recurrence_instance_count == 0
     assert template.recurrence_completed_on is None
     assert template.recurrence_next_on is None
+
+
+@pytest.mark.parametrize("value", _MALFORMED_NATIVE_NUMBERS)
+def test_malformed_native_generated_count_preserves_the_last_valid_count(
+    value: object,
+) -> None:
+    library = MemoryLibrary(
+        [
+            Record(
+                uuid="template",
+                kind="task",
+                title="Routine",
+                recurrence=RecurrenceState(
+                    role="template",
+                    repeat_type="fixed",
+                    rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+                ),
+                recurrence_instance_count=3,
+            )
+        ]
+    )
+
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 1,
+                "p": {"icc": value},
+            }
+        ],
+        library=library,
+    )
+
+    assert library.records["template"].recurrence_instance_count == 3
 
 
 def test_fold_accepts_task7_and_preserves_its_entity_for_updates(

@@ -45,9 +45,9 @@
   date advancement instead of materializing the same occurrence twice, and a
   successful count advance now reconciles from its post-write state instead of
   being reported as partial. Malformed native date, completion-time, and
-  reminder fields now fold as missing state instead of disabling Cloud reads
-  and writes. Corrupt rule anchors require a fresh read for end-date and unit
-  edits.
+  reminder fields now fold as missing state, and malformed generated counts
+  are ignored, instead of disabling Cloud reads and writes. Corrupt rule
+  anchors require a fresh read for end-date and unit edits.
 - Repeating Project templates and future copies reset completed Tasks and
   checklist rows to open, so finished work does not leak into a new occurrence.
 - Repeat Stop removes the hidden template's checklist records before deleting

@@ -147,6 +147,16 @@ def _native_reminder(value: object) -> str | None:
     return remind_from_offset(value)
 
 
+def _native_count(value: object) -> int | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= 2**63 - 1
+    ):
+        return None
+    return value
+
+
 @dataclass
 class Envelope:
     uuid: str
@@ -544,7 +554,9 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "icsd" in payload:
             item.recurrence_created_through = _native_date(payload.get("icsd"))
         if "icc" in payload and payload["icc"] is not None:
-            item.recurrence_instance_count = int(payload["icc"])
+            count = _native_count(payload["icc"])
+            if count is not None:
+                item.recurrence_instance_count = count
         if "acrd" in payload:
             item.recurrence_completed_on = _native_date(payload.get("acrd"))
         if "tir" in payload and item.recurrence.role == "template":
