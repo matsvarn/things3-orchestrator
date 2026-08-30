@@ -296,6 +296,75 @@ def test_malformed_sparse_native_paused_state_preserves_last_valid_state() -> No
     assert library.records["template"].recurrence_paused_known is True
 
 
+@pytest.mark.parametrize("leavable", ["false", 0, 1, None, [], {}])
+def test_malformed_native_generated_origin_blocks_duplicate_create_next(
+    leavable: object,
+) -> None:
+    occurrence = date(2026, 9, 6)
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(occurrence),
+                    "icc": 1,
+                    "icp": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(occurrence),
+                    "rt": ["template"],
+                    "lt": leavable,
+                },
+            },
+        ],
+        library=library,
+    )
+    existing = library.records["existing"]
+    assert existing.recurrence_generated_on is None
+    assert existing.recurrence_generated_on_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2993"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:existing",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "existing"}
+    assert library.records["template"].recurrence_instance_count == 1
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
 @pytest.mark.parametrize(
     "count", ["invalid", MAX_RECURRENCE_INSTANCE_COUNT], ids=["unknown", "exhausted"]
 )
@@ -676,7 +745,7 @@ def test_fold_preserves_a_generated_occurrence_date_after_rescheduling() -> None
                 "uuid": "generated",
                 "e": "Task7",
                 "t": 1,
-                "p": {"sr": day_ts(rescheduled)},
+                "p": {"sr": day_ts(rescheduled), "lt": []},
             },
         ],
         library=library,
@@ -684,7 +753,9 @@ def test_fold_preserves_a_generated_occurrence_date_after_rescheduling() -> None
 
     generated = library.records["generated"]
     assert generated.start == rescheduled
+    assert generated.leavable is True
     assert generated.recurrence_generated_on == original
+    assert generated.recurrence_generated_on_known is True
 
 
 def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
@@ -1164,6 +1235,17 @@ def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
         ("recurrence_paused", []),
         ("recurrence_paused", {}),
         ("recurrence_paused_known", "false"),
+        ("recurrence_created_through", False),
+        ("recurrence_completed_on", []),
+        ("recurrence_next_on", 0),
+        ("recurrence_generated_on", False),
+        ("recurrence_generated_on_known", "false"),
+        ("leavable", "false"),
+        ("leavable", 0),
+        ("leavable", 1),
+        ("leavable", None),
+        ("leavable", []),
+        ("leavable", {}),
     ],
 )
 def test_malformed_cached_recurrence_is_discarded_before_replay(
@@ -1180,6 +1262,12 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
         "recurrence_instance_count_known": False,
         "recurrence_paused": False,
         "recurrence_paused_known": False,
+        "recurrence_created_through": None,
+        "recurrence_completed_on": None,
+        "recurrence_next_on": None,
+        "recurrence_generated_on": None,
+        "recurrence_generated_on_known": True,
+        "leavable": False,
     }
     record[bad_field[0]] = bad_field[1]
     cache.write_text(

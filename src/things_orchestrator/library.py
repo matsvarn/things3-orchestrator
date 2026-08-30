@@ -104,6 +104,7 @@ class Record:
     recurrence_completed_on: date | None = None
     recurrence_next_on: date | None = None
     recurrence_generated_on: date | None = None
+    recurrence_generated_on_known: bool = True
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
@@ -884,6 +885,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
                 if write.leavable and write.recurrence_links
                 else None
             ),
+            recurrence_generated_on_known=True,
             leavable=write.leavable,
         )
         self.library.records[record.uuid] = record

@@ -60,7 +60,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 9
+_CACHE_VERSION = 10
 
 
 class CloudError(RuntimeError):
@@ -487,6 +487,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 title="",
                 recurrence_instance_count_known=False,
                 recurrence_paused_known=False,
+                recurrence_generated_on_known=False,
             )
             if existing is not None:
                 item.checklists = existing.checklists
@@ -497,6 +498,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 title="",
                 recurrence_instance_count_known=False,
                 recurrence_paused_known=False,
+                recurrence_generated_on_known=False,
             )
         item.entity = kind
         if "tt" in payload and payload["tt"] is not None:
@@ -578,15 +580,14 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.recurrence_completed_on = _native_date(payload.get("acrd"))
         if "tir" in payload and item.recurrence.role == "template":
             item.recurrence_next_on = _native_date(payload.get("tir"))
-        if "lt" in payload and payload["lt"] is not None:
-            item.leavable = bool(payload["lt"])
-        if (
-            action == 0
-            and item.leavable
-            and item.recurrence.role == "instance"
-            and item.recurrence_generated_on is None
-        ):
-            item.recurrence_generated_on = item.start
+        if "lt" in payload and isinstance(payload["lt"], bool):
+            item.leavable = payload["lt"]
+            if not item.leavable:
+                item.recurrence_generated_on = None
+                item.recurrence_generated_on_known = True
+            elif action == 0 and item.recurrence.role == "instance":
+                item.recurrence_generated_on = item.start
+                item.recurrence_generated_on_known = item.start is not None
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -1706,6 +1707,7 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_generated_on": item.recurrence_generated_on.isoformat()
         if item.recurrence_generated_on
         else None,
+        "recurrence_generated_on_known": item.recurrence_generated_on_known,
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
@@ -1722,6 +1724,17 @@ def _record_to_json(item: Record) -> dict[str, Any]:
             for line in item.checklists
         ],
     }
+
+
+def _cached_optional_date(payload: dict[str, Any], field: str) -> date | None:
+    if field not in payload:
+        raise ValueError(f"missing cached {field}")
+    raw = payload[field]
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"invalid cached {field}")
+    return date.fromisoformat(raw)
 
 
 def _record_from_json(payload: dict[str, Any]) -> Record:
@@ -1762,6 +1775,25 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
     paused_known = payload.get("recurrence_paused_known")
     if not isinstance(paused_known, bool):
         raise ValueError("invalid cached recurrence paused trust marker")
+    generated_on_known = payload.get("recurrence_generated_on_known")
+    if not isinstance(generated_on_known, bool):
+        raise ValueError("invalid cached recurrence origin trust marker")
+    leavable = payload.get("leavable")
+    if not isinstance(leavable, bool):
+        raise ValueError("invalid cached leavable state")
+    created_through = _cached_optional_date(payload, "recurrence_created_through")
+    completed_on = _cached_optional_date(payload, "recurrence_completed_on")
+    next_on = _cached_optional_date(payload, "recurrence_next_on")
+    generated_on = _cached_optional_date(payload, "recurrence_generated_on")
+    if not generated_on_known and generated_on is not None:
+        raise ValueError("untrusted cached recurrence origin has a date")
+    if (
+        payload.get("recurrence_role") == "instance"
+        and generated_on_known
+        and leavable
+        and generated_on is None
+    ):
+        raise ValueError("cached generated instance has no occurrence date")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1797,34 +1829,19 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             paused=paused,
         ),
         repeater=deepcopy(payload.get("repeater")),
-        recurrence_created_through=(
-            date.fromisoformat(payload["recurrence_created_through"])
-            if payload.get("recurrence_created_through")
-            else None
-        ),
+        recurrence_created_through=created_through,
         recurrence_instance_count=instance_count,
         recurrence_instance_count_known=instance_count_known,
         recurrence_paused_known=paused_known,
-        recurrence_completed_on=(
-            date.fromisoformat(payload["recurrence_completed_on"])
-            if payload.get("recurrence_completed_on")
-            else None
-        ),
-        recurrence_next_on=(
-            date.fromisoformat(payload["recurrence_next_on"])
-            if payload.get("recurrence_next_on")
-            else None
-        ),
-        recurrence_generated_on=(
-            date.fromisoformat(payload["recurrence_generated_on"])
-            if payload.get("recurrence_generated_on")
-            else None
-        ),
+        recurrence_completed_on=completed_on,
+        recurrence_next_on=next_on,
+        recurrence_generated_on=generated_on,
+        recurrence_generated_on_known=generated_on_known,
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),
         entity=str(payload.get("entity") or ""),
-        leavable=bool(payload.get("leavable")),
+        leavable=leavable,
         checklists=[
             ChecklistLine(
                 uuid=str(line["uuid"]),

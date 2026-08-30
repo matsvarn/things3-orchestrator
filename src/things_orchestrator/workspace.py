@@ -3198,9 +3198,23 @@ class ThingsWorkspace:
                         "series again before creating another copy."
                     ),
                 }
+            instances = self._library.recurrence_instances(template.uuid)
+            if any(
+                not instance.recurrence_generated_on_known
+                for instance in instances
+            ):
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "read_fresh",
+                    "instruction": (
+                        "A linked copy has no trustworthy native occurrence date; "
+                        "read the series again before creating another copy."
+                    ),
+                }
             if any(
                 instance.recurrence_generated_on == template.recurrence_next_on
-                for instance in self._library.recurrence_instances(template.uuid)
+                for instance in instances
             ):
                 return {
                     "state": "rejected",
@@ -9520,6 +9534,9 @@ class ThingsWorkspace:
                 item.recurrence_generated_on.isoformat()
                 if item.recurrence_generated_on
                 else None
+            ),
+            "recurrence_generated_on_known": (
+                item.recurrence_generated_on_known
             ),
             "leavable": item.leavable,
             "checklist": [
