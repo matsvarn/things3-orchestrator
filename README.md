@@ -97,12 +97,14 @@ uv run things-orchestrator operation-accept-partial op_EXAMPLE accepted_as_is
 Restart the server after enrolling or rotating the owner factor so it pins the
 new public verification key.
 
-The approval passphrase is read from `/dev/tty`, not from arguments,
-environment variables, or ordinary stdin pipes. This is a CLI routing control,
-not proof that a human is present. The MCP server does not load the encrypted
-owner signing key. The server loads only its pinned public key. Code running as
-the same OS user can still replace these local files or control the process;
-use a separate OS identity or host for a stronger boundary.
+The approval passphrase is read from `/dev/tty`, or from inherited terminal
+file descriptors when a hardened `sudo -u` service account cannot reopen that
+device. Redirected stdin is rejected; the passphrase never comes from
+arguments, environment variables, or ordinary pipes. This is a CLI routing
+control, not proof that a human is present. The MCP server does not load the
+encrypted owner signing key. The server loads only its pinned public key. Code
+running as the same OS user can still replace these local files or control the
+process; use a separate OS identity or host for a stronger boundary.
 
 Advanced scope editing, mutation coaching, and permanent deletion are not
 available in this release.

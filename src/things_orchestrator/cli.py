@@ -674,6 +674,9 @@ def _private_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
     try:
         terminal = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
+        if sys.stdin.isatty() and sys.stderr.isatty():
+            yield sys.stderr
+            return
         parser.error("This host command needs a private local or SSH terminal.")
     try:
         yield terminal

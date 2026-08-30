@@ -48,6 +48,18 @@ All clients share one MCP bearer. There is no per-client identity. The bearer
 cannot approve operations. Enroll and use the separate CLI-only owner factor
 from a private local or SSH terminal.
 
+When the server runs as a hardened service account, keep the SSH terminal on
+stdin and stderr while switching identity. The CLI falls back to those inherited
+terminal descriptors when the target account cannot reopen `/dev/tty`:
+
+```console
+sudo -u things-orchestrator -H env HOME=/var/lib/things-orchestrator \
+  /opt/things-orchestrator/.venv/bin/things-orchestrator \
+  operation-approve op_EXAMPLE
+```
+
+Do not pipe, redirect, or background an owner-factor or approval command.
+
 The owner factor separates MCP access from CLI approval, not processes that
 share the serving OS identity. An agent or plugin with arbitrary code execution
 as that user can replace the server, public key, or journal. Run untrusted agent

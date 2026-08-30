@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from hashlib import sha256
+from io import StringIO
 from pathlib import Path
 from urllib.error import URLError
 
@@ -10,6 +11,7 @@ import pytest
 
 from things_orchestrator.cli import (
     _legacy_resolution_command,
+    _private_tty,
     _server,
     build_parser,
     main,
@@ -18,6 +20,47 @@ from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 
 ROOT = Path(__file__).parents[1]
+
+
+class _TTYBuffer(StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_private_tty_uses_inherited_terminal_when_dev_tty_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdin = _TTYBuffer()
+    stderr = _TTYBuffer()
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("service account cannot reopen the terminal")
+
+    monkeypatch.setattr("things_orchestrator.cli.open", unavailable, raising=False)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", stdin)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", stderr)
+
+    with _private_tty(build_parser()) as terminal:
+        assert terminal is stderr
+
+    assert not stderr.closed
+
+
+def test_private_tty_rejects_redirected_inherited_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no controlling terminal")
+
+    monkeypatch.setattr("things_orchestrator.cli.open", unavailable, raising=False)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", StringIO())
+    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", StringIO())
+
+    with pytest.raises(SystemExit) as caught:
+        with _private_tty(build_parser()):
+            pass
+
+    assert caught.value.code == 2
 
 
 def _stdout_without_secret_flag(out: str) -> str:
