@@ -53,10 +53,13 @@ lifecycle actions. Stopping keeps generated copies, materializes the hidden
 template as a fresh ordinary item on its next date, then removes its old graph.
 For a Project, the ordinary replacement includes its headings, Tasks, and
 checklist rows with fresh IDs. Stop returns `awaiting_owner` for CLI approval.
+Create Next and Stop require Things' native next date; if it is absent, the
+server returns `read_fresh` and writes nothing.
 Do not send `repeat: null`.
 
 Use `things_complete` and `things_trash` for item lifecycle changes. Completing
-a Project also completes its open descendants in the same frozen operation.
+a Project also completes its open action descendants in the same frozen
+operation, excluding structural headings and hidden repeat templates.
 RT2 repeat facts are read-only. The server rejects RT2 schedule, repeat, and
 lifecycle writes instead of guessing at an unproven Cloud payload.
 

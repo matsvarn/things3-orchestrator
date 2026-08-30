@@ -23,9 +23,10 @@
 
 ### Changed
 
-- Completing a Project now completes its open descendants and the Project in
-  one frozen operation. Completing an after-completion copy advances the
-  template once.
+- Completing a Project now completes its open action descendants and the
+  Project in one frozen operation, excluding structural headings and hidden
+  repeat templates. Completing an after-completion copy advances the template
+  once.
 - Cloud writes use the native sparse bookkeeping payloads for pause, resume,
   completion progress, and "Create Next Copy". The cache stores generated-copy
   counts and native leavable flags.

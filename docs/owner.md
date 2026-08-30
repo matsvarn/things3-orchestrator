@@ -12,11 +12,14 @@ RT1 repeat rule. Repeat updates can pause, resume, stop, or create the next
 copy. Stop keeps generated copies, materializes the hidden template as a fresh
 ordinary item on the template's next date, then removes its old graph. Project
 headings, Tasks, and checklist rows are preserved with fresh IDs. Stop requires
-host approval. Completion and recoverable Trash use their own tools.
+host approval. Create Next and Stop require Things' native next date; if it is
+absent, the server returns `read_fresh` and writes nothing. Completion and
+recoverable Trash use their own tools.
 
-Completing a Project completes its open descendants in the same frozen
-operation. RT2 recurrence facts are read-only. The server rejects RT2 schedule,
-repeat, and lifecycle writes.
+Completing a Project completes its open action descendants in the same frozen
+operation, excluding structural headings and hidden repeat templates. RT2
+recurrence facts are read-only. The server rejects RT2 schedule, repeat, and
+lifecycle writes.
 
 Every mutation carries a fresh UUID or ULID. The client may reuse it only for
 the exact same transport retry.
