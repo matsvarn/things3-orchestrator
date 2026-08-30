@@ -2901,8 +2901,13 @@ class ThingsWorkspace:
             write.uuid for write in writes if write.action == "permanent_delete"
         ]
         permanently_deleted_set = set(permanently_deleted)
+        repeat_series_mutations = [
+            write.uuid
+            for write in writes
+            if write.action in {"repeat", "repeat_next", "permanent_delete"}
+        ]
         if (
-            len(permanently_deleted) != len(permanently_deleted_set)
+            len(repeat_series_mutations) != len(set(repeat_series_mutations))
             or any(
                 write.uuid in permanently_deleted_set
                 and write.action != "permanent_delete"
@@ -2915,7 +2920,7 @@ class ThingsWorkspace:
                 "next_action": "correct_request",
                 "instruction": (
                     "A batch cannot change an item that it permanently deletes or "
-                    "stop the same repeat series more than once."
+                    "change the same repeat series more than once."
                 ),
             }
         if len(writes) > 120:

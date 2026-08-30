@@ -727,6 +727,70 @@ def test_v2_rejects_stopping_the_same_series_twice_in_one_batch() -> None:
     )
 
 
+def test_v2_rejects_create_next_twice_for_one_series_in_one_batch() -> None:
+    template, current = _repeating_pair()
+    other = Record(
+        uuid="current-two",
+        kind="task",
+        title="Plan week",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    interface, library = _interface(template, current, other)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2824",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"create_next": True}}},
+                {"id": other.id, "set": {"repeat": {"create_next": True}}},
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert set(library.records) == {template.uuid, current.uuid, other.uuid}
+    assert library.records[template.uuid].recurrence_instance_count == 0
+
+
+def test_v2_rejects_conflicting_rule_edits_for_one_series_in_one_batch() -> None:
+    template, current = _repeating_pair()
+    other = Record(
+        uuid="current-two",
+        kind="task",
+        title="Plan week",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    interface, library = _interface(template, current, other)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2825",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"interval": 2}}},
+                {"id": other.id, "set": {"repeat": {"interval": 3}}},
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert library.records[template.uuid].recurrence.rule is not None
+    assert library.records[template.uuid].recurrence.rule["fa"] == 1
+
+
 def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
     tmp_path: Path,
 ) -> None:
