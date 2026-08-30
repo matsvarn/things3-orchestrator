@@ -365,6 +365,76 @@ def test_malformed_native_generated_origin_blocks_duplicate_create_next(
     assert journal.get_v2_request("owner@example.com", "2", request_id) is None
 
 
+def test_sparse_leavable_activation_invalidates_missing_generated_origin() -> None:
+    occurrence = date(2026, 9, 6)
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(occurrence),
+                    "icc": 1,
+                    "icp": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(occurrence),
+                    "rt": ["template"],
+                    "lt": False,
+                },
+            },
+            {
+                "uuid": "existing",
+                "e": "Task7",
+                "t": 1,
+                "p": {"lt": True},
+            },
+        ],
+        library=library,
+    )
+    existing = library.records["existing"]
+    assert existing.leavable is True
+    assert existing.recurrence_generated_on is None
+    assert existing.recurrence_generated_on_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2994"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:existing",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "existing"}
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
 @pytest.mark.parametrize(
     "count", ["invalid", MAX_RECURRENCE_INSTANCE_COUNT], ids=["unknown", "exhausted"]
 )

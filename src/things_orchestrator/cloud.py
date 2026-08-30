@@ -581,6 +581,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "tir" in payload and item.recurrence.role == "template":
             item.recurrence_next_on = _native_date(payload.get("tir"))
         if "lt" in payload and isinstance(payload["lt"], bool):
+            was_leavable = item.leavable
             item.leavable = payload["lt"]
             if not item.leavable:
                 item.recurrence_generated_on = None
@@ -588,6 +589,9 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             elif action == 0 and item.recurrence.role == "instance":
                 item.recurrence_generated_on = item.start
                 item.recurrence_generated_on_known = item.start is not None
+            elif not was_leavable:
+                item.recurrence_generated_on = None
+                item.recurrence_generated_on_known = False
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
