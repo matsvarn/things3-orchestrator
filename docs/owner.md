@@ -13,7 +13,8 @@ copy. Stop keeps generated copies, materializes the hidden template as a fresh
 ordinary item on the template's next date, then removes its old graph. Project
 headings, Tasks, and checklist rows are preserved with fresh IDs. Stop requires
 host approval. Create Next and Stop require Things' native next date; if it is
-absent, the server returns `read_fresh` and writes nothing. Completion and
+absent, the server returns `read_fresh` and writes nothing. Create Next does the
+same when that native date already has a generated copy. Completion and
 recoverable Trash use their own tools.
 
 Completing a Project completes its open action descendants in the same frozen

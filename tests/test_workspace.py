@@ -3038,6 +3038,47 @@ def test_today_after_rejects_an_anchor_moved_off_today_in_the_same_commit(
     assert getattr(anchor, schedule_field) == NOW.date() - timedelta(days=1)
 
 
+@pytest.mark.parametrize("destination", ["inbox", "anytime"])
+def test_today_after_rejects_an_anchor_unscheduled_in_the_same_commit(
+    destination: str,
+) -> None:
+    anchor = Record(
+        uuid="anchor",
+        kind="task",
+        title="Anchor",
+        start=NOW.date(),
+        today_index=0,
+    )
+    module = workspace([anchor])
+    revision = detail(module, anchor.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-anchor-moved-{destination}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": anchor.id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": anchor.id,
+                        "if_revision": revision,
+                        "into": destination,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert set(module._library.records) == {anchor.uuid}  # noqa: SLF001
+    assert anchor.start == NOW.date()
+
+
 def test_after_rebalances_dense_native_indexes() -> None:
     module = workspace(
         [

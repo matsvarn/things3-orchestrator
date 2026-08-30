@@ -3173,6 +3173,19 @@ class ThingsWorkspace:
                 ),
             }
         if repeat.get("create_next") is True:
+            if any(
+                instance.start == template.recurrence_next_on
+                for instance in self._library.recurrence_instances(template.uuid)
+            ):
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "read_fresh",
+                    "instruction": (
+                        "The native next date is already materialized; read the "
+                        "series again before creating another copy."
+                    ),
+                }
             next_uuid = new_uuid()
             next_on = template.recurrence_next_on
             assert next_on is not None
@@ -5446,7 +5459,7 @@ class ThingsWorkspace:
                 is_open = True
             elif write.status is not None:
                 is_open = write.status == "open"
-            if write.clear_start or write.someday or write.anytime:
+            if write.clear_start or write.someday or write.anytime or write.inbox:
                 start = None
                 tonight = False
             elif write.start is not None:

@@ -53,8 +53,9 @@ date, then removes the old template graph. A Project keeps its headings, Tasks,
 and checklist rows with fresh IDs. Stop returns `awaiting_owner`; the owner must
 review and approve it through the CLI-only flow. Create Next and Stop require
 Things' native next date; if it is absent, expect `read_fresh` with no write.
-Never send `repeat: null`. These three lifecycle forms cannot combine with
-other repeat fields.
+Create Next also returns `read_fresh` when that native date already has a
+generated copy. Never send `repeat: null`. These three lifecycle forms cannot
+combine with other repeat fields.
 
 RT2 recurrence facts are read-only. Do not change their schedule, rule, or
 lifecycle. Permanent deletion, advanced scopes, and mutation coaching are

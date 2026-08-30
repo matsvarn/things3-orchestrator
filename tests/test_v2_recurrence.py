@@ -985,6 +985,43 @@ def test_v2_rejects_create_next_twice_for_one_series_in_one_batch() -> None:
     assert library.records[template.uuid].recurrence_instance_count == 0
 
 
+def test_v2_create_next_requires_native_advancement_before_another_request() -> None:
+    template, current = _repeating_pair()
+    template.recurrence_next_on = NOW.date() + timedelta(days=7)
+    interface, library = _interface(template, current)
+
+    first = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2831",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"create_next": True}}}
+            ],
+        },
+    )
+    second = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2832",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"create_next": True}}}
+            ],
+        },
+    )
+
+    assert first.state == "applied"
+    assert second.state == "rejected"
+    assert second.code == "validation_error"
+    assert second.next_action == "read_fresh"
+    generated = [
+        item
+        for item in library.recurrence_instances(template.uuid)
+        if item.uuid != current.uuid
+    ]
+    assert [item.start for item in generated] == [template.recurrence_next_on]
+    assert template.recurrence_instance_count == 1
+
+
 @pytest.mark.parametrize(
     "lifecycle",
     [{"create_next": True}, {"remove": True}],
