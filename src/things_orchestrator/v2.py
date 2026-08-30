@@ -278,7 +278,7 @@ class PublicRecurrence(StrictModel):
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
     paused: bool = False
     created_through: str | None = None
-    generated_count: int = Field(default=0, ge=0)
+    generated_count: int | None = Field(default=None, ge=0)
     completed_on: str | None = None
     next_on: str | None = None
     on: list[RepeatOn] = Field(default_factory=list, max_length=64)

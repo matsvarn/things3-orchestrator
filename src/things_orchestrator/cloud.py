@@ -17,6 +17,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .library import (
+    MAX_RECURRENCE_INSTANCE_COUNT,
     ApplyResult,
     ChecklistLine,
     Kind,
@@ -59,7 +60,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 7
+_CACHE_VERSION = 8
 
 
 class CloudError(RuntimeError):
@@ -151,7 +152,7 @@ def _native_count(value: object) -> int | None:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
-        or not 0 <= value <= 2**63 - 1
+        or not 0 <= value <= MAX_RECURRENCE_INSTANCE_COUNT
     ):
         return None
     return value
@@ -480,11 +481,21 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             continue
         existing = library.records.get(uuid)
         if action == 0:
-            item = Record(uuid=uuid, kind="task", title="")
+            item = Record(
+                uuid=uuid,
+                kind="task",
+                title="",
+                recurrence_instance_count_known=False,
+            )
             if existing is not None:
                 item.checklists = existing.checklists
         else:
-            item = existing or Record(uuid=uuid, kind="task", title="")
+            item = existing or Record(
+                uuid=uuid,
+                kind="task",
+                title="",
+                recurrence_instance_count_known=False,
+            )
         item.entity = kind
         if "tt" in payload and payload["tt"] is not None:
             item.title = str(payload["tt"])
@@ -557,6 +568,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             count = _native_count(payload["icc"])
             if count is not None:
                 item.recurrence_instance_count = count
+                item.recurrence_instance_count_known = True
         if "acrd" in payload:
             item.recurrence_completed_on = _native_date(payload.get("acrd"))
         if "tir" in payload and item.recurrence.role == "template":
@@ -1678,6 +1690,7 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         if item.recurrence_created_through
         else None,
         "recurrence_instance_count": item.recurrence_instance_count,
+        "recurrence_instance_count_known": item.recurrence_instance_count_known,
         "recurrence_completed_on": item.recurrence_completed_on.isoformat()
         if item.recurrence_completed_on
         else None,
@@ -1771,6 +1784,9 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             else None
         ),
         recurrence_instance_count=int(payload.get("recurrence_instance_count") or 0),
+        recurrence_instance_count_known=bool(
+            payload.get("recurrence_instance_count_known")
+        ),
         recurrence_completed_on=(
             date.fromisoformat(payload["recurrence_completed_on"])
             if payload.get("recurrence_completed_on")

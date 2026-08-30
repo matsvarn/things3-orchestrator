@@ -20,6 +20,7 @@ from things_orchestrator.cloud import (
 from things_orchestrator.interface import ApproveCall, CommitCall, ReadCall
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import (
+    MAX_RECURRENCE_INSTANCE_COUNT,
     ChecklistLine,
     MemoryLibrary,
     Record,
@@ -170,6 +171,7 @@ def test_malformed_native_numeric_fields_fold_as_missing(
     assert template.remind is None
     assert template.recurrence_created_through is None
     assert template.recurrence_instance_count == 0
+    assert template.recurrence_instance_count_known is False
     assert template.recurrence_completed_on is None
     assert template.recurrence_next_on is None
 
@@ -207,6 +209,84 @@ def test_malformed_native_generated_count_preserves_the_last_valid_count(
     )
 
     assert library.records["template"].recurrence_instance_count == 3
+    assert library.records["template"].recurrence_instance_count_known is True
+
+
+@pytest.mark.parametrize(
+    "count", ["invalid", MAX_RECURRENCE_INSTANCE_COUNT], ids=["unknown", "exhausted"]
+)
+def test_create_next_rejects_unavailable_or_exhausted_native_counts(
+    count: object,
+) -> None:
+    library = MemoryLibrary()
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    "tir": day_ts(date(2026, 9, 6)),
+                    "icc": count,
+                },
+            },
+            {
+                "uuid": "current",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "sr": day_ts(date(2026, 8, 30)),
+                    "rt": ["template"],
+                    "lt": True,
+                },
+            },
+        ],
+        library=library,
+    )
+    journal = MemoryJournal()
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            account_id="owner@example.com",
+        )
+    )
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2990"
+
+    recurrence = interface.dispatch(
+        "things_get", {"ids": ["task:current"]}
+    ).items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.generated_count == (
+        MAX_RECURRENCE_INSTANCE_COUNT
+        if count == MAX_RECURRENCE_INSTANCE_COUNT
+        else None
+    )
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:current",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert set(library.records) == {"template", "current"}
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
 
 
 def test_fold_accepts_task7_and_preserves_its_entity_for_updates(
@@ -371,6 +451,7 @@ def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -
 
     assert library.records["rt2"].repeater == repeater
     assert library.records["rt2"].repeater is not repeater
+    assert library.records["rt2"].recurrence_instance_count_known is False
 
     cache = tmp_path / "state.json"
     cloud = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
@@ -381,6 +462,7 @@ def test_fold_and_cache_preserve_opaque_task7_repeater_payload(tmp_path: Path) -
     restored = CloudLibrary(_CaptureClient(), cache=cache)  # type: ignore[arg-type]
     assert restored._restore_cache("history") is True
     assert restored.records["rt2"].repeater == repeater
+    assert restored.records["rt2"].recurrence_instance_count_known is False
 
 
 def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) -> None:

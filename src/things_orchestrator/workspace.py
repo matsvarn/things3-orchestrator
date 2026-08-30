@@ -77,6 +77,7 @@ from .journal import (
     v2_manifest_is_valid,
 )
 from .library import (
+    MAX_RECURRENCE_INSTANCE_COUNT,
     ChecklistLine,
     Kind,
     MemoryLibrary,
@@ -3173,6 +3174,20 @@ class ThingsWorkspace:
                 ),
             }
         if repeat.get("create_next") is True:
+            if (
+                not template.recurrence_instance_count_known
+                or template.recurrence_instance_count
+                >= MAX_RECURRENCE_INSTANCE_COUNT
+            ):
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "read_fresh",
+                    "instruction": (
+                        "The native generated-copy count is unavailable; read the "
+                        "series again before creating another copy."
+                    ),
+                }
             if any(
                 instance.recurrence_generated_on == template.recurrence_next_on
                 for instance in self._library.recurrence_instances(template.uuid)
@@ -3985,7 +4000,8 @@ class ThingsWorkspace:
             "generated_count": (
                 bookkeeping.recurrence_instance_count
                 if bookkeeping is not None
-                else 0
+                and bookkeeping.recurrence_instance_count_known
+                else None
             ),
             "completed_on": (
                 bookkeeping.recurrence_completed_on.isoformat()
@@ -5141,7 +5157,11 @@ class ThingsWorkspace:
                     if bookkeeping.recurrence_created_through
                     else None
                 ),
-                generated_count=bookkeeping.recurrence_instance_count,
+                generated_count=(
+                    bookkeeping.recurrence_instance_count
+                    if bookkeeping.recurrence_instance_count_known
+                    else None
+                ),
                 completed_on=(
                     bookkeeping.recurrence_completed_on.isoformat()
                     if bookkeeping.recurrence_completed_on
@@ -9466,6 +9486,9 @@ class ThingsWorkspace:
                 else None
             ),
             "recurrence_instance_count": item.recurrence_instance_count,
+            "recurrence_instance_count_known": (
+                item.recurrence_instance_count_known
+            ),
             "recurrence_completed_on": (
                 item.recurrence_completed_on.isoformat()
                 if item.recurrence_completed_on

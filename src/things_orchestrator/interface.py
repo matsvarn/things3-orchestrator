@@ -1566,7 +1566,7 @@ class RecurrenceFact(StrictModel):
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
     paused: bool = False
     created_through: str | None = Field(default=None, max_length=10)
-    generated_count: int = Field(default=0, ge=0)
+    generated_count: int | None = Field(default=None, ge=0)
     completed_on: str | None = Field(default=None, max_length=10)
     next_on: str | None = Field(default=None, max_length=10)
     on: list[RepeatOnFact] = Field(default_factory=list, max_length=64)
@@ -2399,7 +2399,7 @@ _RECURRENCE: dict[str, Any] = {
         },
         "paused": {"type": "boolean", "default": False},
         "created_through": {"type": "string", "maxLength": 10},
-        "generated_count": {"type": "integer", "minimum": 0, "default": 0},
+        "generated_count": {"type": "integer", "minimum": 0},
         "completed_on": {"type": "string", "maxLength": 10},
         "next_on": {"type": "string", "maxLength": 10},
         "on": {

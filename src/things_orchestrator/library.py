@@ -13,6 +13,7 @@ from .recurrence import JsonValue, RecurrenceState
 Kind = Literal["task", "project", "area"]
 PublicKind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "done", "dropped"]
+MAX_RECURRENCE_INSTANCE_COUNT = 2**63 - 1
 
 
 def public_id(kind: PublicKind, uuid: str) -> str:
@@ -98,6 +99,7 @@ class Record:
     repeater: JsonValue = None
     recurrence_created_through: date | None = None
     recurrence_instance_count: int = 0
+    recurrence_instance_count_known: bool = True
     recurrence_completed_on: date | None = None
     recurrence_next_on: date | None = None
     recurrence_generated_on: date | None = None
@@ -1173,6 +1175,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
                 item.recurrence_instance_count = (
                     mutation.write.recurrence_instance_count
                 )
+                item.recurrence_instance_count_known = True
         else:
             item.recurrence_completed_on = mutation.write.recurrence_completed_on
             item.recurrence_next_on = mutation.write.recurrence_next_on
