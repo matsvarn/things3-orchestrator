@@ -1580,6 +1580,7 @@ def test_v2_reads_known_rt2_payload_semantically_without_mutating_it() -> None:
     "payload",
     [
         {"v": True, "t": 0, "pfu": 0, "pfa": 1},
+        {"v": 1.0, "t": 0, "pfu": 0, "pfa": 1},
         {"v": 1, "t": False, "pfu": 0, "pfa": 1},
         {"v": 1, "t": 0, "pfu": False, "pfa": 1},
         {"v": 1, "t": 0, "pfu": 0, "pfa": True},
