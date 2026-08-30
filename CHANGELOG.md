@@ -53,7 +53,9 @@
   preventing duplicate same-date copies. Corrupt cached recurrence dates,
   counts, pause state, provenance, and trust markers force a history replay
   instead of being coerced into writable state. Corrupt rule anchors require a
-  fresh read for end-date and unit edits.
+  fresh read for end-date and unit edits. Malformed RT2 version, mode, unit, or
+  interval discriminators remain explicitly unknown instead of becoming a
+  semantic rule.
 - Repeating Project templates and future copies reset completed Tasks and
   checklist rows to open, so finished work does not leak into a new occurrence.
 - Repeat Stop removes the hidden template's checklist records before deleting
@@ -69,7 +71,8 @@
 - Future numbered Task, Area, Tag, and ChecklistItem entities fail before a
   history page can partially change the in-memory snapshot.
 - The read-only live probe can compare every paginated Today and Inbox ID with
-  native Things without printing task content.
+  native Things, reject duplicate rows on either side, and avoid printing task
+  content.
 
 ## 0.6.0 — 2026-08-29
 

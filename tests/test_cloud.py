@@ -177,7 +177,7 @@ def test_malformed_native_numeric_fields_fold_as_missing(
 
 
 @pytest.mark.parametrize("value", _MALFORMED_NATIVE_NUMBERS)
-def test_malformed_native_generated_count_preserves_the_last_valid_count(
+def test_malformed_sparse_native_generated_count_invalidates_trust(
     value: object,
 ) -> None:
     library = MemoryLibrary(
@@ -192,6 +192,7 @@ def test_malformed_native_generated_count_preserves_the_last_valid_count(
                     rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
                 ),
                 recurrence_instance_count=3,
+                recurrence_next_on=date(2026, 9, 6),
             )
         ]
     )
@@ -209,7 +210,38 @@ def test_malformed_native_generated_count_preserves_the_last_valid_count(
     )
 
     assert library.records["template"].recurrence_instance_count == 3
-    assert library.records["template"].recurrence_instance_count_known is True
+    assert library.records["template"].recurrence_instance_count_known is False
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2995"
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    )
+    recurrence = interface.dispatch(
+        "things_get", {"ids": ["task:template"]}
+    ).items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.generated_count is None
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": "task:template",
+                    "set": {"repeat": {"create_next": True}},
+                }
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert result.next_action == "read_fresh"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
 
 
 @pytest.mark.parametrize("paused", ["false", 0, 1, None, [], {}])

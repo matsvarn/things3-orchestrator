@@ -1,12 +1,19 @@
 from pathlib import Path
 
-from scripts.probe_cloud_capabilities import V2_CAPABILITY_KEYS, bare_uuid
+import pytest
+
+from scripts.probe_cloud_capabilities import V2_CAPABILITY_KEYS, _unique_ids, bare_uuid
 
 ROOT = Path(__file__).parents[1]
 
 
 def test_native_parity_compares_the_uuid_independent_of_public_kind() -> None:
     assert bare_uuid("task:same") == bare_uuid("project:same") == "same"
+
+
+def test_native_parity_rejects_duplicate_rows() -> None:
+    with pytest.raises(RuntimeError, match="duplicate public Today IDs"):
+        _unique_ids(["same", "same"], source="public", view="Today")
 
 
 def test_capability_proof_names_the_v2_safety_gate() -> None:

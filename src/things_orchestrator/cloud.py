@@ -571,9 +571,11 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 item.recurrence_paused_known = True
         if "icsd" in payload:
             item.recurrence_created_through = _native_date(payload.get("icsd"))
-        if "icc" in payload and payload["icc"] is not None:
-            count = _native_count(payload["icc"])
-            if count is not None:
+        if "icc" in payload:
+            count = _native_count(payload.get("icc"))
+            if count is None:
+                item.recurrence_instance_count_known = False
+            else:
                 item.recurrence_instance_count = count
                 item.recurrence_instance_count_known = True
         if "acrd" in payload:
