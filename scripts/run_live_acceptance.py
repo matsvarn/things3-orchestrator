@@ -55,8 +55,9 @@ def acceptance_urls(url: str) -> tuple[str, str]:
         parsed.port
     except ValueError as error:
         raise ValueError("URL has an invalid port") from error
+    mcp = parsed._replace(path="/mcp/")
     health = parsed._replace(path="/health")
-    return urlunsplit(parsed), urlunsplit(health)
+    return urlunsplit(mcp), urlunsplit(health)
 
 
 def summary_exit_code(summary: dict[str, object]) -> int:
