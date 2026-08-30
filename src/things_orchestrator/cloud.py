@@ -125,6 +125,17 @@ def _native_date(value: object) -> date | None:
         return None
 
 
+def _native_datetime(value: object) -> datetime | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return (
+            datetime.fromtimestamp(value, timezone.utc) if value > 0 else None
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 @dataclass
 class Envelope:
     uuid: str
@@ -473,12 +484,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
                 "done" if status == 3 else "dropped" if status == 2 else "open"
             )
         if "sp" in payload:
-            raw_completed = payload.get("sp")
-            item.completed_at = (
-                datetime.fromtimestamp(float(raw_completed), timezone.utc)
-                if raw_completed is not None and float(raw_completed) > 0
-                else None
-            )
+            item.completed_at = _native_datetime(payload.get("sp"))
         if "tr" in payload and payload["tr"] is not None:
             item.trashed = bool(payload["tr"])
         if "sr" in payload:

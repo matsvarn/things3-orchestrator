@@ -125,11 +125,20 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["repeat"].is_open() is False
 
 
-@pytest.mark.parametrize("field", ["sr", "dd", "icsd", "acrd", "tir"])
+@pytest.mark.parametrize("field", ["sp", "sr", "dd", "icsd", "acrd", "tir"])
 @pytest.mark.parametrize(
-    "value", ["invalid", True, float("inf"), float("nan"), 10**100]
+    "value",
+    [
+        "invalid",
+        True,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        10**100,
+        -(10**100),
+    ],
 )
-def test_malformed_native_repeat_dates_fold_as_missing(
+def test_malformed_native_temporal_fields_fold_as_missing(
     field: str, value: object
 ) -> None:
     library = MemoryLibrary()
@@ -152,6 +161,7 @@ def test_malformed_native_repeat_dates_fold_as_missing(
     )
 
     template = library.records["template"]
+    assert template.completed_at is None
     assert template.start is None
     assert template.deadline is None
     assert template.recurrence_created_through is None
