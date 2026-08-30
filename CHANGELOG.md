@@ -30,12 +30,21 @@
   completion progress, and "Create Next Copy". The cache stores generated-copy
   counts and native leavable flags.
 
+### Fixed
+
+- Repeating Project templates and future copies reset completed Tasks and
+  checklist rows to open, so finished work does not leak into a new occurrence.
+- Repeat Stop removes the hidden template's checklist records before deleting
+  its Task or Project graph, preventing orphaned Cloud rows.
+- The retained v1 recurrence inspection and Stop paths now match v2 for
+  Projects and next-date materialization.
+
 ## 0.6.1 — 2026-08-30
 
 ### Fixed
 
 - Cloud history now folds `Task7` records and emits `Task7` for current
-  task-family creates and mutations. Cache version 5 replays histories that
+  task-family creates and mutations. Cache version 6 replays histories that
   previously advanced past ignored Task7 events.
 - Today now matches the native Things list. Open items scheduled on or before
   today remain visible, and Waiting-only items are no longer injected.

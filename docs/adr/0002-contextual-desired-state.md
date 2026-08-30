@@ -24,8 +24,9 @@ will write. Task and Area change stay local. It accepts an exact ID or a narrow
 one item.
 `purpose=organize` is the draft, and remains a compatible Project read alias.
 Use the default review purpose with `view=system` for an exact Area and Project
-registry read. `purpose=recurrence` returns one exact Task and verifies the
-native template and generated-copy relationship before a repeat mutation.
+registry read. `purpose=recurrence` returns one exact Task or Project and
+verifies the native template and generated-copy relationship before a repeat
+mutation.
 
 Each focused read returns an opaque, account-bound context and short refs. The
 context result omits revisions because the ref is authoritative. A commit can

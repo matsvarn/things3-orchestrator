@@ -461,6 +461,13 @@ class _Prepared:
     already_correct: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _RepeatStopPlan:
+    replacement: Write
+    writes: list[Write]
+    preconditions: dict[str, str]
+
+
 @dataclass
 class _PreparationContext:
     """Mutable planning state shared by cohesive preparation branches."""
@@ -1624,9 +1631,9 @@ class ThingsWorkspace:
         """Read one item and verify its repeat template/copy relationship."""
         assert call.id is not None
         target = self._exact_item(call.id)
-        if target is None or target.kind != "task" or target.heading:
+        if target is None or target.kind not in {"task", "project"} or target.heading:
             return self._unsupported(
-                "Recurrence inspection needs one exact Task, not a Project or heading."
+                "Recurrence inspection needs one exact Task or Project, not a heading."
             )
         if not self._recurrence_relationship_is_valid(target):
             return self._unsupported(
@@ -3084,7 +3091,7 @@ class ThingsWorkspace:
                             uuid=new_uuid(),
                             title=row.title,
                             checklist_parent_uuid=template_uuid,
-                            checklist_status=row.status,
+                            checklist_status="open",
                             checklist_index=row.sort_index,
                         )
                     )
@@ -3206,7 +3213,7 @@ class ThingsWorkspace:
                             uuid=new_uuid(),
                             title=row.title,
                             checklist_parent_uuid=next_uuid,
-                            checklist_status=row.status,
+                            checklist_status="open",
                             checklist_index=row.sort_index,
                         )
                     )
@@ -3226,125 +3233,41 @@ class ThingsWorkspace:
             display_titles.append(template.title)
             return None
         if remove:
-            replacement_uuid = new_uuid()
-            replacement_write = Write(
-                action="create",
-                uuid=replacement_uuid,
-                kind=template.kind,
-                title=template.title,
-                notes=template.notes,
-                status="open",
-                into_uuid=(
-                    None
-                    if template.heading_uuid
-                    else template.parent_uuid or template.area_uuid
-                ),
-                into_kind=(
-                    None
-                    if template.heading_uuid
-                    else "project"
-                    if template.parent_uuid
-                    else "area"
-                    if template.area_uuid
+            try:
+                plan = self._repeat_stop_plan(template)
+            except ValueError as error:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": str(error),
+                }
+            preconditions.update(plan.preconditions)
+            for write in plan.writes:
+                current = self._library.records.get(write.uuid)
+                writes.append(write)
+                before.append(
+                    self._v2_observed(current, ("recurrence",))
+                    if current is not None
+                    and write.action in {"repeat_link", "permanent_delete"}
                     else None
-                ),
-                start=template.recurrence_next_on or self._clock().date(),
-                deadline=template.deadline,
-                remind=template.remind,
-                tag_uuids=list(template.tag_uuids),
-                heading_uuid=template.heading_uuid,
-                sort_index=template.sort_index,
-                today_index=template.today_index,
-                owner_today=self._clock().date(),
-                leavable=True,
-            )
-            replacement_graph_writes: list[Write] = []
-            if template.kind == "project":
-                preconditions[f"scope:project:{template.uuid}"] = (
-                    self._project_scope_revision(template.uuid)
                 )
-                try:
-                    replacement_graph_writes = self._clone_project_graph_writes(
-                        template.uuid,
-                        replacement_uuid,
-                        leavable=True,
-                    )
-                except ValueError as error:
-                    return {
-                        "state": "rejected",
-                        "code": "validation_error",
-                        "next_action": "correct_request",
-                        "instruction": str(error),
-                    }
-            for current in self._library.recurrence_instances(template.uuid):
-                preconditions[current.id] = self._revision(current)
-                writes.append(
-                    Write(
-                        action="repeat_link",
-                        uuid=current.uuid,
-                        kind=current.kind,
-                        recurrence_links=[],
-                    )
+                touched.append(
+                    ["title", "notes", "start", "deadline", "into", "recurrence"]
+                    if write.uuid == plan.replacement.uuid
+                    else []
+                    if write.action == "checklist"
+                    else ["title", "notes", "status", "into"]
+                    if write.action in {"create", "create_heading"}
+                    else ["recurrence"]
                 )
-                before.append(self._v2_observed(current, ("recurrence",)))
-                touched.append(["recurrence"])
-                display_titles.append(current.title)
-            writes.append(replacement_write)
-            before.append(None)
-            touched.append(
-                ["title", "notes", "start", "deadline", "into", "recurrence"]
-            )
-            display_titles.append(template.title)
+                display_titles.append(
+                    current.title
+                    if current is not None
+                    else write.title or template.title
+                )
             result_ids[:] = [item_id for item_id in result_ids if item_id != template.id]
-            result_ids.append(_write_public_id(replacement_write))
-            if template.kind == "project":
-                for graph_write in replacement_graph_writes:
-                    writes.append(graph_write)
-                    before.append(None)
-                    touched.append(
-                        []
-                        if graph_write.action == "checklist"
-                        else ["title", "notes", "status", "into"]
-                    )
-                    display_titles.append(graph_write.title or template.title)
-                for descendant in self._project_descendants(template.uuid):
-                    preconditions[descendant.id] = self._revision(descendant)
-                    writes.append(
-                        Write(
-                            action="permanent_delete",
-                            uuid=descendant.uuid,
-                            kind=descendant.kind,
-                            heading=descendant.heading,
-                        )
-                    )
-                    before.append(self._v2_observed(descendant, ("recurrence",)))
-                    touched.append(["recurrence"])
-                    display_titles.append(descendant.title)
-            else:
-                for row in template.checklists:
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=new_uuid(),
-                            title=row.title,
-                            checklist_parent_uuid=replacement_uuid,
-                            checklist_status=row.status,
-                            checklist_index=row.sort_index,
-                        )
-                    )
-                    before.append(None)
-                    touched.append([])
-                    display_titles.append(row.title)
-            writes.append(
-                Write(
-                    action="permanent_delete",
-                    uuid=template.uuid,
-                    kind=template.kind,
-                )
-            )
-            before.append(self._v2_observed(template, ("recurrence",)))
-            touched.append(["recurrence"])
-            display_titles.append(template.title)
+            result_ids.append(_write_public_id(plan.replacement))
             return None
 
         rule_fields = {
@@ -3872,6 +3795,8 @@ class ThingsWorkspace:
                 desired["recurrence"] = self._v2_recurrence_from_write(write)
             else:
                 desired["recurrence"] = None
+        if write.action == "checklist" and write.checklist_remove:
+            desired["exists"] = False
         return desired
 
     def _v2_recurrence_from_write(self, write: Write) -> JsonDict | None:
@@ -5851,43 +5776,26 @@ class ThingsWorkspace:
                     if template is not None:
                         target = template
                 if any(
-                    write.action == "repeat"
-                    and write.uuid == target.uuid
-                    and write.clear_recurrence_rule
+                    write.action == "permanent_delete" and write.uuid == target.uuid
                     for write in writes
                 ):
                     return True
                 try:
-                    target.recurrence.validate_interval_template(kind=target.kind)
+                    plan = self._repeat_stop_plan(target)
                 except ValueError as error:
                     raise _Abort(self._unsupported(str(error))) from error
-                linked = self._library.recurrence_instances(target.uuid)
-                for candidate in linked:
-                    preconditions[candidate.id] = self._revision(candidate)
-                    writes.append(
-                        Write(
-                            action="repeat_link",
-                            uuid=candidate.uuid,
-                            kind="task",
-                            recurrence_links=[],
+                if len(writes) + len(plan.writes) > 120:
+                    raise _Abort(
+                        self._rejected(
+                            "The operation expands beyond the 120-write safety limit."
                         )
                     )
-                writes.append(
-                    Write(
-                        action="repeat",
-                        uuid=target.uuid,
-                        kind="task",
-                        clear_recurrence_rule=True,
-                        recurrence_paused=False,
-                    )
-                )
-                preconditions[target.id] = self._revision(target)
-                preconditions[f"scope:repeat:{target.uuid}"] = (
-                    self._recurrence_scope_revision(target.uuid)
-                )
+                writes.extend(plan.writes)
+                preconditions.update(plan.preconditions)
                 summary.append(f"Stop repeating: {target.title}")
                 warnings.append(
-                    "The repeat template and linked copies become ordinary Tasks."
+                    "Linked copies remain ordinary, and one fresh next-date item "
+                    "replaces the hidden template."
                 )
                 context.risky = True
                 return True
@@ -5922,7 +5830,7 @@ class ThingsWorkspace:
                 Write(
                     action="repeat",
                     uuid=target.uuid,
-                    kind="task",
+                    kind=target.kind,
                     recurrence_rule=recurrence.rule,
                 )
             )
@@ -5938,7 +5846,7 @@ class ThingsWorkspace:
             if repeat_interval is not None:
                 parts.append(f"interval to {repeat_interval}")
             summary.append(f"Change repeat rule for {item.title}: {', '.join(parts)}")
-            warnings.append("This changes future generated Tasks.")
+            warnings.append("This changes future generated items.")
             context.risky = True
             repeat_rule_changed = True
         if item.recurrence.role == "template" and not repeat_rule_changed:
@@ -5965,7 +5873,7 @@ class ThingsWorkspace:
                         "Use repeat removal for template lifecycle changes."
                     )
                 )
-            warnings.append("This changes future generated Tasks.")
+            warnings.append("This changes future generated items.")
             context.risky = True
         if (
             item.recurrence.role == "instance"
@@ -9567,7 +9475,7 @@ class ThingsWorkspace:
                     title=heading.title,
                     into_uuid=destination_project_uuid,
                     into_kind="project",
-                    status=heading.status,
+                    status="open",
                     anytime=True,
                     sort_index=heading.sort_index,
                     leavable=leavable,
@@ -9584,7 +9492,7 @@ class ThingsWorkspace:
                     kind="task",
                     title=task.title,
                     notes=task.notes,
-                    status=task.status,
+                    status="open",
                     into_uuid=None if mapped_heading else destination_project_uuid,
                     into_kind=None if mapped_heading else "project",
                     start=task.start,
@@ -9612,11 +9520,137 @@ class ThingsWorkspace:
                         uuid=new_uuid(),
                         title=row.title,
                         checklist_parent_uuid=parent_uuid,
-                        checklist_status=row.status,
+                        checklist_status="open",
                         checklist_index=row.sort_index,
                     )
                 )
         return writes
+
+    def _repeat_stop_plan(self, template: Record) -> _RepeatStopPlan:
+        template.recurrence.validate_interval_template(kind=template.kind)
+        replacement = Write(
+            action="create",
+            uuid=new_uuid(),
+            kind=template.kind,
+            title=template.title,
+            notes=template.notes,
+            status="open",
+            into_uuid=(
+                None
+                if template.heading_uuid
+                else template.parent_uuid or template.area_uuid
+            ),
+            into_kind=(
+                None
+                if template.heading_uuid
+                else "project"
+                if template.parent_uuid
+                else "area"
+                if template.area_uuid
+                else None
+            ),
+            start=template.recurrence_next_on or self._clock().date(),
+            deadline=template.deadline,
+            remind=template.remind,
+            tag_uuids=list(template.tag_uuids),
+            heading_uuid=template.heading_uuid,
+            sort_index=template.sort_index,
+            today_index=template.today_index,
+            owner_today=self._clock().date(),
+            leavable=True,
+        )
+        writes: list[Write] = []
+        preconditions = {
+            template.id: self._revision(template),
+            f"scope:repeat:{template.uuid}": self._recurrence_scope_revision(
+                template.uuid
+            ),
+        }
+        for current in self._library.recurrence_instances(template.uuid):
+            preconditions[current.id] = self._revision(current)
+            writes.append(
+                Write(
+                    action="repeat_link",
+                    uuid=current.uuid,
+                    kind=current.kind,
+                    recurrence_links=[],
+                )
+            )
+        writes.append(replacement)
+        if template.kind == "project":
+            preconditions[f"scope:project:{template.uuid}"] = (
+                self._project_scope_revision(template.uuid)
+            )
+            writes.extend(
+                self._clone_project_graph_writes(
+                    template.uuid,
+                    replacement.uuid,
+                    leavable=True,
+                )
+            )
+            for descendant in self._project_descendants(template.uuid):
+                preconditions[descendant.id] = self._revision(descendant)
+                for row in sorted(
+                    descendant.checklists,
+                    key=lambda item: (item.sort_index, item.uuid),
+                ):
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=row.uuid,
+                            title=row.title,
+                            checklist_parent_uuid=descendant.uuid,
+                            checklist_remove=True,
+                        )
+                    )
+                writes.append(
+                    Write(
+                        action="permanent_delete",
+                        uuid=descendant.uuid,
+                        kind=descendant.kind,
+                        heading=descendant.heading,
+                    )
+                )
+        else:
+            for row in sorted(
+                template.checklists,
+                key=lambda item: (item.sort_index, item.uuid),
+            ):
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=row.title,
+                        checklist_parent_uuid=replacement.uuid,
+                        checklist_status="open",
+                        checklist_index=row.sort_index,
+                    )
+                )
+        for row in sorted(
+            template.checklists,
+            key=lambda item: (item.sort_index, item.uuid),
+        ):
+            writes.append(
+                Write(
+                    action="checklist",
+                    uuid=row.uuid,
+                    title=row.title,
+                    checklist_parent_uuid=template.uuid,
+                    checklist_remove=True,
+                )
+            )
+        writes.append(
+            Write(
+                action="permanent_delete",
+                uuid=template.uuid,
+                kind=template.kind,
+            )
+        )
+        return _RepeatStopPlan(
+            replacement=replacement,
+            writes=writes,
+            preconditions=preconditions,
+        )
 
     def _recurrence_scope_revision(self, uuid: str) -> str:
         items: list[Record] = []

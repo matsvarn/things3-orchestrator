@@ -549,6 +549,38 @@ def test_recurrence_read_verifies_template_and_generated_copy_relationship() -> 
     assert copy_result.items[0].recurrence.template_id == template.id
 
 
+def test_recurrence_read_verifies_repeating_project_relationship() -> None:
+    template = Record(
+        uuid="inspect-project-template",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+    )
+    copy = Record(
+        uuid="inspect-project-copy",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, copy])
+
+    template_result = module.read(ReadCall(purpose="recurrence", id=template.id))
+    copy_result = module.read(ReadCall(purpose="recurrence", id=copy.id))
+
+    assert template_result.status == copy_result.status == "ok"
+    assert copy.id in template_result.items[0].recurrence.linked_item_ids
+    assert copy_result.items[0].recurrence.template_id == template.id
+
+
 def test_recurrence_read_rejects_dangling_generated_copy() -> None:
     copy = Record(
         uuid="dangling-copy",
@@ -5637,10 +5669,16 @@ def test_repeat_create_and_stop_use_one_plan_each() -> None:
     assert stop_plan.plan is not None
     stopped = module.approve(ApproveCall(plan_id=stop_plan.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid in module._library.records  # noqa: SLF001
-    assert template.recurrence == RecurrenceState()
-    assert [row.title for row in template.checklists] == ["Open dashboard"]
+    assert template.uuid not in module._library.records  # noqa: SLF001
     assert instance.recurrence.role == "none"
+    ordinary = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != instance.uuid and item.title == template.title
+    )
+    assert ordinary.recurrence == RecurrenceState()
+    assert [row.title for row in ordinary.checklists] == ["Open dashboard"]
+    assert ordinary.checklists[0].status == "open"
 
 
 def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
@@ -5690,9 +5728,15 @@ def test_stop_repeat_on_current_copy_deletes_the_template() -> None:
     assert planned.plan is not None
     stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid in module._library.records  # noqa: SLF001
-    assert template.recurrence == RecurrenceState()
+    assert template.uuid not in module._library.records  # noqa: SLF001
     assert current.recurrence.role == "none"
+    ordinary = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != current.uuid and item.title == template.title
+    ]
+    assert len(ordinary) == 1
+    assert ordinary[0].recurrence == RecurrenceState()
 
 
 def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
@@ -5723,9 +5767,220 @@ def test_stop_repeat_on_current_and_template_is_one_plan() -> None:
     assert planned.plan is not None
     stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
     assert stopped.status == "applied"
-    assert template.uuid in module._library.records  # noqa: SLF001
-    assert template.recurrence == RecurrenceState()
+    assert template.uuid not in module._library.records  # noqa: SLF001
     assert current.recurrence.role == "none"
+    ordinary = [
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.uuid != current.uuid and item.title == template.title
+    ]
+    assert len(ordinary) == 1
+
+
+def test_v1_stop_repeating_project_materializes_open_graph_and_deletes_template() -> (
+    None
+):
+    template = Record(
+        uuid="v1-project-template",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+        recurrence_next_on=NOW.date() + timedelta(days=7),
+    )
+    heading = Record(
+        uuid="v1-template-heading",
+        kind="task",
+        title="Ship",
+        heading=True,
+        parent_uuid=template.uuid,
+    )
+    task = Record(
+        uuid="v1-template-task",
+        kind="task",
+        title="Deploy",
+        status="done",
+        heading_uuid=heading.uuid,
+        checklists=[
+            ChecklistLine("v1-template-check", "Smoke test", status="done")
+        ],
+    )
+    current = Record(
+        uuid="v1-project-current",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    module = workspace([template, heading, task, current])
+    revision = detail(module, current.id).revision
+
+    planned = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "stop-v1-project-repeat",
+                "change": [
+                    {
+                        "id": current.id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+    assert planned.status == "needs_approval"
+    stopped = module.approve(ApproveCall(plan_id=planned.plan.id))
+
+    assert stopped.status == "applied"
+    assert current.recurrence == RecurrenceState()
+    assert not {template.uuid, heading.uuid, task.uuid}.intersection(
+        module._library.records  # noqa: SLF001
+    )
+    ordinary = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.kind == "project" and item.uuid != current.uuid
+    )
+    ordinary_heading = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.heading and item.parent_uuid == ordinary.uuid
+    )
+    ordinary_task = next(
+        item
+        for item in module._library.records.values()  # noqa: SLF001
+        if item.heading_uuid == ordinary_heading.uuid
+    )
+    assert ordinary.start == NOW.date() + timedelta(days=7)
+    assert ordinary_task.status == "open"
+    assert ordinary_task.checklists[0].status == "open"
+
+
+@pytest.mark.parametrize(
+    ("task_count", "expected_status", "expected_write_count"),
+    [(29, "needs_approval", 120), (30, "rejected", None)],
+)
+def test_v1_project_stop_enforces_expanded_write_limit(
+    task_count: int,
+    expected_status: str,
+    expected_write_count: int | None,
+) -> None:
+    template = Record(
+        uuid=f"v1-limit-template-{task_count}",
+        kind="project",
+        title="Large repeat",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1},
+        ),
+    )
+    currents = [
+        Record(
+            uuid=f"v1-limit-current-{task_count}-{index}",
+            kind="project",
+            title="Large repeat",
+            recurrence=RecurrenceState(
+                role="instance",
+                repeat_type="fixed",
+                template_uuid=template.uuid,
+                links=(template.uuid,),
+            ),
+        )
+        for index in range(2)
+    ]
+    children = [
+        Record(
+            uuid=f"v1-limit-task-{task_count}-{index}",
+            kind="task",
+            title=f"Step {index}",
+            parent_uuid=template.uuid,
+            checklists=[
+                ChecklistLine(
+                    f"v1-limit-check-{task_count}-{index}",
+                    f"Check {index}",
+                )
+            ],
+        )
+        for index in range(task_count)
+    ]
+    module = workspace([template, *currents, *children])
+    revision = detail(module, currents[0].id).revision
+    intent_id = f"stop-v1-limit-{task_count}"
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": intent_id,
+                "change": [
+                    {
+                        "id": currents[0].id,
+                        "if_revision": revision,
+                        "repeat": {"remove": True},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == expected_status
+    stored = module._journal.get(intent_id)  # noqa: SLF001
+    if expected_write_count is None:
+        assert stored is None
+        assert set(module._library.records) == {  # noqa: SLF001
+            template.uuid,
+            *(item.uuid for item in currents),
+            *(item.uuid for item in children),
+        }
+    else:
+        assert stored is not None
+        assert len(stored.plan["writes"]) == expected_write_count
+
+
+def test_v1_project_repeat_rule_edit_keeps_project_entity_kind() -> None:
+    template = Record(
+        uuid="v1-rule-project",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": []},
+        ),
+    )
+    module = workspace([template])
+    revision = detail(module, template.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": "edit-v1-project-repeat",
+                "change": [
+                    {
+                        "id": template.id,
+                        "if_revision": revision,
+                        "repeat": {"interval": 2},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "needs_approval"
+    stored = module._journal.get("edit-v1-project-repeat")  # noqa: SLF001
+    assert stored is not None
+    repeat_write = next(
+        write for write in stored.plan["writes"] if write["action"] == "repeat"
+    )
+    assert repeat_write["kind"] == "project"
 
 
 def test_existing_task_starts_repeating_in_one_plan_and_preserves_metadata() -> None:

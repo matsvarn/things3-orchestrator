@@ -185,17 +185,23 @@ def test_v2_project_conversion_clones_headings_tasks_and_checklists() -> None:
         uuid="root-task",
         kind="task",
         title="Announce",
+        status="done",
         parent_uuid=project.uuid,
         sort_index=2048,
-        checklists=[ChecklistLine(uuid="check-a", title="Draft", sort_index=1)],
+        checklists=[
+            ChecklistLine(uuid="check-a", title="Draft", status="done", sort_index=1)
+        ],
     )
     heading_task = Record(
         uuid="heading-task",
         kind="task",
         title="Deploy",
+        status="dropped",
         heading_uuid=heading.uuid,
         sort_index=3072,
-        checklists=[ChecklistLine(uuid="check-b", title="Verify", sort_index=2)],
+        checklists=[
+            ChecklistLine(uuid="check-b", title="Verify", status="done", sort_index=2)
+        ],
     )
     interface, library = _interface(project, heading, root_task, heading_task)
 
@@ -242,6 +248,11 @@ def test_v2_project_conversion_clones_headings_tasks_and_checklists() -> None:
     assert cloned_under_heading.parent_uuid is None
     assert [row.title for row in cloned_root.checklists] == ["Draft"]
     assert [row.title for row in cloned_under_heading.checklists] == ["Verify"]
+    assert cloned_root.status == cloned_under_heading.status == "open"
+    assert cloned_root.checklists[0].status == "open"
+    assert cloned_under_heading.checklists[0].status == "open"
+    assert library.records[root_task.uuid].status == "done"
+    assert library.records[heading_task.uuid].status == "dropped"
     assert all(
         item.recurrence.role == "none"
         for item in (cloned_heading, cloned_root, cloned_under_heading)
@@ -613,7 +624,12 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     template.tag_uuids = ["tag-planning"]
     template.recurrence_next_on = date(2026, 9, 6)
     template.checklists = [
-        ChecklistLine(uuid="template-check", title="Review calendar", sort_index=7)
+        ChecklistLine(
+            uuid="template-check",
+            title="Review calendar",
+            status="done",
+            sort_index=7,
+        )
     ]
     other = Record(
         uuid="current-two",
@@ -672,6 +688,7 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     assert ordinary.tag_uuids == template.tag_uuids
     assert ordinary.leavable is True
     assert [row.title for row in ordinary.checklists] == ["Review calendar"]
+    assert ordinary.checklists[0].status == "open"
     assert result["item_ids"] == [current.id, ordinary.id]
     receipt = interface.dispatch(
         "things_receipt", {"operation_id": operation.operation_id}
@@ -689,6 +706,12 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     assert any(
         row["action"] == "permanent_delete"
         and row["target_id"] == template.id
+        for row in receipt.rows
+    )
+    assert any(
+        row["action"] == "checklist"
+        and row["target_id"] == "task:template-check"
+        and row["desired"]["exists"] is False
         for row in receipt.rows
     )
     found = interface.dispatch("things_find", {"text": "Plan week"})
@@ -925,8 +948,13 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
         uuid="project-template-task",
         kind="task",
         title="Deploy",
+        status="done",
         heading_uuid=template_heading.uuid,
-        checklists=[ChecklistLine(uuid="template-check", title="Smoke test")],
+        checklists=[
+            ChecklistLine(
+                uuid="template-check", title="Smoke test", status="done"
+            )
+        ],
     )
     current = Record(
         uuid="project-current",
@@ -1037,7 +1065,9 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
     assert ordinary_heading.uuid != template_heading.uuid
     assert ordinary_task.uuid != template_task.uuid
     assert ordinary_heading.leavable is ordinary_task.leavable is True
+    assert ordinary_task.status == "open"
     assert [row.title for row in ordinary_task.checklists] == ["Smoke test"]
+    assert ordinary_task.checklists[0].status == "open"
     assert library.records[current_task.uuid].title == "Already deployed"
     assert result["item_ids"] == [current.id, ordinary.id]
     receipt = interface.dispatch(
@@ -1066,6 +1096,13 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
         template_heading.id,
         template.id,
     }
+    checklist_delete = next(
+        row
+        for row in receipt.rows
+        if row["action"] == "checklist"
+        and row["target_id"] == "task:template-check"
+    )
+    assert checklist_delete["desired"]["exists"] is False
 
 
 def test_v2_stop_repeating_project_counts_replacement_and_deletes_in_write_limit() -> (

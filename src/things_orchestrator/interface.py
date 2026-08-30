@@ -432,7 +432,7 @@ class ReadCall(StrictModel):
         if self.include and self.purpose not in {"review", "change", "organize"}:
             raise ValueError("include is only available for review, change, or organize")
         if self.purpose == "recurrence" and self.id is None:
-            raise ValueError("recurrence purpose needs an exact Task id")
+            raise ValueError("recurrence purpose needs an exact Task or Project id")
         if self.purpose == "recurrence" and any(
             value is not None
             for value in (
@@ -443,7 +443,9 @@ class ReadCall(StrictModel):
                 self.to_date,
             )
         ):
-            raise ValueError("recurrence purpose accepts only an exact Task id")
+            raise ValueError(
+                "recurrence purpose accepts only an exact Task or Project id"
+            )
         if self.purpose == "organize" and not (
             self.id is not None
             or self.find is not None
@@ -2835,9 +2837,9 @@ APPROVE_OUT: dict[str, Any] = {
 }
 
 READ_DESC = (
-    "Do not call for a clearly new create. Read Things; empty input reviews Today. "
+    "Skip clearly new creates. Read Things; empty input reviews Today. "
     "Select exactly one view, exact id, find, or ids. A Project id is the writable neighborhood. "
-    "purpose=change is one item; organize is the draft; recurrence is one Task. "
+    "purpose=change is one item; organize is the draft; recurrence is one Task or Project. "
     "A change read returns the local neighborhood. Include affected Projects in one read. Include a destination to move or merge. "
     "view=weekly_review returns one exception-first GTD review; category opens one named list. view=system is the Area and Project registry. "
     "Review pages return context refs. Use limit=40 for a full audit and continue truncated results. "

@@ -1774,7 +1774,7 @@ def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> Non
         "select exactly one view",
         "purpose=change is one item",
         "organize is the draft",
-        "recurrence is one task",
+        "recurrence is one task or project",
         "local neighborhood",
         "include a destination",
         "within=trash searches trash",

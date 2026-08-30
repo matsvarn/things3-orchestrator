@@ -2351,10 +2351,13 @@ def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
                 uuid="template-task",
                 kind="task",
                 title="Deploy",
+                status="done",
                 entity="Task7",
                 heading_uuid="template-heading",
                 checklists=[
-                    ChecklistLine(uuid="template-check", title="Verify")
+                    ChecklistLine(
+                        uuid="template-check", title="Verify", status="done"
+                    )
                 ],
             ),
             "current-project": Record(
@@ -2443,9 +2446,29 @@ def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
     assert task.payload["pr"] == []
     assert task.payload["agr"] == [heading.uuid]
     assert task.payload["lt"] is True
-    checklist = next(row for row in client.committed if row.kind == "ChecklistItem3")
+    assert task.payload["ss"] == 0
+    checklist = next(
+        row
+        for row in client.committed
+        if row.kind == "ChecklistItem3" and row.action == 0
+    )
     assert checklist.kind == "ChecklistItem3"
     assert checklist.payload["ts"] == [task.uuid]
+    assert checklist.payload["ss"] == 0
+    checklist_delete = by_uuid["template-check"]
+    assert checklist_delete.kind == "ChecklistItem3"
+    assert checklist_delete.action == 2
+    assert checklist_delete.payload == {}
+    committed_order = [row.uuid for row in client.committed]
+    assert committed_order.index("template-check") < committed_order.index(
+        "template-task"
+    )
+    assert committed_order.index("template-task") < committed_order.index(
+        "template-heading"
+    )
+    assert committed_order.index("template-heading") < committed_order.index(
+        "template-project"
+    )
     assert all(
         by_uuid[item_uuid].action == 2 and by_uuid[item_uuid].payload == {}
         for item_uuid in ("template-task", "template-heading", "template-project")
