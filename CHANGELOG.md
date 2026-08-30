@@ -48,7 +48,9 @@
   reminder fields now fold as missing state, and malformed generated counts
   stay explicitly unavailable, instead of disabling Cloud reads and writes or
   authorizing a fabricated Create Next. Exhausted counts also require a fresh
-  read. Corrupt rule anchors require a fresh read for end-date and unit edits.
+  read. Corrupt cached counts and trust markers force a history replay instead
+  of being coerced into writable state. Corrupt rule anchors require a fresh
+  read for end-date and unit edits.
 - Repeating Project templates and future copies reset completed Tasks and
   checklist rows to open, so finished work does not leak into a new occurrence.
 - Repeat Stop removes the hidden template's checklist records before deleting

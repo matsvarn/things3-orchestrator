@@ -1066,6 +1066,11 @@ def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
     [
         ("recurrence_rule", ["not", "an", "object"]),
         ("recurrence_links", "template-id"),
+        ("recurrence_instance_count", -1),
+        ("recurrence_instance_count", False),
+        ("recurrence_instance_count", 1.5),
+        ("recurrence_instance_count", MAX_RECURRENCE_INSTANCE_COUNT + 1),
+        ("recurrence_instance_count_known", "false"),
     ],
 )
 def test_malformed_cached_recurrence_is_discarded_before_replay(
@@ -1078,6 +1083,8 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
         "title": "Bad cache",
         "recurrence_rule": {"tp": 0, "fu": 256, "fa": 1},
         "recurrence_links": [],
+        "recurrence_instance_count": 0,
+        "recurrence_instance_count_known": False,
     }
     record[bad_field[0]] = bad_field[1]
     cache.write_text(
@@ -1138,6 +1145,26 @@ def test_malformed_cached_recurrence_is_discarded_before_replay(
 
     assert client.starts == [0]
     assert list(library.records) == ["fresh"]
+
+    journal = MemoryJournal()
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2991"
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {"id": "task:fresh", "set": {"repeat": {"create_next": True}}}
+            ],
+        },
+    )
+    assert result.state == "rejected"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
 
 
 def test_create_ix_follows_siblings() -> None:

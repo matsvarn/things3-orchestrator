@@ -1743,6 +1743,13 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         not isinstance(link, str) for link in raw_links
     ):
         raise ValueError("invalid cached recurrence links")
+    raw_instance_count = payload.get("recurrence_instance_count")
+    instance_count = _native_count(raw_instance_count)
+    if instance_count is None:
+        raise ValueError("invalid cached recurrence instance count")
+    instance_count_known = payload.get("recurrence_instance_count_known")
+    if not isinstance(instance_count_known, bool):
+        raise ValueError("invalid cached recurrence instance count trust marker")
     return Record(
         uuid=str(payload["uuid"]),
         kind=kind,
@@ -1783,10 +1790,8 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             if payload.get("recurrence_created_through")
             else None
         ),
-        recurrence_instance_count=int(payload.get("recurrence_instance_count") or 0),
-        recurrence_instance_count_known=bool(
-            payload.get("recurrence_instance_count_known")
-        ),
+        recurrence_instance_count=instance_count,
+        recurrence_instance_count_known=instance_count_known,
         recurrence_completed_on=(
             date.fromisoformat(payload["recurrence_completed_on"])
             if payload.get("recurrence_completed_on")
