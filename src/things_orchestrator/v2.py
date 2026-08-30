@@ -7,12 +7,13 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from hashlib import sha256
+from secrets import token_urlsafe
 from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .interface import ReadCall
+from .interface import ReadCall, TruncatedField
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -307,6 +308,12 @@ class PublicRecurrence(StrictModel):
 RecurrenceFact = PublicRecurrence
 
 
+class PublicChecklistRow(StrictModel):
+    id: str
+    title: TaintedText
+    status: Literal["open", "completed", "canceled"]
+
+
 class PublicItem(StrictModel):
     id: str
     kind: Literal["task", "project", "area", "heading"]
@@ -316,13 +323,32 @@ class PublicItem(StrictModel):
     into_id: str | None = None
     start: str | None = None
     deadline: str | None = None
-    tags: list[TaintedText] = Field(default_factory=list)
+    tags: list[TaintedText] = Field(default_factory=list, max_length=80)
+    checklist: list[PublicChecklistRow] = Field(default_factory=list, max_length=100)
+    direct_tag_ids: list[str] = Field(default_factory=list, max_length=40)
+    inherited_tag_ids: list[str] = Field(default_factory=list, max_length=40)
+    truncated_fields: list[TruncatedField] = Field(default_factory=list, max_length=4)
     recurrence: PublicRecurrence | None = None
 
 
 class PublicTag(StrictModel):
     id: str
     title: TaintedText
+
+
+class PublicIssue(StrictModel):
+    path: str = Field(max_length=512)
+    code: str = Field(max_length=120)
+    hint: str = Field(max_length=1000)
+    item_index: int | None = None
+    item_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
+
+
+class PublicEffect(StrictModel):
+    kind: Literal["repeat_started"]
+    explanation: str = Field(max_length=500)
+    template_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
+    instance_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
 
 
 class PublicResult(StrictModel):
@@ -338,7 +364,7 @@ class PublicResult(StrictModel):
     ]
     next_action: Literal[
         "none", "correct_request", "retry_same", "read_fresh", "read_receipt", "run_cli",
-        "wait", "contact_operator",
+        "wait", "contact_operator", "continue_read",
     ]
     operation_id: str | None = None
     blocking_operation_ids: list[str] = Field(default_factory=list)
@@ -348,6 +374,8 @@ class PublicResult(StrictModel):
     cursor: str | None = None
     receipt_hash: str | None = None
     missing_ids: list[str] = Field(default_factory=list)
+    issues: list[PublicIssue] = Field(default_factory=list, max_length=20)
+    effects: list[PublicEffect] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
     def coherent_outcome(self) -> Self:
@@ -360,12 +388,15 @@ class PublicResult(StrictModel):
         if self.state in state_codes and self.code != state_codes[self.state]:
             raise ValueError("state and code disagree")
         state_actions = {
-            "ok": "none", "awaiting_owner": "run_cli", "pending": "run_cli",
+            "ok": "none",
+            "awaiting_owner": "run_cli", "pending": "run_cli",
             "applied": "read_receipt", "unchanged": "read_receipt",
             "not_applied": "read_receipt", "partial": "run_cli",
             "partial_resolved": "none", "stale": "read_fresh", "declined": "none",
         }
-        if self.state in state_actions and self.next_action != state_actions[self.state]:
+        if self.state == "ok" and self.next_action == "continue_read":
+            pass
+        elif self.state in state_actions and self.next_action != state_actions[self.state]:
             raise ValueError("state and next_action disagree")
         if self.state == "rejected" and self.code == "ok":
             raise ValueError("rejected needs a rejection code")
@@ -375,6 +406,8 @@ class PublicResult(StrictModel):
             raise ValueError("blocking IDs require write_fenced")
         if self.missing_ids and self.code != "missing_target":
             raise ValueError("missing IDs require missing_target")
+        if self.next_action == "continue_read" and self.cursor is None:
+            raise ValueError("continue_read needs a cursor")
         if self.rows and self.receipt_hash is None:
             raise ValueError("receipt rows require receipt_hash")
         return self
@@ -388,16 +421,18 @@ class ViewCall(StrictModel):
 
 class FindCall(StrictModel):
     text: str | None = Field(default=None, min_length=1, max_length=500)
-    within: str | None = Field(default=None, pattern=r"^(project|area):[^\s:]+$")
+    within: str | None = Field(
+        default=None, pattern=r"^(project|area):[^\s:]+$", max_length=512
+    )
     limit: int = Field(default=20, ge=1, le=40)
     cursor: str | None = None
 
     @model_validator(mode="after")
     def initial_or_continuation(self) -> Self:
-        if (self.text is None) == (self.cursor is None):
-            raise ValueError("find needs exactly one of text or cursor")
-        if self.cursor is not None and self.within is not None:
+        if self.cursor is not None and (self.text is not None or self.within is not None):
             raise ValueError("a find cursor already binds its search scope")
+        if self.cursor is None and self.text is None and self.within is None:
+            raise ValueError("find needs text, an exact Project or Area within, or a cursor")
         return self
 
 
@@ -523,12 +558,100 @@ class CaptureDiscoveryCall(StrictModel):
         return self
 
 
+ExactTagId = Annotated[str, Field(pattern=r"^tag:[^\s:]+$", max_length=512)]
+ExactChecklistId = Annotated[
+    str, Field(pattern=r"^check:[^\s:]+$", max_length=512)
+]
+
+
+class TagDelta(StrictModel):
+    add: list[ExactTagId] = Field(default_factory=list, max_length=40)
+    remove: list[ExactTagId] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def exact_disjoint_delta(self) -> Self:
+        for values in (self.add, self.remove):
+            if len(values) != len(set(values)):
+                raise ValueError("tag deltas need unique exact tag IDs")
+        if set(self.add).intersection(self.remove):
+            raise ValueError("a tag cannot be both added and removed")
+        if not self.add and not self.remove:
+            raise ValueError("tags needs an add or remove delta")
+        return self
+
+
+class ChecklistAddPatch(StrictModel):
+    title: str = Field(min_length=1, max_length=1000)
+    status: Literal["open", "completed", "canceled"] = "open"
+
+    @field_validator("title")
+    @classmethod
+    def visible_title(cls, value: str) -> str:
+        return _visible_title(value)
+
+
+class ChecklistSetPatch(StrictModel):
+    title: str | SkipJsonSchema[None] = Field(
+        default=None, min_length=1, max_length=1000
+    )
+    status: (
+        Literal["open", "completed", "canceled"] | SkipJsonSchema[None]
+    ) = None
+
+    @field_validator("title", "status", mode="before")
+    @classmethod
+    def no_implicit_clear(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("checklist fields do not support null; omit unchanged fields")
+        return value
+
+    @model_validator(mode="after")
+    def nonempty(self) -> Self:
+        if not self.model_fields_set:
+            raise ValueError("checklist update set needs a field")
+        return self
+
+
+class ChecklistUpdatePatch(StrictModel):
+    id: ExactChecklistId
+    set: ChecklistSetPatch
+
+
+class ChecklistPatch(StrictModel):
+    add: list[ChecklistAddPatch] = Field(default_factory=list, max_length=100)
+    update: list[ChecklistUpdatePatch] = Field(default_factory=list, max_length=100)
+    remove: list[ExactChecklistId] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def exact_disjoint_patch(self) -> Self:
+        updated = [row.id for row in self.update]
+        if len(updated) != len(set(updated)):
+            raise ValueError("each checklist row can be updated once")
+        if len(self.remove) != len(set(self.remove)):
+            raise ValueError("checklist remove needs unique exact check IDs")
+        if set(updated).intersection(self.remove):
+            raise ValueError("a checklist row cannot be updated and removed")
+        if not self.add and not self.update and not self.remove:
+            raise ValueError("checklist needs an add, update, or remove patch")
+        if len(self.add) + len(self.update) + len(self.remove) > 100:
+            raise ValueError("checklist patch expands to at most 100 rows")
+        return self
+
+
 class UpdateFields(StrictModel):
     title: str | SkipJsonSchema[None] = Field(default=None, min_length=1, max_length=1000)
     notes: str | SkipJsonSchema[None] = Field(default=None, max_length=50_000)
-    start: str | None = None
+    start: str | None = Field(
+        default=None,
+        description="Today, tomorrow, evening, someday, anytime, an ISO date, or null.",
+    )
     deadline: str | None = None
     remind_at: str | None = None
+    into_id: str | SkipJsonSchema[None] = Field(
+        default=None, pattern=r"^(project|area):[^\s:]+$", max_length=512
+    )
+    tags: TagDelta | SkipJsonSchema[None] = None
+    checklist: ChecklistPatch | SkipJsonSchema[None] = None
     repeat: RepeatEdit | None = Field(
         default=None,
         description=(
@@ -537,6 +660,13 @@ class UpdateFields(StrictModel):
             "ordinary next-date item and delete the hidden template graph."
         ),
     )
+
+    @field_validator("into_id", "tags", "checklist", mode="before")
+    @classmethod
+    def no_null_deep_field(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("null is not supported; omit this field to preserve it")
+        return value
 
     @field_validator("repeat", mode="before")
     @classmethod
@@ -593,7 +723,7 @@ class UpdateFields(StrictModel):
 
 
 class UpdateItem(StrictModel):
-    id: str = Field(pattern=r"^(task|project):[^\s:]+$")
+    id: str = Field(pattern=r"^(task|project):[^\s:]+$", max_length=512)
     set: UpdateFields
 
 
@@ -648,10 +778,10 @@ DISCOVERY_MODELS: dict[str, type[StrictModel]] = {
 
 DESCRIPTIONS = {
     "things_view": "Read one current Things list.",
-    "things_find": "Search by owner text and optional exact container.",
-    "things_get": "Read one to fifty exact item IDs.",
+    "things_find": "Search by owner text, or read direct membership within one exact Project or Area. Continue pages with only the returned cursor.",
+    "things_get": "Read one to fifty exact item IDs, including exact checklist and direct/inherited tag IDs.",
     "things_capture": "Create an atomic batch of Tasks or Projects with optional nested Project Tasks and a semantic repeat rule for Tasks or Projects.",
-    "things_update": "Set only named ordinary item-local fields, including a semantic repeat rule, Create Next Copy, or owner-approved Stop that materializes the template as a fresh ordinary next-date item before deleting its hidden graph.",
+    "things_update": "Atomically set named fields, move Tasks or Projects in place, patch direct tags and exact checklist rows, or change a semantic repeat rule. Supports Anytime, Create Next Copy, and owner-approved Stop.",
     "things_complete": "Complete one atomic batch of exact items.",
     "things_trash": "Stage one atomic batch for recoverable Trash.",
     "things_receipt": "Read immutable content-minimized receipt rows.",
@@ -685,7 +815,7 @@ def _validate_repeat_on(
 
 
 def _valid_start(value: str | None) -> str | None:
-    if value is None or value in {"today", "tomorrow", "evening", "someday"}:
+    if value is None or value in {"today", "tomorrow", "evening", "someday", "anytime"}:
         return value
     return _valid_date(value)
 
@@ -737,10 +867,18 @@ def flat_schema(model: type[BaseModel]) -> dict[str, Any]:
     return cast(dict[str, Any], inline(schema))
 
 
+@dataclass(frozen=True, slots=True)
+class _WithinPage:
+    within: str
+    revision: str
+    remaining_ids: tuple[str, ...]
+
+
 class ThingsV2:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
         self._cursor_routes: dict[str, str] = {}
+        self._within_pages: dict[str, _WithinPage] = {}
         self._last_prune_date: date | None = None
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
@@ -795,13 +933,18 @@ class ThingsV2:
         if public_view == "tags":
             if result.status != "ok":
                 return self._read_failure(result)
+            cursor = self._remember_cursor(result.cursor, f"view:{public_view}")
             return PublicResult(
                 state="ok",
                 code="ok",
-                next_action="none",
-                instruction="Current Things tags.",
+                next_action="continue_read" if cursor is not None else "none",
+                instruction=(
+                    "Current Things tags; more results remain. Continue with only this cursor."
+                    if cursor is not None
+                    else "Current Things tags."
+                ),
                 tags=[PublicTag(id=tag.id, title=TaintedText(value=tag.title)) for tag in result.tags],
-                cursor=self._remember_cursor(result.cursor, f"view:{public_view}"),
+                cursor=cursor,
             )
         return self._project_read(result, route=f"view:{public_view}")
 
@@ -809,13 +952,142 @@ class ThingsV2:
         if call.cursor is not None:
             if self._cursor_routes.get(call.cursor) != "find":
                 return self._invalid_read_cursor()
+            if call.cursor in self._within_pages:
+                return self._continue_within_page(call.cursor, call.limit)
             result = self.workspace.read(ReadCall(cursor=call.cursor, limit=call.limit))
         else:
-            assert call.text is not None
-            result = self.workspace.read(
-                ReadCall(find=call.text, within=call.within, limit=call.limit)
-            )
+            if call.text is None:
+                assert call.within is not None
+                membership = self._within_membership(call.within)
+                if isinstance(membership, PublicResult):
+                    return membership
+                records, revision = membership
+                page, rest = records[: call.limit], records[call.limit :]
+                cursor = self._store_within_page(
+                    call.within, revision, [item.id for item in rest]
+                )
+                return self._within_result(page, cursor)
+            else:
+                result = self.workspace.read(
+                    ReadCall(find=call.text, within=call.within, limit=call.limit)
+                )
         return self._project_read(result, route="find")
+
+    def _within_membership(
+        self, within: str
+    ) -> tuple[list[Any], str] | PublicResult:
+        failed = self.workspace._refresh(force=True)
+        if failed is not None:
+            return PublicResult(
+                state="rejected",
+                code="read_unavailable",
+                next_action="retry_same",
+                instruction="Things Cloud is unavailable; retry this read.",
+            )
+        container = self.workspace._exact_item(within)
+        expected_kind = "project" if within.startswith("project:") else "area"
+        if (
+            container is None
+            or container.kind != expected_kind
+            or container.status != "open"
+            or container.trashed
+        ):
+            return PublicResult(
+                state="rejected",
+                code="missing_target",
+                next_action="correct_request",
+                instruction="That exact active container was not found.",
+                missing_ids=[within],
+            )
+        records = sorted(
+            [
+                item
+                for item in self.workspace._library.records.values()
+                if item.is_open()
+                and (
+                    item.parent_uuid == container.uuid
+                    if container.kind == "project"
+                    else item.area_uuid == container.uuid
+                    and item.parent_uuid is None
+                )
+            ],
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        return records, self.workspace._scope_revision([container, *records])
+
+    def _continue_within_page(self, cursor: str, limit: int) -> PublicResult:
+        stored = self._within_pages[cursor]
+        membership = self._within_membership(stored.within)
+        if isinstance(membership, PublicResult):
+            if membership.code == "read_unavailable":
+                return membership
+            self._within_pages.pop(cursor, None)
+            self._cursor_routes.pop(cursor, None)
+            return self._invalid_read_cursor()
+        records, revision = membership
+        if revision != stored.revision:
+            return self._invalid_read_cursor()
+        by_id = {item.id: item for item in records}
+        if any(item_id not in by_id for item_id in stored.remaining_ids):
+            return self._invalid_read_cursor()
+        remaining = [by_id[item_id] for item_id in stored.remaining_ids]
+        page, rest = remaining[:limit], remaining[limit:]
+        next_cursor = self._store_within_page(
+            stored.within, revision, [item.id for item in rest]
+        )
+        return self._within_result(page, next_cursor)
+
+    def _store_within_page(
+        self, within: str, revision: str, remaining_ids: list[str]
+    ) -> str | None:
+        if not remaining_ids:
+            return None
+        page = _WithinPage(
+            within=within,
+            revision=revision,
+            remaining_ids=tuple(remaining_ids),
+        )
+        existing = next(
+            (
+                cursor
+                for cursor, stored in self._within_pages.items()
+                if stored == page
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        cursor = "cur_" + token_urlsafe(18)
+        self._within_pages[cursor] = page
+        self._cursor_routes[cursor] = "find"
+        while len(self._within_pages) > 256:
+            expired = next(iter(self._within_pages))
+            del self._within_pages[expired]
+            self._cursor_routes.pop(expired, None)
+        return cursor
+
+    def _within_result(
+        self, records: list[Any], cursor: str | None
+    ) -> PublicResult:
+        return PublicResult(
+            state="ok",
+            code="ok",
+            next_action="continue_read" if cursor else "none",
+            instruction=(
+                "Current Things facts; more results remain. Continue with only this cursor."
+                if cursor
+                else "Current Things facts."
+            ),
+            items=[
+                self._item(
+                    self.workspace._fact(
+                        item, full=False, include_revision=False
+                    )
+                )
+                for item in records
+            ],
+            cursor=cursor,
+        )
 
     def _get(self, ids: list[str]) -> PublicResult:
         items: list[Any] = []
@@ -823,7 +1095,7 @@ class ThingsV2:
             result = self.workspace.read(
                 ReadCall(
                     ids=ids[offset : offset + 10],
-                    fields=["notes", "tags", "recurrence"],
+                    fields=["notes", "checklist", "tags", "recurrence"],
                 )
             )
             if result.status == "unavailable":
@@ -852,20 +1124,57 @@ class ThingsV2:
                     item,
                     full=True,
                     include_revision=False,
-                    detail=("notes", "tags", "recurrence"),
+                    detail=("notes", "checklist", "tags", "recurrence"),
                 )
             )
             for item_id in item_ids
             if (item := self.workspace._exact_item(item_id)) is not None
         ] if fresh_items else self._get(item_ids).items if item_ids else []
+        effects: list[PublicEffect] = []
+        issues = [
+            PublicIssue.model_validate(issue)
+            for issue in cast(list[object], result.get("issues", []))
+        ]
+        if result.get("state") == "rejected" and not issues:
+            issues = [PublicIssue(
+                path=cast(str, result.get("issue_path", "items")),
+                code=cast(str, result.get("code", "validation_error")),
+                hint=cast(str, result.get("instruction", "Correct the request.")),
+                item_id=cast(str | None, result.get("issue_item_id")),
+            )]
+        operation_id = cast(str | None, result.get("operation_id"))
+        if operation_id is not None and result.get("state") in {"applied", "unchanged"}:
+            operation = self.workspace._journal.get_v2_operation(operation_id)
+            if operation is not None:
+                writes = cast(list[dict[str, object]], operation.manifest.get("writes", []))
+                templates = [row for row in writes if row.get("action") == "create" and row.get("recurrence_rule")]
+                for template in templates:
+                    template_uuid = template.get("uuid")
+                    linked = next(
+                        (
+                            row for row in writes
+                            if row.get("action") in {"create", "repeat_link"}
+                            and isinstance(row.get("recurrence_links"), list)
+                            and template_uuid in cast(list[object], row["recurrence_links"])
+                        ),
+                        None,
+                    )
+                    effects.append(PublicEffect(
+                        kind="repeat_started",
+                        explanation="Starting this repeat creates one hidden template and one visible current instance.",
+                        template_id=(f"{template.get('kind', 'task')}:{template_uuid}" if isinstance(template_uuid, str) else None),
+                        instance_id=(f"{linked.get('kind', 'task')}:{linked['uuid']}" if linked is not None and isinstance(linked.get("uuid"), str) else None),
+                    ))
         return PublicResult(
             state=cast(Any, result["state"]),
             code=cast(Any, result.get("code", _result_code(cast(str, result["state"])))),
             next_action=cast(Any, result.get("next_action", _result_next_action(cast(str, result["state"])))),
             instruction=cast(str, result["instruction"]),
-            operation_id=cast(str | None, result.get("operation_id")),
+            operation_id=operation_id,
             blocking_operation_ids=cast(list[str], result.get("blocking_operation_ids", [])),
             items=items,
+            effects=effects,
+            issues=issues,
         )
 
     def _project_read(
@@ -878,13 +1187,18 @@ class ThingsV2:
         ok = result.status == "ok"
         if not ok:
             return self._read_failure(result)
+        cursor = self._remember_cursor(result.cursor, route)
         return PublicResult(
             state="ok",
             code="ok",
-            next_action="none",
-            instruction="Current Things facts.",
+            next_action="continue_read" if cursor is not None else "none",
+            instruction=(
+                "Current Things facts; more results remain. Continue with only this cursor."
+                if cursor is not None
+                else "Current Things facts."
+            ),
             items=[self._item(item) for item in (result.items if items is None else items)],
-            cursor=self._remember_cursor(result.cursor, route),
+            cursor=cursor,
         )
 
     @staticmethod
@@ -927,8 +1241,17 @@ class ThingsV2:
             instruction="That read cursor is invalid or belongs to another tool.",
         )
 
-    @staticmethod
-    def _item(item: Any) -> PublicItem:
+    def _item(self, item: Any) -> PublicItem:
+        record = self.workspace._library.records.get(item.id.partition(":")[2])
+        start = item.start
+        if (
+            start is None
+            and record is not None
+            and record.kind in {"task", "project"}
+            and not record.heading
+            and not record.inbox
+        ):
+            start = "anytime"
         return PublicItem(
             id=item.id,
             kind=item.kind,
@@ -938,12 +1261,23 @@ class ThingsV2:
             if item.notes_markdown
             else None,
             into_id=item.into_id,
-            start=item.start,
+            start=start,
             deadline=item.deadline,
             tags=[
                 TaintedText(value=tag.title)
                 for tag in [*item.direct_tags, *item.inherited_tags]
             ],
+            checklist=[
+                PublicChecklistRow(
+                    id=row.id,
+                    title=TaintedText(value=row.title),
+                    status=row.status,
+                )
+                for row in item.checklist
+            ],
+            direct_tag_ids=list(item.direct_tag_ids),
+            inherited_tag_ids=list(item.inherited_tag_ids),
+            truncated_fields=list(item.truncated_fields),
             recurrence=(
                 PublicRecurrence.model_validate(item.recurrence.model_dump())
                 if item.recurrence is not None

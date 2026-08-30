@@ -31,6 +31,9 @@ Keep one production server and one stable model Interface.
   only the Ed25519 public key used to verify host signatures. `server.py` is
   the v2 MCP adapter.
 - `server.py` exposes stdio and Streamable HTTP.
+- `live_acceptance.py` owns the restart-safe disposable write workflow used as
+  a release gate. It persists request IDs before mutation, never performs the
+  CLI-only owner action, and passes only after receipt and Trash read-back.
 - `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
   `print-config`, and `doctor`. Callers run `uv run things-orchestrator`
   from the checkout. `plugin/bin` locates that checkout when a client
@@ -47,6 +50,12 @@ Keep one production server and one stable model Interface.
   `docs/host.md`. Hermes is the default paste. Capability evidence is
   `docs/capability-proof.md`. Human workflow coverage and rerun status are in
   `docs/dogfood.md`.
+
+For public write changes, deploy the exact candidate before tagging it. Run the
+live acceptance workflow from `docs/capability-proof.md`, approve its one
+recoverable cleanup operation on the host, and rerun the same state file to a
+`cleaned` result. A pending or partial outcome blocks the release. Tag and
+build assets only from the commit that passed this gate.
 
 Do not expose v1 tools or add advanced scopes during this cutover. Keep
 discovery schemas flat because some model clients

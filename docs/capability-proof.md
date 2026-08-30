@@ -289,8 +289,50 @@ print task IDs, titles, or notes. A mismatch exits with status 1.
 
 The probe proves read parity for the current account and Mac at the time of the
 run. It does not prove mutation behavior, remote-host configuration, or another
-account. Deterministic Cloud fixtures cover mutation contracts. Any disposable
-live write needs a separate, explicit proof with exact-ID cleanup.
+account. Deterministic Cloud fixtures cover mutation contracts.
+
+Before a release that changes public write behavior, run the separate public-
+MCP acceptance workflow against the exact candidate deployment:
+
+```console
+uv run python scripts/run_live_acceptance.py \
+  --url http://127.0.0.1:8787/mcp \
+  --expect-commit 0123456789abcdef0123456789abcdef01234567 \
+  --state ~/.local/state/things-orchestrator/release-acceptance.json \
+  --live-write-acceptance
+```
+
+The workflow creates a uniquely named disposable Project pair and Inbox Task.
+It proves whole-batch validation with a field and item index, move-in-place plus
+Anytime, direct and inherited tag identity, exact checklist patching,
+`within`-only pagination and stale-cursor rejection, immutable receipts, and
+the nonblocking guidance for an `awaiting_owner` Trash operation. It uses two
+existing tag IDs only on the disposable records; it does not change the tag
+registry. Before credentials or writes, the command rejects plaintext remote
+URLs and requires `/health` plus MCP initialize to match the local package and
+the exact `--expect-commit`. It binds that URL and commit into the mode-0600
+state file before mutation and reuses the exact request IDs after a crash. A
+pending or partial cleanup stops without replay.
+
+The first run ends at `awaiting_owner` with exit status 2, so automation cannot
+mistake the half-finished run for a passed release gate. Inspect and approve the
+printed cleanup operation in a private host terminal, then rerun the exact
+command:
+
+```console
+uv run things-orchestrator operation-show op_EXAMPLE
+uv run things-orchestrator operation-approve op_EXAMPLE
+uv run python scripts/run_live_acceptance.py \
+  --url http://127.0.0.1:8787/mcp \
+  --expect-commit 0123456789abcdef0123456789abcdef01234567 \
+  --state ~/.local/state/things-orchestrator/release-acceptance.json \
+  --live-write-acceptance
+```
+
+The resumed run passes only after the immutable receipt is applied and every
+recorded fixture ID is visible in recoverable Trash. Keep the private state
+file until that final `cleaned` result. This proves the exercised account,
+server, and version only; it does not prove another account or client.
 
 A read-only history audit inspected 2,568 existing events. It found 88 native
 recurrence-linked creates and 88 completion events. In 64 cases, Things made
