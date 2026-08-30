@@ -285,7 +285,7 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
     if not isinstance(raw, dict):
         return None
     version = raw.get("v")
-    if isinstance(version, bool) or version != 1:
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
         return RecurrenceFact(kind="unknown", engine="rt2")
     mode_code = raw.get("t")
     unit_code = raw.get("pfu")
