@@ -642,6 +642,35 @@ def test_v2_stop_repeat_needs_owner_and_removes_hidden_template(
     assert [item.id for item in found.items] == ["task:current"]
 
 
+def test_v2_rejects_stop_combined_with_an_ordinary_template_update() -> None:
+    template, current = _repeating_pair()
+    interface, library = _interface(template, current)
+
+    with pytest.raises(
+        ValidationError,
+        match="repeat removal cannot combine with ordinary fields",
+    ):
+        interface.dispatch(
+            "things_update",
+            {
+                "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2821",
+                "items": [
+                    {
+                        "id": template.id,
+                        "set": {
+                            "title": "Renamed",
+                            "repeat": {"remove": True},
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert library.records[template.uuid].title == "Plan week"
+    assert library.records[template.uuid].recurrence.role == "template"
+    assert library.records[current.uuid].recurrence.role == "instance"
+
+
 def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
     tmp_path: Path,
 ) -> None:

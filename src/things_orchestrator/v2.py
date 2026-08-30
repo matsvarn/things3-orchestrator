@@ -582,6 +582,12 @@ class UpdateFields(StrictModel):
     def nonempty(self) -> Self:
         if not self.model_fields_set:
             raise ValueError("set needs an explicit ordinary field")
+        if (
+            self.repeat is not None
+            and self.repeat.remove
+            and self.model_fields_set != {"repeat"}
+        ):
+            raise ValueError("repeat removal cannot combine with ordinary fields")
         return self
 
 
