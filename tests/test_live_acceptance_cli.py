@@ -19,16 +19,34 @@ def test_acceptance_url_rejects_unsafe_or_ambiguous_targets(url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "url,health",
+    "url,mcp,health",
     [
-        ("http://127.0.0.1:8787/mcp", "http://127.0.0.1:8787/health"),
-        ("http://localhost:8787/mcp", "http://localhost:8787/health"),
-        ("http://[::1]:8787/mcp", "http://[::1]:8787/health"),
-        ("https://example.com/mcp", "https://example.com/health"),
+        (
+            "http://127.0.0.1:8787/mcp",
+            "http://127.0.0.1:8787/mcp/",
+            "http://127.0.0.1:8787/health",
+        ),
+        (
+            "http://localhost:8787/mcp",
+            "http://localhost:8787/mcp/",
+            "http://localhost:8787/health",
+        ),
+        (
+            "http://[::1]:8787/mcp",
+            "http://[::1]:8787/mcp/",
+            "http://[::1]:8787/health",
+        ),
+        (
+            "https://example.com/mcp",
+            "https://example.com/mcp/",
+            "https://example.com/health",
+        ),
     ],
 )
-def test_acceptance_url_derives_exact_health_endpoint(url: str, health: str) -> None:
-    assert acceptance_urls(url) == (url, health)
+def test_acceptance_url_avoids_the_mount_redirect_before_sending_bearer(
+    url: str, mcp: str, health: str
+) -> None:
+    assert acceptance_urls(url) == (mcp, health)
 
 
 def test_only_cleanup_complete_is_a_success_exit() -> None:
