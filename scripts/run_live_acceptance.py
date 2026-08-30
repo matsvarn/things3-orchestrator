@@ -16,7 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from things_orchestrator.cloud import load_credentials
 from things_orchestrator.deployment import package_version
-from things_orchestrator.live_acceptance import LiveAcceptanceRunner
+from things_orchestrator.live_acceptance import AcceptanceFailure, LiveAcceptanceRunner
 
 
 class SessionToolClient:
@@ -66,6 +66,26 @@ def summary_exit_code(summary: dict[str, object]) -> int:
     if summary.get("state") == "awaiting_owner":
         return 2
     return 1
+
+
+def acceptance_failure_message(error: BaseException) -> str | None:
+    if isinstance(error, AcceptanceFailure):
+        return str(error)
+    if not isinstance(error, BaseExceptionGroup):
+        return None
+    matching, remainder = error.split(AcceptanceFailure)
+    if matching is None or remainder is not None:
+        return None
+    messages: list[str] = []
+    pending: list[BaseException] = list(reversed(matching.exceptions))
+    while pending:
+        current = pending.pop()
+        if isinstance(current, AcceptanceFailure):
+            if str(current) not in messages:
+                messages.append(str(current))
+        elif isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+    return "; ".join(messages) if messages else None
 
 
 async def run(
@@ -141,16 +161,29 @@ def main() -> None:
         _email, _password, token = load_credentials()
     if not token:
         parser.error("live acceptance needs an MCP bearer")
-    summary = anyio.run(
-        partial(
-            run,
-            url=mcp_url,
-            health_url=health_url,
-            state_path=args.state,
-            token=token,
-            expect_commit=args.expect_commit,
+    try:
+        summary = anyio.run(
+            partial(
+                run,
+                url=mcp_url,
+                health_url=health_url,
+                state_path=args.state,
+                token=token,
+                expect_commit=args.expect_commit,
+            )
         )
-    )
+    except (AcceptanceFailure, ExceptionGroup) as error:
+        message = acceptance_failure_message(error)
+        if message is None:
+            raise
+        print(
+            json.dumps(
+                {"error": message, "passed": False, "state": "failed"},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(1) from None
     print(json.dumps(summary, indent=2, sort_keys=True))
     raise SystemExit(summary_exit_code(summary))
 

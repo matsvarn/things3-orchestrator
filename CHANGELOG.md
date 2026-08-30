@@ -29,6 +29,10 @@
 - Retrying the same successful `within` cursor returns the same page and next
   cursor instead of consuming the read. Conflicting request IDs no longer
   inherit repeat effects from the earlier successful operation.
+- Owner-factor commands remain interactive under hardened `sudo -u` service
+  accounts that inherit a private terminal but cannot reopen `/dev/tty`.
+  Expected live-gate failures return one concise structured result instead of
+  an asynchronous transport traceback.
 
 ## 0.7.0 - 2026-08-30
 
