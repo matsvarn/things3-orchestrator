@@ -284,23 +284,35 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
             return RecurrenceFact(kind="unknown", engine="rt2")
     if not isinstance(raw, dict):
         return None
-    if raw.get("v") != 1:
+    version = raw.get("v")
+    if isinstance(version, bool) or version != 1:
         return RecurrenceFact(kind="unknown", engine="rt2")
     mode_code = raw.get("t")
     unit_code = raw.get("pfu")
     mode: RepeatMode | None = (
         "fixed"
-        if mode_code == 0
+        if isinstance(mode_code, int)
+        and not isinstance(mode_code, bool)
+        and mode_code == 0
         else "after_completion"
-        if mode_code == 1
+        if isinstance(mode_code, int)
+        and not isinstance(mode_code, bool)
+        and mode_code == 1
         else None
     )
     unit = (
         {0: "day", 1: "week", 2: "month", 3: "year"}.get(unit_code)
-        if isinstance(unit_code, int)
+        if isinstance(unit_code, int) and not isinstance(unit_code, bool)
         else None
     )
-    interval = raw.get("pfa")
+    raw_interval = raw.get("pfa")
+    interval = (
+        raw_interval
+        if isinstance(raw_interval, int)
+        and not isinstance(raw_interval, bool)
+        and 1 <= raw_interval <= 366
+        else None
+    )
     semantic_on: list[RepeatOnFact] = []
     offsets = raw.get("po")
     if mode == "fixed" and isinstance(offsets, list):
@@ -322,21 +334,23 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
     until = _repeat_timestamp_date(raw.get("ead"))
     alarm = raw.get("aa")
     reminder_time = None
-    if isinstance(alarm, int) and 0 <= alarm < 86_400:
+    if (
+        isinstance(alarm, int)
+        and not isinstance(alarm, bool)
+        and 0 <= alarm < 86_400
+    ):
         hours, remainder = divmod(alarm, 3_600)
         reminder_time = f"{hours:02d}:{remainder // 60:02d}"
     return RecurrenceFact(
-        kind="template" if mode is not None and unit is not None else "unknown",
+        kind=(
+            "template"
+            if mode is not None and unit is not None and interval is not None
+            else "unknown"
+        ),
         engine="rt2",
         mode=mode,
         unit=cast(Any, unit),
-        interval=(
-            interval
-            if isinstance(interval, int)
-            and not isinstance(interval, bool)
-            and 1 <= interval <= 366
-            else None
-        ),
+        interval=interval,
         on=semantic_on,
         until=until,
         start_early_days=(

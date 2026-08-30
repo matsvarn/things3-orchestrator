@@ -1576,6 +1576,36 @@ def test_v2_reads_known_rt2_payload_semantically_without_mutating_it() -> None:
     assert library.records["rt2"].repeater is not None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": True, "t": 0, "pfu": 0, "pfa": 1},
+        {"v": 1, "t": False, "pfu": 0, "pfa": 1},
+        {"v": 1, "t": 0, "pfu": False, "pfa": 1},
+        {"v": 1, "t": 0, "pfu": 0, "pfa": True},
+        {"v": 1, "t": 0, "pfu": 0},
+    ],
+)
+def test_v2_keeps_malformed_rt2_discriminators_unknown(
+    payload: dict[str, object],
+) -> None:
+    interface, _ = _interface(
+        Record(
+            uuid="malformed-rt2",
+            kind="task",
+            title="Malformed RT2",
+            repeater=payload,
+        )
+    )
+
+    result = interface.dispatch("things_get", {"ids": ["task:malformed-rt2"]})
+
+    recurrence = result.items[0].recurrence
+    assert recurrence is not None
+    assert recurrence.engine == "rt2"
+    assert recurrence.kind == "unknown"
+
+
 def test_v2_reads_native_fifth_weekday_rt2_selector() -> None:
     interface, _ = _interface(
         Record(

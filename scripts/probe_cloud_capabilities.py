@@ -30,15 +30,22 @@ def bare_uuid(public_id: str) -> str:
     return public_id.partition(":")[2]
 
 
+def _unique_ids(values: list[str], *, source: str, view: str) -> set[str]:
+    unique = set(values)
+    if len(unique) != len(values):
+        raise RuntimeError(f"duplicate {source} {view} IDs")
+    return unique
+
+
 def _view_ids(interface: ThingsV2, view: str) -> set[str]:
     result = interface.dispatch("things_view", {"view": view, "limit": 40})
-    ids: set[str] = set()
+    ids: list[str] = []
     while True:
         if result.state != "ok":
             raise RuntimeError(f"{view} read returned {result.state}")
-        ids.update(bare_uuid(item.id) for item in result.items)
+        ids.extend(bare_uuid(item.id) for item in result.items)
         if result.cursor is None:
-            return ids
+            return _unique_ids(ids, source="public", view=view.title())
         result = interface.dispatch(
             "things_view", {"cursor": result.cursor, "limit": 40}
         )
@@ -52,11 +59,15 @@ def _native_ids(view: str) -> set[str]:
         capture_output=True,
         text=True,
     )
-    return {
-        value.strip()
-        for value in completed.stdout.strip().split(",")
-        if value.strip()
-    }
+    return _unique_ids(
+        [
+            value.strip()
+            for value in completed.stdout.strip().split(",")
+            if value.strip()
+        ],
+        source="native",
+        view=view,
+    )
 
 
 def run(*, native_parity: bool = False) -> dict[str, object]:
