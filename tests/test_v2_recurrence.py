@@ -247,8 +247,18 @@ def test_v2_repeat_end_edit_bounds_corrupt_native_anchors(
         "nan",
     ],
 )
-def test_v2_repeat_unit_edit_rejects_corrupt_native_anchors(
+@pytest.mark.parametrize(
+    "repeat",
+    [
+        {"unit": "month"},
+        {"unit": "day"},
+        {"unit": "week", "weekdays": ["tuesday"]},
+    ],
+    ids=["anchor_derived", "daily", "explicit_weekdays"],
+)
+def test_v2_repeat_unit_edit_handles_absent_and_corrupt_native_anchors(
     anchor: object | None,
+    repeat: dict[str, object],
 ) -> None:
     rule: dict[str, object] = {
         "tp": 0,
@@ -298,12 +308,17 @@ def test_v2_repeat_unit_edit_rejects_corrupt_native_anchors(
             "items": [
                 {
                     "id": current.id,
-                    "set": {"repeat": {"unit": "month"}},
+                    "set": {"repeat": repeat},
                 }
             ],
         },
     )
 
+    if anchor is None and repeat != {"unit": "month"}:
+        assert result.state == "applied"
+        assert result.next_action == "read_receipt"
+        assert journal.get_v2_request("owner@example.com", "2", request_id) is not None
+        return
     assert result.state == "rejected"
     assert result.code == "validation_error"
     assert result.next_action == "read_fresh"

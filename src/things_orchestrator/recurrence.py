@@ -389,12 +389,14 @@ def _offsets_for_unit(
     _validate_weekday_codes(weekday_codes)
     if weekday_codes is not None and unit != "week":
         raise ValueError("Weekday selectors need a fixed weekly repeat rule")
+    anchor = _repeat_anchor(rule) if "sr" in rule else None
     if unit == "day":
         return []
     if unit == "week" and weekday_codes is not None:
         return [{"wd": code} for code in weekday_codes]
 
-    anchor = _repeat_anchor(rule)
+    if anchor is None:
+        anchor = _repeat_anchor(rule)
     if unit == "week":
         return [{"wd": (anchor.weekday() + 1) % 7}]
     if unit == "month":
