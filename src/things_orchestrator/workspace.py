@@ -3226,6 +3226,56 @@ class ThingsWorkspace:
             display_titles.append(template.title)
             return None
         if remove:
+            replacement_uuid = new_uuid()
+            replacement_write = Write(
+                action="create",
+                uuid=replacement_uuid,
+                kind=template.kind,
+                title=template.title,
+                notes=template.notes,
+                status="open",
+                into_uuid=(
+                    None
+                    if template.heading_uuid
+                    else template.parent_uuid or template.area_uuid
+                ),
+                into_kind=(
+                    None
+                    if template.heading_uuid
+                    else "project"
+                    if template.parent_uuid
+                    else "area"
+                    if template.area_uuid
+                    else None
+                ),
+                start=template.recurrence_next_on or self._clock().date(),
+                deadline=template.deadline,
+                remind=template.remind,
+                tag_uuids=list(template.tag_uuids),
+                heading_uuid=template.heading_uuid,
+                sort_index=template.sort_index,
+                today_index=template.today_index,
+                owner_today=self._clock().date(),
+                leavable=True,
+            )
+            replacement_graph_writes: list[Write] = []
+            if template.kind == "project":
+                preconditions[f"scope:project:{template.uuid}"] = (
+                    self._project_scope_revision(template.uuid)
+                )
+                try:
+                    replacement_graph_writes = self._clone_project_graph_writes(
+                        template.uuid,
+                        replacement_uuid,
+                        leavable=True,
+                    )
+                except ValueError as error:
+                    return {
+                        "state": "rejected",
+                        "code": "validation_error",
+                        "next_action": "correct_request",
+                        "instruction": str(error),
+                    }
             for current in self._library.recurrence_instances(template.uuid):
                 preconditions[current.id] = self._revision(current)
                 writes.append(
@@ -3239,10 +3289,24 @@ class ThingsWorkspace:
                 before.append(self._v2_observed(current, ("recurrence",)))
                 touched.append(["recurrence"])
                 display_titles.append(current.title)
+            writes.append(replacement_write)
+            before.append(None)
+            touched.append(
+                ["title", "notes", "start", "deadline", "into", "recurrence"]
+            )
+            display_titles.append(template.title)
+            result_ids[:] = [item_id for item_id in result_ids if item_id != template.id]
+            result_ids.append(_write_public_id(replacement_write))
             if template.kind == "project":
-                preconditions[f"scope:project:{template.uuid}"] = (
-                    self._project_scope_revision(template.uuid)
-                )
+                for graph_write in replacement_graph_writes:
+                    writes.append(graph_write)
+                    before.append(None)
+                    touched.append(
+                        []
+                        if graph_write.action == "checklist"
+                        else ["title", "notes", "status", "into"]
+                    )
+                    display_titles.append(graph_write.title or template.title)
                 for descendant in self._project_descendants(template.uuid):
                     preconditions[descendant.id] = self._revision(descendant)
                     writes.append(
@@ -3256,6 +3320,21 @@ class ThingsWorkspace:
                     before.append(self._v2_observed(descendant, ("recurrence",)))
                     touched.append(["recurrence"])
                     display_titles.append(descendant.title)
+            else:
+                for row in template.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=row.title,
+                            checklist_parent_uuid=replacement_uuid,
+                            checklist_status=row.status,
+                            checklist_index=row.sort_index,
+                        )
+                    )
+                    before.append(None)
+                    touched.append([])
+                    display_titles.append(row.title)
             writes.append(
                 Write(
                     action="permanent_delete",

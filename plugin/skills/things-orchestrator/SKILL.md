@@ -48,10 +48,11 @@ A repeat rule uses semantic `mode`, `unit`, `interval`, `weekdays`, `on`,
 `until`, and `paused` fields. Use only the fields needed for an edit. Use
 `{repeat: {create_next: true}}` for "Create Next Copy" and
 `{repeat: {remove: true}}` to stop the series while keeping current copies.
-Stop returns `awaiting_owner` because it removes the hidden template graph;
-the owner must review and approve it through the CLI-only flow. Never send
-`repeat: null`. These three lifecycle forms cannot combine with other repeat
-fields.
+Stop materializes the hidden template as a fresh ordinary item on its next
+date, then removes the old template graph. A Project keeps its headings, Tasks,
+and checklist rows with fresh IDs. Stop returns `awaiting_owner`; the owner must
+review and approve it through the CLI-only flow. Never send `repeat: null`.
+These three lifecycle forms cannot combine with other repeat fields.
 
 RT2 recurrence facts are read-only. Do not change their schedule, rule, or
 lifecycle. Permanent deletion, advanced scopes, and mutation coaching are

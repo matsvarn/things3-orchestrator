@@ -17,14 +17,18 @@ Copy" for Tasks and Projects. The Project cases clone the native root,
 headings, heading assignments, Tasks, and checklist rows with fresh IDs.
 Cloud fixture tests assert each entity type and sparse bookkeeping payload.
 Stop is a frozen owner-approved operation that keeps generated copies and
-removes the hidden template graph.
+turns the hidden template into a fresh ordinary item on its next date before
+removing the template graph. A stopped Project preserves its headings, Tasks,
+heading assignments, and checklist rows with fresh IDs.
 
 A disposable native Things Project established the observed graph and
-lifecycle payloads. The run covered pause, resume, "Create Next Copy", and
-after-completion advancement. It also confirmed that a Task assigned to a
-heading uses `agr` without a duplicate `pr`. The v2 live-host proof remains a
-separate deployment gate. RT2 stays read-only because this proof did not
-establish native RT2 write deltas.
+lifecycle payloads. The run covered pause, resume, "Create Next Copy", Stop,
+and after-completion advancement. Native Stop cleared repeat links on generated
+copies, created a scheduled ordinary Project graph with fresh IDs, then deleted
+the hidden template graph. It also confirmed that a Task assigned to a heading
+uses `agr` without a duplicate `pr`. The v2 live-host proof remains a separate
+deployment gate. RT2 stays read-only because this proof did not establish
+native RT2 write deltas.
 
 ## v0.6.0 owner-safe interface gate
 

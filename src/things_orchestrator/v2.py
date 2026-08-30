@@ -212,7 +212,7 @@ class RepeatCreate(StrictModel):
 
 
 class RepeatEdit(StrictModel):
-    """Start repetition, change one repeat rule, or remove repetition."""
+    """Start or edit repetition, create a copy, or stop a repeat series."""
 
     mode: Literal["fixed", "after_completion"] | None = None
     unit: Literal["day", "week", "month", "year"] | None = None
@@ -533,7 +533,8 @@ class UpdateFields(StrictModel):
         default=None,
         description=(
             "Optional semantic repeat change, {create_next: true} for Create Next "
-            "Copy, or {remove: true}."
+            "Copy, or {remove: true} to materialize the template as a fresh "
+            "ordinary next-date item and delete the hidden template graph."
         ),
     )
 
@@ -650,7 +651,7 @@ DESCRIPTIONS = {
     "things_find": "Search by owner text and optional exact container.",
     "things_get": "Read one to fifty exact item IDs.",
     "things_capture": "Create an atomic batch of Tasks or Projects with optional nested Project Tasks and a semantic repeat rule for Tasks or Projects.",
-    "things_update": "Set only named ordinary item-local fields, including an optional semantic repeat rule or Create Next Copy action. Preservation is invariant.",
+    "things_update": "Set only named ordinary item-local fields, including a semantic repeat rule, Create Next Copy, or owner-approved Stop that materializes the template as a fresh ordinary next-date item before deleting its hidden graph.",
     "things_complete": "Complete one atomic batch of exact items.",
     "things_trash": "Stage one atomic batch for recoverable Trash.",
     "things_receipt": "Read immutable content-minimized receipt rows.",

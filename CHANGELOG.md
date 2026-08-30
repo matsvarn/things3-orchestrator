@@ -12,8 +12,9 @@
 - `things_update` can edit or stop an RT1 repeat and can run Things' "Create
   Next Copy" action. Public recurrence facts now include the engine, pause
   state, generated-copy count, generation horizon, last completion date, and
-  next date. Stop is owner-approved, keeps generated copies, and removes the
-  hidden template graph.
+  next date. Stop is owner-approved, keeps generated copies, and turns the
+  hidden template into a fresh ordinary item on its next date. Stopped Projects
+  preserve their complete graph with fresh IDs.
 - Repeating Projects preserve their complete native graph. Generated copies
   remap headings, heading assignments, Tasks, and checklist rows to fresh IDs.
 - `things_view` exposes the native Repeating list. RT2 rules remain readable

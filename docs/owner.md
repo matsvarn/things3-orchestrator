@@ -9,8 +9,10 @@ Captures create Tasks or Projects. A new Project may include nested new Tasks.
 Either kind may have a fixed or after-completion repeat. Updates change only
 explicit item-local fields: the title, notes, start, deadline, reminder, or an
 RT1 repeat rule. Repeat updates can pause, resume, stop, or create the next
-copy. Stop keeps generated copies, removes the hidden template graph, and
-requires host approval. Completion and recoverable Trash use their own tools.
+copy. Stop keeps generated copies, materializes the hidden template as a fresh
+ordinary item on the template's next date, then removes its old graph. Project
+headings, Tasks, and checklist rows are preserved with fresh IDs. Stop requires
+host approval. Completion and recoverable Trash use their own tools.
 
 Completing a Project completes its open descendants in the same frozen
 operation. RT2 recurrence facts are read-only. The server rejects RT2 schedule,

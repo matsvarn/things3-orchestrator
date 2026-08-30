@@ -49,8 +49,11 @@ optional end date, and a paused state.
 title, notes, start, deadline, reminder, or an RT1 repeat rule. Use
 `{repeat: {paused: true}}`, `{repeat: {paused: false}}`,
 `{repeat: {create_next: true}}`, or `{repeat: {remove: true}}` for repeat
-lifecycle actions. Stopping keeps generated copies, removes the hidden template
-graph, and returns `awaiting_owner` for CLI approval. Do not send `repeat: null`.
+lifecycle actions. Stopping keeps generated copies, materializes the hidden
+template as a fresh ordinary item on its next date, then removes its old graph.
+For a Project, the ordinary replacement includes its headings, Tasks, and
+checklist rows with fresh IDs. Stop returns `awaiting_owner` for CLI approval.
+Do not send `repeat: null`.
 
 Use `things_complete` and `things_trash` for item lifecycle changes. Completing
 a Project also completes its open descendants in the same frozen operation.
