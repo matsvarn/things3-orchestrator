@@ -38,6 +38,7 @@ public-files.txt
 pyproject.toml
 scripts/check_release.py
 scripts/probe_cloud_capabilities.py
+scripts/run_live_acceptance.py
 scripts/setup
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
@@ -49,6 +50,7 @@ src/things_orchestrator/deployment.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
+src/things_orchestrator/live_acceptance.py
 src/things_orchestrator/owner_authority.py
 src/things_orchestrator/owner_text.py
 src/things_orchestrator/preferences.py
@@ -70,6 +72,8 @@ tests/test_contextual.py
 tests/test_dogfood_register.py
 tests/test_interface.py
 tests/test_journal.py
+tests/test_live_acceptance.py
+tests/test_live_acceptance_cli.py
 tests/test_owner_text.py
 tests/test_plugin_secret_scan.py
 tests/test_preferences.py
@@ -77,6 +81,7 @@ tests/test_recurrence.py
 tests/test_release.py
 tests/test_server.py
 tests/test_source_document.py
+tests/test_v07_dogfood_ux.py
 tests/test_v2_contract.py
 tests/test_v2_journal_authority.py
 tests/test_v2_recurrence.py

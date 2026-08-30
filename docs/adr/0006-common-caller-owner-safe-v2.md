@@ -74,13 +74,16 @@ The default MCP interface has eight tools:
 
 - `things_view` reads Today, Inbox, Week, Logbook, Projects, Areas, tags, or
   Trash.
-- `things_find` searches by owner text and optional exact container.
-- `things_get` reads one to fifty exact item IDs.
+- `things_find` searches by owner text and optional exact container, or pages
+  direct membership within one exact Project or Area.
+- `things_get` reads one to fifty exact item IDs with checklist rows and
+  direct/inherited tag IDs.
 - `things_capture` creates one atomic batch of Tasks or Projects, optionally
   including new Tasks nested under a new Project.
-- `things_update` sets only explicitly named ordinary item-local fields on one
-  atomic batch of existing items. It cannot complete, trash, reorder, edit
-  structure, checklists, recurrence, registries, or permanently delete.
+- `things_update` atomically sets named fields, moves the same Task to a Project
+  or Area or Project to an Area, applies direct-tag deltas, patches exact
+  checklist rows, and changes RT1 recurrence. It cannot complete, trash,
+  reorder, mutate inherited tags or registries, or permanently delete.
 - `things_complete` completes one atomic batch. A Project must have no open
   actions, and its complete Project scope stays frozen through application.
 - `things_trash` moves one atomic batch to recoverable Trash.

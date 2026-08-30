@@ -181,6 +181,7 @@ class Write:
     someday: bool = False
     inbox: bool = False
     anytime: bool = False
+    public_start_anytime: bool = False
     heading_uuid: str | None = None
     clear_heading: bool = False
     sort_index: int | None = None

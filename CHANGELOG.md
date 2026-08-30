@@ -1,6 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 - 2026-08-30
+
+### Added
+
+- `things_update` moves existing Tasks to Projects or Areas and Projects to
+  Areas without changing identity, applies direct-only exact tag deltas, and
+  patches exact checklist rows while preserving omitted content and order.
+- `start: "anytime"` preserves Project/Area membership and moves Inbox Tasks to
+  top-level Anytime. Exact reads expose checklist IDs plus direct and inherited
+  tag IDs. Find supports cursor-paged `within`-only membership reads.
+- Public results include structured validation issues and narrow repeat-start
+  effects describing the hidden template and visible current instance.
+- A restart-safe live release gate now proves the public MCP write workflow
+  against one disposable scope, stops for owner-approved recoverable cleanup,
+  and passes only after immutable receipt and exact Trash read-back.
+
+### Changed
+
+- Staged recoverable Trash and repeat Stop operations explicitly remain
+  non-blocking for unrelated writes. Only non-empty `blocking_operation_ids`
+  stop writes; staged operations are surfaced by ID and never replayed.
+
+### Fixed
+
+- Public items and receipts now distinguish native Anytime from Inbox after a
+  move or schedule clear, so clients can verify the requested state.
+- Retrying the same successful `within` cursor returns the same page and next
+  cursor instead of consuming the read. Conflicting request IDs no longer
+  inherit repeat effects from the earlier successful operation.
 
 ## 0.7.0 - 2026-08-30
 

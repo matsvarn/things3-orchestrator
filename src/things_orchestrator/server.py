@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import re
 from contextlib import asynccontextmanager
 from secrets import token_urlsafe
 from typing import Any
@@ -32,6 +33,7 @@ from .v2 import (
     DESCRIPTIONS,
     DISCOVERY_MODELS,
     MODELS,
+    PublicIssue,
     PublicResult,
     ThingsV2,
     flat_schema,
@@ -106,7 +108,10 @@ class ThingsMCPServer:
             MODELS[name].model_validate(arguments)
         except ValidationError as error:
             instruction = _safe_validation_error(error)
-            return _domain_result(PublicResult(state="rejected", code="validation_error", next_action="correct_request", instruction=instruction))
+            return _domain_result(PublicResult(
+                state="rejected", code="validation_error", next_action="correct_request",
+                instruction=instruction, issues=_public_issues(error, arguments),
+            ))
         try:
             async with self._lock:
                 result = await anyio.to_thread.run_sync(self._dispatch, name, arguments)
@@ -246,6 +251,47 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
     else:
         message = "Invalid tool request."
     return message if len(message) <= 997 else message[:997] + "..."
+
+
+def _public_issues(
+    error: ValidationError, arguments: dict[str, Any]
+) -> list[PublicIssue]:
+    issues: list[PublicIssue] = []
+    raw_items = arguments.get("items")
+    for entry in error.errors(include_input=False, include_url=False)[:20]:
+        location = tuple(entry["loc"])
+        path = ".".join(str(part) for part in location)
+        item_index = next(
+            (
+                int(location[index + 1])
+                for index, part in enumerate(location[:-1])
+                if part == "items" and isinstance(location[index + 1], int)
+            ),
+            None,
+        )
+        item_id: str | None = None
+        if (
+            item_index is not None
+            and isinstance(raw_items, list)
+            and item_index < len(raw_items)
+            and isinstance(raw_items[item_index], dict)
+            and isinstance(raw_items[item_index].get("id"), str)
+        ):
+            candidate = raw_items[item_index]["id"]
+            if len(candidate) <= 512 and re.fullmatch(
+                r"(?:task|project|area|heading):[^\s:]+", candidate
+            ):
+                item_id = candidate
+        issues.append(
+            PublicIssue(
+                path=path,
+                code=str(entry["type"]),
+                hint=str(entry["msg"]),
+                item_index=item_index,
+                item_id=item_id,
+            )
+        )
+    return issues
 
 
 def _domain_result(result: PublicResult, *, is_error: bool = False) -> CallToolResult:

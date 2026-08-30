@@ -36,5 +36,5 @@ If the server reports blocking operation IDs, stop writes. Pending work may
 settle through read-back. A partial needs `accepted_as_is` or `superseded` on
 the host. Any correction is a new operation.
 
-Advanced Project scopes, coaching mutations, Areas and tag mutation, checklist
-editing, rich-note replacement, and permanent deletion are deferred.
+Advanced Project scopes, coaching mutations, Areas and tag-registry mutation,
+rich-note replacement, and permanent deletion are deferred.

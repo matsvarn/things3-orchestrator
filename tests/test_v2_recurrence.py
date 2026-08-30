@@ -913,7 +913,7 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     )
     assert any(
         row["action"] == "checklist"
-        and row["target_id"] == "task:template-check"
+            and row["target_id"] == "check:template-check"
         and row["desired"]["exists"] is False
         for row in receipt.rows
     )
@@ -1384,7 +1384,7 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
         row
         for row in receipt.rows
         if row["action"] == "checklist"
-        and row["target_id"] == "task:template-check"
+        and row["target_id"] == "check:template-check"
     )
     assert checklist_delete["desired"]["exists"] is False
 

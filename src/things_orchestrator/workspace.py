@@ -2466,7 +2466,10 @@ class ThingsWorkspace:
                 "state": "awaiting_owner",
                 "code": "awaiting_owner",
                 "next_action": "run_cli",
-                "instruction": "Review this operation with the CLI-only operation command.",
+                "instruction": (
+                    "Review this operation with the CLI-only operation command. "
+                    "It does not block unrelated writes; do not replay it."
+                ),
                 "operation_id": operation_id,
             }
             return response
@@ -2805,13 +2808,163 @@ class ThingsWorkspace:
                     before.append(self._v2_observed(target, ("trashed",)))
                     display_titles.append(target.title)
                 else:
-                    row = next(entry for entry in cast(list[dict[str, object]], payload["items"]) if entry["id"] == item_id)
+                    update_rows = cast(list[dict[str, object]], payload["items"])
+                    row_index, row = next(
+                        (index, entry)
+                        for index, entry in enumerate(update_rows)
+                        if entry["id"] == item_id
+                    )
                     fields = cast(dict[str, object], row["set"])
+                    projected_parent_uuid = target.parent_uuid
+                    projected_area_uuid = target.area_uuid
+                    projected_heading_uuid = target.heading_uuid
+                    projected_tag_uuids = list(target.tag_uuids)
+                    projected_checklists = list(target.checklists)
+                    into_id = fields.get("into_id")
+                    if isinstance(into_id, str):
+                        destination = self._exact_item(into_id)
+                        if destination is None or destination.kind not in {"project", "area"}:
+                            return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "The exact move destination was not found.", "issues": [{"path": f"items.{row_index}.set.into_id", "code": "invalid_destination", "hint": "Use an exact active Project or Area ID.", "item_index": row_index, "item_id": item_id}]}
+                        if destination.status != "open" or destination.trashed or destination.recurrence.role != "none":
+                            return {"state": "rejected", "code": "inactive_destination", "next_action": "correct_request", "instruction": "The move destination is not an active ordinary container.", "issues": [{"path": f"items.{row_index}.set.into_id", "code": "inactive_destination", "hint": "Choose an active ordinary container.", "item_index": row_index, "item_id": item_id}]}
+                        if target.kind == "project" and destination.kind != "area":
+                            return {"state": "rejected", "code": "invalid_destination", "next_action": "correct_request", "instruction": "Projects may only move to Areas.", "issues": [{"path": f"items.{row_index}.set.into_id", "code": "invalid_destination", "hint": "Move a Project only to an exact Area ID.", "item_index": row_index, "item_id": item_id}]}
+                        preconditions[destination.id] = self._revision(destination)
+                        source = self._library.records.get(target.parent_uuid or target.area_uuid or "")
+                        if source is not None:
+                            preconditions[source.id] = self._revision(source)
+                        heading = self._library.records.get(target.heading_uuid or "")
+                        keep_heading = (
+                            destination.kind == "project"
+                            and heading is not None
+                            and heading.heading
+                            and heading.parent_uuid == destination.uuid
+                        )
+                        move_write = Write(
+                            action="move",
+                            uuid=target.uuid,
+                            kind=target.kind,
+                            into_uuid=destination.uuid,
+                            into_kind=destination.kind,
+                            heading_uuid=target.heading_uuid if keep_heading else None,
+                            clear_heading=target.heading_uuid is not None and not keep_heading,
+                        )
+                        writes.append(move_write)
+                        touched.append(["into"])
+                        before.append(self._v2_observed(target, ("into",)))
+                        display_titles.append(target.title)
+                        projected_parent_uuid = (
+                            destination.uuid if destination.kind == "project" else None
+                        )
+                        projected_area_uuid = (
+                            destination.uuid if destination.kind == "area" else None
+                        )
+                        projected_heading_uuid = (
+                            target.heading_uuid if keep_heading else None
+                        )
+
+                    tag_delta = fields.get("tags")
+                    if isinstance(tag_delta, dict):
+                        add_ids = cast(list[str], tag_delta.get("add", []))
+                        remove_ids = cast(list[str], tag_delta.get("remove", []))
+                        requested = [*add_ids, *remove_ids]
+                        unknown = [tag_id for tag_id in requested if tag_id.removeprefix("tag:") not in self._library.tags]
+                        if unknown:
+                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "One or more exact tag IDs are unknown.", "issues": [{"path": f"items.{row_index}.set.tags", "code": "unknown_tag", "hint": "Use exact tag IDs from a fresh tag catalog read.", "item_index": row_index, "item_id": item_id}]}
+                        preconditions["scope:tags"] = self._tag_revision()
+                        direct = list(target.tag_uuids)
+                        removed = {tag_id.removeprefix("tag:") for tag_id in remove_ids}
+                        final_tags = [uuid for uuid in direct if uuid not in removed]
+                        for tag_id in add_ids:
+                            uuid = tag_id.removeprefix("tag:")
+                            if uuid not in final_tags:
+                                final_tags.append(uuid)
+                        projected_tag_uuids = final_tags
+                        writes.append(Write(action="tags", uuid=target.uuid, kind=target.kind, tag_uuids=final_tags))
+                        touched.append(["tags"])
+                        before.append(self._v2_observed(target, ("tags",)))
+                        display_titles.append(target.title)
+
+                    checklist_patch = fields.get("checklist")
+                    if isinstance(checklist_patch, dict):
+                        if target.kind != "task":
+                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "Only Tasks can have checklist rows.", "issues": [{"path": f"items.{row_index}.set.checklist", "code": "invalid_checklist_target", "hint": "Patch checklists only on exact Task IDs.", "item_index": row_index, "item_id": item_id}]}
+                        rows_by_id = {f"check:{entry.uuid}": entry for entry in target.checklists}
+                        named_ids = [
+                            *[cast(str, entry["id"]) for entry in cast(list[dict[str, object]], checklist_patch.get("update", []))],
+                            *cast(list[str], checklist_patch.get("remove", [])),
+                        ]
+                        missing_rows = [row_id for row_id in named_ids if row_id not in rows_by_id]
+                        if missing_rows:
+                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "One or more checklist rows do not belong to the target Task.", "issues": [{"path": f"items.{row_index}.set.checklist", "code": "missing_checklist_row", "hint": "Use exact checklist IDs from a fresh read of this Task.", "item_index": row_index, "item_id": item_id}]}
+                        for row_id in named_ids:
+                            preconditions[row_id] = self._checklist_revision(rows_by_id[row_id])
+                        for entry in cast(list[dict[str, object]], checklist_patch.get("update", [])):
+                            existing = rows_by_id[cast(str, entry["id"])]
+                            patch = cast(dict[str, object], entry["set"])
+                            replacement = replace(
+                                existing,
+                                title=cast(str, patch.get("title", existing.title)),
+                                status=(
+                                    cast(Status, _internal_status(cast(str, patch["status"])))
+                                    if "status" in patch
+                                    else existing.status
+                                ),
+                            )
+                            projected_checklists = [
+                                replacement if row.uuid == existing.uuid else row
+                                for row in projected_checklists
+                            ]
+                            writes.append(Write(
+                                action="checklist", uuid=existing.uuid,
+                                title=replacement.title,
+                                checklist_parent_uuid=target.uuid,
+                                checklist_status=replacement.status,
+                                checklist_index=existing.sort_index,
+                            ))
+                            touched.append(["checklist"])
+                            before.append({"id": f"check:{existing.uuid}", "title": existing.title, "status": _public_status(existing.status), "parent_id": target.id, "order": existing.sort_index})
+                            display_titles.append(existing.title)
+                        for row_id in cast(list[str], checklist_patch.get("remove", [])):
+                            existing = rows_by_id[row_id]
+                            projected_checklists = [
+                                row for row in projected_checklists
+                                if row.uuid != existing.uuid
+                            ]
+                            writes.append(Write(action="checklist", uuid=existing.uuid, title=existing.title, checklist_parent_uuid=target.uuid, checklist_remove=True))
+                            touched.append(["checklist"])
+                            before.append({"id": row_id, "title": existing.title, "status": _public_status(existing.status), "parent_id": target.id, "order": existing.sort_index})
+                            display_titles.append(existing.title)
+                        next_index = max((entry.sort_index for entry in target.checklists), default=-1) + 1
+                        for offset, entry in enumerate(cast(list[dict[str, object]], checklist_patch.get("add", []))):
+                            row_uuid = new_uuid()
+                            row_status = cast(
+                                Status,
+                                _internal_status(cast(str, entry.get("status", "open"))),
+                            )
+                            projected_checklists.append(ChecklistLine(
+                                uuid=row_uuid,
+                                title=cast(str, entry["title"]),
+                                status=row_status,
+                                sort_index=next_index + offset,
+                            ))
+                            writes.append(Write(
+                                action="checklist", uuid=row_uuid, title=cast(str, entry["title"]),
+                                checklist_parent_uuid=target.uuid,
+                                checklist_status=row_status,
+                                checklist_index=next_index + offset,
+                            ))
+                            touched.append(["checklist"])
+                            before.append(None)
+                            display_titles.append(cast(str, entry["title"]))
                     if target.repeater is not None and {
                         "repeat",
                         "start",
                         "deadline",
                         "remind_at",
+                        "into_id",
+                        "tags",
+                        "checklist",
                     }.intersection(fields):
                         return {
                             "state": "rejected",
@@ -2827,11 +2980,16 @@ class ThingsWorkspace:
                             "instruction": "The bounded v2 update cannot replace a rich-text note.",
                         }
                     start_set = "start" in fields
-                    start, someday, tonight = self._start(cast(str | None, fields.get("start"))) if start_set else (None, False, False)
+                    start_value = cast(str | None, fields.get("start"))
+                    start, someday, tonight = self._start(start_value) if start_set else (None, False, False)
                     remind_set = "remind_at" in fields
                     if (
                         start_set
-                        and (fields.get("start") is None or someday)
+                        and (
+                            fields.get("start") is None
+                            or fields.get("start") == "anytime"
+                            or someday
+                        )
                         and target.remind is not None
                         and not remind_set
                     ):
@@ -2872,8 +3030,27 @@ class ThingsWorkspace:
                             start = reminder_date
                             tonight = target.tonight
                     ordinary_fields = {
-                        key: value for key, value in fields.items() if key != "repeat"
+                        key: value for key, value in fields.items()
+                        if key not in {"repeat", "into_id", "tags", "checklist"}
                     }
+                    anytime_to_top_level = (
+                        start_value == "anytime"
+                        and target.inbox
+                        and not isinstance(into_id, str)
+                    )
+                    anytime_in_home = (
+                        start_value == "anytime" and not anytime_to_top_level
+                    )
+                    public_start_anytime = (
+                        start_set
+                        and start is None
+                        and not someday
+                        and (
+                            start_value == "anytime"
+                            or not target.inbox
+                            or isinstance(into_id, str)
+                        )
+                    )
                     ordinary_write = Write(
                         action="update",
                         uuid=target.uuid,
@@ -2881,7 +3058,7 @@ class ThingsWorkspace:
                         title=cast(str | None, fields.get("title")),
                         notes=cast(str | None, fields.get("notes")),
                         start=start,
-                        clear_start=start_set and fields.get("start") is None,
+                        clear_start=start_set and (fields.get("start") is None or anytime_in_home),
                         tonight=tonight,
                         someday=someday,
                         deadline=date.fromisoformat(cast(str, fields["deadline"]))
@@ -2892,6 +3069,8 @@ class ThingsWorkspace:
                         remind=reminder,
                         clear_remind="remind_at" in fields
                         and fields.get("remind_at") is None,
+                        anytime=anytime_to_top_level,
+                        public_start_anytime=public_start_anytime,
                     )
                     repeat = fields.get("repeat")
                     if isinstance(repeat, dict):
@@ -2912,6 +3091,12 @@ class ThingsWorkspace:
                             remind=(
                                 reminder if remind_set or start_set else target.remind
                             ),
+                            parent_uuid=projected_parent_uuid,
+                            area_uuid=projected_area_uuid,
+                            heading_uuid=projected_heading_uuid,
+                            inbox=False if isinstance(into_id, str) else target.inbox,
+                            tag_uuids=projected_tag_uuids,
+                            checklists=projected_checklists,
                         )
                         failure = self._append_v2_repeat_change(
                             target=target,
@@ -2964,6 +3149,13 @@ class ThingsWorkspace:
                 "code": "expanded_write_limit",
                 "next_action": "correct_request",
                 "instruction": "The operation expands beyond 120 writes.",
+            }
+        if not writes:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "correct_request",
+                "instruction": "The operation must compile to at least one explicit write.",
             }
         manifest = OperationManifest.build(
             account_id=self._account_id,
@@ -3556,6 +3748,17 @@ class ThingsWorkspace:
             dict[str, object], operation.manifest.get("preconditions", {})
         )
         for item_id, expected in preconditions.items():
+            if item_id == "scope:tags":
+                if self._tag_revision() != expected:
+                    return False
+                continue
+            if item_id.startswith("check:"):
+                _parent, row = self._library._find_checklist(
+                    item_id.removeprefix("check:")
+                )
+                if row is None or self._checklist_revision(row) != expected:
+                    return False
+                continue
             if item_id.startswith("scope:project:"):
                 uuid = item_id.removeprefix("scope:project:")
                 if self._project_scope_revision(uuid) != expected:
@@ -3583,6 +3786,17 @@ class ThingsWorkspace:
             writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
             before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
             return self._reconcile_v2(operation, writes, before)
+        if operation.state == "awaiting_owner":
+            return {
+                "state": "awaiting_owner",
+                "code": "awaiting_owner",
+                "next_action": "run_cli",
+                "instruction": (
+                    "This immutable operation still awaits CLI-only owner review. "
+                    "It does not block unrelated writes; do not replay it."
+                ),
+                "operation_id": operation.operation_id,
+            }
         return {"state": operation.state, "instruction": "This immutable operation is unchanged.", "operation_id": operation.operation_id}
 
     def host_get_operation_v2(self, operation_id: str) -> V2Operation | None:
@@ -3655,8 +3869,7 @@ class ThingsWorkspace:
     ) -> bool:
         touched = cast(list[list[str]], operation.manifest["touched"])
         for index, write in enumerate(writes):
-            current = self._library.records.get(write.uuid)
-            observed = self._v2_observed(current, touched[index]) if current is not None else None
+            observed = self._v2_observed_write(write, touched[index])
             if observed != before[index]:
                 return False
         return True
@@ -3829,8 +4042,7 @@ class ThingsWorkspace:
         rows: list[JsonDict] = []
         touched = cast(list[list[str]], operation.manifest["touched"])
         for index, write in enumerate(writes, start=1):
-            item = self._library.records.get(write.uuid)
-            observed = self._v2_observed(item, touched[index - 1]) if item is not None else None
+            observed = self._v2_observed_write(write, touched[index - 1])
             result = outcome
             if outcome == "partial":
                 result = "applied" if self._writes_match([write]) else "not_applied"
@@ -3871,6 +4083,22 @@ class ThingsWorkspace:
                 if write.into_kind is not None and write.into_uuid is not None
                 else None
             )
+        if "tags" in selected:
+            desired["direct_tag_ids"] = [
+                f"tag:{uuid}" for uuid in (write.tag_uuids or [])
+            ]
+        if "checklist" in selected:
+            desired.update(
+                {
+                    "id": f"check:{write.uuid}",
+                    "title": write.title,
+                    "status": _public_status(write.checklist_status or "open"),
+                    "parent_id": f"task:{write.checklist_parent_uuid}"
+                    if write.checklist_parent_uuid
+                    else None,
+                    "order": write.checklist_index,
+                }
+            )
         if "recurrence" in selected:
             if write.action == "repeat":
                 current = self._library.records.get(write.uuid)
@@ -3906,6 +4134,23 @@ class ThingsWorkspace:
             desired["exists"] = False
         return desired
 
+    def _v2_observed_write(
+        self, write: Write, fields: Sequence[str]
+    ) -> JsonDict | None:
+        if write.action == "checklist":
+            parent, row = self._library._find_checklist(write.uuid)
+            if parent is None or row is None:
+                return None
+            return {
+                "id": f"check:{row.uuid}",
+                "title": row.title,
+                "status": _public_status(row.status),
+                "parent_id": parent.id,
+                "order": row.sort_index,
+            }
+        item = self._library.records.get(write.uuid)
+        return self._v2_observed(item, fields) if item is not None else None
+
     def _v2_recurrence_from_write(self, write: Write) -> JsonDict | None:
         recurrence = RecurrenceState()
         if write.recurrence_rule is not None:
@@ -3930,6 +4175,8 @@ class ThingsWorkspace:
 
     @staticmethod
     def _v2_write_start(write: Write) -> str | None:
+        if write.public_start_anytime:
+            return "anytime"
         if write.clear_start:
             return None
         if write.tonight:
@@ -3955,15 +4202,7 @@ class ThingsWorkspace:
         if "trashed" in selected:
             values["trashed"] = item.trashed
         if "start" in selected:
-            values["start"] = (
-                "evening"
-                if item.tonight
-                else "someday"
-                if item.someday
-                else item.start.isoformat()
-                if item.start
-                else None
-            )
+            values["start"] = _public_start(item)
         if "deadline" in selected:
             values["deadline"] = item.deadline.isoformat() if item.deadline else None
         if "remind_at" in selected:
@@ -3976,6 +4215,10 @@ class ThingsWorkspace:
                 if item.area_uuid
                 else None
             )
+        if "tags" in selected:
+            values["direct_tag_ids"] = [
+                f"tag:{uuid}" for uuid in item.tag_uuids if uuid in self._library.tags
+            ]
         if "recurrence" in selected:
             rt2 = _rt2_fact(item)
             values["recurrence"] = (
@@ -5153,6 +5396,10 @@ class ThingsWorkspace:
         else:
             linked_ids = linked_item_ids
         compact_direct_tag_ids: list[str] = []
+        compact_inherited_tag_ids: list[str] = []
+        if full and want_tags:
+            compact_direct_tag_ids = [tag.id for tag in direct_tags]
+            compact_inherited_tag_ids = [tag.id for tag in inherited_tags]
         if not full and want_tags:
             compact_direct_tag_ids = [
                 f"tag:{uuid}"
@@ -5248,6 +5495,7 @@ class ThingsWorkspace:
             direct_tags=direct_tags,
             inherited_tags=inherited_tags,
             direct_tag_ids=compact_direct_tag_ids,
+            inherited_tag_ids=compact_inherited_tag_ids,
             start="evening"
             if item.tonight
             else "someday"
@@ -7615,7 +7863,7 @@ class ThingsWorkspace:
         return uuid, Write(action="ensure_tag", uuid=uuid, title=title)
 
     def _start(self, value: str | None) -> tuple[date | None, bool, bool]:
-        if value is None:
+        if value is None or value == "anytime":
             return None, False, False
         if value == "today":
             return self._clock().date(), False, False
@@ -10434,6 +10682,18 @@ def _public_status(status: Status) -> PublicStatus:
     )
 
 
+def _public_start(item: Record) -> str | None:
+    if item.tonight:
+        return "evening"
+    if item.someday:
+        return "someday"
+    if item.start is not None:
+        return item.start.isoformat()
+    if item.kind in {"task", "project"} and not item.heading and not item.inbox:
+        return "anytime"
+    return None
+
+
 def _internal_status(status: str | None) -> Status | None:
     if status is None:
         return None
@@ -10459,6 +10719,8 @@ def _outcome_unknown(error: CloudError) -> bool:
 
 
 def _write_public_id(write: Write) -> str:
+    if write.action == "checklist":
+        return f"check:{write.uuid}"
     kind: PublicKind = "heading" if write.heading else write.kind
     return public_id(kind, write.uuid)
 

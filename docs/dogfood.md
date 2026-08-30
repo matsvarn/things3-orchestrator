@@ -3,6 +3,12 @@
 This register tracks human runs against released Things Orchestrator versions.
 Automated tests and isolated model replays do not count as human dogfood.
 
+The pre-release live acceptance runner in `scripts/run_live_acceptance.py` is
+also not human dogfood. It is the deterministic release gate for the public MCP
+transport, move/Anytime, atomic validation, exact tags and checklist rows,
+within-only paging, receipts, and owner-cleaned disposable state. Human runs in
+this register remain necessary for natural-prompt quality and client behavior.
+
 Use a fresh client session for each run. Keep the natural owner prompt, the
 visible trace, the exact Things result, and any recovery path. Record a pass
 only when the result remains useful without the chat.
@@ -80,13 +86,17 @@ Do not teach the agent its expected tool calls.
 5. **Daily focus — Queued.** Review Today, postpone work, move one item to
    Evening, and reorder the remainder.
 6. **Exact change and scheduling — Queued.** Rename, complete, and cancel exact
-   items. Set Today, Evening, a start, a deadline, and a timed reminder.
+   items. Set Today, Evening, Anytime in Inbox and inside a Project, a start, a
+   deadline, and a timed reminder. Move the same Task between homes and confirm
+   its ID, note, tags, checklist, recurrence, and reminder are preserved.
 7. **Recurrence lifecycle — Queued.** Create a repeat, edit its rule, change the
    current copy, complete it, and stop repetition. Check that generated copies
    lose their repeat links and that the template becomes one fresh ordinary
    next-date item or Project graph before its hidden graph is removed.
-8. **Tags and Waiting — Queued.** Rename, reparent, assign, and delete tags.
-   Preserve direct assignments and delegated meaning.
+8. **Tags and Waiting — Queued.** Add and remove exact direct tags through
+   `things_update`; preserve unmentioned direct and every inherited tag. Patch
+   one exact checklist row, remove one, and append one without reordering the
+   survivors. Registry mutation remains outside the default eight.
 9. **Project organization and merge — Queued.** Add, reorder, and delete native
    headings. Merge two Projects without losing hidden occupants.
 10. **Trash, restore, permanent delete, and rich-note replacement — Queued.**
