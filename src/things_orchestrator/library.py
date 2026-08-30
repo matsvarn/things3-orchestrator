@@ -100,6 +100,7 @@ class Record:
     recurrence_instance_count: int = 0
     recurrence_completed_on: date | None = None
     recurrence_next_on: date | None = None
+    recurrence_generated_on: date | None = None
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
@@ -875,6 +876,11 @@ class _MemoryApplyHandler(_MutationHandler[None]):
             recurrence_instance_count=write.recurrence_instance_count or 0,
             recurrence_completed_on=write.recurrence_completed_on,
             recurrence_next_on=write.recurrence_next_on,
+            recurrence_generated_on=(
+                write.start
+                if write.leavable and write.recurrence_links
+                else None
+            ),
             leavable=write.leavable,
         )
         self.library.records[record.uuid] = record

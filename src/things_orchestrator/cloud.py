@@ -59,7 +59,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 6
+_CACHE_VERSION = 7
 
 
 class CloudError(RuntimeError):
@@ -529,6 +529,13 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.recurrence_next_on = from_ts(payload.get("tir"))
         if "lt" in payload and payload["lt"] is not None:
             item.leavable = bool(payload["lt"])
+        if (
+            action == 0
+            and item.leavable
+            and item.recurrence.role == "instance"
+            and item.recurrence_generated_on is None
+        ):
+            item.recurrence_generated_on = item.start
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -1637,6 +1644,9 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_next_on": item.recurrence_next_on.isoformat()
         if item.recurrence_next_on
         else None,
+        "recurrence_generated_on": item.recurrence_generated_on.isoformat()
+        if item.recurrence_generated_on
+        else None,
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
@@ -1729,6 +1739,11 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
         recurrence_next_on=(
             date.fromisoformat(payload["recurrence_next_on"])
             if payload.get("recurrence_next_on")
+            else None
+        ),
+        recurrence_generated_on=(
+            date.fromisoformat(payload["recurrence_generated_on"])
+            if payload.get("recurrence_generated_on")
             else None
         ),
         heading=bool(payload.get("heading")),

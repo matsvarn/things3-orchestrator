@@ -3174,7 +3174,7 @@ class ThingsWorkspace:
             }
         if repeat.get("create_next") is True:
             if any(
-                instance.start == template.recurrence_next_on
+                instance.recurrence_generated_on == template.recurrence_next_on
                 for instance in self._library.recurrence_instances(template.uuid)
             ):
                 return {
@@ -9474,6 +9474,11 @@ class ThingsWorkspace:
             "recurrence_next_on": (
                 item.recurrence_next_on.isoformat()
                 if item.recurrence_next_on
+                else None
+            ),
+            "recurrence_generated_on": (
+                item.recurrence_generated_on.isoformat()
+                if item.recurrence_generated_on
                 else None
             ),
             "leavable": item.leavable,

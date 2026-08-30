@@ -999,6 +999,18 @@ def test_v2_create_next_requires_native_advancement_before_another_request() -> 
             ],
         },
     )
+    generated_id = next(
+        item.id
+        for item in library.recurrence_instances(template.uuid)
+        if item.uuid != current.uuid
+    )
+    rescheduled = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2833",
+            "items": [{"id": generated_id, "set": {"start": "2026-09-20"}}],
+        },
+    )
     second = interface.dispatch(
         "things_update",
         {
@@ -1010,6 +1022,7 @@ def test_v2_create_next_requires_native_advancement_before_another_request() -> 
     )
 
     assert first.state == "applied"
+    assert rescheduled.state == "applied"
     assert second.state == "rejected"
     assert second.code == "validation_error"
     assert second.next_action == "read_fresh"
@@ -1018,7 +1031,10 @@ def test_v2_create_next_requires_native_advancement_before_another_request() -> 
         for item in library.recurrence_instances(template.uuid)
         if item.uuid != current.uuid
     ]
-    assert [item.start for item in generated] == [template.recurrence_next_on]
+    assert [item.start for item in generated] == [date(2026, 9, 20)]
+    assert [item.recurrence_generated_on for item in generated] == [
+        template.recurrence_next_on
+    ]
     assert template.recurrence_instance_count == 1
 
 

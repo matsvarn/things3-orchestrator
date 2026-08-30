@@ -401,6 +401,40 @@ def test_fold_sparse_placement_clears_incompatible_home() -> None:
     assert task.inbox is True
 
 
+def test_fold_preserves_a_generated_occurrence_date_after_rescheduling() -> None:
+    original = date(2026, 9, 6)
+    rescheduled = date(2026, 9, 20)
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "generated",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Generated",
+                    "tp": 0,
+                    "sr": day_ts(original),
+                    "rt": ["template"],
+                    "lt": True,
+                },
+            },
+            {
+                "uuid": "generated",
+                "e": "Task7",
+                "t": 1,
+                "p": {"sr": day_ts(rescheduled)},
+            },
+        ],
+        library=library,
+    )
+
+    generated = library.records["generated"]
+    assert generated.start == rescheduled
+    assert generated.recurrence_generated_on == original
+
+
 def test_fold_tag4_deletion_removes_direct_and_parent_references() -> None:
     library = MemoryLibrary(
         [
@@ -684,6 +718,7 @@ def test_snapshot_resumes_from_loaded_index(tmp_path: Path) -> None:
 def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None:
     cache = tmp_path / "state.json"
     rule = {"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 0}], "rrv": 42}
+    generated_on = date(2026, 9, 6)
 
     class FakeClient:
         def __init__(self) -> None:
@@ -712,7 +747,13 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
                             "uuid": "instance",
                             "e": "Task6",
                             "t": 0,
-                            "p": {"tt": "Weekly copy", "tp": 0, "rt": ["template"]},
+                            "p": {
+                                "tt": "Weekly copy",
+                                "tp": 0,
+                                "sr": day_ts(generated_on),
+                                "rt": ["template"],
+                                "lt": True,
+                            },
                         },
                     ],
                     current=2,
@@ -732,6 +773,7 @@ def test_snapshot_round_trip_keeps_repeat_rule_and_links(tmp_path: Path) -> None
     assert second.records["template"].recurrence.rule == rule
     assert second.records["instance"].recurrence.links == ("template",)
     assert second.records["instance"].recurrence.template_uuid == "template"
+    assert second.records["instance"].recurrence_generated_on == generated_on
     assert second.client.pages == 1  # type: ignore[attr-defined]
 
 
@@ -795,7 +837,7 @@ def test_previous_cache_version_replays_task7_from_zero(tmp_path: Path) -> None:
     cache.write_text(
         json.dumps(
             {
-                "version": 4,
+                "version": _CACHE_VERSION - 1,
                 "history_id": "hist",
                 "loaded_index": 9,
                 "server_index": 9,

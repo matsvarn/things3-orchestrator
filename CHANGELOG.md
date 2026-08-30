@@ -50,8 +50,9 @@
 - The retained v1 recurrence inspection and Stop paths now match v2 for
   Projects and next-date materialization.
 - Cloud history now folds `Task7` records and emits `Task7` for current
-  task-family creates and mutations. Cache version 6 replays histories that
-  previously advanced past ignored Task7 events.
+  task-family creates and mutations. Cache version 7 replays histories that
+  previously advanced past ignored Task7 events and reconstructs the original
+  date of manually generated repeat copies.
 - Today now matches the native Things list. Open items scheduled on or before
   today remain visible, and Waiting-only items are no longer injected.
 - Future numbered Task, Area, Tag, and ChecklistItem entities fail before a
