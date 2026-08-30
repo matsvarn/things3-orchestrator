@@ -2994,6 +2994,50 @@ def test_today_after_can_order_after_every_displayed_overdue_item(
     assert detail(module, overdue.id).today_order is not None
 
 
+@pytest.mark.parametrize(
+    "schedule_field",
+    ["start", "deadline"],
+)
+def test_today_after_rejects_an_anchor_moved_off_today_in_the_same_commit(
+    schedule_field: str,
+) -> None:
+    anchor = Record(
+        uuid="anchor",
+        kind="task",
+        title="Anchor",
+        today_index=0,
+        **{schedule_field: NOW.date() - timedelta(days=1)},
+    )
+    module = workspace([anchor])
+    revision = detail(module, anchor.id).revision
+
+    result = module.commit(
+        CommitCall.model_validate(
+            {
+                "intent_id": f"today-anchor-moved-{schedule_field}",
+                "create": [
+                    {
+                        "title": "Between",
+                        "start": "today",
+                        "today_after": anchor.id,
+                    }
+                ],
+                "change": [
+                    {
+                        "id": anchor.id,
+                        "if_revision": revision,
+                        schedule_field: (NOW.date() + timedelta(days=1)).isoformat(),
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.status == "rejected"
+    assert set(module._library.records) == {anchor.uuid}  # noqa: SLF001
+    assert getattr(anchor, schedule_field) == NOW.date() - timedelta(days=1)
+
+
 def test_after_rebalances_dense_native_indexes() -> None:
     module = workspace(
         [

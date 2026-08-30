@@ -26,6 +26,10 @@ _MAX_INTERVAL = 366
 _NEVER = 64_092_211_200
 
 
+class RecurrenceReadError(ValueError):
+    """Native recurrence bookkeeping is absent or cannot be interpreted safely."""
+
+
 @dataclass(frozen=True)
 class RecurrenceState:
     """One coherent, lossless recurrence value for a Things record."""
@@ -148,8 +152,15 @@ class RecurrenceState:
             if not isinstance(anchor_stamp, (int, float)) or isinstance(
                 anchor_stamp, bool
             ):
-                raise ValueError("The repeat anchor is unavailable; read it again")
-            anchor = datetime.fromtimestamp(anchor_stamp, timezone.utc).date()
+                raise RecurrenceReadError(
+                    "The repeat anchor is unavailable; read it again"
+                )
+            try:
+                anchor = datetime.fromtimestamp(anchor_stamp, timezone.utc).date()
+            except (OverflowError, OSError, ValueError) as error:
+                raise RecurrenceReadError(
+                    "The repeat anchor is unavailable; read it again"
+                ) from error
             if until < anchor:
                 raise ValueError(
                     "The repeat end cannot be before the first occurrence"

@@ -152,6 +152,74 @@ def test_v2_rejects_repeat_end_before_the_first_occurrence() -> None:
     assert not library.records
 
 
+@pytest.mark.parametrize(
+    "anchor",
+    [None, 10**100, -(10**100), float("inf"), float("nan")],
+    ids=["missing", "huge_positive", "huge_negative", "infinite", "nan"],
+)
+def test_v2_repeat_end_edit_bounds_corrupt_native_anchors(
+    anchor: object | None,
+) -> None:
+    rule: dict[str, object] = {
+        "tp": 0,
+        "fu": 256,
+        "fa": 1,
+        "of": [{"wd": 1}],
+    }
+    if anchor is not None:
+        rule["sr"] = anchor
+    template = Record(
+        uuid="corrupt-template",
+        kind="task",
+        title="Corrupt series",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule=rule,  # type: ignore[arg-type]
+        ),
+    )
+    current = Record(
+        uuid="corrupt-current",
+        kind="task",
+        title="Corrupt series",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    library = MemoryLibrary([template, current])
+    journal = MemoryJournal()
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+    request_id = "0198f0ee-98d4-7bd5-91ba-8e76019b2830"
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": request_id,
+            "items": [
+                {
+                    "id": current.id,
+                    "set": {"repeat": {"until": "2027-08-30"}},
+                }
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert result.next_action == "read_fresh"
+    assert journal.get_v2_request("owner@example.com", "2", request_id) is None
+
+
 def test_v2_capture_clones_a_repeating_project_graph() -> None:
     interface, library = _interface()
 

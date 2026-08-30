@@ -90,7 +90,7 @@ from .library import (
     template_uuid_of,
 )
 from .preferences import Preferences, PreferencesError
-from .recurrence import RecurrenceState, RepeatMode, new_rule
+from .recurrence import RecurrenceReadError, RecurrenceState, RepeatMode, new_rule
 from .source_document import (
     SourceDocumentError,
     compile_project_document,
@@ -3349,6 +3349,13 @@ class ThingsWorkspace:
                     ),
                     until_set="until" in repeat,
                 )
+            except RecurrenceReadError as error:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "read_fresh",
+                    "instruction": str(error),
+                }
             except ValueError as error:
                 return {
                     "state": "rejected",
@@ -5384,6 +5391,80 @@ class ThingsWorkspace:
             )
         self._prepare_creates(call, context, preferences=preferences)
         self._prepare_changes(call, context)
+        self._validate_final_today_anchors(call, context)
+
+    def _validate_final_today_anchors(
+        self,
+        call: CommitCall,
+        context: _PreparationContext,
+    ) -> None:
+        references = [
+            reference
+            for reference in (
+                *(entry.today_after for entry in call.create),
+                *(change.today_after for change in call.change),
+            )
+            if reference is not None
+        ]
+        for reference in references:
+            if reference.startswith("$"):
+                resolved = context.local.get(reference)
+                uuid = resolved[0] if resolved is not None else ""
+            else:
+                _kind, uuid = parse_id(reference)
+            if not self._planned_today_member(uuid, context.writes):
+                raise _Abort(
+                    self._rejected(
+                        "A today_after reference must remain on Today after every "
+                        "change in the commit."
+                    )
+                )
+
+    def _planned_today_member(self, uuid: str, writes: list[Write]) -> bool:
+        today = self._clock().date()
+        current = self._library.records.get(uuid)
+        is_open = current.is_open() if current is not None else False
+        start = current.start if current is not None else None
+        deadline = current.deadline if current is not None else None
+        tonight = current.tonight if current is not None else False
+        for write in writes:
+            if write.uuid != uuid:
+                continue
+            if write.action in {"create", "create_heading"}:
+                is_open = (
+                    (write.status or "open") == "open"
+                    and not write.heading
+                    and write.recurrence_rule is None
+                )
+                start = write.start
+                deadline = write.deadline
+                tonight = write.tonight
+                continue
+            if write.action in {"complete", "cancel", "trash", "permanent_delete"}:
+                is_open = False
+            elif write.action == "restore":
+                is_open = True
+            elif write.status is not None:
+                is_open = write.status == "open"
+            if write.clear_start or write.someday or write.anytime:
+                start = None
+                tonight = False
+            elif write.start is not None:
+                start = write.start
+                tonight = write.tonight
+            elif write.tonight:
+                start = write.owner_today or today
+                tonight = True
+            if write.clear_deadline:
+                deadline = None
+            elif write.deadline is not None:
+                deadline = write.deadline
+        return is_open and self._is_today_member(
+            start=start,
+            deadline=deadline,
+            tonight=tonight,
+            today=today,
+        )
 
     def _prepare_creates(
         self,
