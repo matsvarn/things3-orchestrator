@@ -95,12 +95,18 @@ class Record:
     area_uuid: str | None = None
     tag_uuids: list[str] = field(default_factory=list)
     recurrence: RecurrenceState = field(default_factory=RecurrenceState)
+    repeater: JsonValue = None
+    recurrence_created_through: date | None = None
+    recurrence_instance_count: int = 0
+    recurrence_completed_on: date | None = None
+    recurrence_next_on: date | None = None
     heading: bool = False
     heading_uuid: str | None = None
     someday: bool = False
     sort_index: int = 0
     today_index: int = 0
     entity: str = ""
+    leavable: bool = False
     checklists: list[ChecklistLine] = field(default_factory=list)
 
     @property
@@ -149,6 +155,8 @@ class Write:
         "checklist",
         "repeat",
         "repeat_link",
+        "repeat_progress",
+        "repeat_next",
     ]
     uuid: str
     kind: Kind = "task"
@@ -178,10 +186,16 @@ class Write:
     checklist_index: int | None = None
     checklist_remove: bool = False
     recurrence_rule: dict[str, JsonValue] | None = None
+    clear_recurrence_rule: bool = False
     recurrence_links: list[str] | None = None
-    recurrence_generated: bool = False
+    recurrence_paused: bool | None = None
+    recurrence_created_through: date | None = None
+    recurrence_instance_count: int | None = None
+    recurrence_completed_on: date | None = None
+    recurrence_next_on: date | None = None
     tag_parent_uuids: list[str] | None = None
     heading: bool = False
+    leavable: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,7 +247,7 @@ class _ChecklistMutation:
 @dataclass(frozen=True)
 class _RecurrenceMutation:
     write: Write
-    action: Literal["repeat", "repeat_link"]
+    action: Literal["repeat", "repeat_link", "repeat_progress", "repeat_next"]
 
     def dispatch(self, handler: _MutationHandler[_Result]) -> _Result:
         return handler.recurrence(self)
@@ -303,9 +317,13 @@ def _compile_mutation(write: Write) -> _Mutation:
         )
     if action == "checklist":
         return _ChecklistMutation(write)
-    if action in {"repeat", "repeat_link"}:
+    if action in {"repeat", "repeat_link", "repeat_progress", "repeat_next"}:
         return _RecurrenceMutation(
-            write, cast(Literal["repeat", "repeat_link"], action)
+            write,
+            cast(
+                Literal["repeat", "repeat_link", "repeat_progress", "repeat_next"],
+                action,
+            ),
         )
     raise ValueError(f"Unknown mutation action: {action}")
 
@@ -777,8 +795,12 @@ class _MemoryApplyHandler(_MutationHandler[None]):
         if write.heading_uuid is None:
             return
         current = self.library.records.get(write.uuid)
-        project_uuid = write.into_uuid or (current.parent_uuid if current else None)
         heading = self.library.records.get(write.heading_uuid)
+        project_uuid = (
+            write.into_uuid
+            or (current.parent_uuid if current else None)
+            or (heading.parent_uuid if heading is not None else None)
+        )
         if (
             heading is None
             or not heading.heading
@@ -848,7 +870,12 @@ class _MemoryApplyHandler(_MutationHandler[None]):
                 .fold_links(write.recurrence_links)
                 if write.recurrence_links
                 else RecurrenceState().fold_rule(write.recurrence_rule)
-            ),
+            ).fold_paused(write.recurrence_paused),
+            recurrence_created_through=write.recurrence_created_through,
+            recurrence_instance_count=write.recurrence_instance_count or 0,
+            recurrence_completed_on=write.recurrence_completed_on,
+            recurrence_next_on=write.recurrence_next_on,
+            leavable=write.leavable,
         )
         self.library.records[record.uuid] = record
         self.created[record.title] = record.id
@@ -1102,18 +1129,43 @@ class _MemoryApplyHandler(_MutationHandler[None]):
     def recurrence(self, mutation: _RecurrenceMutation) -> None:
         item = self.library.records.get(mutation.write.uuid)
         if mutation.action == "repeat" and (
-            item is None or mutation.write.recurrence_rule is None
+            item is None
+            or (
+                mutation.write.recurrence_rule is None
+                and not mutation.write.clear_recurrence_rule
+            )
         ):
-            raise ValueError("Repeat changes need an exact repeating Task template")
+            raise ValueError("Repeat changes need an exact repeating template")
+        if mutation.action == "repeat_next" and (
+            item is None
+            or item.recurrence.role != "template"
+            or mutation.write.recurrence_instance_count is None
+            or mutation.write.recurrence_instance_count
+            != item.recurrence_instance_count + 1
+        ):
+            raise ValueError(
+                "Create Next Copy needs the next count for an exact repeat template"
+            )
         if item is None:
             return
         if mutation.action == "repeat":
             item.recurrence.validate_interval_template(kind=item.kind)
-            assert mutation.write.recurrence_rule is not None
             item.recurrence = item.recurrence.fold_rule(mutation.write.recurrence_rule)
-        else:
+        elif mutation.action == "repeat_link":
             item.recurrence = item.recurrence.fold_links(
                 mutation.write.recurrence_links or []
+            )
+        elif mutation.action == "repeat_next":
+            if mutation.write.recurrence_instance_count is not None:
+                item.recurrence_instance_count = (
+                    mutation.write.recurrence_instance_count
+                )
+        else:
+            item.recurrence_completed_on = mutation.write.recurrence_completed_on
+            item.recurrence_next_on = mutation.write.recurrence_next_on
+        if mutation.write.recurrence_paused is not None:
+            item.recurrence = item.recurrence.fold_paused(
+                mutation.write.recurrence_paused
             )
         self.verified.append(item.title)
 
@@ -1203,8 +1255,24 @@ class _MutationVerifier(_MutationHandler[bool]):
         if item is None:
             return False
         if mutation.action == "repeat":
-            return item.recurrence.rule == write.recurrence_rule
-        return list(item.recurrence.links) == (write.recurrence_links or [])
+            matches = (
+                item.recurrence.role == "none"
+                if write.clear_recurrence_rule
+                else item.recurrence.rule == write.recurrence_rule
+            )
+        elif mutation.action == "repeat_link":
+            matches = list(item.recurrence.links) == (write.recurrence_links or [])
+        elif mutation.action == "repeat_next":
+            matches = item.recurrence_instance_count == write.recurrence_instance_count
+        else:
+            matches = (
+                item.recurrence_completed_on == write.recurrence_completed_on
+                and item.recurrence_next_on == write.recurrence_next_on
+            )
+        return matches and (
+            write.recurrence_paused is None
+            or item.recurrence.paused == write.recurrence_paused
+        )
 
     def _patch(self, item: Record, write: Write, *, placement: bool = False) -> bool:
         checks = [

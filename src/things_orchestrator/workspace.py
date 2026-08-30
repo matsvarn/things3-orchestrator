@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import re
 from base64 import b32encode
+from calendar import monthrange
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
@@ -52,6 +53,7 @@ from .interface import (
     RecoveryFact,
     RecurrenceFact,
     RecurrenceKind,
+    RepeatOnFact,
     Result,
     ResultStatus,
     ReviewSection,
@@ -88,7 +90,7 @@ from .library import (
     template_uuid_of,
 )
 from .preferences import Preferences, PreferencesError
-from .recurrence import RepeatMode, new_rule
+from .recurrence import RecurrenceState, RepeatMode, new_rule
 from .source_document import (
     SourceDocumentError,
     compile_project_document,
@@ -142,6 +144,210 @@ _WEEKDAY_CODES = {
     "saturday": 6,
 }
 _WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
+_REPEAT_NEVER = 64_092_211_200
+
+
+def _after_completion_next(anchor: date, unit: str, interval: int) -> date:
+    if unit == "day":
+        return anchor + timedelta(days=interval)
+    if unit == "week":
+        return anchor + timedelta(days=interval * 7)
+    if unit == "month":
+        month_index = anchor.year * 12 + anchor.month - 1 + interval
+        year, zero_month = divmod(month_index, 12)
+        month = zero_month + 1
+        return date(year, month, min(anchor.day, monthrange(year, month)[1]))
+    if unit == "year":
+        year = anchor.year + interval
+        return date(
+            year,
+            anchor.month,
+            min(anchor.day, monthrange(year, anchor.month)[1]),
+        )
+    raise ValueError("After-completion repeat has an unsupported unit")
+
+
+def _repeat_offsets(
+    repeat: dict[str, object], unit: str
+) -> list[dict[str, object]] | None:
+    raw = repeat.get("on")
+    if not isinstance(raw, list):
+        return None
+    offsets: list[dict[str, object]] = []
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ValueError("repeat on entries need selected-date objects")
+        offset: dict[str, object] = {}
+        month = value.get("month")
+        day = value.get("day")
+        weekday = value.get("weekday")
+        ordinal = value.get("ordinal")
+        if unit == "year" and isinstance(month, int):
+            offset["mo"] = month - 1
+        if isinstance(day, int):
+            offset["dy"] = -1 if day == -1 else day - 1
+        elif isinstance(weekday, str):
+            offset["wd"] = _WEEKDAY_CODES[cast(Weekday, weekday)]
+            if unit in {"month", "year"} and isinstance(ordinal, int):
+                offset["wdo"] = ordinal
+        offsets.append(offset)
+    return offsets
+
+
+def _public_repeat_on(rule: RecurrenceState) -> list[RepeatOnFact]:
+    raw_offsets = rule.rule.get("of") if rule.rule is not None else None
+    if not isinstance(raw_offsets, list):
+        return []
+    values: list[RepeatOnFact] = []
+    for raw in raw_offsets:
+        if not isinstance(raw, dict):
+            continue
+        month = raw.get("mo")
+        day = raw.get("dy")
+        weekday = raw.get("wd")
+        ordinal = raw.get("wdo")
+        fact = _safe_repeat_on_fact(
+            month=month,
+            day=day,
+            weekday=weekday,
+            ordinal=ordinal,
+        )
+        if fact is not None:
+            values.append(fact)
+    return values
+
+
+def _safe_repeat_on_fact(
+    *, month: object, day: object, weekday: object, ordinal: object
+) -> RepeatOnFact | None:
+    """Translate one native zero-based selector without trusting persisted data."""
+    if isinstance(month, bool) or (
+        month is not None and (not isinstance(month, int) or not 0 <= month <= 11)
+    ):
+        return None
+    if isinstance(day, bool) or (
+        day is not None and (not isinstance(day, int) or day not in {-1, *range(31)})
+    ):
+        return None
+    if isinstance(weekday, bool) or (
+        weekday is not None
+        and (not isinstance(weekday, int) or weekday not in _WEEKDAY_NAMES)
+    ):
+        return None
+    if isinstance(ordinal, bool) or (
+        ordinal is not None
+        and (not isinstance(ordinal, int) or ordinal not in {-1, 1, 2, 3, 4, 5})
+    ):
+        return None
+    if (day is None) == (weekday is None):
+        return None
+    if ordinal is not None and weekday is None:
+        return None
+    return RepeatOnFact(
+        month=month + 1 if isinstance(month, int) else None,
+        day=-1 if day == -1 else day + 1 if isinstance(day, int) else None,
+        weekday=(
+            cast(Weekday, _WEEKDAY_NAMES[weekday])
+            if isinstance(weekday, int)
+            else None
+        ),
+        ordinal=ordinal if isinstance(ordinal, int) else None,
+    )
+
+
+def _repeat_timestamp_date(raw: object) -> str | None:
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or not 0 < raw < _REPEAT_NEVER
+    ):
+        return None
+    try:
+        return datetime.fromtimestamp(raw, timezone.utc).date().isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _repeat_end(rule: RecurrenceState) -> str | None:
+    if rule.rule is None:
+        return None
+    return _repeat_timestamp_date(rule.rule.get("ed"))
+
+
+def _rt2_fact(item: Record) -> RecurrenceFact | None:
+    raw: object = item.repeater
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return RecurrenceFact(kind="unknown", engine="rt2")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("v") != 1:
+        return RecurrenceFact(kind="unknown", engine="rt2")
+    mode_code = raw.get("t")
+    unit_code = raw.get("pfu")
+    mode: RepeatMode | None = (
+        "fixed"
+        if mode_code == 0
+        else "after_completion"
+        if mode_code == 1
+        else None
+    )
+    unit = (
+        {0: "day", 1: "week", 2: "month", 3: "year"}.get(unit_code)
+        if isinstance(unit_code, int)
+        else None
+    )
+    interval = raw.get("pfa")
+    semantic_on: list[RepeatOnFact] = []
+    offsets = raw.get("po")
+    if mode == "fixed" and isinstance(offsets, list):
+        for offset in offsets:
+            if not isinstance(offset, dict):
+                continue
+            month = offset.get("m")
+            day = offset.get("d")
+            weekday = offset.get("wd")
+            ordinal = offset.get("wo")
+            fact = _safe_repeat_on_fact(
+                month=month,
+                day=day,
+                weekday=weekday,
+                ordinal=ordinal,
+            )
+            if fact is not None:
+                semantic_on.append(fact)
+    until = _repeat_timestamp_date(raw.get("ead"))
+    alarm = raw.get("aa")
+    reminder_time = None
+    if isinstance(alarm, int) and 0 <= alarm < 86_400:
+        hours, remainder = divmod(alarm, 3_600)
+        reminder_time = f"{hours:02d}:{remainder // 60:02d}"
+    return RecurrenceFact(
+        kind="template" if mode is not None and unit is not None else "unknown",
+        engine="rt2",
+        mode=mode,
+        unit=cast(Any, unit),
+        interval=(
+            interval
+            if isinstance(interval, int)
+            and not isinstance(interval, bool)
+            and 1 <= interval <= 366
+            else None
+        ),
+        on=semantic_on,
+        until=until,
+        start_early_days=(
+            raw["os"]
+            if isinstance(raw.get("os"), int)
+            and not isinstance(raw.get("os"), bool)
+            and 0 <= raw["os"] <= 366
+            else None
+        ),
+        reminder_time=reminder_time,
+        adds_deadline=raw.get("ad") is True,
+    )
 _SEARCH_ARTICLES = frozenset({"a", "an", "the"})
 _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _FAKE_ACTION_ROW = re.compile(
@@ -1415,7 +1621,7 @@ class ThingsWorkspace:
         )
 
     def _recurrence_read(self, call: ReadCall) -> Result:
-        """Read one Task and verify its repeat template/copy relationship."""
+        """Read one item and verify its repeat template/copy relationship."""
         assert call.id is not None
         target = self._exact_item(call.id)
         if target is None or target.kind != "task" or target.heading:
@@ -2258,6 +2464,20 @@ class ThingsWorkspace:
         preconditions: dict[str, str] = {}
         touched: list[list[str]] = []
         display_titles: list[str] = []
+        result_ids: list[str] = []
+
+        def append_planned(
+            write: Write,
+            *,
+            prior: JsonDict | None,
+            fields: list[str],
+            title: str,
+        ) -> None:
+            writes.append(write)
+            before.append(prior)
+            touched.append(fields)
+            display_titles.append(title)
+
         payload = draft.payload
         if draft.tool == "things_capture":
             for capture_item in cast(list[dict[str, object]], payload["items"]):
@@ -2282,57 +2502,206 @@ class ThingsWorkspace:
                 start_value = cast(str | None, capture_item.get("start"))
                 start, someday, tonight = self._start(start_value)
                 write = Write(
-                    action="create", uuid=uuid, kind=kind,
+                    action="create",
+                    uuid=uuid,
+                    kind=kind,
                     title=cast(str, capture_item["title"]),
                     notes=cast(str | None, capture_item.get("notes")),
                     into_uuid=parent_uuid or area_uuid,
-                    into_kind="project" if parent_uuid else "area" if area_uuid else None,
+                    into_kind="project"
+                    if parent_uuid
+                    else "area"
+                    if area_uuid
+                    else None,
                     inbox=kind == "task" and into_id is None,
-                    start=start, tonight=tonight, someday=someday,
-                    deadline=date.fromisoformat(cast(str, capture_item["deadline"])) if capture_item.get("deadline") else None,
+                    start=start,
+                    tonight=tonight,
+                    someday=someday,
+                    deadline=date.fromisoformat(cast(str, capture_item["deadline"]))
+                    if capture_item.get("deadline")
+                    else None,
                 )
-                writes.append(write)
-                before.append(None)
-                touched.append(["title", "notes", "start", "deadline", "into"])
-                display_titles.append(cast(str, capture_item["title"]))
+                repeat = capture_item.get("repeat")
+                children = cast(
+                    list[dict[str, object]], capture_item.get("tasks", [])
+                )
+                if isinstance(repeat, dict):
+                    template_uuid = new_uuid()
+                    rule = new_rule(
+                        mode=cast(RepeatMode, repeat.get("mode", "fixed")),
+                        unit=cast(Any, repeat["unit"]),
+                        interval=cast(int, repeat.get("interval", 1)),
+                        anchor=start or self._clock().date(),
+                        weekday_codes=[
+                            _WEEKDAY_CODES[cast(Any, weekday)]
+                            for weekday in cast(
+                                list[object], repeat.get("weekdays", [])
+                            )
+                        ]
+                        if "on" not in repeat
+                        else None,
+                        offsets=cast(
+                            Any,
+                            _repeat_offsets(repeat, cast(str, repeat["unit"])),
+                        ),
+                        until=(
+                            date.fromisoformat(cast(str, repeat["until"]))
+                            if repeat.get("until")
+                            else None
+                        ),
+                    )
+                    template_write = replace(
+                        write,
+                        uuid=template_uuid,
+                        recurrence_rule=rule,
+                        recurrence_paused=cast(bool, repeat.get("paused", False)),
+                        recurrence_created_through=(start or self._clock().date())
+                        + timedelta(days=1),
+                        recurrence_instance_count=1,
+                        start=None,
+                        remind=None,
+                        tonight=False,
+                        someday=True,
+                        inbox=False,
+                        anytime=False,
+                        today_index=None,
+                    )
+                    append_planned(
+                        template_write,
+                        prior=None,
+                        fields=[
+                            "title",
+                            "notes",
+                            "start",
+                            "deadline",
+                            "into",
+                            "recurrence",
+                        ],
+                        title=cast(str, capture_item["title"]),
+                    )
+                    if kind == "project":
+                        for child in children:
+                            template_child = Write(
+                                action="create",
+                                uuid=new_uuid(),
+                                kind="task",
+                                title=cast(str, child["title"]),
+                                notes=cast(str | None, child.get("notes")),
+                                into_uuid=template_uuid,
+                                into_kind="project",
+                            )
+                            append_planned(
+                                template_child,
+                                prior=None,
+                                fields=["title", "notes", "into"],
+                                title=cast(str, child["title"]),
+                            )
+                    write = replace(
+                        write,
+                        recurrence_links=[template_uuid],
+                    )
+                append_planned(
+                    write,
+                    prior=None,
+                    fields=[
+                        "title",
+                        "notes",
+                        "start",
+                        "deadline",
+                        "into",
+                        *(["recurrence"] if isinstance(repeat, dict) else []),
+                    ],
+                    title=cast(str, capture_item["title"]),
+                )
+                result_ids.append(_write_public_id(write))
                 if kind == "project":
-                    for child in cast(list[dict[str, object]], capture_item.get("tasks", [])):
+                    for child in children:
                         child_write = Write(
-                            action="create", uuid=new_uuid(), kind="task",
+                            action="create",
+                            uuid=new_uuid(),
+                            kind="task",
                             title=cast(str, child["title"]),
                             notes=cast(str | None, child.get("notes")),
-                            into_uuid=uuid, into_kind="project",
+                            into_uuid=uuid,
+                            into_kind="project",
                         )
-                        writes.append(child_write)
-                        before.append(None)
-                        touched.append(["title", "notes", "into"])
-                        display_titles.append(cast(str, child["title"]))
+                        append_planned(
+                            child_write,
+                            prior=None,
+                            fields=["title", "notes", "into"],
+                            title=cast(str, child["title"]),
+                        )
+                        result_ids.append(_write_public_id(child_write))
         else:
-            ids = cast(list[str], payload["ids"] if "ids" in payload else [row["id"] for row in cast(list[dict[str, object]], payload["items"])])
+            ids = cast(
+                list[str],
+                payload["ids"]
+                if "ids" in payload
+                else [
+                    row["id"] for row in cast(list[dict[str, object]], payload["items"])
+                ],
+            )
+            result_ids.extend(ids)
             expanded_ids: set[str] = set()
             targets: list[Record] = []
             for item_id in ids:
                 target = self._exact_item(item_id)
-                if target is None or target.kind not in {"task", "project"} or target.heading:
-                    return {"state": "rejected", "code": "missing_target", "next_action": "correct_request", "instruction": "Mutation targets must be exact Tasks or Projects."}
-                if draft.tool == "things_trash" and target.kind == "project":
+                if (
+                    target is None
+                    or target.kind not in {"task", "project"}
+                    or target.heading
+                ):
+                    return {
+                        "state": "rejected",
+                        "code": "missing_target",
+                        "next_action": "correct_request",
+                        "instruction": "Mutation targets must be exact Tasks or Projects.",
+                    }
+                if draft.tool in {"things_complete", "things_trash"} and target.kind == "project":
                     preconditions[f"scope:project:{target.uuid}"] = (
                         self._project_scope_revision(target.uuid)
                     )
-                candidates = [*self._project_descendants(target.uuid), target] if draft.tool == "things_trash" and target.kind == "project" else [target]
+                candidates = (
+                    [
+                        *(
+                            child
+                            for child in self._project_descendants(target.uuid)
+                            if draft.tool != "things_complete"
+                            or (child.status == "open" and not child.trashed)
+                        ),
+                        target,
+                    ]
+                    if draft.tool in {"things_complete", "things_trash"}
+                    and target.kind == "project"
+                    else [target]
+                )
                 for candidate in candidates:
-                    if candidate.recurrence.role == "template":
+                    if candidate.repeater is not None and draft.tool in {
+                        "things_complete",
+                        "things_trash",
+                    }:
                         return {
                             "state": "rejected",
                             "code": "validation_error",
                             "next_action": "correct_request",
-                            "instruction": "The bounded v2 mutation tools do not edit, complete, or trash recurrence templates.",
+                            "instruction": "This item uses the newer Things repeater engine; its lifecycle must remain native until that account exposes verified write deltas.",
+                        }
+                    if candidate.recurrence.role == "template" and draft.tool in {
+                        "things_complete",
+                        "things_trash",
+                    }:
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "Complete or trash a generated copy; use repeat editing to change or stop its template.",
                         }
                     if candidate.id not in expanded_ids:
                         expanded_ids.add(candidate.id)
                         targets.append(candidate)
             if len(targets) > 120:
                 return {"state": "rejected", "code": "expanded_write_limit", "next_action": "correct_request", "instruction": "The operation expands beyond 120 writes."}
+            progressed_templates: set[str] = set()
             for target in targets:
                 item_id = target.id
                 preconditions[target.id] = self._revision(target)
@@ -2342,22 +2711,6 @@ class ThingsWorkspace:
                         preconditions[parent.id] = self._revision(parent)
                 if draft.tool == "things_complete":
                     if target.kind == "project":
-                        open_actions = [
-                            child
-                            for child in self._project_descendants(target.uuid)
-                            if child.kind == "task"
-                            and not child.heading
-                            and child.status == "open"
-                            and not child.trashed
-                            and child.recurrence.role != "template"
-                        ]
-                        if open_actions:
-                            return {
-                                "state": "rejected",
-                                "code": "validation_error",
-                                "next_action": "correct_request",
-                                "instruction": "Complete or move every open Project action before completing the Project.",
-                            }
                         preconditions[f"scope:project:{target.uuid}"] = (
                             self._project_scope_revision(target.uuid)
                         )
@@ -2365,6 +2718,52 @@ class ThingsWorkspace:
                     touched.append(["status"])
                     before.append(self._v2_observed(target, ("status",)))
                     display_titles.append(target.title)
+                    if (
+                        target.status == "open"
+                        and target.recurrence.role == "instance"
+                        and target.recurrence.repeat_type == "after_completion"
+                        and target.recurrence.template_uuid is not None
+                        and target.recurrence.template_uuid not in progressed_templates
+                    ):
+                        template = self._library.records.get(
+                            target.recurrence.template_uuid
+                        )
+                        if (
+                            template is None
+                            or template.recurrence.role != "template"
+                            or template.recurrence.repeat_type != "after_completion"
+                            or template.recurrence.unit is None
+                            or template.recurrence.interval is None
+                        ):
+                            return {
+                                "state": "rejected",
+                                "code": "validation_error",
+                                "next_action": "read_fresh",
+                                "instruction": "The after-completion template is incomplete; read the series again.",
+                            }
+                        completed_on = self._clock().date()
+                        next_on = _after_completion_next(
+                            completed_on,
+                            template.recurrence.unit,
+                            template.recurrence.interval,
+                        )
+                        preconditions[template.id] = self._revision(template)
+                        preconditions[f"scope:repeat:{template.uuid}"] = (
+                            self._recurrence_scope_revision(template.uuid)
+                        )
+                        writes.append(
+                            Write(
+                                action="repeat_progress",
+                                uuid=template.uuid,
+                                kind=template.kind,
+                                recurrence_completed_on=completed_on,
+                                recurrence_next_on=next_on,
+                            )
+                        )
+                        touched.append(["recurrence"])
+                        before.append(self._v2_observed(template, ("recurrence",)))
+                        display_titles.append(template.title)
+                        progressed_templates.add(template.uuid)
                 elif draft.tool == "things_trash":
                     writes.append(Write(action="trash", uuid=target.uuid, kind=target.kind, heading=target.heading))
                     touched.append(["trashed"])
@@ -2373,6 +2772,18 @@ class ThingsWorkspace:
                 else:
                     row = next(entry for entry in cast(list[dict[str, object]], payload["items"]) if entry["id"] == item_id)
                     fields = cast(dict[str, object], row["set"])
+                    if target.repeater is not None and {
+                        "repeat",
+                        "start",
+                        "deadline",
+                        "remind_at",
+                    }.intersection(fields):
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": "This item uses the newer Things repeater engine; only title and note edits are currently lossless.",
+                        }
                     if "notes" in fields and target.notes_format == "rich":
                         return {
                             "state": "rejected",
@@ -2409,26 +2820,90 @@ class ThingsWorkspace:
                     )
                     if reminder_date is not None:
                         if start_set and (start is None or start != reminder_date):
-                            return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "start and remind_at must use the same local date."}
+                            return {
+                                "state": "rejected",
+                                "code": "validation_error",
+                                "next_action": "correct_request",
+                                "instruction": "start and remind_at must use the same local date.",
+                            }
                         if not start_set:
                             if target.start != reminder_date:
-                                return {"state": "rejected", "code": "validation_error", "next_action": "correct_request", "instruction": "remind_at may omit start only when the existing start uses the same local date."}
+                                return {
+                                    "state": "rejected",
+                                    "code": "validation_error",
+                                    "next_action": "correct_request",
+                                    "instruction": "remind_at may omit start only when the existing start uses the same local date.",
+                                }
                             start = reminder_date
                             tonight = target.tonight
-                    writes.append(Write(
-                        action="update", uuid=target.uuid, kind=target.kind,
+                    ordinary_fields = {
+                        key: value for key, value in fields.items() if key != "repeat"
+                    }
+                    ordinary_write = Write(
+                        action="update",
+                        uuid=target.uuid,
+                        kind=target.kind,
                         title=cast(str | None, fields.get("title")),
                         notes=cast(str | None, fields.get("notes")),
-                        start=start, clear_start=start_set and fields.get("start") is None,
-                        tonight=tonight, someday=someday,
-                        deadline=date.fromisoformat(cast(str, fields["deadline"])) if fields.get("deadline") else None,
-                        clear_deadline="deadline" in fields and fields.get("deadline") is None,
+                        start=start,
+                        clear_start=start_set and fields.get("start") is None,
+                        tonight=tonight,
+                        someday=someday,
+                        deadline=date.fromisoformat(cast(str, fields["deadline"]))
+                        if fields.get("deadline")
+                        else None,
+                        clear_deadline="deadline" in fields
+                        and fields.get("deadline") is None,
                         remind=reminder,
-                        clear_remind="remind_at" in fields and fields.get("remind_at") is None,
-                    ))
-                    touched.append(sorted(fields))
-                    before.append(self._v2_observed(target, tuple(sorted(fields))))
-                    display_titles.append(target.title)
+                        clear_remind="remind_at" in fields
+                        and fields.get("remind_at") is None,
+                    )
+                    repeat = fields.get("repeat")
+                    if isinstance(repeat, dict):
+                        projected = replace(
+                            target,
+                            title=cast(str, fields.get("title", target.title)),
+                            notes=cast(str, fields.get("notes", target.notes)),
+                            start=(start if start_set else target.start),
+                            someday=someday if start_set else target.someday,
+                            tonight=tonight if start_set else target.tonight,
+                            deadline=(
+                                date.fromisoformat(cast(str, fields["deadline"]))
+                                if fields.get("deadline")
+                                else None
+                                if "deadline" in fields
+                                else target.deadline
+                            ),
+                            remind=(
+                                reminder if remind_set or start_set else target.remind
+                            ),
+                        )
+                        failure = self._append_v2_repeat_change(
+                            target=target,
+                            projected=projected,
+                            repeat=repeat,
+                            writes=writes,
+                            before=before,
+                            touched=touched,
+                            display_titles=display_titles,
+                            result_ids=result_ids,
+                            preconditions=preconditions,
+                        )
+                        if failure is not None:
+                            return failure
+                    if ordinary_fields:
+                        writes.append(ordinary_write)
+                        selected = tuple(sorted(ordinary_fields))
+                        touched.append(list(selected))
+                        before.append(self._v2_observed(target, selected))
+                        display_titles.append(target.title)
+        if len(writes) > 120:
+            return {
+                "state": "rejected",
+                "code": "expanded_write_limit",
+                "next_action": "correct_request",
+                "instruction": "The operation expands beyond 120 writes.",
+            }
         manifest = OperationManifest.build(
             account_id=self._account_id,
             draft=draft,
@@ -2437,10 +2912,383 @@ class ThingsWorkspace:
             touched=touched,
             before=before,
             display_titles=display_titles,
+            result_ids=result_ids,
             requires_owner=draft.tool == "things_trash",
             clock=self._clock(),
         )
         return manifest, writes, before
+
+    def _append_v2_repeat_change(
+        self,
+        *,
+        target: Record,
+        projected: Record,
+        repeat: dict[str, object],
+        writes: list[Write],
+        before: list[JsonDict | None],
+        touched: list[list[str]],
+        display_titles: list[str],
+        result_ids: list[str],
+        preconditions: dict[str, str],
+    ) -> JsonDict | None:
+        if target.kind not in {"task", "project"} or target.heading:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "correct_request",
+                "instruction": "The repeat protocol applies to Tasks and Projects.",
+            }
+        remove = repeat.get("remove") is True
+        if target.recurrence.role == "none":
+            if remove or repeat.get("create_next") is True:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": "That item is not repeating.",
+                }
+            if target.status != "open" or target.trashed:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": "Only an open Task or Project outside Trash can start repeating.",
+                }
+            unit = repeat.get("unit")
+            if not isinstance(unit, str):
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": "Starting repetition needs a unit.",
+                }
+            template_uuid = new_uuid()
+            rule = new_rule(
+                mode=cast(RepeatMode, repeat.get("mode", "fixed")),
+                unit=cast(Any, unit),
+                interval=cast(int, repeat.get("interval", 1)),
+                anchor=projected.start or self._clock().date(),
+                weekday_codes=[
+                    _WEEKDAY_CODES[cast(Any, weekday)]
+                    for weekday in cast(list[object], repeat.get("weekdays", []))
+                ]
+                if "on" not in repeat
+                else None,
+                offsets=cast(Any, _repeat_offsets(repeat, unit)),
+                until=(
+                    date.fromisoformat(cast(str, repeat["until"]))
+                    if repeat.get("until")
+                    else None
+                ),
+            )
+            template_write = Write(
+                action="create",
+                uuid=template_uuid,
+                kind=target.kind,
+                title=projected.title,
+                notes=projected.notes,
+                into_uuid=projected.parent_uuid or projected.area_uuid,
+                into_kind=(
+                    "project"
+                    if projected.parent_uuid
+                    else "area"
+                    if projected.area_uuid
+                    else None
+                ),
+                inbox=False,
+                anytime=False,
+                deadline=projected.deadline,
+                tag_uuids=list(projected.tag_uuids),
+                heading_uuid=projected.heading_uuid,
+                sort_index=projected.sort_index,
+                today_index=None,
+                owner_today=self._clock().date(),
+                recurrence_rule=rule,
+                recurrence_paused=cast(bool, repeat.get("paused", False)),
+                recurrence_created_through=(
+                    projected.start or self._clock().date()
+                )
+                + timedelta(days=1),
+                recurrence_instance_count=1,
+                start=None,
+                remind=None,
+                tonight=False,
+                someday=True,
+            )
+            writes.append(template_write)
+            before.append(None)
+            touched.append(
+                ["title", "notes", "start", "deadline", "into", "recurrence"]
+            )
+            display_titles.append(projected.title)
+            if projected.kind == "project":
+                preconditions[f"scope:project:{target.uuid}"] = (
+                    self._project_scope_revision(target.uuid)
+                )
+                try:
+                    graph_writes = self._clone_project_graph_writes(
+                        target.uuid,
+                        template_uuid,
+                        leavable=False,
+                    )
+                except ValueError as error:
+                    return {
+                        "state": "rejected",
+                        "code": "validation_error",
+                        "next_action": "correct_request",
+                        "instruction": str(error),
+                    }
+                for graph_write in graph_writes:
+                    writes.append(graph_write)
+                    before.append(None)
+                    touched.append(
+                        []
+                        if graph_write.action == "checklist"
+                        else ["title", "notes", "status", "into"]
+                    )
+                    display_titles.append(graph_write.title or projected.title)
+            else:
+                for row in projected.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=row.title,
+                            checklist_parent_uuid=template_uuid,
+                            checklist_status=row.status,
+                            checklist_index=row.sort_index,
+                        )
+                    )
+                    before.append(None)
+                    touched.append([])
+                    display_titles.append(row.title)
+            writes.append(
+                Write(
+                    action="repeat_link",
+                    uuid=target.uuid,
+                    kind=target.kind,
+                    recurrence_links=[template_uuid],
+                )
+            )
+            before.append(self._v2_observed(target, ("recurrence",)))
+            touched.append(["recurrence"])
+            display_titles.append(target.title)
+            preconditions[f"scope:repeat:{template_uuid}"] = (
+                self._recurrence_scope_revision(template_uuid)
+            )
+            return None
+
+        template = (
+            self._library.records.get(template_uuid_of(target) or "")
+            if target.recurrence.role == "instance"
+            else target
+        )
+        if template is None:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "read_fresh",
+                "instruction": "The repeat template is unavailable; read the item again.",
+            }
+        try:
+            template.recurrence.validate_interval_template(kind=template.kind)
+        except ValueError as error:
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "correct_request",
+                "instruction": str(error),
+            }
+        preconditions[template.id] = self._revision(template)
+        preconditions[f"scope:repeat:{template.uuid}"] = (
+            self._recurrence_scope_revision(template.uuid)
+        )
+        if repeat.get("create_next") is True:
+            next_uuid = new_uuid()
+            next_on = template.recurrence_next_on or self._clock().date()
+            mapped_heading = template.heading_uuid
+            current_write = Write(
+                action="create",
+                uuid=next_uuid,
+                kind=template.kind,
+                title=template.title,
+                notes=template.notes,
+                status="open",
+                into_uuid=(
+                    None
+                    if mapped_heading
+                    else template.parent_uuid or template.area_uuid
+                ),
+                into_kind=(
+                    None
+                    if mapped_heading
+                    else "project"
+                    if template.parent_uuid
+                    else "area"
+                    if template.area_uuid
+                    else None
+                ),
+                start=next_on,
+                deadline=template.deadline,
+                remind=template.remind,
+                tag_uuids=list(template.tag_uuids),
+                heading_uuid=mapped_heading,
+                sort_index=template.sort_index,
+                today_index=template.today_index,
+                owner_today=self._clock().date(),
+                recurrence_links=[template.uuid],
+                leavable=True,
+            )
+            writes.append(current_write)
+            before.append(None)
+            touched.append(
+                ["title", "notes", "start", "deadline", "into", "recurrence"]
+            )
+            display_titles.append(template.title)
+            result_ids.append(_write_public_id(current_write))
+            if template.kind == "project":
+                try:
+                    graph_writes = self._clone_project_graph_writes(
+                        template.uuid,
+                        next_uuid,
+                        leavable=True,
+                    )
+                except ValueError as error:
+                    return {
+                        "state": "rejected",
+                        "code": "validation_error",
+                        "next_action": "correct_request",
+                        "instruction": str(error),
+                    }
+                for graph_write in graph_writes:
+                    writes.append(graph_write)
+                    before.append(None)
+                    touched.append(
+                        []
+                        if graph_write.action == "checklist"
+                        else ["title", "notes", "status", "into"]
+                    )
+                    display_titles.append(graph_write.title or template.title)
+            else:
+                for row in template.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=row.title,
+                            checklist_parent_uuid=next_uuid,
+                            checklist_status=row.status,
+                            checklist_index=row.sort_index,
+                        )
+                    )
+                    before.append(None)
+                    touched.append([])
+                    display_titles.append(row.title)
+            writes.append(
+                Write(
+                    action="repeat_next",
+                    uuid=template.uuid,
+                    kind=template.kind,
+                    recurrence_instance_count=template.recurrence_instance_count + 1,
+                )
+            )
+            before.append(self._v2_observed(template, ("recurrence",)))
+            touched.append(["recurrence"])
+            display_titles.append(template.title)
+            return None
+        if remove:
+            for current in self._library.recurrence_instances(template.uuid):
+                preconditions[current.id] = self._revision(current)
+                writes.append(
+                    Write(
+                        action="repeat_link",
+                        uuid=current.uuid,
+                        kind=current.kind,
+                        recurrence_links=[],
+                    )
+                )
+                before.append(self._v2_observed(current, ("recurrence",)))
+                touched.append(["recurrence"])
+                display_titles.append(current.title)
+            writes.append(
+                Write(
+                    action="repeat",
+                    uuid=template.uuid,
+                    kind=template.kind,
+                    clear_recurrence_rule=True,
+                    recurrence_paused=False,
+                )
+            )
+            before.append(self._v2_observed(template, ("recurrence",)))
+            touched.append(["recurrence"])
+            display_titles.append(template.title)
+            return None
+
+        rule_fields = {
+            "mode",
+            "unit",
+            "interval",
+            "weekdays",
+            "on",
+            "until",
+        }.intersection(repeat)
+        recurrence = template.recurrence
+        if rule_fields:
+            try:
+                recurrence = template.recurrence.transition(
+                    kind=template.kind,
+                    mode=cast(RepeatMode | None, repeat.get("mode")),
+                    unit=cast(Any, repeat.get("unit")),
+                    interval=cast(int | None, repeat.get("interval")),
+                    weekday_codes=(
+                        [
+                            _WEEKDAY_CODES[cast(Any, weekday)]
+                            for weekday in cast(list[object], repeat["weekdays"])
+                        ]
+                        if "weekdays" in repeat
+                        else None
+                    ),
+                    offsets=(
+                        cast(
+                            Any,
+                            _repeat_offsets(
+                                repeat,
+                                cast(
+                                    str,
+                                    repeat.get("unit") or template.recurrence.unit,
+                                ),
+                            ),
+                        )
+                        if "on" in repeat
+                        else None
+                    ),
+                    until=(
+                        date.fromisoformat(cast(str, repeat["until"]))
+                        if repeat.get("until")
+                        else None
+                    ),
+                    until_set="until" in repeat,
+                )
+            except ValueError as error:
+                return {
+                    "state": "rejected",
+                    "code": "validation_error",
+                    "next_action": "correct_request",
+                    "instruction": str(error),
+                }
+        writes.append(
+            Write(
+                action="repeat",
+                uuid=template.uuid,
+                kind=template.kind,
+                recurrence_rule=recurrence.rule,
+                recurrence_paused=cast(bool | None, repeat.get("paused")),
+            )
+        )
+        before.append(self._v2_observed(template, ("recurrence",)))
+        touched.append(["recurrence"])
+        display_titles.append(template.title)
+        return None
 
     def _apply_v2(
         self,
@@ -2505,25 +3353,64 @@ class ThingsWorkspace:
         elif any(matched):
             state = "partial"
         else:
-            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The Cloud outcome remains unresolved.", "operation_id": operation.operation_id}
-        item_ids = [_write_public_id(write) for write in writes]
-        response: JsonDict = {"state": state, "code": state, "next_action": "run_cli" if state == "partial" else "read_receipt", "instruction": "Cloud read-back recorded the operation outcome.", "operation_id": operation.operation_id, "item_ids": item_ids}
+            return {
+                "state": "pending",
+                "code": "pending_unknown",
+                "next_action": "run_cli",
+                "instruction": "The Cloud outcome remains unresolved.",
+                "operation_id": operation.operation_id,
+            }
+        raw_result_ids = operation.manifest.get("result_ids")
+        item_ids = (
+            [str(item_id) for item_id in raw_result_ids]
+            if isinstance(raw_result_ids, list)
+            else [_write_public_id(write) for write in writes]
+        )
+        response: JsonDict = {
+            "state": state,
+            "code": state,
+            "next_action": "run_cli" if state == "partial" else "read_receipt",
+            "instruction": "Cloud read-back recorded the operation outcome.",
+            "operation_id": operation.operation_id,
+            "item_ids": item_ids,
+        }
         rows = self._v2_receipt_rows(operation, writes, before, state)
-        settled = self._journal.settle_v2(operation.operation_id, expected="pending", state=cast(Any, state), response=response, rows=rows)
-        return response if settled else self._persisted_v2_outcome(operation.operation_id)
+        settled = self._journal.settle_v2(
+            operation.operation_id,
+            expected="pending",
+            state=cast(Any, state),
+            response=response,
+            rows=rows,
+        )
+        return (
+            response if settled else self._persisted_v2_outcome(operation.operation_id)
+        )
 
     def _persisted_v2_outcome(self, operation_id: str) -> JsonDict:
         current = self._journal.get_v2_operation(operation_id)
         if current is not None and current.response is not None:
             return current.response
-        return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "A concurrent reconciliation changed the operation; inspect its persisted receipt.", "operation_id": operation_id}
+        return {
+            "state": "pending",
+            "code": "pending_unknown",
+            "next_action": "run_cli",
+            "instruction": "A concurrent reconciliation changed the operation; inspect its persisted receipt.",
+            "operation_id": operation_id,
+        }
 
     def _v2_preconditions_match(self, operation: V2Operation) -> bool:
-        preconditions = cast(dict[str, object], operation.manifest.get("preconditions", {}))
+        preconditions = cast(
+            dict[str, object], operation.manifest.get("preconditions", {})
+        )
         for item_id, expected in preconditions.items():
             if item_id.startswith("scope:project:"):
                 uuid = item_id.removeprefix("scope:project:")
                 if self._project_scope_revision(uuid) != expected:
+                    return False
+                continue
+            if item_id.startswith("scope:repeat:"):
+                uuid = item_id.removeprefix("scope:repeat:")
+                if self._recurrence_scope_revision(uuid) != expected:
                     return False
                 continue
             item = self._exact_item(item_id)
@@ -2831,7 +3718,58 @@ class ThingsWorkspace:
                 if write.into_kind is not None and write.into_uuid is not None
                 else None
             )
+        if "recurrence" in selected:
+            if write.action == "repeat":
+                recurrence = (
+                    RecurrenceState()
+                    .fold_rule(write.recurrence_rule)
+                    .fold_paused(write.recurrence_paused)
+                )
+                current = self._library.records.get(write.uuid)
+                desired["recurrence"] = self._v2_recurrence_value(
+                    recurrence,
+                    item=(
+                        replace(current, recurrence=recurrence)
+                        if current is not None
+                        else None
+                    ),
+                )
+            elif write.action == "repeat_link":
+                desired["recurrence"] = self._v2_recurrence_from_write(write)
+            elif write.action in {"repeat_progress", "repeat_next"}:
+                current = self._library.records.get(write.uuid)
+                desired["recurrence"] = (
+                    self._v2_recurrence_value(current.recurrence, item=current)
+                    if current is not None
+                    else None
+                )
+            elif write.action == "create":
+                desired["recurrence"] = self._v2_recurrence_from_write(write)
+            else:
+                desired["recurrence"] = None
         return desired
+
+    def _v2_recurrence_from_write(self, write: Write) -> JsonDict | None:
+        recurrence = RecurrenceState()
+        if write.recurrence_rule is not None:
+            recurrence = recurrence.fold_rule(write.recurrence_rule).fold_paused(
+                write.recurrence_paused
+            )
+        elif write.recurrence_links:
+            recurrence = recurrence.fold_links(write.recurrence_links)
+        else:
+            return None
+        projected = Record(
+            uuid=write.uuid,
+            kind=write.kind,
+            title=write.title or "",
+            recurrence=recurrence,
+            recurrence_created_through=write.recurrence_created_through,
+            recurrence_instance_count=write.recurrence_instance_count or 0,
+            recurrence_completed_on=write.recurrence_completed_on,
+            recurrence_next_on=write.recurrence_next_on,
+        )
+        return self._v2_recurrence_value(recurrence, item=projected)
 
     @staticmethod
     def _v2_write_start(write: Write) -> str | None:
@@ -2874,9 +3812,92 @@ class ThingsWorkspace:
         if "remind_at" in selected:
             values["remind_at"] = self._reminder(item)
         if "into" in selected:
-            values["into_id"] = f"project:{item.parent_uuid}" if item.parent_uuid else f"area:{item.area_uuid}" if item.area_uuid else None
+            values["into_id"] = (
+                f"project:{item.parent_uuid}"
+                if item.parent_uuid
+                else f"area:{item.area_uuid}"
+                if item.area_uuid
+                else None
+            )
+        if "recurrence" in selected:
+            rt2 = _rt2_fact(item)
+            values["recurrence"] = (
+                rt2.model_dump()
+                if rt2 is not None
+                else self._v2_recurrence_value(item.recurrence, item=item)
+            )
         return values
 
+    def _v2_recurrence_value(
+        self, recurrence: RecurrenceState, *, item: Record | None = None
+    ) -> JsonDict | None:
+        if recurrence.role == "none":
+            return None
+        resolved = recurrence
+        bookkeeping = item
+        template_kind: PublicKind = item.public_kind if item is not None else "task"
+        if recurrence.role == "instance" and recurrence.template_uuid is not None:
+            template = self._library.records.get(recurrence.template_uuid)
+            if template is not None and template.recurrence.role == "template":
+                resolved = template.recurrence
+                bookkeeping = template
+                template_kind = template.public_kind
+        kind = (
+            "template"
+            if recurrence.role == "template"
+            else "fixed_instance"
+            if resolved.repeat_type == "fixed"
+            else "after_completion_instance"
+            if resolved.repeat_type == "after_completion"
+            else "unknown"
+        )
+        until = _repeat_end(resolved)
+        return {
+            "kind": kind,
+            "template_id": (
+                f"{template_kind}:{recurrence.template_uuid}"
+                if recurrence.template_uuid is not None
+                else None
+            ),
+            "mode": (
+                resolved.repeat_type
+                if resolved.repeat_type in {"fixed", "after_completion"}
+                else None
+            ),
+            "unit": resolved.unit,
+            "interval": resolved.interval,
+            "weekdays": [
+                _WEEKDAY_NAMES[code]
+                for code in resolved.weekday_codes
+                if code in _WEEKDAY_NAMES
+            ],
+            "paused": resolved.paused,
+            "created_through": (
+                bookkeeping.recurrence_created_through.isoformat()
+                if bookkeeping is not None
+                and bookkeeping.recurrence_created_through is not None
+                else None
+            ),
+            "generated_count": (
+                bookkeeping.recurrence_instance_count
+                if bookkeeping is not None
+                else 0
+            ),
+            "completed_on": (
+                bookkeeping.recurrence_completed_on.isoformat()
+                if bookkeeping is not None
+                and bookkeeping.recurrence_completed_on is not None
+                else None
+            ),
+            "next_on": (
+                bookkeeping.recurrence_next_on.isoformat()
+                if bookkeeping is not None
+                and bookkeeping.recurrence_next_on is not None
+                else None
+            ),
+            "on": [value.model_dump() for value in _public_repeat_on(resolved)],
+            "until": until,
+        }
 
     def commit(self, call: CommitCall) -> Result:
         fingerprint = _fingerprint(call.model_dump(mode="json", by_alias=True))
@@ -3141,6 +4162,23 @@ class ThingsWorkspace:
             return self._library.inbox(limit=10_000)
         if view == "week":
             return self._library.week(today=today, limit=10_000)
+        if view == "repeating":
+            return sorted(
+                [
+                    item
+                    for item in self._library.records.values()
+                    if (
+                        item.recurrence.role == "template"
+                        or item.repeater is not None
+                    )
+                    and not item.trashed
+                ],
+                key=lambda item: (
+                    item.start or date.max,
+                    item.sort_index,
+                    item.title,
+                ),
+            )
         if view == "trash":
             return self._library.trash()
         if view == "system":
@@ -3963,22 +5001,23 @@ class ThingsWorkspace:
                 compact_direct_tag_ids = compact_direct_tag_ids[:40]
                 tags_truncated = True
         recurrence_kind = self._recurrence_kind(item)
-        recurrence = None
-        if recurrence_kind != "none":
+        recurrence = _rt2_fact(item)
+        if recurrence is None and recurrence_kind != "none":
             rule = item.recurrence
+            bookkeeping = item
+            template_id: str | None = None
             if item.recurrence.role == "instance":
                 template_record = self._library.records.get(
                     template_uuid_of(item) or ""
                 )
                 if template_record is not None and template_record.recurrence.rule:
                     rule = template_record.recurrence
+                    bookkeeping = template_record
+                    template_id = template_record.id
+            until = _repeat_end(rule)
             recurrence = RecurrenceFact(
                 kind=recurrence_kind,
-                template_id=(
-                    f"task:{template}"
-                    if (template := template_uuid_of(item))
-                    else None
-                ),
+                template_id=template_id,
                 mode=(
                     cast(RepeatMode, rule.repeat_type)
                     if rule.repeat_type in {"fixed", "after_completion"}
@@ -3992,6 +5031,25 @@ class ThingsWorkspace:
                     if code in _WEEKDAY_NAMES
                 ],
                 linked_item_ids=linked_ids[:40],
+                paused=rule.paused,
+                created_through=(
+                    bookkeeping.recurrence_created_through.isoformat()
+                    if bookkeeping.recurrence_created_through
+                    else None
+                ),
+                generated_count=bookkeeping.recurrence_instance_count,
+                completed_on=(
+                    bookkeeping.recurrence_completed_on.isoformat()
+                    if bookkeeping.recurrence_completed_on
+                    else None
+                ),
+                next_on=(
+                    bookkeeping.recurrence_next_on.isoformat()
+                    if bookkeeping.recurrence_next_on
+                    else None
+                ),
+                on=_public_repeat_on(rule),
+                until=until,
             )
         into_id = (
             f"project:{item.parent_uuid}"
@@ -4466,6 +5524,16 @@ class ThingsWorkspace:
                         common_create,
                         uuid=repeat_template_uuid,
                         recurrence_rule=rule,
+                        recurrence_created_through=(
+                            start or self._clock().date()
+                        )
+                        + timedelta(days=1),
+                        start=None,
+                        remind=None,
+                        tonight=False,
+                        someday=True,
+                        inbox=False,
+                        anytime=False,
                         sort_index=sort_index,
                         today_index=None,
                     )
@@ -4473,7 +5541,6 @@ class ThingsWorkspace:
                 common_create = replace(
                     common_create,
                     recurrence_links=[repeat_template_uuid],
-                    recurrence_generated=True,
                 )
                 warnings.append("This creates future generated Tasks.")
                 context.risky = True
@@ -4602,19 +5669,23 @@ class ThingsWorkspace:
                     notes=desired.notes,
                     into_uuid=desired.home[0],
                     into_kind=desired.home[1],
-                    inbox=desired.home[2],
-                    anytime=desired.home[3],
-                    start=desired.start,
+                    inbox=False,
+                    anytime=False,
                     deadline=desired.deadline,
-                    remind=desired.remind,
-                    tonight=desired.tonight,
-                    someday=desired.someday,
                     tag_uuids=desired.tag_uuids,
                     heading_uuid=desired.heading_uuid,
                     sort_index=desired.sort_index,
-                    today_index=desired.today_index,
+                    today_index=None,
                     owner_today=self._clock().date(),
                     recurrence_rule=rule,
+                    recurrence_created_through=(
+                        desired.start or self._clock().date()
+                    )
+                    + timedelta(days=1),
+                    start=None,
+                    remind=None,
+                    tonight=False,
+                    someday=True,
                 )
             )
             for projected_row in desired.checklist.rows:
@@ -4634,7 +5705,6 @@ class ThingsWorkspace:
                     uuid=item.uuid,
                     kind="task",
                     recurrence_links=[template_uuid],
-                    recurrence_generated=True,
                 )
             )
             preconditions[f"scope:repeat:{template_uuid}"] = (
@@ -4656,7 +5726,9 @@ class ThingsWorkspace:
                     if template is not None:
                         target = template
                 if any(
-                    write.action == "permanent_delete" and write.uuid == target.uuid
+                    write.action == "repeat"
+                    and write.uuid == target.uuid
+                    and write.clear_recurrence_rule
                     for write in writes
                 ):
                     return True
@@ -4675,23 +5747,22 @@ class ThingsWorkspace:
                             recurrence_links=[],
                         )
                     )
-                for checklist_row in target.checklists:
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=checklist_row.uuid,
-                            checklist_parent_uuid=target.uuid,
-                            checklist_remove=True,
-                        )
+                writes.append(
+                    Write(
+                        action="repeat",
+                        uuid=target.uuid,
+                        kind="task",
+                        clear_recurrence_rule=True,
+                        recurrence_paused=False,
                     )
-                writes.append(_delete_write(target))
+                )
                 preconditions[target.id] = self._revision(target)
                 preconditions[f"scope:repeat:{target.uuid}"] = (
                     self._recurrence_scope_revision(target.uuid)
                 )
                 summary.append(f"Stop repeating: {target.title}")
                 warnings.append(
-                    "The repeat template will be deleted. Linked copies stay as ordinary Tasks."
+                    "The repeat template and linked copies become ordinary Tasks."
                 )
                 context.risky = True
                 return True
@@ -5403,6 +6474,25 @@ class ThingsWorkspace:
                     )
                 )
             item = self._required_exact(change.id)
+            if item.repeater is not None and any(
+                field in change.model_fields_set
+                for field in {
+                    "status",
+                    "start",
+                    "deadline",
+                    "remind_at",
+                    "repeat",
+                    "repeat_interval",
+                    "trash",
+                    "lifecycle",
+                }
+            ):
+                raise _Abort(
+                    self._unsupported(
+                        "This item uses the newer Things repeater engine. Keep its "
+                        "schedule and lifecycle native until verified write deltas are available."
+                    )
+                )
             revision = self._revision(item)
             if revision != change.if_revision:
                 raise _Abort(self._stale(f"{item.title} changed. Read it again."))
@@ -7213,7 +8303,7 @@ class ThingsWorkspace:
         if write.action == "checklist":
             action = "Remove" if write.checklist_remove else "Change"
             return f'{action} checklist row "{write.title or write.uuid}" on "{title}".'
-        if write.action in {"repeat", "repeat_link"}:
+        if write.action in {"repeat", "repeat_link", "repeat_progress", "repeat_next"}:
             return f'Change repetition for {kind} "{title}".'
 
         changes: list[str] = []
@@ -7893,7 +8983,14 @@ class ThingsWorkspace:
             write.uuid
             for write in writes
             if write.kind in {"task", "project"}
-            and write.action not in {"checklist", "repeat", "repeat_link"}
+            and write.action
+            not in {
+                "checklist",
+                "repeat",
+                "repeat_link",
+                "repeat_progress",
+                "repeat_next",
+            }
         }
         if len(changed) <= 1:
             return None
@@ -7956,7 +9053,14 @@ class ThingsWorkspace:
             for write in writes
             if write.kind in {"task", "project"}
             and write.action
-            not in {"checklist", "repeat", "repeat_link", *tag_actions}
+            not in {
+                "checklist",
+                "repeat",
+                "repeat_link",
+                "repeat_progress",
+                "repeat_next",
+                *tag_actions,
+            }
         }
         if item_uuids:
             parts.append(count_phrase(len(item_uuids), "Task or Project change"))
@@ -8117,6 +9221,24 @@ class ThingsWorkspace:
             "sort": item.sort_index,
             "today_sort": item.today_index,
             "recurrence": cast(object, asdict(item.recurrence)),
+            "repeater": item.repeater,
+            "recurrence_created_through": (
+                item.recurrence_created_through.isoformat()
+                if item.recurrence_created_through
+                else None
+            ),
+            "recurrence_instance_count": item.recurrence_instance_count,
+            "recurrence_completed_on": (
+                item.recurrence_completed_on.isoformat()
+                if item.recurrence_completed_on
+                else None
+            ),
+            "recurrence_next_on": (
+                item.recurrence_next_on.isoformat()
+                if item.recurrence_next_on
+                else None
+            ),
+            "leavable": item.leavable,
             "checklist": [
                 [row.uuid, row.title, row.status, row.sort_index]
                 for row in sorted(
@@ -8131,7 +9253,13 @@ class ThingsWorkspace:
         return "r_" + _digest([row.uuid, row.title, row.status, row.sort_index])
 
     def _scope_revision(self, items: list[Record]) -> str:
-        return "s_" + _digest([[item.id, self._revision(item)] for item in items])
+        unique = {item.id: item for item in items}
+        return "s_" + _digest(
+            [
+                [item_id, self._revision(item)]
+                for item_id, item in sorted(unique.items())
+            ]
+        )
 
     def _workspace_revision(self) -> str:
         items = sorted(self._library.records.values(), key=lambda item: item.id)
@@ -8234,6 +9362,10 @@ class ThingsWorkspace:
         for item in self._library.records.values():
             if item.parent_uuid is not None:
                 by_parent.setdefault(item.parent_uuid, []).append(item)
+            elif item.heading_uuid is not None:
+                # Native Things stores a task placed under a heading through
+                # ``agr`` alone; it does not duplicate the Project in ``pr``.
+                by_parent.setdefault(item.heading_uuid, []).append(item)
         ordered: list[Record] = []
 
         def visit(parent_uuid: str, path: frozenset[str]) -> None:
@@ -8251,13 +9383,129 @@ class ThingsWorkspace:
         visit(uuid, frozenset({uuid}))
         return ordered
 
+    def _clone_project_graph_writes(
+        self,
+        source_project_uuid: str,
+        destination_project_uuid: str,
+        *,
+        leavable: bool,
+    ) -> list[Write]:
+        """Clone one native Project descendant graph with fresh identities."""
+        all_descendants = self._project_descendants(source_project_uuid)
+        by_uuid = {item.uuid: item for item in all_descendants}
+
+        def cloneable(item: Record) -> bool:
+            current = item
+            seen = {item.uuid}
+            while True:
+                if current.trashed:
+                    return False
+                parent_uuid = current.parent_uuid or current.heading_uuid
+                if parent_uuid == source_project_uuid:
+                    return True
+                if parent_uuid is None or parent_uuid in seen:
+                    return False
+                parent = by_uuid.get(parent_uuid)
+                if parent is None:
+                    return False
+                seen.add(parent_uuid)
+                current = parent
+
+        descendants = [item for item in all_descendants if cloneable(item)]
+        if any(item.kind == "project" for item in descendants):
+            raise ValueError(
+                "A repeating Project cannot contain another Project."
+            )
+        if any(
+            item.recurrence.role != "none" or item.repeater is not None
+            for item in descendants
+        ):
+            raise ValueError(
+                "A repeating Project cannot contain another repeating item."
+            )
+        headings = sorted(
+            (item for item in descendants if item.heading),
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        tasks = sorted(
+            (item for item in descendants if item.kind == "task" and not item.heading),
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        uuid_map = {item.uuid: new_uuid() for item in [*headings, *tasks]}
+        writes: list[Write] = []
+        for heading in headings:
+            writes.append(
+                Write(
+                    action="create_heading",
+                    uuid=uuid_map[heading.uuid],
+                    kind="task",
+                    title=heading.title,
+                    into_uuid=destination_project_uuid,
+                    into_kind="project",
+                    status=heading.status,
+                    anytime=True,
+                    sort_index=heading.sort_index,
+                    leavable=leavable,
+                )
+            )
+        for task in tasks:
+            mapped_heading = (
+                uuid_map.get(task.heading_uuid) if task.heading_uuid else None
+            )
+            writes.append(
+                Write(
+                    action="create",
+                    uuid=uuid_map[task.uuid],
+                    kind="task",
+                    title=task.title,
+                    notes=task.notes,
+                    status=task.status,
+                    into_uuid=None if mapped_heading else destination_project_uuid,
+                    into_kind=None if mapped_heading else "project",
+                    start=task.start,
+                    deadline=task.deadline,
+                    remind=task.remind,
+                    tonight=task.tonight,
+                    someday=task.someday,
+                    anytime=task.start is None and not task.someday,
+                    tag_uuids=list(task.tag_uuids),
+                    heading_uuid=mapped_heading,
+                    sort_index=task.sort_index,
+                    today_index=task.today_index,
+                    owner_today=self._clock().date(),
+                    leavable=leavable,
+                )
+            )
+        for task in tasks:
+            parent_uuid = uuid_map[task.uuid]
+            for row in sorted(
+                task.checklists, key=lambda item: (item.sort_index, item.uuid)
+            ):
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=row.title,
+                        checklist_parent_uuid=parent_uuid,
+                        checklist_status=row.status,
+                        checklist_index=row.sort_index,
+                    )
+                )
+        return writes
+
     def _recurrence_scope_revision(self, uuid: str) -> str:
         items: list[Record] = []
         template = self._library.records.get(uuid)
         if template is not None:
             items.append(template)
-        items.extend(self._library.recurrence_instances(uuid))
-        return "s_" + _digest([[item.id, self._revision(item)] for item in items])
+            if template.kind == "project":
+                items.extend(self._project_descendants(template.uuid))
+        current = self._library.recurrence_instances(uuid)
+        items.extend(current)
+        for instance in current:
+            if instance.kind == "project":
+                items.extend(self._project_descendants(instance.uuid))
+        return self._scope_revision(items)
 
     def _recurrence_relationship_is_valid(self, target: Record) -> bool:
         """Check the native one-way link before exposing repeat mutation facts."""
@@ -8267,6 +9515,7 @@ class ThingsWorkspace:
         if recurrence.role == "template":
             return all(
                 candidate.recurrence.role == "instance"
+                and candidate.kind == target.kind
                 for candidate in self._library.recurrence_instances(target.uuid)
             )
         template_uuid = template_uuid_of(target)
@@ -8277,6 +9526,7 @@ class ThingsWorkspace:
             template is not None
             and template.recurrence.role == "template"
             and template.recurrence.rule is not None
+            and template.kind == target.kind
         )
 
     def _recurrence_kind(self, item: Record) -> RecurrenceKind:
@@ -8765,7 +10015,14 @@ def _write_public_id(write: Write) -> str:
 
 def _write_json(write: Write) -> JsonDict:
     payload = cast(JsonDict, asdict(write))
-    for name in ("start", "deadline", "owner_today"):
+    for name in (
+        "start",
+        "deadline",
+        "owner_today",
+        "recurrence_created_through",
+        "recurrence_completed_on",
+        "recurrence_next_on",
+    ):
         value = payload.get(name)
         if isinstance(value, date):
             payload[name] = value.isoformat()
@@ -8775,7 +10032,14 @@ def _write_json(write: Write) -> JsonDict:
 def _write_from_json(payload: dict[str, object]) -> Write:
     allowed = {field.name for field in fields(Write)}
     values = {key: value for key, value in payload.items() if key in allowed}
-    for name in ("start", "deadline", "owner_today"):
+    for name in (
+        "start",
+        "deadline",
+        "owner_today",
+        "recurrence_created_through",
+        "recurrence_completed_on",
+        "recurrence_next_on",
+    ):
         value = values.get(name)
         if isinstance(value, str):
             values[name] = date.fromisoformat(value)
@@ -8845,9 +10109,20 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
             ))
         ):
             return False
-        if action == "repeat" and not write.recurrence_rule:
+        if (
+            action == "repeat"
+            and not write.recurrence_rule
+            and not write.clear_recurrence_rule
+        ):
             return False
         if action == "repeat_link" and write.recurrence_links is None:
+            return False
+        if action == "repeat_progress" and (
+            write.recurrence_completed_on is None
+            or write.recurrence_next_on is None
+        ):
+            return False
+        if action == "repeat_next" and write.recurrence_instance_count is None:
             return False
     return True
 
@@ -8863,7 +10138,7 @@ _LEGACY_WRITE_ACTIONS = frozenset({
     "create", "create_heading", "update", "complete", "cancel", "move", "tags",
     "rename_area", "delete_area", "trash", "restore", "permanent_delete",
     "ensure_tag", "rename_tag", "reparent_tag", "delete_tag", "checklist",
-    "repeat", "repeat_link",
+    "repeat", "repeat_link", "repeat_progress", "repeat_next",
 })
 _LEGACY_WRITE_KINDS = frozenset({"task", "project", "area"})
 

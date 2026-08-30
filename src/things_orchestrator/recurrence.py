@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
@@ -16,8 +16,8 @@ RepeatType = Literal["none", "fixed", "after_completion", "unknown"]
 
 _UNITS: dict[int, RepeatUnit] = {
     4: "year",
-    8: "day",
-    16: "month",
+    8: "month",
+    16: "day",
     256: "week",
 }
 _UNIT_CODES: dict[RepeatUnit, int] = {unit: code for code, unit in _UNITS.items()}
@@ -35,6 +35,7 @@ class RecurrenceState:
     template_uuid: str | None = None
     rule: dict[str, JsonValue] | None = None
     links: tuple[str, ...] = ()
+    paused: bool = False
 
     @property
     def unit(self) -> RepeatUnit | None:
@@ -77,6 +78,9 @@ class RecurrenceState:
         unit: RepeatUnit | None = None,
         interval: int | None = None,
         weekday_codes: list[int] | None = None,
+        offsets: list[dict[str, JsonValue]] | None = None,
+        until: date | None = None,
+        until_set: bool = False,
         remove: bool = False,
     ) -> RecurrenceState:
         """Apply one atomic semantic change to an existing repeat template.
@@ -88,7 +92,8 @@ class RecurrenceState:
         """
         self.validate_interval_template(kind=kind)
         if remove and any(
-            value is not None for value in (mode, unit, interval, weekday_codes)
+            value is not None
+            for value in (mode, unit, interval, weekday_codes, offsets)
         ):
             raise ValueError("Removing a repeat rule cannot combine with rule changes")
         if (
@@ -97,6 +102,8 @@ class RecurrenceState:
             and unit is None
             and interval is None
             and weekday_codes is None
+            and offsets is None
+            and not until_set
         ):
             raise ValueError("A repeat transition needs a rule change or remove")
         if interval is not None and (
@@ -110,6 +117,8 @@ class RecurrenceState:
         if unit is not None and unit not in _UNIT_CODES:
             raise ValueError("Repeat unit must be day, week, month, or year")
         _validate_weekday_codes(weekday_codes)
+        if offsets is not None and weekday_codes is not None:
+            raise ValueError("Use one selected-date representation")
 
         rule = self.rule
         assert rule is not None
@@ -129,7 +138,14 @@ class RecurrenceState:
             "fixed" if self.repeat_type == "fixed" else "after_completion"
         )
         target_unit = unit or current_unit
-        if target_mode == "after_completion" and weekday_codes is not None:
+        if target_mode == "after_completion":
+            if weekday_codes is not None or offsets is not None:
+                raise ValueError("Selected dates need a fixed repeat rule")
+            if until_set and until is not None:
+                raise ValueError("After-completion repeats do not use an end date")
+        if offsets is not None:
+            _validate_offsets(offsets, unit=target_unit)
+        if weekday_codes is not None and target_unit != "week":
             raise ValueError("Weekday selectors need a fixed weekly repeat rule")
 
         changed = deepcopy(rule)
@@ -143,6 +159,7 @@ class RecurrenceState:
             self.repeat_type == "after_completion"
             or (unit is not None and unit != current_unit)
             or weekday_codes is not None
+            or offsets is not None
         )
         if target_mode == "after_completion" and (
             self.repeat_type != "after_completion"
@@ -150,14 +167,24 @@ class RecurrenceState:
         ):
             changed["of"] = []
         elif rebuild_fixed_offsets:
-            changed["of"] = _offsets_for_unit(
-                rule,
-                target_unit,
-                weekday_codes=weekday_codes,
+            changed["of"] = (
+                cast(list[JsonValue], deepcopy(offsets))
+                if offsets is not None
+                else _offsets_for_unit(
+                    rule,
+                    target_unit,
+                    weekday_codes=weekday_codes,
+                )
             )
         if unit is not None and unit != current_unit:
             if isinstance(rule.get("sr"), (int, float)):
                 changed["ts"] = -7 if target_unit == "year" else 0
+        if mode == "after_completion":
+            changed["ed"] = _NEVER
+            changed["rc"] = 0
+        if until_set:
+            changed["ed"] = _day_timestamp(until) if until is not None else _NEVER
+            changed["rc"] = 0
         return replace(
             self,
             repeat_type=target_mode,
@@ -166,13 +193,15 @@ class RecurrenceState:
 
     def validate_interval_template(self, *, kind: str) -> None:
         if (
-            kind != "task"
+            kind not in {"task", "project"}
             or self.role != "template"
             or self.repeat_type not in {"fixed", "after_completion"}
             or self.rule is None
             or self.links
         ):
-            raise ValueError("Repeat changes need an exact repeating Task template")
+            raise ValueError(
+                "Repeat changes need an exact repeating Task or Project template"
+            )
 
     def fold_rule(self, value: object) -> RecurrenceState:
         if isinstance(value, dict):
@@ -189,7 +218,7 @@ class RecurrenceState:
                 rule=rule,
             )
         if self.role == "template":
-            return RecurrenceState(links=self.links)
+            return RecurrenceState(links=self.links, paused=self.paused)
         return replace(self, rule=None)
 
     def fold_links(self, value: object) -> RecurrenceState:
@@ -209,8 +238,11 @@ class RecurrenceState:
                 links=links,
             )
         if self.role == "instance":
-            return RecurrenceState()
+            return RecurrenceState(paused=self.paused)
         return replace(self, template_uuid=None, links=())
+
+    def fold_paused(self, value: object) -> RecurrenceState:
+        return replace(self, paused=bool(value))
 
     def resolve_instance_type(self, repeat_type: RepeatType | None) -> RecurrenceState:
         if self.role != "instance":
@@ -270,6 +302,8 @@ def new_rule(
     interval: int,
     anchor: date,
     weekday_codes: list[int] | None = None,
+    offsets: list[dict[str, JsonValue]] | None = None,
+    until: date | None = None,
 ) -> dict[str, JsonValue]:
     """Build the complete observed Cloud rule for a new repeat template."""
     if not 1 <= interval <= _MAX_INTERVAL:
@@ -279,30 +313,39 @@ def new_rule(
         raise ValueError("Weekday selectors need a weekly repeat rule")
     if any(code < 0 or code > 6 for code in codes) or len(codes) != len(set(codes)):
         raise ValueError("Weekday selectors must be unique values from 0 through 6")
-    offsets: list[JsonValue]
+    if offsets is not None and weekday_codes is not None:
+        raise ValueError("Use one selected-date representation")
     if mode == "after_completion":
-        offsets = []
+        selected_offsets: list[JsonValue] = []
+    elif offsets is not None:
+        selected_offsets = cast(list[JsonValue], deepcopy(offsets))
     elif unit == "week":
-        offsets = [{"wd": code} for code in (codes or [(anchor.weekday() + 1) % 7])]
+        selected_offsets = [
+            {"wd": code} for code in (codes or [(anchor.weekday() + 1) % 7])
+        ]
     elif unit == "month":
-        offsets = [{"dy": anchor.day - 1}]
+        selected_offsets = [{"dy": anchor.day - 1}]
     elif unit == "year":
-        offsets = [{"dy": anchor.day - 1, "mo": anchor.month - 1}]
+        selected_offsets = [{"dy": anchor.day - 1, "mo": anchor.month - 1}]
     else:
-        offsets = []
+        selected_offsets = []
     stamp = int(datetime.combine(anchor, time.min, tzinfo=timezone.utc).timestamp())
     return {
         "tp": _MODE_CODES[mode],
         "fu": _UNIT_CODES[unit],
         "fa": interval,
-        "of": offsets,
+        "of": selected_offsets,
         "sr": stamp,
         "ia": stamp,
-        "ed": _NEVER,
+        "ed": _day_timestamp(until) if until is not None else _NEVER,
         "rc": 0,
         "ts": -7 if unit == "year" else 0,
         "rrv": 4,
     }
+
+
+def _day_timestamp(value: date) -> int:
+    return int(datetime.combine(value, time.min, tzinfo=timezone.utc).timestamp())
 
 
 def _offsets_for_unit(
@@ -342,3 +385,55 @@ def _validate_weekday_codes(weekday_codes: list[int] | None) -> None:
         raise ValueError("Weekday selectors must be unique values from 0 through 6")
     if len(weekday_codes) != len(set(weekday_codes)):
         raise ValueError("Weekday selectors must be unique values from 0 through 6")
+
+
+def _validate_offsets(
+    offsets: list[dict[str, JsonValue]], *, unit: RepeatUnit
+) -> None:
+    if not offsets:
+        raise ValueError("Selected dates need at least one value")
+    if unit == "day":
+        raise ValueError("Daily repeats do not use selected dates")
+    for offset in offsets:
+        month = offset.get("mo")
+        day = offset.get("dy")
+        weekday = offset.get("wd")
+        ordinal = offset.get("wdo")
+        if unit == "week" and (
+            not isinstance(weekday, int)
+            or isinstance(weekday, bool)
+            or month is not None
+            or day is not None
+            or ordinal is not None
+        ):
+            raise ValueError("Weekly selected dates need plain weekdays")
+        if unit == "month" and month is not None:
+            raise ValueError("Monthly selected dates do not name a month")
+        if unit == "year" and (
+            not isinstance(month, int)
+            or isinstance(month, bool)
+            or not 0 <= month <= 11
+        ):
+            raise ValueError("Yearly selected dates need a month")
+        if (day is None) == (weekday is None):
+            raise ValueError("Selected dates need exactly one day or weekday")
+        if day is not None and (
+            not isinstance(day, int)
+            or isinstance(day, bool)
+            or day not in {-1, *range(31)}
+        ):
+            raise ValueError("Selected day is outside the supported range")
+        if weekday is not None and (
+            not isinstance(weekday, int)
+            or isinstance(weekday, bool)
+            or not 0 <= weekday <= 6
+        ):
+            raise ValueError("Selected weekday is outside the supported range")
+        if unit in {"month", "year"} and weekday is not None and ordinal not in {
+            -1,
+            1,
+            2,
+            3,
+            4,
+        }:
+            raise ValueError("Monthly and yearly weekdays need an ordinal")

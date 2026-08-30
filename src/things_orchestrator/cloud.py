@@ -59,7 +59,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 5
+_CACHE_VERSION = 6
 
 
 class CloudError(RuntimeError):
@@ -515,6 +515,20 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
             item.recurrence = item.recurrence.fold_rule(payload.get("rr"))
         if "rt" in payload:
             item.recurrence = item.recurrence.fold_links(payload.get("rt"))
+        if "rp" in payload:
+            item.repeater = deepcopy(payload.get("rp"))
+        if "icp" in payload:
+            item.recurrence = item.recurrence.fold_paused(payload.get("icp"))
+        if "icsd" in payload:
+            item.recurrence_created_through = from_ts(payload.get("icsd"))
+        if "icc" in payload and payload["icc"] is not None:
+            item.recurrence_instance_count = int(payload["icc"])
+        if "acrd" in payload:
+            item.recurrence_completed_on = from_ts(payload.get("acrd"))
+        if "tir" in payload and item.recurrence.role == "template":
+            item.recurrence_next_on = from_ts(payload.get("tir"))
+        if "lt" in payload and payload["lt"] is not None:
+            item.leavable = bool(payload["lt"])
         library.records[uuid] = item
     for event in checklists:
         raw = event.get("p")
@@ -668,8 +682,6 @@ class CloudLibrary(MemoryLibrary):
         )
 
     def matches(self, writes: list[Write]) -> bool:
-        """Match the safe Cloud envelopes, including Task7 index normalization."""
-
         try:
             envelopes, _ = self._plan(writes)
         except CloudError:
@@ -889,8 +901,18 @@ def _record_matches_payload(item: Record, payload: dict[str, Any]) -> bool:
         "rr" not in payload or item.recurrence.rule == payload["rr"],
         "rt" not in payload
         or list(item.recurrence.links) == [str(link) for link in payload["rt"]],
-        "lt" not in payload
-        or bool(payload["lt"]) == (item.recurrence.role == "instance"),
+        "rp" not in payload or item.repeater == payload["rp"],
+        "icp" not in payload or item.recurrence.paused == bool(payload["icp"]),
+        "icsd" not in payload
+        or item.recurrence_created_through == from_ts(payload.get("icsd")),
+        "icc" not in payload
+        or item.recurrence_instance_count == int(payload.get("icc") or 0),
+        "acrd" not in payload
+        or item.recurrence_completed_on == from_ts(payload.get("acrd")),
+        "tir" not in payload
+        or payload.get("acrd") is None
+        or item.recurrence_next_on == from_ts(payload.get("tir")),
+        "lt" not in payload or item.leavable == bool(payload.get("lt")),
     ]
     if "tp" in payload:
         expected_kind: Kind = "project" if payload["tp"] == 1 else "task"
@@ -974,7 +996,12 @@ class _CloudPlanHandler(_MutationHandler[None]):
             raise CloudError("Projects cannot enter Inbox")
         if write.heading_uuid is not None:
             heading = self.library.records.get(write.heading_uuid)
-            project_uuid = write.into_uuid or (current.parent_uuid if current else None)
+            project_uuid = (
+                write.into_uuid
+                or (current.parent_uuid if current else None)
+                or self.created_headings.get(write.heading_uuid)
+                or (heading.parent_uuid if heading is not None else None)
+            )
             existing = (
                 heading is not None
                 and heading.heading
@@ -1107,12 +1134,34 @@ class _CloudPlanHandler(_MutationHandler[None]):
         write = mutation.write
         current = self.library.records.get(write.uuid)
         if write.action == "repeat":
-            if current is None or write.recurrence_rule is None:
+            if current is None or (
+                write.recurrence_rule is None and not write.clear_recurrence_rule
+            ):
                 raise CloudError("Repeat changes need an exact repeating Task template")
             try:
                 current.recurrence.validate_interval_template(kind=current.kind)
             except ValueError as error:
                 raise CloudError(str(error)) from error
+        if write.action == "repeat_progress" and (
+            current is None
+            or current.recurrence.role != "template"
+            or current.recurrence.repeat_type != "after_completion"
+            or write.recurrence_completed_on is None
+            or write.recurrence_next_on is None
+        ):
+            raise CloudError(
+                "Repeat progress needs an after-completion template and two dates"
+            )
+        if write.action == "repeat_next" and (
+            current is None
+            or current.recurrence.role != "template"
+            or write.recurrence_instance_count is None
+            or write.recurrence_instance_count
+            != current.recurrence_instance_count + 1
+        ):
+            raise CloudError(
+                "Create Next Copy needs the next count for an exact repeat template"
+            )
         self._emit(write)
 
 
@@ -1169,7 +1218,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                     "ts": [parent_uuid] if parent_uuid else [],
                     "ix": index,
                     "cd": now,
-                    "md": now,
+                    "md": None,
                     "lt": False,
                     "xx": {"sn": {}, "_t": "oo"},
                 },
@@ -1233,13 +1282,31 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
     def recurrence(self, mutation: _RecurrenceMutation) -> Envelope:
         write = mutation.write
         payload: dict[str, Any] = {"md": _now()}
-        payload["rr" if write.action == "repeat" else "rt"] = deepcopy(
-            write.recurrence_rule
-            if write.action == "repeat"
-            else list(write.recurrence_links or [])
-        )
-        if write.action == "repeat_link" and write.recurrence_generated:
-            payload["lt"] = True
+        if write.action == "repeat_progress":
+            payload.update(
+                {
+                    "acrd": day_ts(write.recurrence_completed_on)
+                    if write.recurrence_completed_on
+                    else None,
+                    "tir": day_ts(write.recurrence_next_on)
+                    if write.recurrence_next_on
+                    else None,
+                }
+            )
+        elif write.action == "repeat_next":
+            payload = {"icc": write.recurrence_instance_count}
+        else:
+            payload["rr" if write.action == "repeat" else "rt"] = (
+                None
+                if write.action == "repeat" and write.clear_recurrence_rule
+                else deepcopy(
+                    write.recurrence_rule
+                    if write.action == "repeat"
+                    else list(write.recurrence_links or [])
+                )
+            )
+        if write.recurrence_paused is not None:
+            payload["icp"] = write.recurrence_paused
         return Envelope(
             uuid=write.uuid, action=1, kind=self._entity(write), payload=payload
         )
@@ -1436,7 +1503,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
             "tt": write.title,
             "ix": write.sort_index or 0,
             "tg": write.tag_uuids or [],
-            "md": now,
+            "md": None,
             "xx": {"sn": {}, "_t": "oo"},
         }
     st = (
@@ -1478,7 +1545,7 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "ss": _status_code(write.status or "open"),
         "tr": False,
         "dl": [],
-        "icp": False,
+        "icp": bool(write.recurrence_paused),
         "st": st,
         "ar": ar,
         "tt": write.title,
@@ -1489,14 +1556,16 @@ def _create_payload(write: Write) -> dict[str, Any]:
         "agr": [write.heading_uuid] if write.heading_uuid else [],
         "ix": write.sort_index or 0,
         "cd": now,
-        "lt": write.recurrence_generated,
-        "icc": 0,
-        "md": now,
+        "lt": write.leavable,
+        "icc": write.recurrence_instance_count or 0,
+        "md": None,
         "ti": write.today_index or 0,
         "dd": day_ts(write.deadline) if write.deadline else None,
         "ato": schedule.get("ato"),
         "nt": _note(write.notes) if write.notes else None,
-        "icsd": None,
+        "icsd": day_ts(write.recurrence_created_through)
+        if write.recurrence_created_through
+        else None,
         "pr": pr,
         "rp": None,
         "acrd": None,
@@ -1553,10 +1622,23 @@ def _record_to_json(item: Record) -> dict[str, Any]:
         "recurrence_template_uuid": item.recurrence.template_uuid,
         "recurrence_rule": item.recurrence.rule,
         "recurrence_links": list(item.recurrence.links),
+        "recurrence_paused": item.recurrence.paused,
+        "repeater": deepcopy(item.repeater),
+        "recurrence_created_through": item.recurrence_created_through.isoformat()
+        if item.recurrence_created_through
+        else None,
+        "recurrence_instance_count": item.recurrence_instance_count,
+        "recurrence_completed_on": item.recurrence_completed_on.isoformat()
+        if item.recurrence_completed_on
+        else None,
+        "recurrence_next_on": item.recurrence_next_on.isoformat()
+        if item.recurrence_next_on
+        else None,
         "heading": item.heading,
         "sort_index": item.sort_index,
         "today_index": item.today_index,
         "entity": item.entity,
+        "leavable": item.leavable,
         "checklists": [
             {
                 "uuid": line.uuid,
@@ -1627,11 +1709,30 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             template_uuid=payload.get("recurrence_template_uuid"),
             rule=raw_rule,
             links=tuple(raw_links),
+            paused=bool(payload.get("recurrence_paused")),
+        ),
+        repeater=deepcopy(payload.get("repeater")),
+        recurrence_created_through=(
+            date.fromisoformat(payload["recurrence_created_through"])
+            if payload.get("recurrence_created_through")
+            else None
+        ),
+        recurrence_instance_count=int(payload.get("recurrence_instance_count") or 0),
+        recurrence_completed_on=(
+            date.fromisoformat(payload["recurrence_completed_on"])
+            if payload.get("recurrence_completed_on")
+            else None
+        ),
+        recurrence_next_on=(
+            date.fromisoformat(payload["recurrence_next_on"])
+            if payload.get("recurrence_next_on")
+            else None
         ),
         heading=bool(payload.get("heading")),
         sort_index=int(payload.get("sort_index") or 0),
         today_index=int(payload.get("today_index") or 0),
         entity=str(payload.get("entity") or ""),
+        leavable=bool(payload.get("leavable")),
         checklists=[
             ChecklistLine(
                 uuid=str(line["uuid"]),

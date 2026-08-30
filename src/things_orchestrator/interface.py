@@ -42,6 +42,7 @@ View = Literal[
     "today",
     "inbox",
     "week",
+    "repeating",
     "weekly_review",
     "system",
     "project",
@@ -1545,7 +1546,15 @@ class ChecklistFact(StrictModel):
     order: int = Field(ge=_ORDER_MIN, le=_ORDER_MAX)
 
 
+class RepeatOnFact(StrictModel):
+    month: int | None = Field(default=None, ge=1, le=12)
+    day: int | None = None
+    weekday: Weekday | None = None
+    ordinal: int | None = None
+
+
 class RecurrenceFact(StrictModel):
+    engine: Literal["rt1", "rt2"] = "rt1"
     kind: RecurrenceKind
     template_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
     mode: Literal["fixed", "after_completion"] | None = None
@@ -1553,6 +1562,16 @@ class RecurrenceFact(StrictModel):
     interval: int | None = Field(default=None, ge=1, le=366)
     weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
+    paused: bool = False
+    created_through: str | None = Field(default=None, max_length=10)
+    generated_count: int = Field(default=0, ge=0)
+    completed_on: str | None = Field(default=None, max_length=10)
+    next_on: str | None = Field(default=None, max_length=10)
+    on: list[RepeatOnFact] = Field(default_factory=list, max_length=64)
+    until: str | None = Field(default=None, max_length=10)
+    start_early_days: int | None = Field(default=None, ge=0, le=366)
+    reminder_time: str | None = None
+    adds_deadline: bool = False
 
     @field_validator("weekdays")
     @classmethod
@@ -1890,6 +1909,7 @@ READ_IN: dict[str, Any] = {
                 "today",
                 "inbox",
                 "week",
+                "repeating",
                 "weekly_review",
                 "system",
                 "project",
@@ -2339,6 +2359,7 @@ _RECURRENCE: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["kind"],
     "properties": {
+        "engine": {"enum": ["rt1", "rt2"], "default": "rt1"},
         "kind": {
             "enum": [
                 "none",
@@ -2374,6 +2395,39 @@ _RECURRENCE: dict[str, Any] = {
             "uniqueItems": True,
             "items": _EXACT_ITEM,
         },
+        "paused": {"type": "boolean", "default": False},
+        "created_through": {"type": "string", "maxLength": 10},
+        "generated_count": {"type": "integer", "minimum": 0, "default": 0},
+        "completed_on": {"type": "string", "maxLength": 10},
+        "next_on": {"type": "string", "maxLength": 10},
+        "on": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                    "day": {"type": "integer"},
+                    "weekday": {
+                        "enum": [
+                            "monday",
+                            "tuesday",
+                            "wednesday",
+                            "thursday",
+                            "friday",
+                            "saturday",
+                            "sunday",
+                        ]
+                    },
+                    "ordinal": {"type": "integer"},
+                },
+            },
+        },
+        "until": {"type": "string", "maxLength": 10},
+        "start_early_days": {"type": "integer", "minimum": 0, "maximum": 366},
+        "reminder_time": {"type": "string"},
+        "adds_deadline": {"type": "boolean", "default": False},
     },
 }
 

@@ -26,13 +26,17 @@ V2_CAPABILITY_KEYS = (
 )
 
 
+def bare_uuid(public_id: str) -> str:
+    return public_id.partition(":")[2]
+
+
 def _view_ids(interface: ThingsV2, view: str) -> set[str]:
     result = interface.dispatch("things_view", {"view": view, "limit": 40})
     ids: set[str] = set()
     while True:
         if result.state != "ok":
             raise RuntimeError(f"{view} read returned {result.state}")
-        ids.update(item.id for item in result.items)
+        ids.update(bare_uuid(item.id) for item in result.items)
         if result.cursor is None:
             return ids
         result = interface.dispatch(
@@ -49,7 +53,7 @@ def _native_ids(view: str) -> set[str]:
         text=True,
     )
     return {
-        f"task:{value.strip()}"
+        value.strip()
         for value in completed.stdout.strip().split(",")
         if value.strip()
     }
