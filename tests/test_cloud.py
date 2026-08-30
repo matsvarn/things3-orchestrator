@@ -125,6 +125,38 @@ def test_fold_keeps_headings_and_drops_recurring_templates() -> None:
     assert library.records["repeat"].is_open() is False
 
 
+@pytest.mark.parametrize("field", ["sr", "dd", "icsd", "acrd", "tir"])
+@pytest.mark.parametrize("value", ["invalid", float("inf"), float("nan"), 10**100])
+def test_malformed_native_repeat_dates_fold_as_missing(
+    field: str, value: object
+) -> None:
+    library = MemoryLibrary()
+
+    fold_events(
+        [
+            {
+                "uuid": "template",
+                "e": "Task7",
+                "t": 0,
+                "p": {
+                    "tt": "Routine",
+                    "tp": 0,
+                    "rr": {"tp": 0, "fu": 256, "fa": 1, "of": []},
+                    field: value,
+                },
+            }
+        ],
+        library=library,
+    )
+
+    template = library.records["template"]
+    assert template.start is None
+    assert template.deadline is None
+    assert template.recurrence_created_through is None
+    assert template.recurrence_completed_on is None
+    assert template.recurrence_next_on is None
+
+
 def test_fold_accepts_task7_and_preserves_its_entity_for_updates(
     tmp_path: Path,
 ) -> None:
