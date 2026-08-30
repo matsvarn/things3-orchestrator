@@ -2897,6 +2897,27 @@ class ThingsWorkspace:
                         touched.append(list(selected))
                         before.append(self._v2_observed(target, selected))
                         display_titles.append(target.title)
+        permanently_deleted = [
+            write.uuid for write in writes if write.action == "permanent_delete"
+        ]
+        permanently_deleted_set = set(permanently_deleted)
+        if (
+            len(permanently_deleted) != len(permanently_deleted_set)
+            or any(
+                write.uuid in permanently_deleted_set
+                and write.action != "permanent_delete"
+                for write in writes
+            )
+        ):
+            return {
+                "state": "rejected",
+                "code": "validation_error",
+                "next_action": "correct_request",
+                "instruction": (
+                    "A batch cannot change an item that it permanently deletes or "
+                    "stop the same repeat series more than once."
+                ),
+            }
         if len(writes) > 120:
             return {
                 "state": "rejected",

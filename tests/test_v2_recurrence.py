@@ -671,6 +671,62 @@ def test_v2_rejects_stop_combined_with_an_ordinary_template_update() -> None:
     assert library.records[current.uuid].recurrence.role == "instance"
 
 
+def test_v2_rejects_cross_item_update_of_a_stopped_template() -> None:
+    template, current = _repeating_pair()
+    interface, library = _interface(template, current)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2822",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"remove": True}}},
+                {"id": template.id, "set": {"title": "Renamed"}},
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert library.records[template.uuid].title == "Plan week"
+    assert library.records[template.uuid].recurrence.role == "template"
+    assert library.records[current.uuid].recurrence.role == "instance"
+
+
+def test_v2_rejects_stopping_the_same_series_twice_in_one_batch() -> None:
+    template, current = _repeating_pair()
+    other = Record(
+        uuid="current-two",
+        kind="task",
+        title="Plan week",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    interface, library = _interface(template, current, other)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2823",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"remove": True}}},
+                {"id": other.id, "set": {"repeat": {"remove": True}}},
+            ],
+        },
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert set(library.records) == {template.uuid, current.uuid, other.uuid}
+    assert all(
+        record.recurrence.role != "none" for record in library.records.values()
+    )
+
+
 def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
     tmp_path: Path,
 ) -> None:
