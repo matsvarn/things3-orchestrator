@@ -435,5 +435,6 @@ def _validate_offsets(
             2,
             3,
             4,
+            5,
         }:
             raise ValueError("Monthly and yearly weekdays need an ordinal")

@@ -16,6 +16,8 @@ conversion, rule edits, pause, resume, stop, completion, and "Create Next
 Copy" for Tasks and Projects. The Project cases clone the native root,
 headings, heading assignments, Tasks, and checklist rows with fresh IDs.
 Cloud fixture tests assert each entity type and sparse bookkeeping payload.
+Stop is a frozen owner-approved operation that keeps generated copies and
+removes the hidden template graph.
 
 A disposable native Things Project established the observed graph and
 lifecycle payloads. The run covered pause, resume, "Create Next Copy", and

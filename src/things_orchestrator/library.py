@@ -1133,6 +1133,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
             or (
                 mutation.write.recurrence_rule is None
                 and not mutation.write.clear_recurrence_rule
+                and mutation.write.recurrence_paused is None
             )
         ):
             raise ValueError("Repeat changes need an exact repeating template")
@@ -1150,7 +1151,13 @@ class _MemoryApplyHandler(_MutationHandler[None]):
             return
         if mutation.action == "repeat":
             item.recurrence.validate_interval_template(kind=item.kind)
-            item.recurrence = item.recurrence.fold_rule(mutation.write.recurrence_rule)
+            if (
+                mutation.write.recurrence_rule is not None
+                or mutation.write.clear_recurrence_rule
+            ):
+                item.recurrence = item.recurrence.fold_rule(
+                    mutation.write.recurrence_rule
+                )
         elif mutation.action == "repeat_link":
             item.recurrence = item.recurrence.fold_links(
                 mutation.write.recurrence_links or []
@@ -1258,6 +1265,8 @@ class _MutationVerifier(_MutationHandler[bool]):
             matches = (
                 item.recurrence.role == "none"
                 if write.clear_recurrence_rule
+                else True
+                if write.recurrence_rule is None
                 else item.recurrence.rule == write.recurrence_rule
             )
         elif mutation.action == "repeat_link":

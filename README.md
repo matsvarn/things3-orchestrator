@@ -49,7 +49,8 @@ optional end date, and a paused state.
 title, notes, start, deadline, reminder, or an RT1 repeat rule. Use
 `{repeat: {paused: true}}`, `{repeat: {paused: false}}`,
 `{repeat: {create_next: true}}`, or `{repeat: {remove: true}}` for repeat
-lifecycle actions. Do not send `repeat: null`.
+lifecycle actions. Stopping keeps generated copies, removes the hidden template
+graph, and returns `awaiting_owner` for CLI approval. Do not send `repeat: null`.
 
 Use `things_complete` and `things_trash` for item lifecycle changes. Completing
 a Project also completes its open descendants in the same frozen operation.
@@ -61,9 +62,9 @@ freezes a private manifest. It never rebases that operation onto newer state.
 Pending and partial outcomes block every write path until CLI-only read-back
 reconciliation settles them or the owner resolves the partial.
 
-Recoverable Trash requires CLI approval. MCP has no approval tool. Enroll the
-owner factor and use the CLI-only commands from a private local or SSH
-terminal:
+Recoverable Trash and stopping a repeat require CLI approval. MCP has no
+approval tool. Enroll the owner factor and use the CLI-only commands from a
+private local or SSH terminal:
 
 ```console
 uv run things-orchestrator owner-factor

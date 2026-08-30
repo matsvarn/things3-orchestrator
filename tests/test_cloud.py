@@ -314,12 +314,12 @@ def test_task7_repeat_pause_round_trips_as_template_bookkeeping(tmp_path: Path) 
             Write(
                 action="repeat",
                 uuid="template",
-                recurrence_rule=library.records["template"].recurrence.rule,
                 recurrence_paused=True,
             )
         ]
     )
 
+    assert set(client.committed[0].payload) == {"md", "icp"}
     assert client.committed[0].payload["icp"] is True
     assert library.records["template"].recurrence.paused is True
 

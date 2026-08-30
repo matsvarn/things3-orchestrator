@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,10 @@ from pydantic import ValidationError
 from things_orchestrator.interface import ReadCall
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import ChecklistLine, MemoryLibrary, Record
+from things_orchestrator.owner_authority import (
+    enroll_owner_factor,
+    verified_authorization,
+)
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
@@ -592,10 +597,25 @@ def test_v2_edits_future_rule_through_current_copy_and_preserves_opaque_fields()
     assert result.items[0].recurrence.interval == 2
 
 
-def test_v2_stop_repeat_keeps_current_copy_as_an_ordinary_task() -> None:
-    interface, library = _interface(*_repeating_pair())
+def test_v2_stop_repeat_needs_owner_and_removes_hidden_template(
+    tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    template, current = _repeating_pair()
+    library = MemoryLibrary([template, current])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    interface = ThingsV2(workspace)
 
-    result = interface.dispatch(
+    staged = interface.dispatch(
         "things_update",
         {
             "request_id": REQUESTS[2],
@@ -603,11 +623,127 @@ def test_v2_stop_repeat_keeps_current_copy_as_an_ordinary_task() -> None:
         },
     )
 
-    assert result.state == "applied"
-    assert library.records["template"].recurrence == RecurrenceState()
+    assert staged.state == "awaiting_owner"
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert operation is not None
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "applied"
+    assert "template" not in library.records
     assert library.records["current"].recurrence == RecurrenceState()
-    assert [item.id for item in result.items] == ["task:current"]
-    assert result.items[0].recurrence is None
+    found = interface.dispatch("things_find", {"text": "Plan week"})
+    assert [item.id for item in found.items] == ["task:current"]
+
+
+def test_v2_stop_repeating_project_removes_only_hidden_template_graph(
+    tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    template = Record(
+        uuid="project-template",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="template",
+            repeat_type="fixed",
+            rule={"tp": 0, "fu": 256, "fa": 1, "of": [{"wd": 1}]},
+        ),
+    )
+    template_heading = Record(
+        uuid="project-template-heading",
+        kind="task",
+        title="Ship",
+        heading=True,
+        parent_uuid=template.uuid,
+    )
+    template_task = Record(
+        uuid="project-template-task",
+        kind="task",
+        title="Deploy",
+        heading_uuid=template_heading.uuid,
+    )
+    current = Record(
+        uuid="project-current",
+        kind="project",
+        title="Release train",
+        recurrence=RecurrenceState(
+            role="instance",
+            repeat_type="fixed",
+            template_uuid=template.uuid,
+            links=(template.uuid,),
+        ),
+    )
+    current_heading = Record(
+        uuid="project-current-heading",
+        kind="task",
+        title="Ship",
+        heading=True,
+        parent_uuid=current.uuid,
+    )
+    current_task = Record(
+        uuid="project-current-task",
+        kind="task",
+        title="Deploy",
+        heading_uuid=current_heading.uuid,
+    )
+    library = MemoryLibrary(
+        [
+            template,
+            template_heading,
+            template_task,
+            current,
+            current_heading,
+            current_task,
+        ]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    interface = ThingsV2(workspace)
+
+    staged = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2819",
+            "items": [
+                {"id": current.id, "set": {"repeat": {"remove": True}}}
+            ],
+        },
+    )
+    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert staged.state == "awaiting_owner" and operation is not None
+    assert "scope:project:project-template" in operation.manifest["preconditions"]
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    result = workspace.host_approve_v2(operation.operation_id, authorization)
+
+    assert result["state"] == "applied"
+    assert set(library.records) == {
+        current.uuid,
+        current_heading.uuid,
+        current_task.uuid,
+    }
+    assert library.records[current.uuid].recurrence == RecurrenceState()
 
 
 def test_v2_pauses_and_resumes_the_template_through_the_current_copy() -> None:
@@ -683,6 +819,39 @@ def test_v2_creates_selected_monthly_dates_with_an_end_date() -> None:
         {"month": None, "day": 15, "weekday": None, "ordinal": None},
         {"month": None, "day": None, "weekday": "tuesday", "ordinal": 3},
         {"month": None, "day": -1, "weekday": None, "ordinal": None},
+    ]
+
+
+def test_v2_edits_a_monthly_rule_to_the_fifth_weekday() -> None:
+    template, current = _repeating_pair()
+    template.recurrence = RecurrenceState(
+        role="template",
+        repeat_type="fixed",
+        rule={"tp": 0, "fu": 8, "fa": 1, "of": [{"wd": 2, "wdo": 3}]},
+    )
+    interface, library = _interface(template, current)
+
+    result = interface.dispatch(
+        "things_update",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2820",
+            "items": [
+                {
+                    "id": current.id,
+                    "set": {
+                        "repeat": {
+                            "on": [{"weekday": "tuesday", "ordinal": 5}]
+                        }
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result.state == "applied"
+    assert library.records[template.uuid].recurrence.rule is not None
+    assert library.records[template.uuid].recurrence.rule["of"] == [
+        {"wd": 2, "wdo": 5}
     ]
 
 

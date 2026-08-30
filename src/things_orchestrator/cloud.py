@@ -1136,6 +1136,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
         if write.action == "repeat":
             if current is None or (
                 write.recurrence_rule is None and not write.clear_recurrence_rule
+                and write.recurrence_paused is None
             ):
                 raise CloudError("Repeat changes need an exact repeating Task template")
             try:
@@ -1295,7 +1296,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             )
         elif write.action == "repeat_next":
             payload = {"icc": write.recurrence_instance_count}
-        else:
+        elif write.action != "repeat" or (
+            write.recurrence_rule is not None or write.clear_recurrence_rule
+        ):
             payload["rr" if write.action == "repeat" else "rt"] = (
                 None
                 if write.action == "repeat" and write.clear_recurrence_rule

@@ -2913,7 +2913,10 @@ class ThingsWorkspace:
             before=before,
             display_titles=display_titles,
             result_ids=result_ids,
-            requires_owner=draft.tool == "things_trash",
+            requires_owner=(
+                draft.tool == "things_trash"
+                or any(write.action == "permanent_delete" for write in writes)
+            ),
             clock=self._clock(),
         )
         return manifest, writes, before
@@ -3210,13 +3213,28 @@ class ThingsWorkspace:
                 before.append(self._v2_observed(current, ("recurrence",)))
                 touched.append(["recurrence"])
                 display_titles.append(current.title)
+            if template.kind == "project":
+                preconditions[f"scope:project:{template.uuid}"] = (
+                    self._project_scope_revision(template.uuid)
+                )
+                for descendant in self._project_descendants(template.uuid):
+                    preconditions[descendant.id] = self._revision(descendant)
+                    writes.append(
+                        Write(
+                            action="permanent_delete",
+                            uuid=descendant.uuid,
+                            kind=descendant.kind,
+                            heading=descendant.heading,
+                        )
+                    )
+                    before.append(self._v2_observed(descendant, ("recurrence",)))
+                    touched.append(["recurrence"])
+                    display_titles.append(descendant.title)
             writes.append(
                 Write(
-                    action="repeat",
+                    action="permanent_delete",
                     uuid=template.uuid,
                     kind=template.kind,
-                    clear_recurrence_rule=True,
-                    recurrence_paused=False,
                 )
             )
             before.append(self._v2_observed(template, ("recurrence",)))
@@ -3281,7 +3299,7 @@ class ThingsWorkspace:
                 action="repeat",
                 uuid=template.uuid,
                 kind=template.kind,
-                recurrence_rule=recurrence.rule,
+                recurrence_rule=recurrence.rule if rule_fields else None,
                 recurrence_paused=cast(bool | None, repeat.get("paused")),
             )
         )
@@ -3720,12 +3738,14 @@ class ThingsWorkspace:
             )
         if "recurrence" in selected:
             if write.action == "repeat":
-                recurrence = (
-                    RecurrenceState()
-                    .fold_rule(write.recurrence_rule)
-                    .fold_paused(write.recurrence_paused)
-                )
                 current = self._library.records.get(write.uuid)
+                recurrence = (
+                    current.recurrence
+                    if write.recurrence_rule is None
+                    and not write.clear_recurrence_rule
+                    and current is not None
+                    else RecurrenceState().fold_rule(write.recurrence_rule)
+                ).fold_paused(write.recurrence_paused)
                 desired["recurrence"] = self._v2_recurrence_value(
                     recurrence,
                     item=(
@@ -10113,6 +10133,7 @@ def _legacy_recovery_plan_is_complete(plan: JsonDict) -> bool:
             action == "repeat"
             and not write.recurrence_rule
             and not write.clear_recurrence_rule
+            and write.recurrence_paused is None
         ):
             return False
         if action == "repeat_link" and write.recurrence_links is None:
