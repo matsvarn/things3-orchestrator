@@ -136,6 +136,17 @@ def _native_datetime(value: object) -> datetime | None:
         return None
 
 
+def _native_reminder(value: object) -> str | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value < 86_400
+        or value % 60 != 0
+    ):
+        return None
+    return remind_from_offset(value)
+
+
 @dataclass
 class Envelope:
     uuid: str
@@ -494,9 +505,7 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "dd" in payload:
             item.deadline = _native_date(payload.get("dd"))
         if "ato" in payload:
-            item.remind = remind_from_offset(
-                int(payload["ato"]) if payload["ato"] is not None else None
-            )
+            item.remind = _native_reminder(payload.get("ato"))
         if "sb" in payload and payload["sb"] is not None:
             item.tonight = int(payload["sb"]) == 1
         if "ix" in payload and payload["ix"] is not None:

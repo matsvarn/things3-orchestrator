@@ -148,19 +148,7 @@ class RecurrenceState:
             if until_set and until is not None:
                 raise ValueError("After-completion repeats do not use an end date")
         if until_set and until is not None:
-            anchor_stamp = rule.get("sr")
-            if not isinstance(anchor_stamp, (int, float)) or isinstance(
-                anchor_stamp, bool
-            ):
-                raise RecurrenceReadError(
-                    "The repeat anchor is unavailable; read it again"
-                )
-            try:
-                anchor = datetime.fromtimestamp(anchor_stamp, timezone.utc).date()
-            except (OverflowError, OSError, ValueError) as error:
-                raise RecurrenceReadError(
-                    "The repeat anchor is unavailable; read it again"
-                ) from error
+            anchor = _repeat_anchor(rule)
             if until < anchor:
                 raise ValueError(
                     "The repeat end cannot be before the first occurrence"
@@ -374,6 +362,24 @@ def _day_timestamp(value: date) -> int:
     return int(datetime.combine(value, time.min, tzinfo=timezone.utc).timestamp())
 
 
+def _repeat_anchor(rule: dict[str, JsonValue]) -> date:
+    raw = rule.get("sr")
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or raw <= 0
+    ):
+        raise RecurrenceReadError(
+            "The repeat anchor is unavailable; read it again"
+        )
+    try:
+        return datetime.fromtimestamp(raw, timezone.utc).date()
+    except (OverflowError, OSError, ValueError) as error:
+        raise RecurrenceReadError(
+            "The repeat anchor is unavailable; read it again"
+        ) from error
+
+
 def _offsets_for_unit(
     rule: dict[str, JsonValue],
     unit: RepeatUnit,
@@ -388,10 +394,7 @@ def _offsets_for_unit(
     if unit == "week" and weekday_codes is not None:
         return [{"wd": code} for code in weekday_codes]
 
-    raw = rule.get("sr")
-    if not isinstance(raw, (int, float)):
-        raise ValueError("This repeat rule has an unsupported start anchor")
-    anchor = datetime.fromtimestamp(raw, timezone.utc).date()
+    anchor = _repeat_anchor(rule)
     if unit == "week":
         return [{"wd": (anchor.weekday() + 1) % 7}]
     if unit == "month":

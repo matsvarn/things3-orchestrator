@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from things_orchestrator.recurrence import RecurrenceState, new_rule
+from things_orchestrator.recurrence import (
+    RecurrenceReadError,
+    RecurrenceState,
+    new_rule,
+)
 
 
 def template(
@@ -223,7 +227,7 @@ def test_explicit_weekdays_do_not_need_an_anchor() -> None:
 
 @pytest.mark.parametrize("unit", ["week", "month", "year"])
 def test_fixed_unit_change_rejects_missing_required_anchor(unit: str) -> None:
-    with pytest.raises(ValueError, match="start anchor"):
+    with pytest.raises(RecurrenceReadError, match="repeat anchor"):
         template(unit=16).transition(kind="task", unit=unit)  # type: ignore[arg-type]
 
 
