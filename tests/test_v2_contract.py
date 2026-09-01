@@ -9,7 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from things_orchestrator.cloud import CloudError
-from things_orchestrator.journal import JsonDict, MemoryJournal, V2Operation
+from things_orchestrator.journal import (
+    JsonDict,
+    MemoryJournal,
+    V2Operation,
+    v2_manifest_hash,
+)
 from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
 from things_orchestrator.owner_authority import (
     enroll_owner_factor,
@@ -751,14 +756,8 @@ def test_project_trash_receipt_preserves_heading_identity(tmp_path: Path) -> Non
     assert receipt.rows[0]["observed"]["id"] == "heading:h"
 
 
-def test_project_trash_scope_rejects_a_child_added_after_owner_review(
-    tmp_path: Path,
-) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+def test_project_trash_rechecks_scope_after_pending_fence_before_post() -> None:
+    journal = MemoryJournal()
     project = Record(uuid="p", kind="project", title="Project")
     original = Record(uuid="a", kind="task", title="Original", parent_uuid="p")
     library = MemoryLibrary([project, original])
@@ -768,26 +767,29 @@ def test_project_trash_scope_rejects_a_child_added_after_owner_review(
         clock=lambda: NOW,
         account_id="owner@example.com",
     )
-    staged = ThingsV2(workspace).dispatch(
+    class RacingLibrary(MemoryLibrary):
+        refreshes = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                self.records["late"] = Record(
+                    uuid="late", kind="task", title="Late", parent_uuid="p"
+                )
+
+    racing = RacingLibrary([project, original])
+    workspace = ThingsWorkspace(
+        racing,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    result = ThingsV2(workspace).dispatch(
         "things_trash", {"request_id": REQUEST, "ids": [project.id]}
     )
-    operation = journal.get_v2_operation(staged.operation_id or "")
-    assert operation is not None
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    library.records["late"] = Record(
-        uuid="late", kind="task", title="Late", parent_uuid="p"
-    )
 
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
-    assert result["state"] == "stale"
-    assert all(not record.trashed for record in (project, original, library.records["late"]))
+    assert result.state == "not_applied"
+    assert all(not record.trashed for record in racing.records.values())
 
 
 def test_reminder_receipt_uses_public_remind_at_alias_for_set_and_clear() -> None:
@@ -1129,7 +1131,7 @@ def test_output_and_flattened_capture_schemas_are_closed() -> None:
 def test_receipt_next_action_follows_operation_state() -> None:
     from things_orchestrator.journal import V2Operation, v2_manifest_hash
 
-    for state, next_action in (("awaiting_owner", "run_cli"), ("pending", "run_cli"), ("partial", "run_cli"), ("applied", "read_receipt"), ("stale", "read_fresh")):
+    for state, next_action in (("pending", "retry_same"), ("partial", "read_receipt"), ("applied", "read_receipt"), ("stale", "read_fresh")):
         journal = MemoryJournal()
         initial_state = state if state in {"awaiting_owner", "pending"} else "awaiting_owner" if state == "stale" else "pending"
         request_hash = "sha256:test"
@@ -1173,12 +1175,12 @@ def test_receipt_next_action_follows_operation_state() -> None:
 @pytest.mark.parametrize(
     ("state", "code", "expected"),
     [
-        ("ok", "ok", "none"), ("awaiting_owner", "awaiting_owner", "run_cli"),
-        ("pending", "pending_unknown", "run_cli"),
+        ("ok", "ok", "none"),
+        ("pending", "pending_unknown", "retry_same"),
         ("applied", "applied", "read_receipt"),
         ("unchanged", "unchanged", "read_receipt"),
         ("not_applied", "not_applied_precondition", "read_receipt"),
-        ("partial", "partial", "run_cli"),
+        ("partial", "partial", "read_receipt"),
         ("partial_resolved", "partial_resolved", "none"),
         ("stale", "stale", "read_fresh"), ("declined", "declined", "none"),
     ],
@@ -1198,14 +1200,43 @@ def test_public_result_rejects_state_next_action_mismatch(
 
 def test_stale_mutation_projection_requires_fresh_read() -> None:
     journal = MemoryJournal()
+    manifest = {
+        "version": "v1",
+        "account_id": "owner@example.com",
+        "api_version": "2",
+        "schema_version": "v2.0",
+        "request_hash": "sha256:legacy",
+        "tool": "things_trash",
+        "preconditions": {},
+        "writes": [{"action": "trash", "uuid": "a", "kind": "task"}],
+        "touched": [["trashed"]],
+        "before": [{"id": "task:a", "trashed": False}],
+        "display_titles": ["A"],
+        "requires_owner": True,
+        "safety_policy_digest": "sha256:legacy",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+    }
+    operation = V2Operation(
+        account_id="owner@example.com",
+        api_version="2",
+        request_id=REQUEST,
+        request_hash="sha256:legacy",
+        operation_id="op_stale12345678",
+        tool="things_trash",
+        state="awaiting_owner",
+        manifest=manifest,
+        manifest_hash=v2_manifest_hash(manifest),
+        safety_policy_digest="sha256:legacy",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+    journal.create_v2(operation, claim_fence=False)
+    journal.prune_v2(now=NOW.isoformat())
     server = _server(Record(uuid="a", kind="task", title="A"), journal=journal)
-    arguments = {"request_id": REQUEST, "ids": ["task:a"]}
-    first = asyncio.run(server.call_tool("things_trash", arguments))
-    operation_id = first.structured_content["operation_id"]
-    journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "stale", "operation_id": operation_id})
-    repeated = asyncio.run(server.call_tool("things_trash", arguments))
-    assert repeated.structured_content["state"] == "stale"
-    assert repeated.structured_content["next_action"] == "read_fresh"
+    receipt = asyncio.run(
+        server.call_tool("things_receipt", {"operation_id": operation.operation_id})
+    )
+    assert receipt.structured_content["state"] == "stale"
+    assert receipt.structured_content["next_action"] == "read_fresh"
 
 
 def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> None:
@@ -1458,4 +1489,39 @@ def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:
     second = ThingsV2(workspace).dispatch("things_update", {"request_id": REQUEST, "items": [{"id": "task:a", "set": {"title": "B"}}]})
     assert first.state == second.state == "pending"
     assert first.code == "pending_unknown"
+    assert first.next_action == second.next_action == "retry_same"
     assert library.apply_calls == 1
+
+
+def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() -> None:
+    class RejectedWrite(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[object]) -> object:
+            self.apply_calls += 1
+            raise CloudError("request failed before commit")
+
+    library = RejectedWrite([Record(uuid="a", kind="task", title="Before")])
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    interface = ThingsV2(workspace)
+    arguments = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "Desired"}}],
+    }
+
+    first = interface.dispatch("things_update", arguments)
+    repeated = interface.dispatch("things_update", arguments)
+
+    assert first.state == repeated.state == "not_applied"
+    assert first.next_action == repeated.next_action == "read_receipt"
+    assert library.apply_calls == 1
+    receipt = interface.dispatch(
+        "things_receipt", {"operation_id": first.operation_id}
+    )
+    assert receipt.state == "not_applied"
+    assert receipt.rows[0]["observed"]["title"]["value"] == "Before"

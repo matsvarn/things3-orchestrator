@@ -46,7 +46,7 @@ class LiveAcceptanceRunner:
         await self._move_tag_and_add_checklist(state)
         await self._patch_checklist(state)
         await self._prove_within_paging(state)
-        return await self._stage_cleanup(state)
+        return await self._cleanup(state)
 
     def _load_or_create(self) -> State:
         if self.state_path.exists():
@@ -347,9 +347,9 @@ class LiveAcceptanceRunner:
             state["phase"] = "within_paging_proved"
             self._save(state)
 
-    async def _stage_cleanup(self, state: State) -> dict[str, object]:
+    async def _cleanup(self, state: State) -> dict[str, object]:
         if state["phase"] != "within_paging_proved":
-            raise AcceptanceFailure(f"cannot stage cleanup from phase {state['phase']}")
+            raise AcceptanceFailure(f"cannot run cleanup from phase {state['phase']}")
         roles = cast(dict[str, str], state["roles"])
         result = await self.client.call_tool(
             "things_trash",
@@ -358,22 +358,33 @@ class LiveAcceptanceRunner:
                 "ids": [roles["primary_project"], roles["secondary_project"]],
             },
         )
-        self._expect(result, state="awaiting_owner", code="awaiting_owner", label="cleanup staging")
-        instruction = str(result.get("instruction", ""))
-        if "does not block unrelated writes" not in instruction:
-            raise AcceptanceFailure("awaiting-owner cleanup omitted nonblocking guidance")
+        self._expect(result, state="applied", code="applied", label="cleanup")
         operation_id = result.get("operation_id")
         if not isinstance(operation_id, str):
-            raise AcceptanceFailure("cleanup staging omitted its operation ID")
+            raise AcceptanceFailure("cleanup omitted its operation ID")
         state["cleanup_operation_id"] = operation_id
-        state["phase"] = "cleanup_staged"
+        receipt = await self.client.call_tool(
+            "things_receipt", {"operation_id": operation_id, "limit": 100}
+        )
+        self._expect(
+            receipt,
+            state="applied",
+            code="applied",
+            label="cleanup receipt",
+        )
+        rows = cast(list[dict[str, object]], receipt.get("rows", []))
+        if not receipt.get("receipt_hash") or not rows:
+            raise AcceptanceFailure("applied cleanup has no immutable receipt evidence")
+        created = set(cast(list[str], state["created_ids"]))
+        receipt_ids = {str(row.get("target_id")) for row in rows}
+        if not created.issubset(receipt_ids):
+            raise AcceptanceFailure("cleanup receipt omitted a disposable acceptance item")
+        trash_ids = await self._read_view_ids("trash")
+        if not created.issubset(trash_ids):
+            raise AcceptanceFailure("not every disposable acceptance item reached Trash")
+        state["phase"] = "cleaned"
         self._save(state)
-        return {
-            "state": "awaiting_owner",
-            "passed": False,
-            "next_action": "approve_cleanup",
-            "cleanup_operation_id": operation_id,
-        }
+        return {"state": "cleaned", "passed": True, "next_action": "none"}
 
     async def _resume_cleanup(self, state: State) -> dict[str, object]:
         operation_id = str(state["cleanup_operation_id"])
@@ -381,19 +392,40 @@ class LiveAcceptanceRunner:
             "things_receipt", {"operation_id": operation_id, "limit": 100}
         )
         outcome = str(receipt.get("state"))
-        if outcome == "awaiting_owner":
-            return {
-                "state": "awaiting_owner",
-                "passed": False,
-                "next_action": "approve_cleanup",
-                "cleanup_operation_id": operation_id,
-            }
-        if outcome in {"pending", "partial"}:
+        if outcome == "pending":
+            roles = cast(dict[str, str], state["roles"])
+            request_ids = cast(dict[str, str], state["request_ids"])
+            retried = await self.client.call_tool(
+                "things_trash",
+                {
+                    "request_id": request_ids["cleanup"],
+                    "ids": [roles["primary_project"], roles["secondary_project"]],
+                },
+            )
+            if retried.get("operation_id") != operation_id:
+                raise AcceptanceFailure("cleanup retry changed operation identity")
+            outcome = str(retried.get("state"))
+            if outcome == "pending":
+                return {
+                    "state": outcome,
+                    "passed": False,
+                    "next_action": "retry_same",
+                }
+            receipt = await self.client.call_tool(
+                "things_receipt", {"operation_id": operation_id, "limit": 100}
+            )
+            outcome = str(receipt.get("state"))
+        if outcome == "partial":
             return {
                 "state": outcome,
                 "passed": False,
-                "next_action": "resolve_cleanup",
+                "next_action": "read_receipt",
             }
+        if outcome == "stale":
+            raise AcceptanceFailure(
+                "legacy cleanup was retired without Cloud I/O; use a fresh acceptance "
+                "state and request after reading current Trash"
+            )
         if outcome != "applied":
             raise AcceptanceFailure(f"cleanup settled as {outcome}; inspect its receipt")
         if not receipt.get("receipt_hash") or not receipt.get("rows"):

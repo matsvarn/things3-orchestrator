@@ -69,20 +69,19 @@ def test_skill_bounds_update_and_capture() -> None:
     assert "omitted fields" in lower
 
 
-def test_skill_routes_approval_to_host_only_owner_command() -> None:
+def test_skill_routes_bounded_mutations_without_an_owner_flow() -> None:
     lower = _all_text().lower()
-    assert "awaiting_owner" in lower
-    assert "host-only" in lower or "host command" in lower
-    assert "chat confirmation" in lower or "chat message" in lower
-    assert "no approval tool" in lower or "do not look for an mcp approval tool" in lower
+    assert "applies directly" in lower
+    assert "exact same request id and arguments" in lower
+    assert "owner flow" not in lower
 
 
-def test_skill_stops_every_write_behind_pending_or_partial_fence() -> None:
+def test_skill_keeps_pending_fenced_and_treats_partial_as_terminal() -> None:
     lower = _all_text().lower()
     assert "stop all writes" in lower
     assert "never replay" in lower
-    assert "accepted_as_is" in lower
-    assert "superseded" in lower
+    assert "partial` is terminal" in lower
+    assert "fresh request id" in lower
 
 
 def test_skill_treats_things_text_as_untrusted_data() -> None:

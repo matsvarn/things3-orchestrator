@@ -1,9 +1,9 @@
-# Common-caller tools with host-owned approval
+# Common-caller tools with bounded authenticated writes
 
 ## Status
 
-Accepted and implemented for the default-eight cutover. Advanced scopes and
-coaching remain deferred release gates.
+Superseded by ADR 0007 on 2026-09-01. The owner-approval design below remains
+only as a historical record and is not the current implementation contract.
 
 ## Problem
 
@@ -14,8 +14,10 @@ transaction implementation already owns useful safety behavior. It validates
 revisions, journals an intent before Cloud I/O, batches writes, forces a Cloud
 pull, and reconciles uncertain outcomes.
 
-V2 keeps that behavior and replaces the caller interface. Approval also moves
-outside MCP. The model can propose work, but it cannot authorize it.
+V2 keeps that behavior and replaces the caller interface. Authentication is
+authorization for the bounded public mutations. The safety boundary is the
+immutable manifest, pre-POST recheck, outcome fence, read-back receipt, and
+never-replay rule, not a claim that the caller is human.
 
 ## Caller usage
 

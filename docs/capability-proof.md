@@ -9,6 +9,16 @@ read-back behavior agree.
 Human workflow runs are tracked separately in
 [`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
 
+## 2026-09-01 authenticated-write gate
+
+The public v2 contract has no owner-approval state or action. Focused memory
+and server tests prove direct recoverable Trash and repeat Stop, pending exact
+retry without repost, terminal partial receipts, and no-I/O retirement of
+legacy `awaiting_owner` rows. The disposable live acceptance gate now performs
+cleanup in the same authenticated run and passes only after immutable receipt
+and exact Trash read-back. Live proof still requires running that gate against
+the exact deployed commit and account.
+
 ## v0.7.0 recurrence gate
 
 The v2 contract and memory adapter cover RT1 repeat inspection, creation,
@@ -16,7 +26,7 @@ conversion, rule edits, pause, resume, stop, completion, and "Create Next
 Copy" for Tasks and Projects. The Project cases clone the native root,
 headings, heading assignments, Tasks, and checklist rows with fresh IDs.
 Cloud fixture tests assert each entity type and sparse bookkeeping payload.
-Stop is a frozen owner-approved operation that keeps generated copies and
+Stop is a frozen authenticated operation that keeps generated copies and
 turns the hidden template into a fresh ordinary item on its next date before
 removing the template graph. A stopped Project preserves its headings, Tasks,
 heading assignments, and checklist rows with fresh IDs.
@@ -306,30 +316,17 @@ The workflow creates a uniquely named disposable Project pair and Inbox Task.
 It proves whole-batch validation with a field and item index, move-in-place plus
 Anytime, direct and inherited tag identity, exact checklist patching,
 `within`-only pagination and stale-cursor rejection, immutable receipts, and
-the nonblocking guidance for an `awaiting_owner` Trash operation. It uses two
+direct recoverable Trash through the same authenticated v2 path. It uses two
 existing tag IDs only on the disposable records; it does not change the tag
 registry. Before credentials or writes, the command rejects plaintext remote
 URLs and requires `/health` plus MCP initialize to match the local package and
 the exact `--expect-commit`. It binds that URL and commit into the mode-0600
-state file before mutation and reuses the exact request IDs after a crash. A
-pending or partial cleanup stops without replay.
+state file before mutation and reuses exact request IDs after a crash. An
+unresolved `pending` cleanup stops without replay; rerunning the exact command
+reconciles it through read-back. A terminal `partial` reports its immutable
+receipt and fails the release gate until fresh corrective work is completed.
 
-The first run ends at `awaiting_owner` with exit status 2, so automation cannot
-mistake the half-finished run for a passed release gate. Inspect and approve the
-printed cleanup operation in a private host terminal, then rerun the exact
-command:
-
-```console
-uv run things-orchestrator operation-show op_EXAMPLE
-uv run things-orchestrator operation-approve op_EXAMPLE
-uv run python scripts/run_live_acceptance.py \
-  --url http://127.0.0.1:8787/mcp \
-  --expect-commit 0123456789abcdef0123456789abcdef01234567 \
-  --state ~/.local/state/things-orchestrator/release-acceptance.json \
-  --live-write-acceptance
-```
-
-The resumed run passes only after the immutable receipt is applied and every
+The run passes only after the immutable receipt is applied and every
 recorded fixture ID is visible in recoverable Trash. Keep the private state
 file until that final `cleaned` result. This proves the exercised account,
 server, and version only; it does not prove another account or client.

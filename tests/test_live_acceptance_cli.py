@@ -56,7 +56,7 @@ def test_acceptance_url_avoids_the_mount_redirect_before_sending_bearer(
 
 def test_only_cleanup_complete_is_a_success_exit() -> None:
     assert summary_exit_code({"state": "cleaned", "passed": True}) == 0
-    assert summary_exit_code({"state": "awaiting_owner", "passed": False}) == 2
+    assert summary_exit_code({"state": "pending", "passed": False}) == 1
     assert summary_exit_code({"state": "partial", "passed": False}) == 1
 
 

@@ -26,14 +26,12 @@ Keep one production server and one stable model Interface.
   It coalesces one envelope per UUID and verifies a forced Cloud pull.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
-- `owner_authority.py` is CLI-only. The MCP server must not import it or gain
-  access to its passphrase verifier or encrypted signing key. The journal pins
-  only the Ed25519 public key used to verify host signatures. `server.py` is
-  the v2 MCP adapter.
+- `owner_authority.py` is retained only for signed legacy recovery. It is not
+  part of the normal v2 mutation path. `server.py` is the v2 MCP adapter.
 - `server.py` exposes stdio and Streamable HTTP.
 - `live_acceptance.py` owns the restart-safe disposable write workflow used as
-  a release gate. It persists request IDs before mutation, never performs the
-  CLI-only owner action, and passes only after receipt and Trash read-back.
+  a release gate. It persists request IDs before mutation and passes only after
+  receipt and Trash read-back.
 - `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
   `print-config`, and `doctor`. Callers run `uv run things-orchestrator`
   from the checkout. `plugin/bin` locates that checkout when a client
@@ -52,9 +50,8 @@ Keep one production server and one stable model Interface.
   `docs/dogfood.md`.
 
 For public write changes, deploy the exact candidate before tagging it. Run the
-live acceptance workflow from `docs/capability-proof.md`, approve its one
-recoverable cleanup operation on the host, and rerun the same state file to a
-`cleaned` result. A pending or partial outcome blocks the release. Tag and
+live acceptance workflow from `docs/capability-proof.md` to a `cleaned` result.
+An unresolved pending or partial outcome blocks the release. Tag and
 build assets only from the commit that passed this gate.
 
 Do not expose v1 tools or add advanced scopes during this cutover. Keep

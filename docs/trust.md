@@ -16,23 +16,19 @@ The server owns revisions and freezes the first force-refreshed mutation
 manifest. A repeated request returns the same operation. It never reparses or
 rebases terminal work.
 
-Pending and partial operations hold an account-wide outcome fence. The fence
-covers all write paths, including host approval and retained v1 recovery.
-Recovery observes Cloud state and never reposts an old operation.
+Only an unresolved `pending` operation holds the account-wide outcome fence.
+An exact retry observes Cloud state and never reposts the frozen operation.
+Fully classified `partial` outcomes are terminal and carry an immutable
+read-back receipt.
 
-The MCP request path cannot approve. The CLI approval component stores a salted
-`scrypt` verifier and encrypted Ed25519 private key in a separate 0600 file. It
-reads the raw passphrase only from the host terminal. Approval binds the
-account, API version, action, operation ID, tool, manifest hash, safety-policy
-digest, and expiry.
-The MCP request path loads only the pinned Ed25519 public key and cannot sign
-without the passphrase-encrypted private key.
+The shared MCP bearer, or access to the stdio server, authorizes every bounded
+v2 mutation. There is no per-client identity or human-presence claim. Keep the
+bearer private and give it only to agents that may write to the account.
 
-This separation assumes an agent has only MCP access. It does not protect
-against an agent, plugin, or process with arbitrary code execution or write
-access as the serving OS user. Code running as that identity can replace the
-server, public key, or journal. Run untrusted agent runtimes under a different
-OS identity, or treat serving-host access as owner authority.
+An agent, plugin, or process with arbitrary code execution or write access as
+the serving OS user can replace the server or journal. Run untrusted agent
+runtimes under a different OS identity, or treat serving-host access as full
+write authority.
 
 The host renderer escapes ANSI and OSC sequences, control characters,
 newlines, backslashes, and delimiters. Typed IDs and actions remain the

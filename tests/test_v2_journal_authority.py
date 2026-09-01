@@ -25,6 +25,7 @@ from things_orchestrator.owner_authority import (
     verified_authorization,
     verify_owner_factor,
 )
+from things_orchestrator.v2 import SAFETY_POLICY_DIGEST
 from things_orchestrator.workspace import ThingsWorkspace
 
 
@@ -184,6 +185,83 @@ def test_unchanged_settlement_is_immediately_terminal_for_retention(tmp_path: Pa
     assert tombstone is not None and tombstone.state == "unchanged"
 
 
+def test_partial_settlement_is_terminal_receipted_and_nonblocking(tmp_path: Path) -> None:
+    for journal in (
+        MemoryJournal(),
+        SQLiteJournal(tmp_path / "partial.sqlite3"),
+    ):
+        operation = _operation(
+            f"op_partial_{type(journal).__name__}",
+            request_id=(
+                "0198f0ee-98d4-7bd5-91ba-8e76019b2735"
+                if isinstance(journal, MemoryJournal)
+                else "0198f0ef-3923-79b6-96a8-2bf28eac0d67"
+            ),
+        )
+        rows = [{
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {"title": "A"},
+            "observed": {"title": "Different"},
+            "result": "not_applied",
+        }]
+        assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+        assert journal.settle_v2(
+            operation.operation_id,
+            expected="pending",
+            state="partial",
+            response={
+                "state": "partial",
+                "code": "partial",
+                "next_action": "read_receipt",
+                "instruction": "Use a fresh current-state correction; never replay.",
+                "operation_id": operation.operation_id,
+            },
+            rows=rows,
+        )
+        assert journal.blocking_v2_operations(operation.account_id) == []
+        receipt = journal.v2_receipt_page(
+            operation.account_id, operation.operation_id, limit=10
+        )
+        assert receipt.rows == rows
+        assert receipt.receipt_hash
+
+
+@pytest.mark.parametrize("cutover", [False, True], ids=["prune", "cutover"])
+def test_legacy_awaiting_owner_rows_retire_without_replay_for_both_journals(
+    tmp_path: Path, cutover: bool
+) -> None:
+    for journal in (
+        MemoryJournal(),
+        SQLiteJournal(tmp_path / f"retire-{cutover}.sqlite3"),
+    ):
+        operation = _operation(
+            f"op_retire_{type(journal).__name__}_{cutover}",
+            request_id=(
+                "0198f0ee-98d4-7bd5-91ba-8e76019b2735"
+                if isinstance(journal, MemoryJournal)
+                else "0198f0ef-3923-79b6-96a8-2bf28eac0d67"
+            ),
+            state="awaiting_owner",
+        )
+        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        if cutover:
+            journal.cutover_v1()
+            journal.cutover_v1()
+        else:
+            journal.prune_v2(now="2026-09-01T00:00:00+00:00")
+            journal.prune_v2(now="2026-09-01T00:00:00+00:00")
+        retired = journal.get_v2_operation(operation.operation_id)
+        assert retired is not None and retired.state == "stale"
+        assert retired.response is not None
+        assert retired.response["next_action"] == "read_fresh"
+        instruction = str(retired.response["instruction"])
+        assert "without Cloud I/O" in instruction
+        assert "Never replay" in instruction
+        assert "fresh request" in instruction
+
+
 def test_only_legal_v2_transitions_are_accepted() -> None:
     journal = MemoryJournal()
     operation = _operation(
@@ -296,6 +374,37 @@ def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp
     assert stored.state == "pending"
     assert stored.authorization == authorization.record
     assert stored.authorization.startswith("ed25519:v1:")
+
+
+def test_current_policy_partial_is_terminal_without_owner_resolution() -> None:
+    journal = MemoryJournal()
+    operation = _operation(
+        "op_terminal_partial",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    operation = replace(operation, safety_policy_digest=SAFETY_POLICY_DIGEST)
+    operation = _with_manifest(operation)
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.settle_v2(
+        operation.operation_id,
+        expected="pending",
+        state="partial",
+        response={"state": "partial"},
+        rows=[{"sequence": 1}],
+    )
+
+    workspace = ThingsWorkspace(
+        MemoryLibrary([]),
+        journal=journal,
+        account_id="owner@example.com",
+    )
+    assert not workspace.host_resolve_partial_v2(
+        operation.operation_id,
+        "accepted_as_is",
+        object(),
+    )
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None and stored.state == "partial"
 
 
 def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> None:

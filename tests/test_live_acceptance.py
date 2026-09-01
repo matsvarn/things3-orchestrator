@@ -26,7 +26,7 @@ class LocalMCPClient:
         return result.structured_content
 
 
-def test_live_acceptance_exercises_dogfood_workflow_and_stages_exact_cleanup(
+def test_live_acceptance_exercises_dogfood_workflow_and_verifies_cleanup_in_one_run(
     tmp_path: Path,
 ) -> None:
     library = MemoryLibrary([])
@@ -48,12 +48,10 @@ def test_live_acceptance_exercises_dogfood_workflow_and_stages_exact_cleanup(
         LiveAcceptanceRunner(client, state_path, target={"url": "memory://test", "commit": "abc"}).run()
     )
 
-    assert first["state"] == "awaiting_owner"
-    assert first["passed"] is False
-    assert first["next_action"] == "approve_cleanup"
+    assert first == {"state": "cleaned", "passed": True, "next_action": "none"}
     assert state_path.stat().st_mode & 0o777 == 0o600
     state = json.loads(state_path.read_text())
-    assert state["phase"] == "cleanup_staged"
+    assert state["phase"] == "cleaned"
     assert state["cleanup_operation_id"].startswith("op_")
     assert len(state["created_ids"]) == 6
 
@@ -70,16 +68,20 @@ def test_live_acceptance_exercises_dogfood_workflow_and_stages_exact_cleanup(
     assert primary.tag_uuids == [state["tag_ids"][0].partition(":")[2]]
     atomic_id = state["roles"]["atomic_task"].partition(":")[2]
     assert library.records[atomic_id].title == state["titles"]["atomic_original"]
+    assert all(
+        library.records[item_id.partition(":")[2]].trashed
+        for item_id in state["created_ids"]
+    )
 
     trash_calls = client.calls.count("things_trash")
     second = asyncio.run(
         LiveAcceptanceRunner(client, state_path, target={"url": "memory://test", "commit": "abc"}).run()
     )
 
-    assert second == first
+    assert second == {"state": "cleaned", "passed": True, "next_action": "none"}
     assert client.calls.count("things_trash") == trash_calls
     operation = journal.get_v2_operation(state["cleanup_operation_id"])
-    assert operation is not None and operation.state == "awaiting_owner"
+    assert operation is not None and operation.state == "applied"
 
 
 def test_live_acceptance_refuses_to_replay_after_partial_cleanup(
@@ -110,9 +112,9 @@ def test_live_acceptance_refuses_to_replay_after_partial_cleanup(
             return {
                 "state": "partial",
                 "code": "partial",
-                "next_action": "run_cli",
+                "next_action": "read_receipt",
                 "operation_id": "op_partial123",
-                "instruction": "Resolve on the host.",
+                "instruction": "Read the immutable receipt.",
             }
 
     result = asyncio.run(
@@ -126,8 +128,73 @@ def test_live_acceptance_refuses_to_replay_after_partial_cleanup(
     assert result == {
         "state": "partial",
         "passed": False,
-        "next_action": "resolve_cleanup",
+        "next_action": "read_receipt",
     }
+
+
+def test_live_acceptance_retries_exact_pending_cleanup_for_read_back(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "acceptance.json"
+    created = ["project:one", "project:two"]
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": {"url": "memory://test", "commit": "abc"},
+                "phase": "cleanup_staged",
+                "cleanup_operation_id": "op_cleanup123",
+                "created_ids": created,
+                "roles": {
+                    "primary_project": created[0],
+                    "secondary_project": created[1],
+                },
+                "titles": {},
+                "request_ids": {"cleanup": "0198f0ee-98d4-7bd5-91ba-8e76019b2735"},
+            }
+        )
+    )
+    state_path.chmod(0o600)
+
+    class PendingThenAppliedClient:
+        calls: list[tuple[str, dict[str, object]]] = []
+        receipt_count = 0
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, object]
+        ) -> dict[str, Any]:
+            self.calls.append((name, arguments))
+            if name == "things_receipt":
+                self.receipt_count += 1
+                if self.receipt_count == 1:
+                    return {"state": "pending"}
+                return {
+                    "state": "applied",
+                    "receipt_hash": "sha256:test",
+                    "rows": [{"target_id": item_id} for item_id in created],
+                }
+            if name == "things_trash":
+                return {"state": "applied", "operation_id": "op_cleanup123"}
+            assert name == "things_view"
+            return {"state": "ok", "items": [{"id": item_id} for item_id in created]}
+
+    client = PendingThenAppliedClient()
+    result = asyncio.run(
+        LiveAcceptanceRunner(
+            client,
+            state_path,
+            target={"url": "memory://test", "commit": "abc"},
+        ).run()
+    )
+
+    assert result == {"state": "cleaned", "passed": True, "next_action": "none"}
+    assert client.calls[1] == (
+        "things_trash",
+        {
+            "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            "ids": created,
+        },
+    )
 
 
 def test_live_acceptance_recovers_after_capture_response_before_state_save(
@@ -177,7 +244,7 @@ def test_live_acceptance_recovers_after_capture_response_before_state_save(
         ).run()
     )
 
-    assert resumed["state"] == "awaiting_owner"
+    assert resumed == {"state": "cleaned", "passed": True, "next_action": "none"}
     assert len(library.records) == 6
     capture_operations = [
         operation

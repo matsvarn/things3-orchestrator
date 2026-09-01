@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -9,10 +8,6 @@ from pydantic import ValidationError
 from things_orchestrator.interface import ReadCall
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.library import ChecklistLine, MemoryLibrary, Record
-from things_orchestrator.owner_authority import (
-    enroll_owner_factor,
-    verified_authorization,
-)
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
@@ -812,13 +807,8 @@ def test_v2_edits_future_rule_through_current_copy_and_preserves_opaque_fields()
 
 
 def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
-    tmp_path: Path,
 ) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+    journal = MemoryJournal()
     template, current = _repeating_pair()
     template.notes = "Choose the three outcomes."
     template.start = date(2026, 9, 1)
@@ -854,7 +844,7 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     )
     interface = ThingsV2(workspace)
 
-    staged = interface.dispatch(
+    result = interface.dispatch(
         "things_update",
         {
             "request_id": REQUESTS[2],
@@ -862,19 +852,10 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
         },
     )
 
-    assert staged.state == "awaiting_owner"
-    operation = journal.get_v2_operation(staged.operation_id or "")
+    assert result.state == "applied"
+    assert result.next_action == "read_receipt"
+    operation = journal.get_v2_operation(result.operation_id or "")
     assert operation is not None
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
-    assert result["state"] == "applied"
     assert "template" not in library.records
     assert library.records["current"].recurrence == RecurrenceState()
     assert library.records["current-two"].recurrence == RecurrenceState()
@@ -892,7 +873,7 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
     assert ordinary.leavable is True
     assert [row.title for row in ordinary.checklists] == ["Review calendar"]
     assert ordinary.checklists[0].status == "open"
-    assert result["item_ids"] == [current.id, ordinary.id]
+    assert [item.id for item in result.items] == [current.id, ordinary.id]
     receipt = interface.dispatch(
         "things_receipt", {"operation_id": operation.operation_id}
     )
@@ -926,13 +907,8 @@ def test_v2_stop_repeat_materializes_next_ordinary_task_and_deletes_template(
 
 
 def test_v2_stop_template_without_generated_copies_returns_ordinary_replacement(
-    tmp_path: Path,
 ) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+    journal = MemoryJournal()
     template, _ = _repeating_pair()
     template.recurrence_next_on = date(2026, 9, 6)
     library = MemoryLibrary([template])
@@ -944,7 +920,7 @@ def test_v2_stop_template_without_generated_copies_returns_ordinary_replacement(
     )
     interface = ThingsV2(workspace)
 
-    staged = interface.dispatch(
+    result = interface.dispatch(
         "things_update",
         {
             "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2826",
@@ -953,23 +929,14 @@ def test_v2_stop_template_without_generated_copies_returns_ordinary_replacement(
             ],
         },
     )
-    operation = journal.get_v2_operation(staged.operation_id or "")
-    assert staged.state == "awaiting_owner" and operation is not None
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
+    operation = journal.get_v2_operation(result.operation_id or "")
+    assert result.state == "applied" and operation is not None
 
     ordinary = next(iter(library.records.values()))
     assert ordinary.uuid != template.uuid
     assert ordinary.recurrence == RecurrenceState()
     assert ordinary.start == date(2026, 9, 6)
-    assert result["item_ids"] == [ordinary.id]
+    assert [item.id for item in result.items] == [ordinary.id]
 
 
 def test_v2_rejects_stop_combined_with_an_ordinary_template_update() -> None:
@@ -1203,13 +1170,8 @@ def test_v2_rejects_conflicting_rule_edits_for_one_series_in_one_batch() -> None
 
 
 def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
-    tmp_path: Path,
 ) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+    journal = MemoryJournal()
     template = Record(
         uuid="project-template",
         kind="project",
@@ -1294,7 +1256,7 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
     )
     interface = ThingsV2(workspace)
 
-    staged = interface.dispatch(
+    result = interface.dispatch(
         "things_update",
         {
             "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2819",
@@ -1303,20 +1265,9 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
             ],
         },
     )
-    operation = journal.get_v2_operation(staged.operation_id or "")
-    assert staged.state == "awaiting_owner" and operation is not None
+    operation = journal.get_v2_operation(result.operation_id or "")
+    assert result.state == "applied" and operation is not None
     assert "scope:project:project-template" in operation.manifest["preconditions"]
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
-    assert result["state"] == "applied"
     assert not {
         template.uuid,
         template_heading.uuid,
@@ -1353,7 +1304,7 @@ def test_v2_stop_project_materializes_next_ordinary_graph_and_deletes_template(
     assert [row.title for row in ordinary_task.checklists] == ["Smoke test"]
     assert ordinary_task.checklists[0].status == "open"
     assert library.records[current_task.uuid].title == "Already deployed"
-    assert result["item_ids"] == [current.id, ordinary.id]
+    assert [item.id for item in result.items] == [current.id, ordinary.id]
     receipt = interface.dispatch(
         "things_receipt", {"operation_id": operation.operation_id}
     )

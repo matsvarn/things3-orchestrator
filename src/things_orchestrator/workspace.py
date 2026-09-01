@@ -2405,8 +2405,8 @@ class ThingsWorkspace:
             return {
                 "state": "rejected",
                 "code": "write_fenced",
-                "next_action": "run_cli",
-                "instruction": "An unresolved operation blocks writes for this account.",
+                "next_action": "read_receipt",
+                "instruction": "An unresolved operation blocks writes. Read its receipt and retry only its exact pending request.",
                 "blocking_operation_ids": blockers,
             }
         failed = self._refresh(force=True)
@@ -2417,14 +2417,7 @@ class ThingsWorkspace:
             return prepared
         manifest, writes, before = prepared
         operation_id = f"op_{token_urlsafe(18)}"
-        already_current = self._writes_match(writes)
-        initial_state: V2State = (
-            "pending"
-            if already_current
-            else "awaiting_owner"
-            if manifest.requires_owner
-            else "pending"
-        )
+        initial_state: V2State = "pending"
         operation = V2Operation(
             account_id=self._account_id,
             api_version=draft.api_version,
@@ -2440,14 +2433,14 @@ class ThingsWorkspace:
         )
         outcome, stored, blockers = journal.create_v2(
             operation,
-            claim_fence=initial_state == "pending",
+            claim_fence=True,
         )
         if outcome == "blocked":
             return {
                 "state": "rejected",
                 "code": "write_fenced",
-                "next_action": "run_cli",
-                "instruction": "An unresolved operation blocks writes for this account.",
+                "next_action": "read_receipt",
+                "instruction": "An unresolved operation blocks writes. Read its receipt and retry only its exact pending request.",
                 "blocking_operation_ids": blockers,
             }
         assert stored is not None
@@ -2461,18 +2454,6 @@ class ThingsWorkspace:
             }
         if outcome == "existing":
             return self._resume_v2(stored)
-        if initial_state == "awaiting_owner":
-            response: JsonDict = {
-                "state": "awaiting_owner",
-                "code": "awaiting_owner",
-                "next_action": "run_cli",
-                "instruction": (
-                    "Review this operation with the CLI-only operation command. "
-                    "It does not block unrelated writes; do not replay it."
-                ),
-                "operation_id": operation_id,
-            }
-            return response
         result = self._apply_v2(operation, writes=writes, before=before)
         if result.get("item_ids"):
             return {**result, "_fresh_items": True}
@@ -3166,10 +3147,7 @@ class ThingsWorkspace:
             before=before,
             display_titles=display_titles,
             result_ids=result_ids,
-            requires_owner=(
-                draft.tool == "things_trash"
-                or any(write.action == "permanent_delete" for write in writes)
-            ),
+            requires_owner=False,
             clock=self._clock(),
         )
         return manifest, writes, before
@@ -3651,7 +3629,7 @@ class ThingsWorkspace:
         before = before or cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
         failed = self._refresh(force=True)
         if failed is not None:
-            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud precondition read-back is unavailable.", "operation_id": operation.operation_id}
+            return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
         if not self._v2_preconditions_match(operation):
             response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
             rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
@@ -3681,12 +3659,12 @@ class ThingsWorkspace:
         except CloudError:
             failed = self._refresh(force=True)
             if failed is not None:
-                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "The commit outcome is unknown and will never be replayed.", "operation_id": operation.operation_id}
+                return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
             return self._reconcile_v2(operation, writes, before)
         if not applied.read_back_verified:
             failed = self._refresh(force=True)
             if failed is not None:
-                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is not yet proven.", "operation_id": operation.operation_id}
+                return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
         return self._reconcile_v2(operation, writes, before)
 
     def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
@@ -3697,12 +3675,14 @@ class ThingsWorkspace:
             state = "applied"
         elif any(matched):
             state = "partial"
+        elif self._v2_current_equals_before(operation, writes, before):
+            state = "not_applied"
         else:
             return {
                 "state": "pending",
                 "code": "pending_unknown",
-                "next_action": "run_cli",
-                "instruction": "The Cloud outcome remains unresolved.",
+                "next_action": "retry_same",
+                "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.",
                 "operation_id": operation.operation_id,
             }
         raw_result_ids = operation.manifest.get("result_ids")
@@ -3713,9 +3693,19 @@ class ThingsWorkspace:
         )
         response: JsonDict = {
             "state": state,
-            "code": state,
-            "next_action": "run_cli" if state == "partial" else "read_receipt",
-            "instruction": "Cloud read-back recorded the operation outcome.",
+            "code": (
+                "not_applied_precondition" if state == "not_applied" else state
+            ),
+            "next_action": "read_receipt",
+            "instruction": (
+                "Cloud read-back recorded every frozen write in the immutable receipt. "
+                "Correct a partial outcome only with a fresh current-state request; "
+                "the stored operation is never replayed."
+                if state == "partial"
+                else "Forced read-back proved that no frozen write landed; nothing was replayed."
+                if state == "not_applied"
+                else "Cloud read-back recorded the operation outcome."
+            ),
             "operation_id": operation.operation_id,
             "item_ids": item_ids,
         }
@@ -3738,8 +3728,8 @@ class ThingsWorkspace:
         return {
             "state": "pending",
             "code": "pending_unknown",
-            "next_action": "run_cli",
-            "instruction": "A concurrent reconciliation changed the operation; inspect its persisted receipt.",
+            "next_action": "retry_same",
+            "instruction": "Retry this exact request to read the concurrent result; the stored operation is never reposted.",
             "operation_id": operation_id,
         }
 
@@ -3782,7 +3772,7 @@ class ThingsWorkspace:
         if operation.state == "pending":
             failed = self._refresh(force=True)
             if failed is not None:
-                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable.", "operation_id": operation.operation_id}
+                return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
             writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
             before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
             return self._reconcile_v2(operation, writes, before)
@@ -3831,7 +3821,7 @@ class ThingsWorkspace:
             return self._resume_v2(operation)
         failed = self._refresh(force=True)
         if failed is not None:
-            return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud read-back is unavailable; nothing was replayed.", "operation_id": operation_id}
+            return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry the exact original request to force read-back; the stored operation is never reposted.", "operation_id": operation_id}
         writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
         before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
         return self._reconcile_v2(operation, writes, before)
@@ -4023,10 +4013,13 @@ class ThingsWorkspace:
         resolution: Literal["accepted_as_is", "superseded"],
         authorization: object,
     ) -> bool:
+        from .v2 import SAFETY_POLICY_DIGEST
+
         operation = self._journal.get_v2_operation(operation_id)
         return bool(
             operation is not None
             and operation.account_id == self._account_id
+            and operation.safety_policy_digest != SAFETY_POLICY_DIGEST
             and self._journal.verify_v2_authorization(operation, resolution, authorization) is not None
             and self._journal.transition_v2(
                 operation_id,

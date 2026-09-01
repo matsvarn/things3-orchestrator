@@ -901,14 +901,19 @@ def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
 
 def test_plugin_wrapper_routes_every_recovery_command() -> None:
     script = (ROOT / "plugin/bin/things-orchestrator").read_text()
-    for command in (
-        "legacy-reconcile", "legacy-resolve", "operation-reconcile",
-        "operation-settle-not-applied",
-    ):
+    commands = ("legacy-reconcile", "legacy-resolve", "operation-reconcile")
+    for command in commands:
         assert command in script
     usage = next(line for line in script.splitlines() if line.startswith('    echo "Usage:'))
-    for command in ("legacy-reconcile", "legacy-resolve", "operation-reconcile", "operation-settle-not-applied"):
+    for command in commands:
         assert command in usage
+    for removed in (
+        "operation-settle-not-applied",
+        "operation-approve",
+        "operation-decline",
+        "operation-accept-partial",
+    ):
+        assert removed not in script
 
 
 def test_legacy_resolution_renders_before_reading_passphrase(

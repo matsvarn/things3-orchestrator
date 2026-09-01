@@ -15,6 +15,7 @@ docs/adr/0003-review-completeness-behind-three-tools.md
 docs/adr/0004-review-token-and-native-heading-delete.md
 docs/adr/0005-one-project-read.md
 docs/adr/0006-common-caller-owner-safe-v2.md
+docs/adr/0007-authenticated-bounded-v2-writes.md
 docs/capability-proof.md
 docs/clients.md
 docs/comparison.md

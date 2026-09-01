@@ -410,7 +410,7 @@ def test_tags_view_marks_an_incomplete_page_for_continuation() -> None:
     assert "more results remain" in str(first["instruction"]).lower()
 
 
-def test_awaiting_owner_trash_does_not_fence_unrelated_write_and_says_so() -> None:
+def test_trash_applies_without_owner_flow_and_leaves_unrelated_writes_available() -> None:
     server, library, _ = _stack(
         Record(uuid="trash", kind="task", title="Trash me"),
         Record(uuid="other", kind="task", title="Other"),
@@ -423,10 +423,10 @@ def test_awaiting_owner_trash_does_not_fence_unrelated_write_and_says_so() -> No
         "items": [{"id": "task:other", "set": {"title": "Changed"}}],
     })
 
-    assert staged["state"] == "awaiting_owner"
-    assert "does not block unrelated writes" in str(staged["instruction"])
+    assert staged["state"] == "applied"
+    assert staged["next_action"] == "read_receipt"
     assert changed["state"] == "applied"
-    assert library.records["trash"].trashed is False
+    assert library.records["trash"].trashed is True
 
 
 def test_starting_repeat_discloses_hidden_template_and_visible_instance_without_titles() -> None:

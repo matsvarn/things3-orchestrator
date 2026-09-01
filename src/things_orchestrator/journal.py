@@ -209,7 +209,7 @@ class MemoryJournal:
             current = [
                 row.operation_id
                 for row in self._v2_operations.values()
-                if row.account_id == account_id and row.state in {"pending", "partial"}
+                if row.account_id == account_id and row.state == "pending"
             ]
             legacy = [
                 row.intent_id
@@ -245,7 +245,7 @@ class MemoryJournal:
             created_at = _utc_now()
             self._v2_times[operation.operation_id] = (
                 created_at,
-                None if operation.state in {"awaiting_owner", "pending", "partial"} else created_at,
+                None if operation.state in {"awaiting_owner", "pending"} else created_at,
             )
             return "created", _copy_v2(copied), []
 
@@ -286,7 +286,7 @@ class MemoryJournal:
             created, _ = self._v2_times.get(operation_id, (_utc_now(), None))
             self._v2_times[operation_id] = (
                 created,
-                None if state in {"awaiting_owner", "pending", "partial"} else _utc_now(),
+                None if state in {"awaiting_owner", "pending"} else _utc_now(),
             )
             return True
 
@@ -327,7 +327,7 @@ class MemoryJournal:
                 authorization=authorization_record,
                 resolution=resolution,
             )
-            if state not in {"awaiting_owner", "pending", "partial"}:
+            if state not in {"awaiting_owner", "pending"}:
                 created, _settled = self._v2_times.get(operation_id, (_utc_now(), None))
                 self._v2_times[operation_id] = (created, _utc_now())
             return True
@@ -392,11 +392,16 @@ class MemoryJournal:
         count = 0
         with self._lock:
             for operation_id, operation in list(self._v2_operations.items()):
-                if operation.state == "awaiting_owner" and operation.expires_at and datetime.fromisoformat(operation.expires_at) <= datetime.fromisoformat(now):
-                    self.transition_v2(operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "The approval window expired.", "operation_id": operation_id})
+                if operation.state == "awaiting_owner":
+                    self.transition_v2(
+                        operation_id,
+                        expected="awaiting_owner",
+                        state="stale",
+                        response=_retired_awaiting_owner_response(operation_id),
+                    )
                     operation = self._v2_operations[operation_id]
                 _created, settled = self._v2_times.get(operation_id, (_utc_now(), None))
-                if operation.state in {"awaiting_owner", "pending", "partial"} or settled is None or datetime.fromisoformat(settled) >= threshold:
+                if operation.state in {"awaiting_owner", "pending"} or settled is None or datetime.fromisoformat(settled) >= threshold:
                     continue
                 key = _v2_request_key(operation.account_id, operation.api_version, operation.request_id)
                 self._v2_tombstones[key] = replace(operation, request_id=key, manifest={}, response={"state": operation.state, "instruction": "This operation is retained as a content-minimized tombstone.", "operation_id": operation.operation_id})
@@ -408,6 +413,14 @@ class MemoryJournal:
 
     def cutover_v1(self) -> JsonDict:
         with self._lock:
+            for operation_id, operation in list(self._v2_operations.items()):
+                if operation.state == "awaiting_owner":
+                    self.transition_v2(
+                        operation_id,
+                        expected="awaiting_owner",
+                        state="stale",
+                        response=_retired_awaiting_owner_response(operation_id),
+                    )
             quarantined: list[str] = []
             unresolved: list[str] = []
             partial_like: list[str] = []
@@ -694,7 +707,7 @@ class SQLiteJournal:
         with self._connect() as connection:
             current = connection.execute(
                 """SELECT operation_id FROM owner_operations_v2
-                   WHERE account_id=? AND state IN ('pending','partial')""",
+                   WHERE account_id=? AND state='pending'""",
                 (account_id,),
             ).fetchall()
             legacy = connection.execute(
@@ -767,7 +780,7 @@ class SQLiteJournal:
             created_at = _utc_now()
             settled_at = (
                 None
-                if operation.state in {"awaiting_owner", "pending", "partial"}
+                if operation.state in {"awaiting_owner", "pending"}
                 else created_at
             )
             connection.execute(
@@ -833,7 +846,7 @@ class SQLiteJournal:
                 ),
             )
             changed = cursor.rowcount == 1
-            if changed and state not in {"awaiting_owner", "pending", "partial"}:
+            if changed and state not in {"awaiting_owner", "pending"}:
                 connection.execute(
                     "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
                     (_utc_now(), operation_id),
@@ -917,7 +930,7 @@ class SQLiteJournal:
             if changed != 1:
                 connection.rollback()
                 return False
-            if state not in {"awaiting_owner", "pending", "partial"}:
+            if state not in {"awaiting_owner", "pending"}:
                 connection.execute(
                     "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
                     (_utc_now(), operation_id),
@@ -960,19 +973,16 @@ class SQLiteJournal:
         now_value = datetime.fromisoformat(now).astimezone(timezone.utc)
         threshold = (now_value - timedelta(days=retention_days)).isoformat()
         with self._connect() as connection:
-            expired = connection.execute(
-                """SELECT operation_id, expires_at FROM owner_operations_v2
-                   WHERE state='awaiting_owner' AND expires_at IS NOT NULL""",
+            awaiting_owner = connection.execute(
+                """SELECT operation_id FROM owner_operations_v2
+                   WHERE state='awaiting_owner'""",
             ).fetchall()
-            for row in expired:
-                expires_at = datetime.fromisoformat(str(row["expires_at"]))
-                if expires_at.astimezone(timezone.utc) > now_value:
-                    continue
+            for row in awaiting_owner:
                 operation_id = str(row["operation_id"])
                 connection.execute(
                     """UPDATE owner_operations_v2 SET state='stale', response_json=?
                        WHERE operation_id=? AND state='awaiting_owner'""",
-                    (_json({"state": "stale", "instruction": "The approval window expired.", "operation_id": operation_id}), operation_id),
+                    (_json(_retired_awaiting_owner_response(operation_id)), operation_id),
                 )
                 connection.execute(
                     "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
@@ -981,7 +991,7 @@ class SQLiteJournal:
             rows = connection.execute(
                 """SELECT o.*, t.settled_at FROM owner_operations_v2 o
                    JOIN owner_operation_times_v2 t USING(operation_id)
-                   WHERE o.state NOT IN ('awaiting_owner','pending','partial')
+                   WHERE o.state NOT IN ('awaiting_owner','pending')
                      AND t.settled_at IS NOT NULL AND t.settled_at<?""",
                 (threshold,),
             ).fetchall()
@@ -1001,6 +1011,20 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            awaiting_owner = connection.execute(
+                "SELECT operation_id FROM owner_operations_v2 WHERE state='awaiting_owner'"
+            ).fetchall()
+            for row in awaiting_owner:
+                operation_id = str(row["operation_id"])
+                connection.execute(
+                    """UPDATE owner_operations_v2 SET state='stale', response_json=?
+                       WHERE operation_id=? AND state='awaiting_owner'""",
+                    (_json(_retired_awaiting_owner_response(operation_id)), operation_id),
+                )
+                connection.execute(
+                    "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
+                    (_utc_now(), operation_id),
+                )
             rows = connection.execute(
                 "SELECT intent_id, state, result_json FROM intents ORDER BY intent_id"
             ).fetchall()
@@ -1457,7 +1481,7 @@ def _legacy_report(
 def _sqlite_blockers(connection: sqlite3.Connection, account_id: str) -> list[str]:
     current = connection.execute(
         """SELECT operation_id FROM owner_operations_v2
-           WHERE account_id=? AND state IN ('pending','partial')""",
+           WHERE account_id=? AND state='pending'""",
         (account_id,),
     ).fetchall()
     legacy = connection.execute(
@@ -1477,6 +1501,19 @@ def _legal_v2_transition(before: V2State, after: V2State) -> bool:
         "pending": {"applied", "unchanged", "not_applied", "partial"},
         "partial": {"partial_resolved"},
     }.get(before, set())
+
+
+def _retired_awaiting_owner_response(operation_id: str) -> JsonDict:
+    return {
+        "state": "stale",
+        "code": "stale",
+        "next_action": "read_fresh",
+        "instruction": (
+            "This legacy awaiting-owner operation was retired without Cloud I/O. "
+            "Never replay it; read current Things state and send a fresh request."
+        ),
+        "operation_id": operation_id,
+    }
 
 
 def _validate_v2_receipts(rows: list[JsonDict]) -> list[JsonDict]:

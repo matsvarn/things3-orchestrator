@@ -57,9 +57,8 @@ Checklist patches preserve unmentioned rows and order and append new rows. Use
 lifecycle actions. Stopping keeps generated copies, materializes the hidden
 template as a fresh ordinary item on its next date, then removes its old graph.
 For a Project, the ordinary replacement includes its headings, Tasks, and
-checklist rows with fresh IDs. Stop returns `awaiting_owner` for CLI approval.
-That staged operation does not block unrelated writes; only returned
-`blocking_operation_ids` stop writes.
+checklist rows with fresh IDs. Stop applies through the same authenticated,
+bounded mutation path as other updates.
 Create Next and Stop require Things' native next date; if it is absent, the
 server returns `read_fresh` and writes nothing. Create Next also returns
 `read_fresh` when that native date already has a generated copy.
@@ -73,38 +72,22 @@ lifecycle writes instead of guessing at an unproven Cloud payload.
 
 The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.
-Pending and partial outcomes block every write path until CLI-only read-back
-reconciliation settles them or the owner resolves the partial.
+An uncertain outcome returns `pending`. Retry the exact same request ID and
+arguments to force read-back reconciliation; the retry never reposts the frozen
+writes. A fully classified mixed outcome returns terminal `partial` with an
+exact receipt. Corrective work always uses a fresh request ID.
 
 `things_find` accepts owner text with an optional exact container, or a
 `within`-only Project/Area membership read. When a page returns
 `next_action: "continue_read"`, continue with only its cursor.
 
-Recoverable Trash and stopping a repeat require CLI approval. MCP has no
-approval tool. Enroll the owner factor and use the CLI-only commands from a
-private local or SSH terminal:
+Recoverable Trash and repeat Stop apply directly for an authenticated MCP or
+stdio client. The shared bearer is write authority; keep it private. There is
+no per-client identity or separate owner flow in the normal v2 path.
 
-```console
-uv run things-orchestrator owner-factor
-uv run things-orchestrator operation-show op_EXAMPLE
-uv run things-orchestrator operation-reconcile op_EXAMPLE
-uv run things-orchestrator operation-settle-not-applied op_EXAMPLE
-uv run things-orchestrator operation-approve op_EXAMPLE
-uv run things-orchestrator operation-decline op_EXAMPLE
-uv run things-orchestrator operation-accept-partial op_EXAMPLE accepted_as_is
-```
-
-Restart the server after enrolling or rotating the owner factor so it pins the
-new public verification key.
-
-The approval passphrase is read from `/dev/tty`, or from inherited terminal
-file descriptors when a hardened `sudo -u` service account cannot reopen that
-device. Redirected stdin is rejected; the passphrase never comes from
-arguments, environment variables, or ordinary pipes. This is a CLI routing
-control, not proof that a human is present. The MCP server does not load the
-encrypted owner signing key. The server loads only its pinned public key. Code
-running as the same OS user can still replace these local files or control the
-process; use a separate OS identity or host for a stronger boundary.
+Rows left in legacy `awaiting_owner` state by an older build are retired as
+`stale` without Cloud I/O. Never replay their stored batch. Read current Things
+state and send a fresh request if the change is still wanted.
 
 Advanced scope editing, mutation coaching, and permanent deletion are not
 available in this release.
@@ -119,7 +102,7 @@ uv run ruff check .
 ```
 
 See [maintainer notes](docs/maintainer.md) and the
-[v2 ADR](docs/adr/0006-common-caller-owner-safe-v2.md).
+[authenticated-write ADR](docs/adr/0007-authenticated-bounded-v2-writes.md).
 
 ## Protocol acknowledgement
 

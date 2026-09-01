@@ -29,10 +29,6 @@ from things_orchestrator.library import (
     from_ts,
     new_uuid,
 )
-from things_orchestrator.owner_authority import (
-    enroll_owner_factor,
-    verified_authorization,
-)
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
@@ -2895,18 +2891,14 @@ def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
         }
     )
     library.records["template-project"].recurrence_next_on = date(2026, 9, 6)
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+    journal = MemoryJournal()
     workspace = ThingsWorkspace(
         library,
         journal=journal,
         clock=lambda: datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
         account_id="owner@example.com",
     )
-    staged = ThingsV2(workspace).dispatch(
+    result = ThingsV2(workspace).dispatch(
         "things_update",
         {
             "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2901",
@@ -2918,19 +2910,8 @@ def test_project_stop_emits_native_ordinary_graph_and_template_deletes(
             ],
         },
     )
-    operation = journal.get_v2_operation(staged.operation_id or "")
-    assert staged.state == "awaiting_owner" and operation is not None
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
-    assert result["state"] == "applied"
+    assert result.state == "applied"
+    assert result.next_action == "read_receipt"
 
     by_uuid = {row.uuid: row for row in client.committed}
     assert by_uuid["current-project"].payload["rt"] == []

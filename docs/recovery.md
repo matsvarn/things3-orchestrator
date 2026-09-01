@@ -3,34 +3,23 @@
 Read-only tools and `things_receipt` remain available while an outcome fence
 blocks writes.
 
-If an operation is `pending`, do not retry it as a write. Force read-back from
-the CLI; this never reposts the frozen writes:
+If an operation is `pending`, retry the exact same tool, request ID, and
+arguments. The server force-refreshes and classifies current Cloud state; it
+never reposts the frozen writes. `operation-reconcile` provides the same
+read-back from a private host terminal:
 
 ```console
 uv run things-orchestrator operation-reconcile op_EXAMPLE
 ```
 
-If read-back proves that none of the writes landed, settle it with the signed
-owner factor:
+If read-back proves that none of the writes landed, the operation becomes
+terminal `not_applied`. If every write landed, it becomes `applied`. A fully
+classified mixed result becomes terminal `partial` and includes its exact
+receipt. Corrective work uses a fresh request ID.
 
-```console
-uv run things-orchestrator operation-settle-not-applied op_EXAMPLE
-```
-
-If an operation is `partial`, do not retry or start corrective work. Inspect
-its exact receipt, then record one CLI-only resolution:
-
-```console
-uv run things-orchestrator operation-accept-partial op_EXAMPLE accepted_as_is
-uv run things-orchestrator operation-accept-partial op_EXAMPLE superseded
-```
-
-Resolution performs no Cloud write. Corrective work uses a fresh request ID
-after the fence releases.
-
-If a risky operation is `awaiting_owner`, show, approve, or decline it in a
-private local or SSH terminal. Expired or changed preconditions make it
-`stale` and write nothing.
+Legacy `awaiting_owner` rows from older builds are retired as `stale` without
+Cloud I/O. Never replay their stored batch. Read current Things state and send
+a fresh request if the change is still wanted.
 
 Retained v1 `prepared` and `needs_approval` rows are quarantined. Retained
 `pending` rows block v2 writes until current Cloud state classifies them.

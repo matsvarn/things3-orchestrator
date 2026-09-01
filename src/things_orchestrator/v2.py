@@ -18,7 +18,10 @@ from .interface import ReadCall, TruncatedField
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
 MANIFEST_VERSION = "v1"
-SAFETY_POLICY_DIGEST = "sha256:v1:" + sha256(b"preserve-omitted-fields;host-approval-for-trash").hexdigest()
+SAFETY_POLICY_DIGEST = "sha256:v1:" + sha256(
+    b"preserve-omitted-fields;bounded-v2-writes-apply-immediately;"
+    b"pre-post-recheck;read-back-receipt;never-replay-stored-operation"
+).hexdigest()
 REQUEST_ID = r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[0-9A-HJKMNP-TV-Z]{26})$"
 ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 
@@ -352,18 +355,18 @@ class PublicEffect(StrictModel):
 
 
 class PublicResult(StrictModel):
-    state: Literal["ok", "awaiting_owner", "pending", "applied", "unchanged", "not_applied", "partial", "partial_resolved", "stale", "declined", "rejected"]
+    state: Literal["ok", "pending", "applied", "unchanged", "not_applied", "partial", "partial_resolved", "stale", "declined", "rejected"]
     instruction: str
     code: Literal[
         "ok", "validation_error", "unknown_tool", "request_conflict",
         "write_fenced", "missing_target", "invalid_destination",
-        "inactive_destination", "expanded_write_limit", "awaiting_owner",
+        "inactive_destination", "expanded_write_limit",
         "pending_unknown", "applied", "unchanged", "not_applied_precondition",
         "partial", "partial_resolved", "stale", "declined", "receipt_missing",
         "cursor_invalid", "read_unavailable", "internal_error",
     ]
     next_action: Literal[
-        "none", "correct_request", "retry_same", "read_fresh", "read_receipt", "run_cli",
+        "none", "correct_request", "retry_same", "read_fresh", "read_receipt",
         "wait", "contact_operator", "continue_read",
     ]
     operation_id: str | None = None
@@ -380,7 +383,7 @@ class PublicResult(StrictModel):
     @model_validator(mode="after")
     def coherent_outcome(self) -> Self:
         state_codes = {
-            "ok": "ok", "awaiting_owner": "awaiting_owner", "pending": "pending_unknown",
+            "ok": "ok", "pending": "pending_unknown",
             "applied": "applied", "unchanged": "unchanged",
             "not_applied": "not_applied_precondition", "partial": "partial",
             "partial_resolved": "partial_resolved", "stale": "stale", "declined": "declined",
@@ -389,9 +392,9 @@ class PublicResult(StrictModel):
             raise ValueError("state and code disagree")
         state_actions = {
             "ok": "none",
-            "awaiting_owner": "run_cli", "pending": "run_cli",
+            "pending": "retry_same",
             "applied": "read_receipt", "unchanged": "read_receipt",
-            "not_applied": "read_receipt", "partial": "run_cli",
+            "not_applied": "read_receipt", "partial": "read_receipt",
             "partial_resolved": "none", "stale": "read_fresh", "declined": "none",
         }
         if self.state == "ok" and self.next_action == "continue_read":
@@ -781,9 +784,9 @@ DESCRIPTIONS = {
     "things_find": "Search by owner text, or read direct membership within one exact Project or Area. Continue pages with only the returned cursor.",
     "things_get": "Read one to fifty exact item IDs, including exact checklist and direct/inherited tag IDs.",
     "things_capture": "Create an atomic batch of Tasks or Projects with optional nested Project Tasks and a semantic repeat rule for Tasks or Projects.",
-    "things_update": "Atomically set named fields, move Tasks or Projects in place, patch direct tags and exact checklist rows, or change a semantic repeat rule. Supports Anytime, Create Next Copy, and owner-approved Stop.",
+    "things_update": "Atomically set named fields, move Tasks or Projects in place, patch direct tags and exact checklist rows, or change a semantic repeat rule. Supports Anytime, Create Next Copy, and Stop.",
     "things_complete": "Complete one atomic batch of exact items.",
-    "things_trash": "Stage one atomic batch for recoverable Trash.",
+    "things_trash": "Move one atomic batch to recoverable Trash.",
     "things_receipt": "Read immutable content-minimized receipt rows.",
 }
 
@@ -1288,7 +1291,6 @@ class ThingsV2:
 
 def _result_code(state: str) -> str:
     return {
-        "awaiting_owner": "awaiting_owner",
         "pending": "pending_unknown",
         "applied": "applied",
         "unchanged": "unchanged",
@@ -1303,8 +1305,8 @@ def _result_code(state: str) -> str:
 def _result_next_action(state: str) -> str:
     if state == "stale":
         return "read_fresh"
-    if state in {"awaiting_owner", "pending", "partial"}:
-        return "run_cli"
-    if state in {"applied", "unchanged", "not_applied"}:
+    if state == "pending":
+        return "retry_same"
+    if state in {"applied", "unchanged", "not_applied", "partial"}:
         return "read_receipt"
     return "correct_request" if state == "rejected" else "none"

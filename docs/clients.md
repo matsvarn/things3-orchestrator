@@ -10,9 +10,9 @@ prints the bodies, including the MCP bearer.
 The HTTP Bearer is the MCP token, not the Cloud password. Do not paste
 the Cloud password into chat.
 
-All clients share that one bearer. There is no per-client identity. MCP cannot
-approve an operation. Host approval uses a separate owner factor that the MCP
-server and agent runtime cannot access.
+All clients share that one bearer. There is no per-client identity. Possession
+of the bearer authorizes every bounded v2 mutation, including recoverable
+Trash and repeat Stop.
 
 Claude.ai, ChatGPT web, and ChatGPT mobile cannot use this bearer. This
 project does not ship MCP OAuth. When tools are missing:

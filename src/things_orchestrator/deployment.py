@@ -15,11 +15,12 @@ from .v2 import DESCRIPTIONS, MODELS, PublicResult
 PACKAGE_NAME = "things-orchestrator"
 CACHE_VERSION = _CACHE_VERSION
 CAPABILITIES = {
-    "owner_safe_v2": True,
+    "bounded_v2": True,
+    "shared_bearer_write_authority": True,
     "default_eight": True,
     "immutable_operations": True,
     "account_outcome_fence": True,
-    "signed_host_authorization": True,
+    "signed_legacy_recovery": True,
     "hmac_receipt_cursors": True,
     "legacy_cutover_report": True,
     "seven_day_retention": True,

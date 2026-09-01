@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 - 2026-09-01
+
+### Changed
+
+- Authenticated v2 clients now apply recoverable Trash and repeat Stop
+  directly. The shared MCP bearer or stdio connection authorizes every bounded
+  mutation; the normal path has no separate owner approval step.
+- Exact retries of uncertain operations reconcile current Cloud state without
+  reposting frozen writes. Fully classified mixed outcomes are terminal
+  `partial` results with immutable read-back receipts.
+- Legacy `awaiting_owner` rows are retired as `stale` without Cloud I/O during
+  cutover. Their stored batches are never replayed.
+
 ## 0.7.1 - 2026-08-30
 
 ### Added

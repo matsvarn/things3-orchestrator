@@ -63,8 +63,6 @@ def acceptance_urls(url: str) -> tuple[str, str]:
 def summary_exit_code(summary: dict[str, object]) -> int:
     if summary.get("state") == "cleaned" and summary.get("passed") is True:
         return 0
-    if summary.get("state") == "awaiting_owner":
-        return 2
     return 1
 
 
@@ -145,7 +143,7 @@ def main() -> None:
     parser.add_argument(
         "--live-write-acceptance",
         action="store_true",
-        help="acknowledge disposable live writes and owner-approved Trash cleanup",
+        help="acknowledge disposable live writes and recoverable Trash cleanup",
     )
     args = parser.parse_args()
     if not args.live_write_acceptance:
