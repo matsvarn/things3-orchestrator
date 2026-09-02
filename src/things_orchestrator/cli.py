@@ -12,11 +12,12 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any, NamedTuple, TextIO, cast
+from typing import Any, TextIO, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .client_config import ClientKind, Endpoint, render_client_config
 from .cloud import (
     CloudClient,
     CloudError,
@@ -44,22 +45,8 @@ from .server import ThingsMCPServer
 from .workspace import ThingsWorkspace
 
 _LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
-_PLACEHOLDER_HOST = "https://YOUR-HOST/mcp"
 _LOOPBACK_HEALTH = "http://127.0.0.1:8787/health"
 _HEALTH_WAIT_SECONDS = 15
-_SNIPPET_NAMES = (
-    "mcp.stdio.json",
-    "mcp.http.json",
-    "mcp.hermes.yaml",
-    "mcp.hermes.http.yaml",
-)
-
-
-class Snippets(NamedTuple):
-    stdio: Path
-    http: Path
-    hermes: Path
-    hermes_http: Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--public-url",
         dest="public_url",
         default="",
-        help="HTTPS origin or /mcp URL written into the HTTP snippets",
+        help="HTTPS origin or /mcp URL saved as the canonical MCP endpoint",
     )
     login.add_argument(
         "--timezone",
@@ -98,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument(
         "--show-secrets",
         action="store_true",
-        help="print snippet file bodies (includes the MCP bearer)",
+        help="deprecated; use print-config --client CLIENT --show-secrets",
     )
     configure = commands.add_parser(
         "configure", help="change owner preferences without changing credentials"
@@ -121,18 +108,23 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("skill-path", help="print the installed Things skill directory")
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
     http.add_argument("--port", type=int, default=8787)
-    show = commands.add_parser("print-config", help="reprint MCP snippets without logging in")
-    show.add_argument("--http", action="store_true", help="print only the HTTP snippets")
+    show = commands.add_parser("print-config", help="render one client configuration")
+    show.add_argument(
+        "--client",
+        choices=tuple(client.value for client in ClientKind),
+        help="client whose configuration to render",
+    )
+    show.add_argument("--http", action="store_true", help=argparse.SUPPRESS)
     show.add_argument(
         "--url",
         dest="public_url",
         default="",
-        help="HTTPS origin or /mcp URL written into the HTTP snippets",
+        help="render with this HTTPS origin or /mcp URL without saving it",
     )
     show.add_argument(
         "--show-secrets",
         action="store_true",
-        help="print snippet file bodies (includes the MCP bearer)",
+        help="substitute the stored MCP bearer for the safe placeholder",
     )
     doctor = commands.add_parser(
         "doctor",
@@ -179,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
         _print_config(
             parser,
             public_url=args.public_url,
-            http_only=args.http,
+            client=args.client,
             show_secrets=args.show_secrets,
         )
         return
@@ -305,17 +297,14 @@ def _login(
         parser.error(str(error))
     path = save_credentials(email, password, McpBearer(token), path=creds)
     _remember_checkout()
-    snippets = _write_mcp_snippets(
-        path.parent,
-        token=token,
-        public_url=str(mcp_url),
-    )
     print(f"Stored credentials in {path} (mode 0600, plaintext password).")
-    _print_snippets(snippets, http_only=False, show_secrets=show_secrets)
+    print(f"Stored preferences in {preferences_file} (mode 0600).")
     if rotate_token:
         print("mcp_token rotated. Update every HTTP client header.")
+    if show_secrets:
+        print("--show-secrets moved to print-config --client CLIENT --show-secrets.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
-    print("Next: docs/host.md if the server is a VPS, else docs/clients.md.")
+    print("Next: install the HTTP service, run doctor --wait, then render a client config.")
     print("Do not paste the Cloud password into chat.")
 
 
@@ -323,7 +312,7 @@ def _print_config(
     parser: argparse.ArgumentParser,
     *,
     public_url: str,
-    http_only: bool,
+    client: str | None,
     show_secrets: bool,
 ) -> None:
     creds = credentials_path()
@@ -335,12 +324,37 @@ def _print_config(
     if credentials.bearer is None:
         parser.error(_LOGIN)
         return
-    token = credentials.bearer.reveal()
-    _remember_checkout()
-    snippets = _write_mcp_snippets(creds.parent, token=token, public_url=public_url)
-    _print_snippets(snippets, http_only=http_only, show_secrets=show_secrets)
+    preferences_file = creds.with_name("preferences.json")
+    try:
+        url = (
+            normalize_mcp_url(public_url)
+            if public_url.strip()
+            else load_mcp_url(
+                preferences_file=preferences_file,
+                credentials_file=creds,
+            )
+            or normalize_mcp_url("http://127.0.0.1:8787")
+        )
+        kind = ClientKind(client or ClientKind.CURSOR.value)
+        rendered = render_client_config(
+            kind,
+            Endpoint(url, credentials.bearer),
+            skill_dir=skill_path(),
+            show_secrets=show_secrets,
+        )
+    except ConfigError as error:
+        parser.error(str(error))
+        return
+    if client is None:
+        print("No --client selected; rendering generic HTTP JSON (deprecated default).")
+    print(rendered.guidance)
+    print(rendered.body, end="")
+    if rendered.secondary_body is not None:
+        print("Alternative JSON:")
+        print(rendered.secondary_body, end="")
+    if not show_secrets:
+        print("Token is hidden. Add --show-secrets only in a private terminal.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
-    print("Next: docs/host.md if the server is a VPS, else docs/clients.md.")
     print("Do not paste the Cloud password into chat.")
 
 
@@ -353,191 +367,6 @@ def _mcp_token(*, rotate: bool, path: Path) -> str:
         if existing is not None:
             return existing.reveal()
     return token_urlsafe(32)
-
-
-def _http_url(public_url: str) -> str:
-    raw = public_url.strip().rstrip("/")
-    if not raw:
-        return _PLACEHOLDER_HOST
-    if raw.endswith("/mcp"):
-        return raw
-    return f"{raw}/mcp"
-
-
-def _read_existing_http_url(config_dir: Path) -> str:
-    path = config_dir / "mcp.http.json"
-    if not path.is_file():
-        return ""
-    try:
-        payload = json.loads(path.read_text())
-        url = payload["mcpServers"]["things"]["url"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
-        return ""
-    if isinstance(url, str) and url and "YOUR-HOST" not in url:
-        return url
-    return ""
-
-
-def _resolved_http_url(config_dir: Path, public_url: str) -> str:
-    if public_url.strip():
-        return _http_url(public_url)
-    return _read_existing_http_url(config_dir) or _PLACEHOLDER_HOST
-
-
-def _yaml_quote(value: str) -> str:
-    return json.dumps(value)
-
-
-def _skills_dir() -> Path:
-    return _checkout_wrapper().parent.parent / "skills"
-
-
-def _stdio_mcp() -> dict[str, object]:
-    return {
-        "mcpServers": {
-            "things": {
-                "command": str(_checkout_wrapper()),
-                "args": ["serve"],
-            }
-        }
-    }
-
-
-def _http_mcp(token: str, url: str) -> dict[str, object]:
-    return {
-        "mcpServers": {
-            "things": {
-                "url": url,
-                "headers": {"Authorization": f"Bearer {token}"},
-            }
-        }
-    }
-
-
-def _hermes_stdio_yaml() -> str:
-    return (
-        "mcp_servers:\n"
-        "  things:\n"
-        f"    command: {_yaml_quote(str(_checkout_wrapper()))}\n"
-        '    args: ["serve"]\n'
-        "    tools:\n"
-        "      resources: false\n"
-        "      prompts: false\n"
-        "\n"
-        "skills:\n"
-        "  external_dirs:\n"
-        f"    - {_yaml_quote(str(_skills_dir()))}\n"
-    )
-
-
-def _hermes_http_yaml(token: str, url: str) -> str:
-    return (
-        "mcp_servers:\n"
-        "  things:\n"
-        f"    url: {_yaml_quote(url)}\n"
-        "    headers:\n"
-        f"      Authorization: {_yaml_quote(f'Bearer {token}')}\n"
-        "    tools:\n"
-        "      resources: false\n"
-        "      prompts: false\n"
-        "\n"
-        "skills:\n"
-        "  external_dirs:\n"
-        f"    - {_yaml_quote(str(_skills_dir()))}\n"
-    )
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> Path:
-    _ensure_private_dir(path.parent)
-    path.write_text(json.dumps(payload, indent=2) + "\n")
-    path.chmod(0o600)
-    return path
-
-
-def _write_text(path: Path, text: str) -> Path:
-    _ensure_private_dir(path.parent)
-    path.write_text(text)
-    path.chmod(0o600)
-    return path
-
-
-def _write_mcp_snippets(config_dir: Path, *, token: str, public_url: str) -> Snippets:
-    url = _resolved_http_url(config_dir, public_url)
-    stdio = _write_json(config_dir / "mcp.stdio.json", _stdio_mcp())
-    http = _write_json(config_dir / "mcp.http.json", _http_mcp(token, url))
-    hermes = _write_text(config_dir / "mcp.hermes.yaml", _hermes_stdio_yaml())
-    hermes_http = _write_text(config_dir / "mcp.hermes.http.yaml", _hermes_http_yaml(token, url))
-    return Snippets(stdio=stdio, http=http, hermes=hermes, hermes_http=hermes_http)
-
-
-def _print_snippets(snippets: Snippets, *, http_only: bool, show_secrets: bool) -> None:
-    http_body = snippets.http.read_text()
-    placeholder = "YOUR-HOST" in http_body
-    if not http_only:
-        _emit_snippet(
-            "Hermes stdio YAML: merge into the active Hermes profile "
-            "config.yaml (default ~/.hermes/config.yaml)",
-            snippets.hermes,
-            snippets.hermes.read_text(),
-            show_secrets=show_secrets,
-        )
-        _emit_snippet(
-            f"Cursor / Claude Desktop JSON: {snippets.stdio}",
-            snippets.stdio,
-            json.dumps(json.loads(snippets.stdio.read_text()), indent=2) + "\n",
-            show_secrets=show_secrets,
-        )
-        if placeholder and show_secrets:
-            print(
-                "VPS: uv run things-orchestrator print-config "
-                "--http --show-secrets --url https://YOUR-HOST"
-            )
-            print(
-                "Keep skills.external_dirs on this host when the agent "
-                "runtime is here; change it only if the agent runs elsewhere."
-            )
-            print("Numbered host steps: docs/host.md.")
-            _print_secret_hint(http_only=http_only, show_secrets=show_secrets)
-            return
-    _emit_snippet(
-        "Hermes HTTP YAML: merge into the active Hermes profile "
-        "config.yaml (default ~/.hermes/config.yaml)",
-        snippets.hermes_http,
-        snippets.hermes_http.read_text(),
-        show_secrets=show_secrets,
-    )
-    if show_secrets:
-        print(
-            "Keep skills.external_dirs on this host when the agent "
-            "runtime is here; change it only if the agent runs elsewhere."
-        )
-    _emit_snippet(
-        f"Cursor Cloud Agents / Claude Code JSON: {snippets.http}",
-        snippets.http,
-        json.dumps(json.loads(http_body), indent=2) + "\n",
-        show_secrets=show_secrets,
-    )
-    if placeholder:
-        print("HTTP URL still has YOUR-HOST. Rerun with --url https://your-host.")
-    _print_secret_hint(http_only=http_only, show_secrets=show_secrets)
-
-
-def _emit_snippet(label: str, path: Path, body: str, *, show_secrets: bool) -> None:
-    if not show_secrets:
-        print(f"Wrote {path}")
-        return
-    print(label)
-    print(f"Wrote {path}")
-    print(body, end="")
-
-
-def _print_secret_hint(*, http_only: bool, show_secrets: bool) -> None:
-    if show_secrets:
-        return
-    command = "uv run things-orchestrator print-config --show-secrets"
-    if http_only:
-        command += " --http"
-    print(f"To print snippet contents: {command}")
 
 
 def _doctor(
@@ -571,20 +400,12 @@ def _doctor(
         else:
             print(f"timezone: ok ({timezone_name})")
 
-    config_dir = creds.parent
-    missing = [name for name in _SNIPPET_NAMES if not (config_dir / name).is_file()]
-    if missing:
-        print(f"snippets: missing {', '.join(missing)}")
-        failed = True
-    else:
-        print("snippets: ok")
-
-    resolved = _resolved_http_url(config_dir, "")
-    hosted = "YOUR-HOST" not in resolved
-    if hosted:
-        print(f"http url: {resolved}")
-    else:
-        print("http url: placeholder")
+    resolved = load_mcp_url(
+        preferences_file=creds.with_name("preferences.json"),
+        credentials_file=creds,
+    ) or normalize_mcp_url("http://127.0.0.1:8787")
+    print(f"http url: {resolved}")
+    hosted = resolved.origin != "http://127.0.0.1:8787"
 
     loopback = _probe_loopback(wait=wait)
     print(f"loopback health: {loopback}")

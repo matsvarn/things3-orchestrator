@@ -119,25 +119,20 @@ def _seed_credentials(
     return creds
 
 
-def _seed_snippets(
-    tmp_path: Path, *, token: str = "keep-me", url: str = "https://YOUR-HOST/mcp"
+def _seed_preferences(
+    tmp_path: Path, *, url: str = "http://127.0.0.1:8787/mcp"
 ) -> None:
-    (tmp_path / "mcp.stdio.json").write_text("{}\n")
-    (tmp_path / "mcp.http.json").write_text(
+    (tmp_path / "preferences.json").write_text(
         json.dumps(
             {
-                "mcpServers": {
-                    "things": {
-                        "url": url,
-                        "headers": {"Authorization": f"Bearer {token}"},
-                    }
-                }
+                "version": 2,
+                "note_style": "natural",
+                "timezone": "Europe/Berlin",
+                "mcp_url": url,
             }
         )
         + "\n"
     )
-    (tmp_path / "mcp.hermes.yaml").write_text("mcp_servers: {}\n")
-    (tmp_path / "mcp.hermes.http.yaml").write_text("mcp_servers: {}\n")
 
 
 class _HealthResponse:
@@ -154,7 +149,7 @@ class _HealthResponse:
         return self._body
 
 
-def test_login_prints_stdio_and_http_snippets(
+def test_login_stores_credentials_and_preferences_without_snippets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = tmp_path / "credentials.json"
@@ -164,38 +159,18 @@ def test_login_prints_stdio_and_http_snippets(
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "fixed-token")
     main(["login", "--timezone", "Europe/Berlin"])
     out = capsys.readouterr().out
-    wrapper = str((ROOT / "plugin/bin/things-orchestrator").resolve())
-    skills = str((ROOT / "plugin/skills").resolve())
     assert "fixed-token" not in out
     assert "Bearer fixed-token" not in out
     assert "Authorization" not in out
     assert "mcp_servers" not in out
     assert "mcpServers" not in out
-    assert str(tmp_path / "mcp.stdio.json") in out
-    assert str(tmp_path / "mcp.http.json") in out
-    assert str(tmp_path / "mcp.hermes.yaml") in out
-    assert str(tmp_path / "mcp.hermes.http.yaml") in out
-    assert "print-config --show-secrets" in out
-    assert "docs/clients.md" in out
+    assert "install the HTTP service" in out
+    assert "doctor --wait" in out
     assert "Do not paste the Cloud password into chat." in out
     assert "The HTTP Bearer is the MCP token, not the Cloud password." in out
     assert "codex plugin marketplace add ." not in out
     assert "secret" not in _stdout_without_secret_flag(out)
-    assert wrapper not in out
-    stdio = json.loads((tmp_path / "mcp.stdio.json").read_text())
-    assert stdio["mcpServers"]["things"] == {"command": wrapper, "args": ["serve"]}
-    http = json.loads((tmp_path / "mcp.http.json").read_text())
-    assert http["mcpServers"]["things"] == {
-        "url": "http://127.0.0.1:8787/mcp",
-        "headers": {"Authorization": "Bearer fixed-token"},
-    }
-    hermes = (tmp_path / "mcp.hermes.yaml").read_text()
-    assert "mcp_servers:" in hermes
-    assert wrapper in hermes
-    assert skills in hermes
-    hermes_http = (tmp_path / "mcp.hermes.http.yaml").read_text()
-    assert "Bearer fixed-token" in hermes_http
-    assert "http://127.0.0.1:8787/mcp" in hermes_http
+    assert not list(tmp_path.glob("mcp.*"))
     stored = json.loads(creds.read_text())
     assert stored["mcp_token"] == "fixed-token"
     assert stored["password"] == "secret"
@@ -208,18 +183,12 @@ def test_login_prints_stdio_and_http_snippets(
     }
     checkout = (tmp_path / "checkout").read_text().strip()
     assert Path(checkout) == ROOT.resolve()
-    for name in (
-        "credentials.json",
-        "mcp.stdio.json",
-        "mcp.http.json",
-        "mcp.hermes.yaml",
-        "mcp.hermes.http.yaml",
-    ):
+    for name in ("credentials.json", "preferences.json"):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
 
 
-def test_login_show_secrets_prints_bodies_and_bearer(
+def test_login_show_secrets_never_prints_bearer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = tmp_path / "credentials.json"
@@ -238,19 +207,12 @@ def test_login_show_secrets_prints_bodies_and_bearer(
         ]
     )
     out = capsys.readouterr().out
-    wrapper = str((ROOT / "plugin/bin/things-orchestrator").resolve())
-    assert "fixed-token" in out
-    assert "Bearer fixed-token" in out
-    assert "mcp_servers" in out
-    assert "mcpServers" in out
-    assert wrapper in out
-    assert "active Hermes profile" in out
-    assert "~/.hermes/config.yaml" in out
-    assert "Cursor / Claude Desktop JSON" in out
-    assert "Cursor Cloud Agents / Claude Code JSON" in out
-    assert "Codex" not in out
+    assert "fixed-token" not in out
+    assert "Bearer fixed-token" not in out
+    assert "mcp_servers" not in out
+    assert "mcpServers" not in out
+    assert "--show-secrets moved to print-config --client CLIENT" in out
     assert '"secret"' not in out
-    assert "docs/clients.md" in out
 
 
 def test_login_keeps_mcp_token_unless_rotated(
@@ -426,7 +388,7 @@ def test_configure_rejects_scheme_and_keeps_note_style_change_atomic(
     assert path.read_text() == original
 
 
-def test_print_config_reprints_without_login(
+def test_print_config_renders_without_writing_and_hides_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = tmp_path / "credentials.json"
@@ -438,20 +400,15 @@ def test_print_config_reprints_without_login(
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
-    main(["print-config", "--http", "--url", "https://tasks.example.com"])
+    main(["print-config", "--url", "https://tasks.example.com"])
     out = capsys.readouterr().out
     assert "secret" not in _stdout_without_secret_flag(out)
     assert "keep-me" not in out
     assert "Bearer" in out
-    assert str(tmp_path / "mcp.http.json") in out
-    assert str(tmp_path / "mcp.hermes.http.yaml") in out
-    assert "print-config --show-secrets" in out
-    http = json.loads((tmp_path / "mcp.http.json").read_text())
-    assert http["mcpServers"]["things"]["url"] == "https://tasks.example.com/mcp"
-    assert http["mcpServers"]["things"]["headers"]["Authorization"] == "Bearer keep-me"
-    hermes_http = (tmp_path / "mcp.hermes.http.yaml").read_text()
-    assert "https://tasks.example.com/mcp" in hermes_http
-    assert "Bearer keep-me" in hermes_http
+    assert "https://tasks.example.com/mcp" in out
+    assert "Bearer <mcp_token>" in out
+    assert "deprecated default" in out
+    assert not list(tmp_path.glob("mcp.*"))
 
 
 def test_print_config_show_secrets_prints_bearer(
@@ -466,18 +423,17 @@ def test_print_config_show_secrets_prints_bearer(
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
-    main(["print-config", "--http", "--show-secrets", "--url", "https://tasks.example.com"])
+    main(["print-config", "--client", "codex", "--show-secrets", "--url", "https://tasks.example.com"])
     out = capsys.readouterr().out
     assert '"secret"' not in out
     assert "keep-me" in out
     assert "Bearer keep-me" in out
-    assert "Cursor Cloud Agents / Claude Code JSON" in out
-    assert "Codex" not in out
-    assert "active Hermes profile" in out
+    assert "~/.codex/config.toml" in out
+    assert "mcp_servers.things" in out
 
 
-def test_print_config_keeps_existing_http_url(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_print_config_uses_saved_url_without_mutating_preferences(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = tmp_path / "credentials.json"
     creds.write_text(
@@ -486,24 +442,16 @@ def test_print_config_keeps_existing_http_url(
         )
         + "\n"
     )
-    (tmp_path / "mcp.http.json").write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "things": {
-                        "url": "https://tasks.example.com/mcp",
-                        "headers": {"Authorization": "Bearer keep-me"},
-                    }
-                }
-            }
-        )
-        + "\n"
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text(
+        '{"version":2,"note_style":"natural","mcp_url":"https://tasks.example.com/mcp"}\n'
     )
+    before = preferences.read_text()
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
-    main(["print-config", "--http"])
-    http = json.loads((tmp_path / "mcp.http.json").read_text())
-    assert http["mcpServers"]["things"]["url"] == "https://tasks.example.com/mcp"
+    main(["print-config", "--client", "cursor"])
+    assert "https://tasks.example.com/mcp" in capsys.readouterr().out
+    assert preferences.read_text() == before
 
 
 def test_print_config_without_credentials_points_at_login(
@@ -534,7 +482,7 @@ def test_doctor_without_server_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
-    _seed_snippets(tmp_path)
+    _seed_preferences(tmp_path)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
 
@@ -548,8 +496,7 @@ def test_doctor_without_server_exits_nonzero(
     assert "secret" not in out
     assert "credentials: ok" in out
     assert "timezone: ok (Europe/Berlin)" in out
-    assert "snippets: ok" in out
-    assert "http url: placeholder" in out
+    assert "http url: http://127.0.0.1:8787/mcp" in out
     assert "loopback health: not listening" in out
 
 
@@ -557,7 +504,7 @@ def test_doctor_hosted_url_requires_loopback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
-    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
 
@@ -577,7 +524,7 @@ def test_doctor_wait_retries_until_health_ok(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
-    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     attempts = {"n": 0}
@@ -603,7 +550,7 @@ def test_doctor_url_probes_origin_health(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
-    _seed_snippets(tmp_path, url="https://tasks.example.com/mcp")
+    _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     seen: list[str] = []

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from things_orchestrator.cloud import CloudError
+from things_orchestrator.config import ConfigError, Preferences
 from things_orchestrator.interface import (
     ApproveCall,
     CommitCall,
@@ -19,7 +20,6 @@ from things_orchestrator.library import (
     MemoryLibrary,
     Record,
 )
-from things_orchestrator.config import ConfigError, Preferences
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.workspace import ThingsWorkspace
 
