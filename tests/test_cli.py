@@ -142,7 +142,7 @@ def test_login_stores_credentials_and_preferences_without_snippets(
     creds = tmp_path / "credentials.json"
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "fixed-token")
     main(["login", "--timezone", "Europe/Berlin"])
     out = capsys.readouterr().out
@@ -168,8 +168,9 @@ def test_login_stores_credentials_and_preferences_without_snippets(
         "timezone": "Europe/Berlin",
         "mcp_url": "http://127.0.0.1:8787/mcp",
     }
-    checkout = (tmp_path / "checkout").read_text().strip()
-    assert Path(checkout) == ROOT.resolve()
+    launcher = Path((tmp_path / "state.json").read_text().strip())
+    assert launcher.name == "things-orchestrator"
+    assert launcher.is_file()
     for name in ("credentials.json", "preferences.json"):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
@@ -181,7 +182,7 @@ def test_login_show_secrets_never_prints_bearer(
     creds = tmp_path / "credentials.json"
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "fixed-token")
     main(
         [
@@ -211,7 +212,7 @@ def test_login_keeps_mcp_token_unless_rotated(
     )
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "new-token")
     main(["login", "--timezone", "Europe/Berlin"])
     assert json.loads(creds.read_text())["mcp_token"] == "keep-me"
@@ -228,7 +229,7 @@ def test_login_updates_only_host_preferences_and_preserves_other_keys(
     preferences.write_text(original)
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "first-token")
 
     main(["login", "--timezone", "Europe/Berlin"])
@@ -386,7 +387,7 @@ def test_print_config_renders_without_writing_and_hides_token(
         + "\n"
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     main(["print-config", "--url", "https://tasks.example.com"])
     out = capsys.readouterr().out
     assert "secret" not in _stdout_without_secret_flag(out)
@@ -409,7 +410,7 @@ def test_print_config_show_secrets_prints_bearer(
         + "\n"
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     main(["print-config", "--client", "codex", "--show-secrets", "--url", "https://tasks.example.com"])
     out = capsys.readouterr().out
     assert '"secret"' not in out
@@ -435,7 +436,7 @@ def test_print_config_uses_saved_url_without_mutating_preferences(
     )
     before = preferences.read_text()
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     main(["print-config", "--client", "cursor"])
     assert "https://tasks.example.com/mcp" in capsys.readouterr().out
     assert preferences.read_text() == before
@@ -471,7 +472,7 @@ def test_doctor_without_server_exits_nonzero(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
 
     async def refused(*_args: object, **_kwargs: object) -> object:
         raise DoctorFailure("connection refused")
@@ -494,7 +495,7 @@ def test_doctor_without_url_checks_loopback_only(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
 
     seen: list[str] = []
 
@@ -515,7 +516,7 @@ def test_doctor_passes_wait_to_authenticated_round_trip(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     seen_wait: list[bool] = []
 
     async def healthy(targets: list[object], *_args: object, wait: bool) -> object:
@@ -537,7 +538,7 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     seen: list[str] = []
 
     async def healthy(targets: list[object], *_args: object, **_kwargs: object) -> object:
@@ -681,50 +682,10 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
     assert token_factory() == "secure-context-token"  # type: ignore[operator]
 
 
-def test_setup_wizard_is_linked_and_does_not_store_cloud_secrets() -> None:
-    import subprocess
-
-    script = ROOT / "scripts/setup"
-    subprocess.run(["bash", "-n", str(script)], check=True)
-    stages = script.read_text().split("# STAGES —", 1)[1]
-    assert "write_env" not in stages
-    assert "ask_secret" not in stages
-    assert "scripts/setup" in (ROOT / "README.md").read_text()
-    assert "scripts/setup" in (ROOT / "docs/owner.md").read_text()
-    assert "docs/clients.md" in stages
-    assert "mcp.stdio.json" in stages
-    assert "mcp.http.json" in stages
-    assert "mcp.hermes.yaml" in stages
-    assert "~/.hermes/config.yaml" in stages
-    assert "codex plugin marketplace add ." not in stages
-    assert "CURSOR_SKILLS" not in stages
-    assert "~/.cursor/skills" not in stages
-    assert "the next screen will clear" not in stages
-    assert "Do not replace the whole file." in stages
-    assert (ROOT / "docs/clients.md").is_file()
+def test_obsolete_setup_and_hand_edited_service_template_are_removed() -> None:
+    assert not (ROOT / "scripts/setup").exists()
+    assert not (ROOT / "deploy/serve-http.service").exists()
     assert (ROOT / "deploy/Caddyfile").is_file()
-    assert (ROOT / "deploy/serve-http.service").is_file()
-    clients = (ROOT / "docs/clients.md").read_text()
-    assert "## This Mac" in clients
-    assert "## Already hosted" in clients
-    assert "~/.hermes/config.yaml" in clients
-    assert "cursor.com/agents" in clients
-    assert "cannot use this bearer" in clients
-    assert "does not ship MCP OAuth" in clients
-    assert "config.toml" in clients
-    assert "bearer_token_env_var" in clients or "http_headers" in clients
-    host = (ROOT / "docs/host.md").read_text()
-    assert "login --url" in host
-    assert "plugin/skills" in host
-    assert "do not run `login`" in host.lower()
-    assert "serve-http.service" in host
-    assert "claude mcp add --transport http" not in host
-    assert "Tailscale" in host
-    assert "topolog" in host.lower()
-    assert "Things Cloud password" in host
-    assert "VPS" in host
-    assert "Hermes Desktop" in host or "Hermes desktop" in host
-    assert "docs/host.md" in stages
 
 
 def test_readme_is_safe_to_publish() -> None:
@@ -799,7 +760,7 @@ def test_skill_path_prints_the_packaged_skill(capsys: pytest.CaptureFixture[str]
     assert (output / "SKILL.md").is_file()
 
 
-def test_plugin_wrapper_reads_the_checkout_file(tmp_path: Path) -> None:
+def test_plugin_wrapper_executes_the_recorded_launcher(tmp_path: Path) -> None:
     import os
     import stat
     import subprocess
@@ -811,47 +772,51 @@ def test_plugin_wrapper_reads_the_checkout_file(tmp_path: Path) -> None:
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     state = tmp_path / "state"
     (state / "things-orchestrator").mkdir(parents=True)
-    (state / "things-orchestrator" / "checkout").write_text(f"{ROOT.resolve()}\n")
+    launcher = tmp_path / "installed" / "things-orchestrator"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/bin/sh\nprintf 'launcher:%s\\n' \"$*\"\n")
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+    (state / "things-orchestrator" / "launcher").write_text(f"{launcher}\n")
     env = os.environ.copy()
     env["XDG_STATE_HOME"] = str(state)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
     env["HOME"] = str(tmp_path / "home")
-    env.pop("THINGS_EMAIL", None)
-    env.pop("THINGS_PASSWORD", None)
     result = subprocess.run(
-        [str(script), "serve"],
+        [str(script), "skill-path"],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode == 2
-    assert "uv run things-orchestrator login" in result.stderr
+    assert result.returncode == 0
+    assert result.stdout == "launcher:skill-path\n"
 
 
-def test_plugin_wrapper_runs_configure_from_the_checkout(tmp_path: Path) -> None:
+def test_plugin_wrapper_uses_checkout_venv_fallback(tmp_path: Path) -> None:
     import os
     import stat
     import subprocess
 
-    plugin = tmp_path / "cache" / "plugin"
+    checkout = tmp_path / "checkout"
+    plugin = checkout / "plugin"
     (plugin / "bin").mkdir(parents=True)
     script = plugin / "bin" / "things-orchestrator"
     script.write_text((ROOT / "plugin/bin/things-orchestrator").read_text())
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    state = tmp_path / "state"
-    (state / "things-orchestrator").mkdir(parents=True)
-    (state / "things-orchestrator" / "checkout").write_text(f"{ROOT.resolve()}\n")
+    launcher = checkout / ".venv/bin/things-orchestrator"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\nprintf 'fallback:%s\\n' \"$*\"\n")
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
     env = {
         **os.environ,
         "HOME": str(tmp_path / "home"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
-        "XDG_STATE_HOME": str(state),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
     }
 
     result = subprocess.run(
-        [str(script), "configure", "--note-style", "visual"],
+        [str(script), "service", "status"],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
@@ -860,13 +825,10 @@ def test_plugin_wrapper_runs_configure_from_the_checkout(tmp_path: Path) -> None
     )
 
     assert result.returncode == 0
-    saved = json.loads(
-        (tmp_path / "config/things-orchestrator/preferences.json").read_text()
-    )
-    assert saved["note_style"] == "visual"
+    assert result.stdout == "fallback:service status\n"
 
 
-def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
+def test_plugin_wrapper_without_launcher_explains_recovery(tmp_path: Path) -> None:
     import os
     import stat
     import subprocess
@@ -885,7 +847,8 @@ def test_plugin_wrapper_without_checkout_explains_login(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 2
-    assert "uv run things-orchestrator login" in result.stderr
+    assert "things-orchestrator login" in result.stderr
+    assert "uv sync" in result.stderr
     assert "No module named" not in result.stderr
 
 
@@ -897,6 +860,8 @@ def test_plugin_wrapper_routes_every_recovery_command() -> None:
     usage = next(line for line in script.splitlines() if line.startswith('    echo "Usage:'))
     for command in commands:
         assert command in usage
+    assert "python3" not in script
+    assert "PYTHONPATH" not in script
     for removed in (
         "operation-settle-not-applied",
         "operation-approve",
@@ -1027,7 +992,7 @@ def test_login_prompts_for_timezone_on_a_utc_host(
     monkeypatch.setattr("things_orchestrator.cli._local_timezone_name", lambda: "UTC")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
-        "things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json"
+        "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "token")
 

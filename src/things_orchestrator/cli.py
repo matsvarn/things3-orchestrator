@@ -22,13 +22,12 @@ from .cloud import (
     CloudClient,
     CloudError,
     CloudLibrary,
-    _ensure_private_dir,
-    state_cache_path,
 )
 from .config import (
     ConfigError,
     McpBearer,
     credentials_path,
+    launcher_path,
     load_credentials,
     load_mcp_url,
     load_preferences,
@@ -36,6 +35,7 @@ from .config import (
     load_timezone,
     normalize_mcp_url,
     save_credentials,
+    save_launcher,
     save_preferences,
 )
 from .context import SQLiteContextStore
@@ -43,7 +43,7 @@ from .deployment import skill_path
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
-from .service import service_action
+from .service import resolve_console_script, service_action
 from .workspace import ThingsWorkspace
 
 _LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
@@ -321,9 +321,10 @@ def _login(
     except ConfigError as error:
         parser.error(str(error))
     path = save_credentials(email, password, McpBearer(token), path=creds)
-    _remember_checkout()
+    launcher = save_launcher(resolve_console_script(), path=launcher_path())
     print(f"Stored credentials in {path} (mode 0600, plaintext password).")
     print(f"Stored preferences in {preferences_file} (mode 0600).")
+    print(f"Bound the Codex plugin launcher in {launcher} (mode 0600).")
     if rotate_token:
         print("mcp_token rotated. Update every HTTP client header.")
     if show_secrets:
@@ -451,20 +452,6 @@ def _doctor(
     client_target = report.targets[-1].url
     print("Client acceptance (set THINGS_MCP_TOKEN on that machine):")
     print(curl_tool_count_command(client_target))
-
-
-def _checkout_wrapper() -> Path:
-    return Path(__file__).resolve().parents[2] / "plugin" / "bin" / "things-orchestrator"
-
-
-def _remember_checkout() -> None:
-    root = Path(__file__).resolve().parents[2]
-    if not (root / "pyproject.toml").is_file():
-        return
-    path = state_cache_path().with_name("checkout")
-    _ensure_private_dir(path.parent)
-    path.write_text(f"{root}\n")
-    path.chmod(0o600)
 
 
 def _server(parser: argparse.ArgumentParser) -> ThingsMCPServer:

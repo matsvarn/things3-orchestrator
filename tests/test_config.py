@@ -13,6 +13,7 @@ from things_orchestrator.config import (
     load_timezone,
     normalize_mcp_url,
     save_credentials,
+    save_launcher,
     save_preferences,
 )
 
@@ -99,3 +100,23 @@ def test_mcp_url_accepts_https_and_loopback_http() -> None:
     assert str(normalize_mcp_url(_url("http", "127.0.0.1:8787"))) == (
         _url("http", "127.0.0.1:8787/mcp")
     )
+
+
+def test_launcher_binding_is_exact_private_and_executable(tmp_path: Path) -> None:
+    executable = tmp_path / "bin/things-orchestrator"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o700)
+    binding = tmp_path / "state/launcher"
+
+    saved = save_launcher(executable, path=binding)
+
+    assert saved.read_text() == f"{executable.resolve()}\n"
+    assert saved.stat().st_mode & 0o777 == 0o600
+
+
+def test_launcher_binding_rejects_a_non_executable(tmp_path: Path) -> None:
+    executable = tmp_path / "things-orchestrator"
+    executable.write_text("not executable")
+    with pytest.raises(ConfigError, match="executable"):
+        save_launcher(executable, path=tmp_path / "launcher")

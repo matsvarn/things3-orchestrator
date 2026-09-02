@@ -1,36 +1,27 @@
 #!/bin/sh
 set -eu
 
-unset PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE
-export PYTHONNOUSERSITE=1
-
 TO_PLUGIN_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TO_SOURCE_ROOT=$(CDPATH= cd -- "$TO_PLUGIN_ROOT/.." && pwd)
-TO_CHECKOUT_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/things-orchestrator/checkout"
-# Codex copies plugin/ into a cache that is not next to src/. Prefer the live checkout.
-if [ ! -f "$TO_SOURCE_ROOT/pyproject.toml" ] && [ -f "$TO_CHECKOUT_FILE" ]; then
-  TO_SOURCE_ROOT=$(tr -d '\n' < "$TO_CHECKOUT_FILE")
+TO_LAUNCHER_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/things-orchestrator/launcher"
+TO_LAUNCHER=""
+if [ -f "$TO_LAUNCHER_FILE" ]; then
+  TO_LAUNCHER=$(tr -d '\n' < "$TO_LAUNCHER_FILE")
 fi
-if [ ! -f "$TO_SOURCE_ROOT/pyproject.toml" ]; then
-  echo "From the clone: uv run things-orchestrator login" >&2
+if [ -z "$TO_LAUNCHER" ] && [ -x "$TO_SOURCE_ROOT/.venv/bin/things-orchestrator" ]; then
+  TO_LAUNCHER="$TO_SOURCE_ROOT/.venv/bin/things-orchestrator"
+fi
+if [ -z "$TO_LAUNCHER" ] || [ ! -x "$TO_LAUNCHER" ]; then
+  echo "Run things-orchestrator login from the uv tool, or run uv sync in the clone." >&2
   exit 2
 fi
-if [ -n "${THINGS_ORCHESTRATOR_PYTHON:-}" ]; then
-  TO_PYTHON=$THINGS_ORCHESTRATOR_PYTHON
-elif [ -x "$TO_SOURCE_ROOT/.venv/bin/python" ]; then
-  TO_PYTHON="$TO_SOURCE_ROOT/.venv/bin/python"
-else
-  TO_PYTHON=python3
-fi
-export PYTHONPATH="$TO_SOURCE_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 case "${1:-}" in
-  configure|login|serve|serve-http|print-config|doctor|owner-factor|migration-report|legacy-reconcile|legacy-resolve|operation-show|operation-reconcile)
-    exec "$TO_PYTHON" -m things_orchestrator.cli "$@"
+  configure|login|service|serve|serve-http|print-config|doctor|skill-path|owner-factor|migration-report|legacy-reconcile|legacy-resolve|operation-show|operation-reconcile)
+    exec "$TO_LAUNCHER" "$@"
     ;;
   *)
-    echo "Usage: things-orchestrator {configure,login,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}" >&2
-    echo "From the clone: uv run things-orchestrator login" >&2
+    echo "Usage: things-orchestrator {configure,login,service,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}" >&2
     exit 2
     ;;
 esac

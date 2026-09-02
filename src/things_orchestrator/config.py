@@ -83,6 +83,12 @@ def preferences_path() -> Path:
     return _config_dir() / "preferences.json"
 
 
+def launcher_path() -> Path:
+    root = os.environ.get("XDG_STATE_HOME")
+    base = Path(root) if root else Path.home() / ".local" / "state"
+    return base / "things-orchestrator" / "launcher"
+
+
 def _config_dir() -> Path:
     root = os.environ.get("XDG_CONFIG_HOME")
     base = Path(root) if root else Path.home() / ".config"
@@ -144,6 +150,17 @@ def save_credentials(
         indent=2,
     ) + "\n"
     _atomic_write(target, payload)
+    return target
+
+
+def save_launcher(executable: Path, *, path: Path | None = None) -> Path:
+    resolved = executable.resolve()
+    if not resolved.is_absolute() or not resolved.is_file():
+        raise ConfigError("The Things launcher must be an existing absolute file")
+    if not os.access(resolved, os.X_OK):
+        raise ConfigError("The Things launcher must be executable")
+    target = path or launcher_path()
+    _atomic_write(target, f"{resolved}\n")
     return target
 
 

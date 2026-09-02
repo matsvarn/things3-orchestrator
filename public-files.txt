@@ -8,7 +8,6 @@ LICENSE
 README.md
 SECURITY.md
 deploy/Caddyfile
-deploy/serve-http.service
 docs/adr/0001-revisioned-workspace-behind-three-tools.md
 docs/adr/0002-contextual-desired-state.md
 docs/adr/0003-review-completeness-behind-three-tools.md
@@ -40,7 +39,6 @@ pyproject.toml
 scripts/check_release.py
 scripts/probe_cloud_capabilities.py
 scripts/run_live_acceptance.py
-scripts/setup
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
 src/things_orchestrator/client_config.py
