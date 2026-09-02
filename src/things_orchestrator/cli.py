@@ -115,11 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
     service_commands = service.add_subparsers(dest="service_action", required=True)
     for action in ("install", "uninstall", "status"):
         service_command = service_commands.add_parser(action)
-        service_command.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="show the convergent service effects without applying them",
-        )
+        if action != "status":
+            service_command.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="show the convergent service effects without applying them",
+            )
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
     http.add_argument("--port", type=int, default=8787)
     show = commands.add_parser("print-config", help="render one client configuration")
@@ -242,18 +243,22 @@ def main(argv: list[str] | None = None) -> None:
         print(skill_path())
         return
     if args.action == "service":
+        dry_run = getattr(args, "dry_run", False)
         try:
-            result = service_action(args.service_action, dry_run=args.dry_run)
+            result = service_action(args.service_action, dry_run=dry_run)
         except (ConfigError, OSError) as error:
             parser.error(str(error))
             return
         for effect in result.effects:
-            prefix = "Would" if args.dry_run else "Applied"
+            prefix = "Would" if dry_run else "Applied"
             print(f"{prefix}: {effect.description}")
-        status_label = "service (planned)" if args.dry_run else "service"
+        status_label = "service (planned)" if dry_run else "service"
         print(f"{status_label}: {result.status.value}")
         if args.service_action == "install":
-            print("Next: things-orchestrator doctor --wait")
+            if dry_run:
+                print("Next: rerun without --dry-run to apply this plan")
+            else:
+                print("Next: things-orchestrator doctor --wait")
         return
     if args.action == "owner-factor":
         _owner_factor(parser)

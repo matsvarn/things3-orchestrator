@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,7 @@ _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
 _BUILT_IN_SCHEMES = frozenset(("file", "http", "https", "things"))
 _DANGEROUS_SCHEMES = frozenset(("data", "javascript", "vbscript"))
 _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
+_DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
 class ConfigError(ValueError):
@@ -105,6 +107,12 @@ def normalize_mcp_url(raw: str) -> McpUrl:
     if parsed.query or parsed.fragment or parsed.path not in {"", "/mcp"}:
         raise ConfigError("The MCP URL needs an origin or an /mcp path")
     host = parsed.hostname
+    if host is None or not _valid_network_host(host):
+        raise ConfigError("The MCP URL host must be a DNS name or IP address")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ConfigError("The MCP URL port is invalid") from error
     if parsed.scheme == "https" and host:
         pass
     elif parsed.scheme == "http" and host in _LOOPBACK_HOSTS:
@@ -113,6 +121,19 @@ def normalize_mcp_url(raw: str) -> McpUrl:
         raise ConfigError("The MCP URL needs HTTPS or loopback HTTP")
     origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     return McpUrl(origin)
+
+
+def _valid_network_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        dns = host.removesuffix(".")
+        return (
+            bool(dns)
+            and len(dns) <= 253
+            and all(_DNS_LABEL.fullmatch(label) for label in dns.split("."))
+        )
+    return True
 
 
 def load_credentials(*, path: Path | None = None) -> Credentials:

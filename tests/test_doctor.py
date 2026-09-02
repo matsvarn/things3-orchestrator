@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from mcp.types import Implementation
 
-from things_orchestrator.config import normalize_mcp_url
+from things_orchestrator.config import McpUrl, normalize_mcp_url
 from things_orchestrator.deployment import (
     DeploymentIdentity,
     tool_contract_hash,
@@ -107,3 +107,8 @@ def test_curl_command_uses_environment_bearer_and_returns_tool_count() -> None:
     assert "jq" in command
     assert "| length" in command
     assert "keep-me" not in command
+
+
+def test_curl_command_shell_quotes_its_url_even_if_a_caller_bypasses_parsing() -> None:
+    command = curl_tool_count_command(McpUrl("https://$(id)"))
+    assert "POST 'https://$(id)/mcp'" in command

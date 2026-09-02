@@ -656,7 +656,13 @@ def test_service_install_dry_run_prints_effects_and_doctor_last(
     assert seen == [("install", True)]
     assert lines[0] == "Would: install launchd agent"
     assert "service (planned): active" in lines
-    assert lines[-1] == "Next: things-orchestrator doctor --wait"
+    assert lines[-1] == "Next: rerun without --dry-run to apply this plan"
+
+
+def test_service_status_rejects_dry_run() -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["service", "status", "--dry-run"])
+    assert caught.value.code == 2
 
 
 def _doctor_report(targets: list[object]) -> object:

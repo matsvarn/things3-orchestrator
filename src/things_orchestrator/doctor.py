@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -133,7 +134,7 @@ async def run_doctor(
 
 def curl_tool_count_command(url: McpUrl) -> str:
     return (
-        f"curl -fsS -X POST {url} "
+        f"curl -fsS -X POST {shlex.quote(str(url))} "
         "-H \"Authorization: Bearer $THINGS_MCP_TOKEN\" "
         "-H 'Content-Type: application/json' "
         "-H 'Accept: application/json, text/event-stream' "

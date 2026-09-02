@@ -83,6 +83,11 @@ def test_legacy_credentials_timezone_is_a_read_only_fallback(tmp_path: Path) -> 
         _url("https", "tasks.example.com/other"),
         _url("https", "user:secret@tasks.example.com"),
         _url("https", "tasks.example.com?token=x"),
+        _url("https", "$(id)"),
+        _url("https", "example.com;id"),
+        _url("https", "exa mple.com"),
+        _url("https", "bad_host.example.com"),
+        _url("https", "example.com:99999"),
     ),
 )
 def test_mcp_url_rejects_placeholders_and_unsafe_origins(raw: str) -> None:
