@@ -127,7 +127,7 @@ def render_client_config(
         return RenderedClientConfig(client, body, guidance)
     if client is ClientKind.CADDY:
         if endpoint.url.origin.startswith("https://") is False:
-            raise ConfigError("Caddy configuration needs a public HTTPS MCP URL")
+            raise ConfigError("Caddy configuration needs an HTTPS MCP URL")
         hostname = endpoint.url.origin.removeprefix("https://")
         body = (
             f"{hostname} {{\n"

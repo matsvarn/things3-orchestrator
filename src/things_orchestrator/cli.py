@@ -121,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="show the convergent service effects without applying them",
             )
-    http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
+    http = commands.add_parser("serve-http", help="MCP on loopback HTTP")
     http.add_argument("--port", type=int, default=8787)
     show = commands.add_parser("print-config", help="render one client configuration")
     show.add_argument(

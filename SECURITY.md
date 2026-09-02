@@ -16,8 +16,9 @@ the protocol, block access, or disable an account. Use at your own risk.
 - Treat output from `print-config --show-secrets` as secret. It contains the
   MCP bearer. Do not save it in a repository, screenshot it, or paste it into
   an issue.
-- Put TLS in front of `serve-http`. Leave the process on `127.0.0.1`.
-  Do not publish port 8787. Do not run `/mcp` without a bearer.
+- Put TLS in front of `serve-http` before any non-loopback client hop. Leave the
+  process on `127.0.0.1`; a client on the same host may use loopback HTTP. Do
+  not publish port 8787. Do not run `/mcp` without a bearer.
   Unauthenticated `/health` is liveness only (`{"ok":true}`). A request with
   the correct bearer receives deployment diagnostics; a wrong bearer gets 401.
 - Rotate the MCP bearer with `login --rotate-token` if a client configuration

@@ -141,17 +141,35 @@ def service_status(
     else:
         command = ("systemctl", "is-active", "--quiet", _UNIT)
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if platform == "darwin":
+            launchctl_result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            systemctl_result = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except OSError:
         return ServiceStatus.INACTIVE
+    if platform == "darwin":
+        return (
+            ServiceStatus.ACTIVE
+            if launchctl_result.returncode == 0
+            and any(
+                line.strip() == "state = running"
+                for line in launchctl_result.stdout.splitlines()
+            )
+            else ServiceStatus.INACTIVE
+        )
     return (
         ServiceStatus.ACTIVE
-        if completed.returncode == 0
+        if systemctl_result.returncode == 0
         else ServiceStatus.INACTIVE
     )
 

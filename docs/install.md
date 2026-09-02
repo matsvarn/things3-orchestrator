@@ -5,6 +5,7 @@ Things Cloud password and the MCP bearer. Other machines receive only the MCP
 URL and bearer.
 
 You need [uv](https://docs.astral.sh/uv/) and Things Cloud enabled in Things 3.
+The optional client-side curl acceptance line also needs `jq` on that client.
 Install an exact Git tag:
 
 ```console

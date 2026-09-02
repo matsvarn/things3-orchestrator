@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from things_orchestrator.service import (
     ServiceStatus,
     _plan_service,
     render_launchd_plist,
     render_systemd_unit,
+    service_status,
 )
 
 EXECUTABLE = Path("/opt/uv tools/bin/things-orchestrator")
@@ -91,6 +95,34 @@ def test_launchd_uninstall_does_not_bootout_an_inactive_agent() -> None:
         status=ServiceStatus.INACTIVE,
     )
     assert [effect.kind for effect in plan.effects] == ["remove"]
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("state = running\n", ServiceStatus.ACTIVE),
+        ("state = exited\n", ServiceStatus.INACTIVE),
+        ("", ServiceStatus.INACTIVE),
+    ],
+)
+def test_launchd_status_requires_a_running_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    output: str,
+    expected: ServiceStatus,
+) -> None:
+    agent = (
+        tmp_path
+        / "Library/LaunchAgents/com.matsvarnskuhler.things-orchestrator-http.plist"
+    )
+    agent.parent.mkdir(parents=True)
+    agent.write_text("plist")
+    monkeypatch.setattr(
+        "things_orchestrator.service.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output),
+    )
+
+    assert service_status(platform="darwin", uid=501, home=tmp_path) is expected
 
 
 def test_linux_install_writes_reloads_and_starts_the_supervisor() -> None:
