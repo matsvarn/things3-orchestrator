@@ -24,8 +24,9 @@ from mcp.types import (
 )
 from pydantic import ValidationError
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
+from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from .deployment import health_payload, package_version
@@ -173,19 +174,29 @@ class ThingsMCPServer:
             security_settings=settings,
         )
 
-        async def mcp_app(scope: Scope, receive: Receive, send: Send) -> None:
-            header = {
-                key.decode("latin-1"): value.decode("latin-1")
-                for key, value in scope.get("headers") or []
-            }
-            if not bearer_matches(header.get("authorization"), token):
-                response = Response("unauthorized", status_code=401)
-                await response(scope, receive, send)
-                return
-            await manager.handle_request(scope, receive, send)
+        class AuthenticatedMCP:
+            async def __call__(
+                self, scope: Scope, receive: Receive, send: Send
+            ) -> None:
+                header = {
+                    key.decode("latin-1"): value.decode("latin-1")
+                    for key, value in scope.get("headers") or []
+                }
+                if not bearer_matches(header.get("authorization"), token):
+                    response = Response("unauthorized", status_code=401)
+                    await response(scope, receive, send)
+                    return
+                await manager.handle_request(scope, receive, send)
 
-        async def health(_request: object) -> JSONResponse:
-            return JSONResponse(health_payload())
+        mcp_app = AuthenticatedMCP()
+
+        async def health(request: Request) -> JSONResponse:
+            authorization = request.headers.get("authorization")
+            if authorization is None:
+                return JSONResponse(health_payload())
+            if not bearer_matches(authorization, token):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return JSONResponse(health_payload(authenticated=True))
 
         @asynccontextmanager
         async def lifespan(_app: Starlette) -> Any:
@@ -195,7 +206,8 @@ class ThingsMCPServer:
         return Starlette(
             routes=[
                 Route("/health", health),
-                Mount("/mcp", app=mcp_app),
+                Route("/mcp", mcp_app),
+                Route("/mcp/", mcp_app),
             ],
             lifespan=lifespan,
         )

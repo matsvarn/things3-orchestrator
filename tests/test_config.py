@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from things_orchestrator.config import (
+    ConfigError,
+    McpBearer,
+    McpUrl,
+    load_credentials,
+    load_legacy_mcp_url,
+    load_mcp_url,
+    load_timezone,
+    normalize_mcp_url,
+    save_credentials,
+    save_launcher,
+    save_preferences,
+    select_login_mcp_url,
+)
+
+
+def _url(scheme: str, remainder: str) -> str:
+    return f"{scheme}://{remainder}"
+
+
+def test_credentials_and_owner_preferences_have_separate_authority(
+    tmp_path: Path,
+) -> None:
+    credentials = tmp_path / "credentials.json"
+    preferences = tmp_path / "preferences.json"
+
+    save_credentials(
+        "user@example.com", "secret", McpBearer("bearer"), path=credentials
+    )
+    save_preferences(
+        timezone="Europe/Berlin",
+        mcp_url=normalize_mcp_url(_url("https", "tasks.example.com")),
+        path=preferences,
+    )
+
+    assert json.loads(credentials.read_text()) == {
+        "email": "user@example.com",
+        "password": "secret",
+        "mcp_token": "bearer",
+    }
+    assert (
+        load_timezone(preferences_file=preferences, credentials_file=credentials)
+        == "Europe/Berlin"
+    )
+    assert str(
+        load_mcp_url(preferences_file=preferences, credentials_file=credentials)
+    ) == _url("https", "tasks.example.com/mcp")
+    assert str(load_credentials(path=credentials).bearer) == "<mcp_token>"
+
+
+def test_legacy_credentials_timezone_is_a_read_only_fallback(tmp_path: Path) -> None:
+    credentials = tmp_path / "credentials.json"
+    preferences = tmp_path / "preferences.json"
+    credentials.write_text(
+        json.dumps(
+            {
+                "email": "user@example.com",
+                "password": "secret",
+                "mcp_token": "bearer",
+                "timezone": "Europe/Berlin",
+            }
+        )
+    )
+
+    assert (
+        load_timezone(preferences_file=preferences, credentials_file=credentials)
+        == "Europe/Berlin"
+    )
+    assert (
+        load_mcp_url(preferences_file=preferences, credentials_file=credentials) is None
+    )
+    assert not preferences.exists()
+
+
+@pytest.mark.parametrize("timezone", ("", "/etc/localtime"))
+def test_timezone_rejects_empty_and_absolute_names_without_leaking_value_error(
+    tmp_path: Path,
+    timezone: str,
+) -> None:
+    with pytest.raises(ConfigError, match="IANA name"):
+        save_preferences(timezone=timezone, path=tmp_path / "preferences.json")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        _url("https", "YOUR-HOST"),
+        _url("ftp", "tasks.example.com"),
+        _url("http", "tasks.example.com"),
+        _url("https", "tasks.example.com/other"),
+        _url("https", "user:secret@tasks.example.com"),
+        _url("https", "tasks.example.com?token=x"),
+        _url("https", "$(id)"),
+        _url("https", "example.com;id"),
+        _url("https", "exa mple.com"),
+        _url("https", "bad_host.example.com"),
+        _url("https", "example.com:99999"),
+    ),
+)
+def test_mcp_url_rejects_placeholders_and_unsafe_origins(raw: str) -> None:
+    with pytest.raises(ConfigError):
+        normalize_mcp_url(raw)
+
+
+def test_mcp_url_accepts_https_and_loopback_http() -> None:
+    assert str(normalize_mcp_url(_url("https", "tasks.example.com/"))) == (
+        _url("https", "tasks.example.com/mcp")
+    )
+    assert str(normalize_mcp_url(_url("https", "tasks.example.com/mcp"))) == (
+        _url("https", "tasks.example.com/mcp")
+    )
+    assert str(normalize_mcp_url(_url("http", "127.0.0.1:8787"))) == (
+        _url("http", "127.0.0.1:8787/mcp")
+    )
+
+
+def test_legacy_mcp_url_loads_the_pre_09_http_snippet(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.http.json"
+    path.write_text(
+        json.dumps(
+            {"mcpServers": {"things": {"url": _url("https", "tasks.example.com/mcp")}}}
+        )
+    )
+
+    assert load_legacy_mcp_url(path=path) == McpUrl(_url("https", "tasks.example.com"))
+
+
+def test_legacy_mcp_url_is_optional_but_existing_invalid_data_fails_closed(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.json"
+    assert load_legacy_mcp_url(path=missing) is None
+
+    invalid = tmp_path / "mcp.http.json"
+    invalid.write_text('{"mcpServers":{"things":{"url":"not-a-url"}}}')
+    with pytest.raises(ConfigError, match="Legacy MCP config"):
+        load_legacy_mcp_url(path=invalid)
+
+
+def test_login_url_selection_uses_explicit_saved_legacy_then_loopback() -> None:
+    saved = normalize_mcp_url(_url("https", "saved.example.com"))
+    legacy = normalize_mcp_url(_url("https", "legacy.example.com"))
+
+    assert select_login_mcp_url(
+        explicit=_url("https", "explicit.example.com"),
+        saved=saved,
+        legacy=legacy,
+    ) == normalize_mcp_url(_url("https", "explicit.example.com"))
+    assert select_login_mcp_url(explicit="", saved=saved, legacy=legacy) == saved
+    assert select_login_mcp_url(explicit="", saved=None, legacy=legacy) == legacy
+    assert select_login_mcp_url(explicit="", saved=None, legacy=None) == (
+        normalize_mcp_url(_url("http", "127.0.0.1:8787"))
+    )
+
+
+def test_launcher_binding_is_exact_private_and_executable(tmp_path: Path) -> None:
+    executable = tmp_path / "bin/things-orchestrator"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o700)
+    binding = tmp_path / "state/launcher"
+
+    saved = save_launcher(executable, path=binding)
+
+    assert saved.read_text() == f"{executable.resolve()}\n"
+    assert saved.stat().st_mode & 0o777 == 0o600
+
+
+def test_launcher_binding_rejects_a_non_executable(tmp_path: Path) -> None:
+    executable = tmp_path / "things-orchestrator"
+    executable.write_text("not executable")
+    with pytest.raises(ConfigError, match="executable"):
+        save_launcher(executable, path=tmp_path / "launcher")

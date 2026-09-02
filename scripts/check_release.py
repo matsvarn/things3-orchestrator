@@ -19,6 +19,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
+SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
 
 
 def fail(messages: list[str]) -> None:
@@ -86,6 +87,12 @@ def metadata() -> None:
         if not any(tool.get("type") == "mcp" and tool.get("value") == "things" for tool in tools):
             errors.append(f"{agent_file.relative_to(ROOT)} must depend on the things MCP")
 
+        packaged_skill = ROOT / "src/things_orchestrator/skills" / skill_dir.name
+        errors.extend(
+            f"packaged skill differs: {message}"
+            for message in skill_tree_mismatches(packaged_skill, source=skill_dir)
+        )
+
     fail(errors)
     print("Release metadata and skill files are valid.")
 
@@ -150,6 +157,54 @@ def archive_versions(sdist: Path, wheel: Path) -> tuple[str | None, str | None]:
     return sdist_version, wheel_version
 
 
+def skill_tree_mismatches(target: Path, *, source: Path) -> list[str]:
+    expected = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    actual = {
+        path.relative_to(target).as_posix(): path.read_bytes()
+        for path in target.rglob("*")
+        if path.is_file()
+    } if target.is_dir() else {}
+    messages: list[str] = []
+    for name in sorted(expected):
+        if name not in actual:
+            messages.append(f"missing skill file: {name}")
+        elif actual[name] != expected[name]:
+            messages.append(f"changed skill file: {name}")
+    messages.extend(
+        f"unexpected skill file: {name}" for name in sorted(set(actual) - set(expected))
+    )
+    return messages
+
+
+def archive_skill_mismatches(wheel: Path, *, source: Path) -> list[str]:
+    expected = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    with zipfile.ZipFile(wheel) as archive:
+        actual = {
+            str(PurePosixPath(name).relative_to(SKILL_ARCHIVE_ROOT)): archive.read(name)
+            for name in archive.namelist()
+            if not name.endswith("/")
+            and PurePosixPath(name).is_relative_to(SKILL_ARCHIVE_ROOT)
+        }
+    messages: list[str] = []
+    for name in sorted(expected):
+        if name not in actual:
+            messages.append(f"missing skill file: {name}")
+        elif actual[name] != expected[name]:
+            messages.append(f"changed skill file: {name}")
+    messages.extend(
+        f"unexpected skill file: {name}" for name in sorted(set(actual) - set(expected))
+    )
+    return messages
+
+
 def archives() -> None:
     sdists = sorted((ROOT / "dist").glob("*.tar.gz"))
     wheels = sorted((ROOT / "dist").glob("*.whl"))
@@ -187,6 +242,11 @@ def archives() -> None:
         errors.append(
             f"wheel version {wheel_version!r} differs from pyproject.toml {expected_version!r}"
         )
+    errors.extend(
+        archive_skill_mismatches(
+            wheels[0], source=ROOT / "plugin/skills/things-orchestrator"
+        )
+    )
     fail(errors)
     print("Release archives contain only approved files.")
 

@@ -11,7 +11,8 @@ import argparse
 import json
 import subprocess
 
-from things_orchestrator.cloud import CloudClient, CloudLibrary, load_credentials
+from things_orchestrator.cloud import CloudClient, CloudLibrary
+from things_orchestrator.config import load_credentials
 from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
@@ -71,12 +72,12 @@ def _native_ids(view: str) -> set[str]:
 
 
 def run(*, native_parity: bool = False) -> dict[str, object]:
-    email, password, _token = load_credentials()
-    library = CloudLibrary(CloudClient(email, password))
+    credentials = load_credentials()
+    library = CloudLibrary(CloudClient(credentials.email, credentials.password))
     workspace = ThingsWorkspace(
         library,
         journal=MemoryJournal(),
-        account_id=email,
+        account_id=credentials.email,
     )
     interface = ThingsV2(workspace)
     today = interface.dispatch("things_view", {"view": "today", "limit": 1})

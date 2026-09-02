@@ -14,6 +14,7 @@ from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
 
 from .cloud import CloudError
+from .config import ConfigError, Preferences
 from .consistency import Conflict, diagnose, item_conflicts
 from .context import (
     CompletenessFact,
@@ -90,7 +91,6 @@ from .library import (
     public_id,
     template_uuid_of,
 )
-from .preferences import Preferences, PreferencesError
 from .recurrence import RecurrenceReadError, RecurrenceState, RepeatMode, new_rule
 from .source_document import (
     SourceDocumentError,
@@ -5669,7 +5669,7 @@ class ThingsWorkspace:
         if any(entry.kind == "project" for entry in call.create):
             try:
                 preferences = self._preferences()
-            except PreferencesError as error:
+            except ConfigError as error:
                 raise _Abort(
                     self._rejected(
                         f"Saved Project preferences are invalid: {error}. Fix the "

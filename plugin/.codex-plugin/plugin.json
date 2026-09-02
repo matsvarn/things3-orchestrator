@@ -1,6 +1,6 @@
 {
   "name": "things-orchestrator",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Unofficial self-hosted Things Cloud MCP with eight bounded agent-ready tools",
   "author": {
     "name": "Mats Varnskuhler"
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Things Orchestrator",
     "shortDescription": "Manage tasks and projects in Things 3.",
-    "longDescription": "Read current Things work and submit bounded idempotent changes. Risky work requires the host-only owner command.",
+    "longDescription": "Read current Things work and submit bounded idempotent changes. Every bounded write is authorized by the connected server; Trash is recoverable.",
     "developerName": "Mats Varnskuhler",
     "category": "Productivity",
     "capabilities": [

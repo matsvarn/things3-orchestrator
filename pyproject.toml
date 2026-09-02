@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "things-orchestrator"
-version = "0.8.0"
+version = "0.9.0"
 description = "Unofficial self-hosted Things 3 Cloud MCP with eight bounded agent-ready tools"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -37,6 +37,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/things_orchestrator"]
+include = ["src/things_orchestrator/skills/**"]
 
 [tool.hatch.build.targets.sdist]
 only-include = [

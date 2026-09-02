@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.0 - 2026-09-02
+
+### Added
+
+- Git-tag installation now ships the canonical Things skill and records the
+  exact deployed commit from package metadata.
+- `service install`, `service status`, and `service uninstall` manage the
+  loopback HTTP server through launchd or systemd.
+- `print-config --client` renders Codex, Hermes, Claude Code, Cursor, Cursor
+  Cloud Agents, or Caddy output from one saved endpoint.
+- `doctor` now authenticates, initializes MCP, verifies the exact eight tools,
+  and compares the running schema and commit with the installed artifact.
+
+### Changed
+
+- Streamable HTTP is the normal client transport. Stdio remains only inside the
+  Codex plugin package.
+- Public `/health` returns only `{"ok":true}`. The correct bearer reveals the
+  deployment receipt, while a wrong bearer returns 401.
+- Timezone and MCP URL are owner preferences. Credentials contain only the
+  Things Cloud login and the single MCP bearer authority.
+- The plugin wrapper executes the launcher recorded by `login`, with an exact
+  checkout `.venv` fallback for development.
+
+### Removed
+
+- Generated snippet files, the setup wizard, the hand-edited systemd template,
+  the checkout pointer, and system-Python/PYTHONPATH launcher fallbacks.
+
 ## 0.8.0 - 2026-09-01
 
 ### Changed

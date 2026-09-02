@@ -9,30 +9,28 @@ the protocol, block access, or disable an account. Use at your own risk.
 
 ## Do
 
-- Run `uv run things-orchestrator login` in a private terminal. Confirm
+- Run `things-orchestrator login` in a private terminal. Confirm
   the password prompt is this project's CLI, not chat.
 - Keep `~/.config/things-orchestrator/credentials.json` mode 0600. Do
   not commit it, paste it, or put it in issues, screenshots, or chat.
-- Treat snippet files as secret (`mcp.http.json`,
-  `mcp.hermes.http.yaml`, `mcp.hermes.yaml`, `mcp.stdio.json`). They are
-  mode 0600. Default `login` / `print-config` print paths only.
-  `--show-secrets` prints the MCP Bearer. Do not screenshot that
-  terminal into an issue.
-- Put TLS in front of `serve-http`. Leave the process on `127.0.0.1`.
-  Do not publish port 8787. Do not run `/mcp` without a bearer.
-  `/health` is liveness only (`{"ok":true}`).
-- Rotate the MCP bearer with `login --rotate-token` if an HTTP snippet
+- Treat output from `print-config --show-secrets` as secret. It contains the
+  MCP bearer. Do not save it in a repository, screenshot it, or paste it into
+  an issue.
+- Put TLS in front of `serve-http` before any non-loopback client hop. Leave the
+  process on `127.0.0.1`; a client on the same host may use loopback HTTP. Do
+  not publish port 8787. Do not run `/mcp` without a bearer.
+  Unauthenticated `/health` is liveness only (`{"ok":true}`). A request with
+  the correct bearer receives deployment diagnostics; a wrong bearer gets 401.
+- Rotate the MCP bearer with `login --rotate-token` if a client configuration
   leaked. That token is not the Cloud password; still treat it as a
   secret.
-- In systemd, do not set `THINGS_MCP_TOKEN`. `login` already wrote the
-  token and Cloud credentials to `credentials.json`.
 
 ## Do not
 
 - Paste the Cloud password into chat, tickets, or a hosted login we do
   not run on your own machine.
-- File a GitHub issue that contains `credentials.json`, `mcp.http.json`,
-  `mcp.hermes.http.yaml`, or a Bearer header.
+- File a GitHub issue that contains `credentials.json`, a generated client
+  configuration, or a Bearer header.
 - Open `/mcp` with no auth so ChatGPT will connect.
 
 ## Report a vulnerability

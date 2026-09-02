@@ -12,27 +12,26 @@ eight bounded tools: `things_view`, `things_find`, `things_get`,
 > change the protocol, block access, or disable an account. `login` stores the
 > Cloud password on the serving host. Never paste that password into chat.
 
-Read [Trust](docs/trust.md), [Security](SECURITY.md), and the
-[product comparison](docs/comparison.md) before deployment. The
-[capability proof](docs/capability-proof.md) records the tested Cloud boundary.
+Read [Trust](docs/trust.md) and [Security](SECURITY.md) before deployment.
 
-## Install on this Mac
+## Install
 
-You need [uv](https://docs.astral.sh/uv/) and a Git clone. The package is not on PyPI.
-Use the clone because it contains the server, plugin, and CLI-only commands.
+Install an exact Git tag, log in on the serving host, and start the supervised
+HTTP service. A single Mac uses loopback. A remote host adds Tailscale Serve or
+Caddy for TLS.
 
 ```console
-scripts/setup
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.0"
+things-orchestrator login
+things-orchestrator service install
+things-orchestrator doctor --wait
+things-orchestrator print-config --client codex
 ```
 
-Merge `mcp.hermes.yaml` into `~/.hermes/config.yaml`. Do not replace that
-file. See [client setup](docs/clients.md) for other clients.
-
-## Install on a host
-
-Run login and the server on the host. A private Tailscale VPS is the personal
-default. The Mac can be off while that host runs. Use public HTTPS only for clients that cannot reach the tailnet. See
-[host setup](docs/host.md).
+See [Install](docs/install.md) for the Mac, private VPS, tailnet, and public
+HTTPS paths. Then use the compact [client table](docs/clients.md). The serving
+host keeps the Things Cloud password; clients receive only the MCP URL and
+bearer.
 
 ## Use the v2 tools
 
