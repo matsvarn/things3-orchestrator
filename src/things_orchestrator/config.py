@@ -141,13 +141,20 @@ def load_credentials(*, path: Path | None = None) -> Credentials:
     try:
         raw: object = json.loads(target.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ConfigError("Run things-orchestrator login in a private terminal") from error
+        raise ConfigError(
+            "Run things-orchestrator login in a private terminal"
+        ) from error
     if not isinstance(raw, dict):
         raise ConfigError("Things Cloud credentials were unreadable")
     email = raw.get("email")
     password = raw.get("password")
     token = raw.get("mcp_token")
-    if not isinstance(email, str) or not email or not isinstance(password, str) or not password:
+    if (
+        not isinstance(email, str)
+        or not email
+        or not isinstance(password, str)
+        or not password
+    ):
         raise ConfigError("Run things-orchestrator login in a private terminal")
     if token is not None and (not isinstance(token, str) or not token):
         raise ConfigError("Things Cloud credentials were unreadable")
@@ -166,10 +173,13 @@ def save_credentials(
     path: Path | None = None,
 ) -> Path:
     target = path or credentials_path()
-    payload = json.dumps(
-        {"email": email, "password": password, "mcp_token": bearer.reveal()},
-        indent=2,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            {"email": email, "password": password, "mcp_token": bearer.reveal()},
+            indent=2,
+        )
+        + "\n"
+    )
     _atomic_write(target, payload)
     return target
 
@@ -236,13 +246,50 @@ def load_mcp_url(
     return load_preferences(path=preferences_file).mcp_url
 
 
+def load_legacy_mcp_url(*, path: Path) -> McpUrl | None:
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ConfigError(f"Legacy MCP config path is not a file: {path}")
+    try:
+        raw: object = json.loads(path.read_text())
+        if not isinstance(raw, dict):
+            raise TypeError
+        servers = raw["mcpServers"]
+        if not isinstance(servers, dict):
+            raise TypeError
+        things = servers["things"]
+        if not isinstance(things, dict):
+            raise TypeError
+        url = things["url"]
+        if not isinstance(url, str) or not url:
+            raise TypeError
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ConfigError(f"Legacy MCP config is unreadable: {path}") from error
+    if "YOUR-HOST" in url.upper():
+        return None
+    try:
+        return normalize_mcp_url(url)
+    except ConfigError as error:
+        raise ConfigError(f"Legacy MCP config has an invalid URL: {path}") from error
+
+
+def select_login_mcp_url(
+    *,
+    explicit: str,
+    saved: McpUrl | None,
+    legacy: McpUrl | None,
+) -> McpUrl:
+    if explicit.strip():
+        return normalize_mcp_url(explicit)
+    return saved or legacy or normalize_mcp_url("http://127.0.0.1:8787")
+
+
 def save_note_style(style: NoteStyle, *, path: Path | None = None) -> Path:
     return save_preferences(note_style=style, path=path)
 
 
-def save_source_schemes(
-    schemes: Iterable[str], *, path: Path | None = None
-) -> Path:
+def save_source_schemes(schemes: Iterable[str], *, path: Path | None = None) -> Path:
     return save_preferences(source_schemes=schemes, path=path)
 
 
@@ -258,11 +305,19 @@ def save_preferences(
         raise ConfigError("No preference change was supplied")
     if note_style is not None and note_style not in _NOTE_STYLES:
         raise ConfigError(f"Unknown note style: {note_style}")
-    normalized_schemes = _normalize_source_schemes(source_schemes) if source_schemes is not None else None
-    normalized_timezone = _normalize_timezone(timezone) if timezone is not None else None
+    normalized_schemes = (
+        _normalize_source_schemes(source_schemes)
+        if source_schemes is not None
+        else None
+    )
+    normalized_timezone = (
+        _normalize_timezone(timezone) if timezone is not None else None
+    )
     normalized_url = (
-        mcp_url if isinstance(mcp_url, McpUrl) else normalize_mcp_url(mcp_url)
-    ) if mcp_url is not None else None
+        (mcp_url if isinstance(mcp_url, McpUrl) else normalize_mcp_url(mcp_url))
+        if mcp_url is not None
+        else None
+    )
     target = path or preferences_path()
     payload = _load_preferences_payload(target)
     payload["version"] = _CURRENT_VERSION
@@ -284,7 +339,9 @@ def _normalize_timezone(value: str) -> str:
     try:
         ZoneInfo(value)
     except ZoneInfoNotFoundError as error:
-        raise ConfigError("Timezone needs an IANA name such as Europe/Berlin") from error
+        raise ConfigError(
+            "Timezone needs an IANA name such as Europe/Berlin"
+        ) from error
     return value
 
 
@@ -346,7 +403,9 @@ def _load_preferences_payload(path: Path) -> dict[str, object]:
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o600)

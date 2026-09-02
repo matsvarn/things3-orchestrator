@@ -29,6 +29,7 @@ from .config import (
     credentials_path,
     launcher_path,
     load_credentials,
+    load_legacy_mcp_url,
     load_mcp_url,
     load_preferences,
     load_source_schemes,
@@ -37,13 +38,14 @@ from .config import (
     save_credentials,
     save_launcher,
     save_preferences,
+    select_login_mcp_url,
 )
 from .context import SQLiteContextStore
 from .deployment import skill_path
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
-from .service import resolve_console_script, service_action
+from .service import ServiceApplyError, resolve_console_script, service_action
 from .workspace import ThingsWorkspace
 
 _LOGIN = (
@@ -67,7 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="{login,configure,service,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
     )
-    login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
+    login = commands.add_parser(
+        "login", help="store Things Cloud email and password (TTY only)"
+    )
     login.add_argument(
         "--url",
         "--public-url",
@@ -104,9 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="approved third-party app schemes; pass no values to clear",
     )
     configure.add_argument("--timezone", help="owner IANA timezone")
-    configure.add_argument(
-        "--url", dest="public_url", help="HTTPS origin or /mcp URL"
-    )
+    configure.add_argument("--url", dest="public_url", help="HTTPS origin or /mcp URL")
     commands.add_parser("serve", help="MCP on stdio")
     commands.add_parser("skill-path", help="print the installed Things skill directory")
     service = commands.add_parser(
@@ -156,16 +158,31 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="also verify this HTTPS origin or /mcp endpoint",
     )
-    commands.add_parser("owner-factor", help="enroll the signed legacy-recovery passphrase")
-    commands.add_parser("migration-report", help="quarantine and report retained v1 operations")
-    legacy_reconcile = commands.add_parser("legacy-reconcile", help="classify one retained v1 pending row from Cloud evidence without replay")
+    commands.add_parser(
+        "owner-factor", help="enroll the signed legacy-recovery passphrase"
+    )
+    commands.add_parser(
+        "migration-report", help="quarantine and report retained v1 operations"
+    )
+    legacy_reconcile = commands.add_parser(
+        "legacy-reconcile",
+        help="classify one retained v1 pending row from Cloud evidence without replay",
+    )
     legacy_reconcile.add_argument("intent_id")
-    legacy_resolve = commands.add_parser("legacy-resolve", help="release one retained v1 partial or unknown fence with signed owner resolution")
+    legacy_resolve = commands.add_parser(
+        "legacy-resolve",
+        help="release one retained v1 partial or unknown fence with signed owner resolution",
+    )
     legacy_resolve.add_argument("intent_id")
     legacy_resolve.add_argument("resolution", choices=("accepted_as_is", "superseded"))
-    operation_show = commands.add_parser("operation-show", help="render one exact operation manifest")
+    operation_show = commands.add_parser(
+        "operation-show", help="render one exact operation manifest"
+    )
     operation_show.add_argument("operation_id")
-    operation_reconcile = commands.add_parser("operation-reconcile", help="force read-back for one pending operation without replay")
+    operation_reconcile = commands.add_parser(
+        "operation-reconcile",
+        help="force read-back for one pending operation without replay",
+    )
     operation_reconcile.add_argument("operation_id")
     return parser
 
@@ -173,6 +190,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        _dispatch(parser, args)
+    except ConfigError as error:
+        parser.error(str(error))
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.action == "login":
         _login(
             parser,
@@ -234,7 +258,9 @@ def main(argv: list[str] | None = None) -> None:
                 "things-orchestrator service install"
             )
         else:
-            print("The next request uses these preferences. No server restart is needed.")
+            print(
+                "The next request uses these preferences. No server restart is needed."
+            )
         return
     if args.action == "doctor":
         _doctor(parser, wait=args.wait, public_url=args.public_url)
@@ -246,7 +272,10 @@ def main(argv: list[str] | None = None) -> None:
         dry_run = getattr(args, "dry_run", False)
         try:
             result = service_action(args.service_action, dry_run=dry_run)
-        except (ConfigError, OSError) as error:
+        except ServiceApplyError as error:
+            parser.error(str(error))
+            return
+        except OSError as error:
             parser.error(str(error))
             return
         for effect in result.effects:
@@ -267,7 +296,12 @@ def main(argv: list[str] | None = None) -> None:
         _migration_report(parser)
         return
     if args.action == "legacy-reconcile":
-        print(json.dumps(_workspace(parser).host_reconcile_v1_pending(args.intent_id), sort_keys=True))
+        print(
+            json.dumps(
+                _workspace(parser).host_reconcile_v1_pending(args.intent_id),
+                sort_keys=True,
+            )
+        )
         return
     if args.action == "legacy-resolve":
         _legacy_resolution_command(parser, args.intent_id, args.resolution)
@@ -301,7 +335,9 @@ def _login(
     show_secrets: bool,
 ) -> None:
     if not sys.stdin.isatty():
-        parser.error("login needs an interactive terminal. Do not paste the password into chat.")
+        parser.error(
+            "login needs an interactive terminal. Do not paste the password into chat."
+        )
     email = input("Things Cloud email: ").strip()
     password = getpass("Things Cloud password: ")
     confirm = getpass("Confirm password: ")
@@ -317,15 +353,20 @@ def _login(
     creds = credentials_path()
     token = _mcp_token(rotate=rotate_token, path=creds)
     preferences_file = creds.with_name("preferences.json")
-    existing_url = load_mcp_url(
-        preferences_file=preferences_file,
-        credentials_file=creds,
-    )
     try:
-        mcp_url = (
-            normalize_mcp_url(public_url)
-            if public_url.strip()
-            else existing_url or normalize_mcp_url("http://127.0.0.1:8787")
+        existing_url = load_mcp_url(
+            preferences_file=preferences_file,
+            credentials_file=creds,
+        )
+        legacy_url = (
+            None
+            if public_url.strip() or existing_url is not None
+            else load_legacy_mcp_url(path=creds.with_name("mcp.http.json"))
+        )
+        mcp_url = select_login_mcp_url(
+            explicit=public_url,
+            saved=existing_url,
+            legacy=legacy_url,
         )
         save_preferences(
             timezone=timezone_name,
@@ -344,7 +385,9 @@ def _login(
     if show_secrets:
         print("--show-secrets moved to print-config --client CLIENT --show-secrets.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
-    print("Next: install the HTTP service, run doctor --wait, then render a client config.")
+    print(
+        "Next: install the HTTP service, run doctor --wait, then render a client config."
+    )
     print("Do not paste the Cloud password into chat.")
 
 
@@ -418,9 +461,7 @@ def _mcp_token(*, rotate: bool, path: Path) -> str:
     return token_urlsafe(32)
 
 
-def _doctor(
-    parser: argparse.ArgumentParser, *, wait: bool, public_url: str
-) -> None:
+def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> None:
     creds = credentials_path()
     try:
         credentials = load_credentials(path=creds)
@@ -495,7 +536,11 @@ def _workspace(parser: argparse.ArgumentParser) -> ThingsWorkspace:
     library = CloudLibrary(CloudClient(email, credentials.password))
     timezone_name = load_timezone()
     try:
-        timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
+        timezone = (
+            ZoneInfo(timezone_name)
+            if timezone_name
+            else datetime.now().astimezone().tzinfo
+        )
     except ZoneInfoNotFoundError:
         parser.error("Stored timezone is invalid. Run login --timezone Europe/Berlin.")
 
@@ -611,7 +656,9 @@ def _legacy_resolution_command(
         parser.error(f"owner factor is unavailable: {error}")
     if authorization is None:
         parser.error("owner factor did not match")
-    if not workspace.host_resolve_legacy_v1(intent_id, cast(Any, resolution), authorization):
+    if not workspace.host_resolve_legacy_v1(
+        intent_id, cast(Any, resolution), authorization
+    ):
         parser.error("retained v1 operation cannot be resolved")
     print(f"legacy_resolved: {resolution}")
 
@@ -625,9 +672,7 @@ def _local_timezone_name() -> str:
 def _login_timezone(parser: argparse.ArgumentParser, explicit: str | None) -> str:
     candidate = explicit or _local_timezone_name()
     if explicit is None and candidate == "UTC":
-        candidate = input(
-            "Owner timezone (IANA, for example Europe/Berlin): "
-        ).strip()
+        candidate = input("Owner timezone (IANA, for example Europe/Berlin): ").strip()
     try:
         ZoneInfo(candidate)
     except ZoneInfoNotFoundError:

@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -26,6 +28,11 @@ class ServiceStatus(str, Enum):
     LOADED = "loaded"
     INACTIVE = "inactive"
     NOT_INSTALLED = "not-installed"
+    UNKNOWN = "unknown"
+
+
+class ServiceApplyError(RuntimeError):
+    """A convergent service operation did not reach its next safe state."""
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,7 @@ class ServiceEffect:
     mode: int | None = None
     elevated: bool = False
     argv: tuple[str, ...] = ()
+    settles_to: ServiceStatus | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +63,16 @@ class ServiceOperationResult:
     applied: bool
 
 
-def render_systemd_unit(executable: Path, *, user: str) -> str:
+def render_systemd_unit(
+    executable: Path,
+    *,
+    user: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    environment_lines = "".join(
+        f"Environment={_systemd_quote_environment(name, value)}\n"
+        for name, value in _xdg_environment(environment).items()
+    )
     return (
         "[Unit]\n"
         "Description=Things Orchestrator MCP HTTP\n"
@@ -65,6 +82,7 @@ def render_systemd_unit(executable: Path, *, user: str) -> str:
         "[Service]\n"
         "Type=simple\n"
         f"User={user}\n"
+        f"{environment_lines}"
         f"ExecStart={_systemd_quote(executable)} serve-http --port 8787\n"
         "Restart=on-failure\n"
         "RestartSec=2\n"
@@ -74,7 +92,11 @@ def render_systemd_unit(executable: Path, *, user: str) -> str:
     )
 
 
-def render_launchd_plist(executable: Path) -> str:
+def render_launchd_plist(
+    executable: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     payload: dict[str, object] = {
         "Label": _LABEL,
         "ProgramArguments": [
@@ -88,6 +110,9 @@ def render_launchd_plist(executable: Path) -> str:
         "ProcessType": "Background",
         "ThrottleInterval": 2,
     }
+    xdg_environment = _xdg_environment(environment)
+    if xdg_environment:
+        payload["EnvironmentVariables"] = xdg_environment
     return plistlib.dumps(payload, sort_keys=True).decode()
 
 
@@ -112,10 +137,11 @@ def service_action(
         uid=uid,
         home=home,
         status=status,
+        environment=os.environ,
     )
     if not dry_run:
         for effect in plan.effects:
-            _apply(effect)
+            _apply(effect, platform=platform, uid=uid, home=home)
         status = service_status(platform=platform, uid=uid, home=home)
     else:
         status = plan.result_status
@@ -157,10 +183,18 @@ def service_status(
                 stderr=subprocess.DEVNULL,
             )
     except OSError:
-        return ServiceStatus.INACTIVE
+        return (
+            ServiceStatus.UNKNOWN
+            if platform == "darwin"
+            else ServiceStatus.INACTIVE
+        )
     if platform == "darwin":
         if launchctl_result.returncode != 0:
-            return ServiceStatus.INACTIVE
+            return (
+                ServiceStatus.INACTIVE
+                if launchctl_result.returncode == 113
+                else ServiceStatus.UNKNOWN
+            )
         return (
             ServiceStatus.ACTIVE
             if any(
@@ -188,7 +222,9 @@ def resolve_console_script() -> Path:
         )
     path = Path(candidate).resolve()
     if not path.is_file() or not os.access(path, os.X_OK):
-        raise ConfigError("The resolved things-orchestrator console script is not executable")
+        raise ConfigError(
+            "The resolved things-orchestrator console script is not executable"
+        )
     return path
 
 
@@ -201,47 +237,75 @@ def _plan_service(
     uid: int,
     home: Path,
     status: ServiceStatus,
+    environment: Mapping[str, str] | None = None,
 ) -> ServicePlan:
     path = _service_path(platform, home)
-    if action == "uninstall" and status is ServiceStatus.NOT_INSTALLED:
+    if (
+        action == "uninstall"
+        and platform == "darwin"
+        and status is ServiceStatus.NOT_INSTALLED
+    ):
         return ServicePlan(platform, action, (), ServiceStatus.NOT_INSTALLED)
     effects: tuple[ServiceEffect, ...]
     if platform == "darwin":
         domain = f"gui/{uid}"
         if action == "install":
             unload = (
-                ServiceEffect(
-                    "command",
-                    "reload launchd agent",
-                    argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
-                ),
-            ) if status in {ServiceStatus.ACTIVE, ServiceStatus.LOADED} else ()
+                (
+                    ServiceEffect(
+                        "command",
+                        "reload launchd agent",
+                        argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
+                        settles_to=ServiceStatus.INACTIVE,
+                    ),
+                )
+                if status in {
+                    ServiceStatus.ACTIVE,
+                    ServiceStatus.LOADED,
+                    ServiceStatus.UNKNOWN,
+                }
+                else ()
+            )
             effects = (
-                ServiceEffect(
-                    "write",
-                    f"install {path}",
-                    path=path,
-                    content=render_launchd_plist(executable),
-                    mode=0o600,
-                ),
-            ) + unload + (
-                ServiceEffect(
-                    "command",
-                    "start launchd agent",
-                    argv=("launchctl", "bootstrap", domain, str(path)),
-                ),
+                (
+                    ServiceEffect(
+                        "write",
+                        f"install {path}",
+                        path=path,
+                        content=render_launchd_plist(
+                            executable,
+                            environment=environment,
+                        ),
+                        mode=0o600,
+                    ),
+                )
+                + unload
+                + (
+                    ServiceEffect(
+                        "command",
+                        "start launchd agent",
+                        argv=("launchctl", "bootstrap", domain, str(path)),
+                    ),
+                )
             )
             return ServicePlan(platform, action, effects, ServiceStatus.ACTIVE)
         stop = (
-            ServiceEffect(
-                "command",
-                "stop launchd agent",
-                argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
-            ),
-        ) if status in {ServiceStatus.ACTIVE, ServiceStatus.LOADED} else ()
-        effects = stop + (
-            ServiceEffect("remove", f"remove {path}", path=path),
+            (
+                ServiceEffect(
+                    "command",
+                    "stop launchd agent",
+                    argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
+                    settles_to=ServiceStatus.INACTIVE,
+                ),
+            )
+            if status in {
+                ServiceStatus.ACTIVE,
+                ServiceStatus.LOADED,
+                ServiceStatus.UNKNOWN,
+            }
+            else ()
         )
+        effects = stop + (ServiceEffect("remove", f"remove {path}", path=path),)
         return ServicePlan(platform, action, effects, ServiceStatus.NOT_INSTALLED)
     if action == "install":
         effects = (
@@ -249,7 +313,11 @@ def _plan_service(
                 "write",
                 f"install {_SYSTEMD_PATH}",
                 path=_SYSTEMD_PATH,
-                content=render_systemd_unit(executable, user=user),
+                content=render_systemd_unit(
+                    executable,
+                    user=user,
+                    environment=environment,
+                ),
                 mode=0o644,
                 elevated=True,
             ),
@@ -270,6 +338,19 @@ def _plan_service(
             ),
         )
         return ServicePlan(platform, action, effects, ServiceStatus.ACTIVE)
+    if status is ServiceStatus.NOT_INSTALLED:
+        return ServicePlan(
+            platform,
+            action,
+            (
+                ServiceEffect(
+                    "command",
+                    "reload systemd units",
+                    argv=("sudo", "systemctl", "daemon-reload"),
+                ),
+            ),
+            ServiceStatus.NOT_INSTALLED,
+        )
     effects = (
         ServiceEffect(
             "command",
@@ -291,9 +372,64 @@ def _plan_service(
     return ServicePlan(platform, action, effects, ServiceStatus.NOT_INSTALLED)
 
 
-def _apply(effect: ServiceEffect) -> None:
+def _apply(
+    effect: ServiceEffect,
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+    settle_timeout: float = 5.0,
+) -> None:
+    try:
+        _apply_unchecked(
+            effect,
+            platform=platform,
+            uid=uid,
+            home=home,
+            settle_timeout=settle_timeout,
+        )
+    except ServiceApplyError:
+        raise
+    except subprocess.CalledProcessError as error:
+        command = _command_text(error.cmd)
+        raise ServiceApplyError(
+            f"Service effect failed: {effect.description} "
+            f"({command}; exit {error.returncode}). The operation may be partially "
+            "applied; rerun the same command safely."
+        ) from error
+    except OSError as error:
+        raise ServiceApplyError(
+            f"Service effect failed: {effect.description} ({error}). "
+            "The operation may be partially applied; rerun the same command safely."
+        ) from error
+
+
+def _apply_unchecked(
+    effect: ServiceEffect,
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+    settle_timeout: float,
+) -> None:
     if effect.kind == "command":
-        subprocess.run(effect.argv, check=True)
+        if effect.settles_to is None:
+            subprocess.run(effect.argv, check=True)
+            return
+        command_result = subprocess.run(
+            effect.argv,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        _wait_for_service_status(
+            effect,
+            platform=platform,
+            uid=uid,
+            home=home,
+            timeout=settle_timeout,
+            command_result=command_result,
+        )
         return
     if effect.path is None:
         raise AssertionError("file effect has no path")
@@ -334,6 +470,36 @@ def _apply(effect: ServiceEffect) -> None:
         staged_path.unlink(missing_ok=True)
 
 
+def _wait_for_service_status(
+    effect: ServiceEffect,
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+    timeout: float,
+    command_result: subprocess.CompletedProcess[str],
+) -> None:
+    expected = effect.settles_to
+    if expected is None:
+        raise AssertionError("settling effect has no expected status")
+    deadline = time.monotonic() + timeout
+    while service_status(platform=platform, uid=uid, home=home) is not expected:
+        if time.monotonic() >= deadline:
+            command_failure = ""
+            if command_result.returncode != 0:
+                stderr = command_result.stderr.strip()
+                detail = f"exit {command_result.returncode}"
+                if stderr:
+                    detail = f"{detail}: {stderr}"
+                command_failure = f" ({_command_text(effect.argv)}; {detail})"
+            raise ServiceApplyError(
+                f"Service effect failed: {effect.description} did not reach "
+                f"{expected.value}{command_failure}. The operation may be partially "
+                "applied; rerun the same command safely."
+            )
+        time.sleep(0.05)
+
+
 def _service_path(platform: Literal["darwin", "linux"], home: Path) -> Path:
     if platform == "darwin":
         return home / "Library" / "LaunchAgents" / f"{_LABEL}.plist"
@@ -351,3 +517,33 @@ def _platform() -> Literal["darwin", "linux"]:
 def _systemd_quote(path: Path) -> str:
     escaped = str(path).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _systemd_quote_environment(name: str, value: str) -> str:
+    escaped = (
+        f"{name}={value}".replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("%", "%%")
+    )
+    return f'"{escaped}"'
+
+
+def _xdg_environment(
+    environment: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if environment is None:
+        return {}
+    return {
+        name: value
+        for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")
+        if (value := environment.get(name))
+    }
+
+
+def _command_text(command: object) -> str:
+    if isinstance(command, (tuple, list)):
+        return " ".join(str(part) for part in command)
+    return str(command)
