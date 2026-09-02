@@ -46,7 +46,10 @@ from .server import ThingsMCPServer
 from .service import resolve_console_script, service_action
 from .workspace import ThingsWorkspace
 
-_LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
+_LOGIN = (
+    "Run `things-orchestrator login` in a private terminal. "
+    "Clone development may use `uv run things-orchestrator login`."
+)
 _LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
 
 
@@ -224,7 +227,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.public_url is not None:
             print(f"MCP URL: {normalize_mcp_url(args.public_url)}")
         print(f"Stored preferences in {path} (mode 0600).")
-        print("The next Project uses these preferences. No server restart is needed.")
+        if args.timezone is not None:
+            print(
+                "Restart the HTTP service to apply the timezone: "
+                "things-orchestrator service install"
+            )
+        else:
+            print("The next request uses these preferences. No server restart is needed.")
         return
     if args.action == "doctor":
         _doctor(parser, wait=args.wait, public_url=args.public_url)
@@ -241,7 +250,8 @@ def main(argv: list[str] | None = None) -> None:
         for effect in result.effects:
             prefix = "Would" if args.dry_run else "Applied"
             print(f"{prefix}: {effect.description}")
-        print(f"service: {result.status.value}")
+        status_label = "service (planned)" if args.dry_run else "service"
+        print(f"{status_label}: {result.status.value}")
         if args.service_action == "install":
             print("Next: things-orchestrator doctor --wait")
         return

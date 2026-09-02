@@ -100,7 +100,8 @@ def render_client_config(
         return RenderedClientConfig(
             client,
             command + "\n",
-            "Run the command, or pass the JSON block to claude mcp add-json.",
+            "Run the command. For the alternative JSON block, run "
+            "claude mcp add-json things '<JSON>', replacing <JSON> with that block.",
             secondary,
         )
     if client in {ClientKind.CURSOR, ClientKind.CURSOR_CLOUD}:

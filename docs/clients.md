@@ -8,7 +8,7 @@ then transfer only its output to the client.
 |---|---|---|
 | Codex | `codex` | Merge the TOML block into `~/.codex/config.toml`. |
 | Hermes | `hermes` | Merge the YAML into the active Hermes profile. The generated skill path belongs on the agent-runtime host. |
-| Claude Code | `claude-code` | Run the printed command, or use the printed JSON with `claude mcp add-json`. |
+| Claude Code | `claude-code` | Run the printed command. For the alternative block, run `claude mcp add-json things '<JSON>'` with the printed JSON as the argument. |
 | Cursor desktop | `cursor` | Merge the `things` entry into `~/.cursor/mcp.json`. |
 | Cursor Cloud Agents | `cursor-cloud` | Paste in the Cloud Agents dashboard at `cursor.com/agents`, not in `.cursor/mcp.json`. |
 | Caddy | `caddy` | Install as `/etc/caddy/Caddyfile`; this is infrastructure configuration, not an MCP client. |

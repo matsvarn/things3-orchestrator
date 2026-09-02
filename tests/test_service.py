@@ -57,8 +57,13 @@ def test_launchd_install_converges_according_to_supervisor_state() -> None:
     )
     assert [effect.kind for effect in unloaded.effects] == ["write", "command"]
     assert "bootstrap" in unloaded.effects[-1].argv
-    assert [effect.kind for effect in loaded.effects] == ["write", "command"]
-    assert "kickstart" in loaded.effects[-1].argv
+    assert [effect.kind for effect in loaded.effects] == [
+        "write",
+        "command",
+        "command",
+    ]
+    assert "bootout" in loaded.effects[1].argv
+    assert "bootstrap" in loaded.effects[2].argv
 
 
 def test_uninstall_is_idempotent_when_service_is_not_installed() -> None:

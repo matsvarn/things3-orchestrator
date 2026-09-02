@@ -76,8 +76,9 @@ things-orchestrator configure --timezone Europe/Berlin
 things-orchestrator configure --url https://mcp.example.com
 ```
 
-Preference changes apply to the next request. They do not require a server
-restart.
+Note style, source scheme, and URL changes apply to the next command. A timezone
+change requires `things-orchestrator service install` because the running
+server captures its timezone at startup.
 
 ## Uninstall
 

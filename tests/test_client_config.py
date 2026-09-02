@@ -96,6 +96,7 @@ def test_claude_code_emits_a_finished_command_and_typed_http_json(
         "url": "https://tasks.example.com/mcp",
         "headers": {"Authorization": "Bearer secret-bearer"},
     }
+    assert "claude mcp add-json things '<JSON>'" in rendered.guidance
 
 
 def test_caddy_uses_the_saved_hostname_and_keeps_streaming_enabled(

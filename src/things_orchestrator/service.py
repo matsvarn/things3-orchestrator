@@ -189,11 +189,13 @@ def _plan_service(
     if platform == "darwin":
         domain = f"gui/{uid}"
         if action == "install":
-            command: tuple[str, ...] = (
-                ("launchctl", "kickstart", "-k", f"{domain}/{_LABEL}")
-                if status is ServiceStatus.ACTIVE
-                else ("launchctl", "bootstrap", domain, str(path))
-            )
+            unload = (
+                ServiceEffect(
+                    "command",
+                    "reload launchd agent",
+                    argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
+                ),
+            ) if status is ServiceStatus.ACTIVE else ()
             effects = (
                 ServiceEffect(
                     "write",
@@ -202,7 +204,12 @@ def _plan_service(
                     content=render_launchd_plist(executable),
                     mode=0o600,
                 ),
-                ServiceEffect("command", "start launchd agent", argv=command),
+            ) + unload + (
+                ServiceEffect(
+                    "command",
+                    "start launchd agent",
+                    argv=("launchctl", "bootstrap", domain, str(path)),
+                ),
             )
             return ServicePlan(platform, action, effects, ServiceStatus.ACTIVE)
         stop = (

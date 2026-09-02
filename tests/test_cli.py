@@ -332,6 +332,20 @@ def test_configure_requires_at_least_one_preference(
     )
 
 
+def test_configure_timezone_names_the_required_service_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    main(["configure", "--timezone", "Europe/Berlin"])
+
+    out = capsys.readouterr().out
+    assert "things-orchestrator service install" in out
+    assert "No server restart is needed" not in out
+
+
 def test_migration_report_quarantines_and_reads_disposable_sqlite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -641,6 +655,7 @@ def test_service_install_dry_run_prints_effects_and_doctor_last(
     lines = capsys.readouterr().out.splitlines()
     assert seen == [("install", True)]
     assert lines[0] == "Would: install launchd agent"
+    assert "service (planned): active" in lines
     assert lines[-1] == "Next: things-orchestrator doctor --wait"
 
 
