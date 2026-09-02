@@ -16,6 +16,7 @@ from .config import McpBearer, McpUrl
 from .deployment import (
     DeploymentIdentity,
     installed_identity,
+    tool_contract_hash,
     tool_schema_hash,
 )
 from .v2 import MODELS
@@ -63,6 +64,8 @@ def validate_target(
         raise DoctorFailure("MCP tools/list did not return the exact eight tools")
     if receipt.detailed_health.get("tool_schema_hash") != tool_schema_hash():
         raise DoctorFailure("health schema hash differs from the local schema hash")
+    if receipt.detailed_health.get("tool_contract_hash") != tool_contract_hash():
+        raise DoctorFailure("health contract hash differs from the local contract hash")
     if identity.commit is None:
         raise DoctorFailure("installed commit is unknown; reinstall from an exact Git tag")
     if receipt.detailed_health.get("commit") != identity.commit:

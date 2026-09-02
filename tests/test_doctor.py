@@ -8,6 +8,7 @@ from mcp.types import Implementation
 from things_orchestrator.config import normalize_mcp_url
 from things_orchestrator.deployment import (
     DeploymentIdentity,
+    tool_contract_hash,
     tool_schema_hash,
 )
 from things_orchestrator.doctor import (
@@ -28,6 +29,7 @@ def _receipt() -> TargetReceipt:
             "version": "0.8.0",
             "commit": "a" * 40,
             "tool_schema_hash": tool_schema_hash(),
+            "tool_contract_hash": tool_contract_hash(),
         },
         server_info=Implementation(name="things", version="0.8.0"),
         tool_names=tuple(MODELS),
@@ -61,6 +63,16 @@ def test_validate_target_accepts_exact_public_health_identity_and_tools() -> Non
                 },
             ),
             "schema hash",
+        ),
+        (
+            replace(
+                _receipt(),
+                detailed_health={
+                    **_receipt().detailed_health,
+                    "tool_contract_hash": "sha256:wrong",
+                },
+            ),
+            "contract hash",
         ),
         (
             replace(
