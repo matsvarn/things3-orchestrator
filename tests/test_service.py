@@ -59,6 +59,15 @@ def test_launchd_install_converges_according_to_supervisor_state() -> None:
         home=Path("/Users/mats"),
         status=ServiceStatus.ACTIVE,
     )
+    loaded_but_stopped = _plan_service(
+        action="install",
+        platform="darwin",
+        executable=EXECUTABLE,
+        user="mats",
+        uid=501,
+        home=Path("/Users/mats"),
+        status=ServiceStatus.LOADED,
+    )
     assert [effect.kind for effect in unloaded.effects] == ["write", "command"]
     assert "bootstrap" in unloaded.effects[-1].argv
     assert [effect.kind for effect in loaded.effects] == [
@@ -68,6 +77,7 @@ def test_launchd_install_converges_according_to_supervisor_state() -> None:
     ]
     assert "bootout" in loaded.effects[1].argv
     assert "bootstrap" in loaded.effects[2].argv
+    assert loaded_but_stopped.effects == loaded.effects
 
 
 def test_uninstall_is_idempotent_when_service_is_not_installed() -> None:
@@ -97,17 +107,33 @@ def test_launchd_uninstall_does_not_bootout_an_inactive_agent() -> None:
     assert [effect.kind for effect in plan.effects] == ["remove"]
 
 
+def test_launchd_uninstall_boots_out_a_loaded_stopped_agent() -> None:
+    plan = _plan_service(
+        action="uninstall",
+        platform="darwin",
+        executable=EXECUTABLE,
+        user="mats",
+        uid=501,
+        home=Path("/Users/mats"),
+        status=ServiceStatus.LOADED,
+    )
+    assert [effect.kind for effect in plan.effects] == ["command", "remove"]
+    assert "bootout" in plan.effects[0].argv
+
+
 @pytest.mark.parametrize(
-    ("output", "expected"),
+    ("returncode", "output", "expected"),
     [
-        ("state = running\n", ServiceStatus.ACTIVE),
-        ("state = exited\n", ServiceStatus.INACTIVE),
-        ("", ServiceStatus.INACTIVE),
+        (0, "state = running\n", ServiceStatus.ACTIVE),
+        (0, "state = exited\n", ServiceStatus.LOADED),
+        (0, "", ServiceStatus.LOADED),
+        (113, "", ServiceStatus.INACTIVE),
     ],
 )
 def test_launchd_status_requires_a_running_job(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    returncode: int,
     output: str,
     expected: ServiceStatus,
 ) -> None:
@@ -119,7 +145,10 @@ def test_launchd_status_requires_a_running_job(
     agent.write_text("plist")
     monkeypatch.setattr(
         "things_orchestrator.service.subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=returncode,
+            stdout=output,
+        ),
     )
 
     assert service_status(platform="darwin", uid=501, home=tmp_path) is expected

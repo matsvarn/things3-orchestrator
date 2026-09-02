@@ -27,7 +27,7 @@ reviewed
 
 Things Orchestrator stores one account on the owner's host. See the
 [trust boundary](../trust.md) and the local credential implementation in
-[`cloud.py`](../../src/things_orchestrator/cloud.py).
+[`config.py`](../../src/things_orchestrator/config.py).
 
 These differences do not make any option risk-free. Both Cloud options use an
 unofficial protocol. Cultured Code can change that protocol or disable an

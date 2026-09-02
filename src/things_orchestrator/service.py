@@ -23,6 +23,7 @@ _SYSTEMD_PATH = Path("/etc/systemd/system") / _UNIT
 
 class ServiceStatus(str, Enum):
     ACTIVE = "active"
+    LOADED = "loaded"
     INACTIVE = "inactive"
     NOT_INSTALLED = "not-installed"
 
@@ -158,14 +159,15 @@ def service_status(
     except OSError:
         return ServiceStatus.INACTIVE
     if platform == "darwin":
+        if launchctl_result.returncode != 0:
+            return ServiceStatus.INACTIVE
         return (
             ServiceStatus.ACTIVE
-            if launchctl_result.returncode == 0
-            and any(
+            if any(
                 line.strip() == "state = running"
                 for line in launchctl_result.stdout.splitlines()
             )
-            else ServiceStatus.INACTIVE
+            else ServiceStatus.LOADED
         )
     return (
         ServiceStatus.ACTIVE
@@ -213,7 +215,7 @@ def _plan_service(
                     "reload launchd agent",
                     argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
                 ),
-            ) if status is ServiceStatus.ACTIVE else ()
+            ) if status in {ServiceStatus.ACTIVE, ServiceStatus.LOADED} else ()
             effects = (
                 ServiceEffect(
                     "write",
@@ -236,7 +238,7 @@ def _plan_service(
                 "stop launchd agent",
                 argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
             ),
-        ) if status is ServiceStatus.ACTIVE else ()
+        ) if status in {ServiceStatus.ACTIVE, ServiceStatus.LOADED} else ()
         effects = stop + (
             ServiceEffect("remove", f"remove {path}", path=path),
         )
