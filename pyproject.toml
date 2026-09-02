@@ -37,6 +37,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/things_orchestrator"]
+include = ["src/things_orchestrator/skills/**"]
 
 [tool.hatch.build.targets.sdist]
 only-include = [

@@ -57,6 +57,11 @@ src/things_orchestrator/owner_text.py
 src/things_orchestrator/preferences.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
+src/things_orchestrator/skills/things-orchestrator/SKILL.md
+src/things_orchestrator/skills/things-orchestrator/agents/openai.yaml
+src/things_orchestrator/skills/things-orchestrator/references/form.md
+src/things_orchestrator/skills/things-orchestrator/references/research.md
+src/things_orchestrator/skills/things-orchestrator/references/review.md
 src/things_orchestrator/source_document.py
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
@@ -70,6 +75,7 @@ tests/test_cloud.py
 tests/test_consistency.py
 tests/test_context.py
 tests/test_contextual.py
+tests/test_deployment.py
 tests/test_dogfood_register.py
 tests/test_interface.py
 tests/test_journal.py

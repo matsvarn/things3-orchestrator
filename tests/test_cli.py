@@ -802,11 +802,20 @@ def test_parser_names_the_owner_commands() -> None:
     assert "print-config" in help_text
     assert "doctor" in help_text
     assert "configure" in help_text
+    assert "skill-path" in help_text
     assert "uv run things-orchestrator login" in help_text
     compact = help_text.replace("-\n", "-").replace("\n", " ")
     assert "things-orchestrator doctor" in compact
     with pytest.raises(SystemExit):
         build_parser().parse_args(["serve-http", "--host", "0.0.0.0"])
+
+
+def test_skill_path_prints_the_packaged_skill(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["skill-path"])
+
+    output = Path(capsys.readouterr().out.strip())
+    assert output.name == "things-orchestrator"
+    assert (output / "SKILL.md").is_file()
 
 
 def test_plugin_wrapper_reads_the_checkout_file(tmp_path: Path) -> None:

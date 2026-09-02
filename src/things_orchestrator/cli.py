@@ -30,6 +30,7 @@ from .cloud import (
     state_cache_path,
 )
 from .context import SQLiteContextStore
+from .deployment import skill_path
 from .journal import SQLiteJournal, journal_path
 from .preferences import (
     PreferencesError,
@@ -72,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="{login,configure,serve,serve-http,print-config,doctor,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
+        metavar="{login,configure,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -111,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="approved third-party app schemes; pass no values to clear",
     )
     commands.add_parser("serve", help="MCP on stdio")
+    commands.add_parser("skill-path", help="print the installed Things skill directory")
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
     http.add_argument("--port", type=int, default=8787)
     show = commands.add_parser("print-config", help="reprint MCP snippets without logging in")
@@ -201,6 +203,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.action == "doctor":
         _doctor(parser, wait=args.wait, public_url=args.public_url)
+        return
+    if args.action == "skill-path":
+        print(skill_path())
         return
     if args.action == "owner-factor":
         _owner_factor(parser)
