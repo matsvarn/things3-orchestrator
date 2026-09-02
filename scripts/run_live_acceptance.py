@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from functools import partial
 from pathlib import Path
@@ -14,7 +13,7 @@ import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from things_orchestrator.cloud import load_credentials
+from things_orchestrator.config import load_credentials
 from things_orchestrator.deployment import package_version
 from things_orchestrator.live_acceptance import AcceptanceFailure, LiveAcceptanceRunner
 
@@ -154,11 +153,10 @@ def main() -> None:
         mcp_url, health_url = acceptance_urls(args.url)
     except ValueError as error:
         parser.error(str(error))
-    token = os.environ.get("THINGS_MCP_TOKEN")
-    if token is None:
-        _email, _password, token = load_credentials()
-    if not token:
+    bearer = load_credentials().bearer
+    if bearer is None:
         parser.error("live acceptance needs an MCP bearer")
+    token = bearer.reveal()
     try:
         summary = anyio.run(
             partial(

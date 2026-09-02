@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from collections.abc import Iterator
@@ -23,21 +22,24 @@ from .cloud import (
     CloudError,
     CloudLibrary,
     _ensure_private_dir,
+    state_cache_path,
+)
+from .config import (
+    ConfigError,
+    McpBearer,
     credentials_path,
     load_credentials,
+    load_mcp_url,
+    load_preferences,
+    load_source_schemes,
     load_timezone,
+    normalize_mcp_url,
     save_credentials,
-    state_cache_path,
+    save_preferences,
 )
 from .context import SQLiteContextStore
 from .deployment import skill_path
 from .journal import SQLiteJournal, journal_path
-from .preferences import (
-    PreferencesError,
-    load_preferences,
-    load_source_schemes,
-    save_preferences,
-)
 from .server import ThingsMCPServer
 from .workspace import ThingsWorkspace
 
@@ -85,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     login.add_argument(
         "--timezone",
-        default=os.environ.get("THINGS_TIMEZONE") or _local_timezone_name(),
+        default=None,
         help="owner IANA timezone, for example Europe/Berlin",
     )
     login.add_argument(
@@ -110,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-schemes",
         nargs="*",
         help="approved third-party app schemes; pass no values to clear",
+    )
+    configure.add_argument("--timezone", help="owner IANA timezone")
+    configure.add_argument(
+        "--url", dest="public_url", help="HTTPS origin or /mcp URL"
     )
     commands.add_parser("serve", help="MCP on stdio")
     commands.add_parser("skill-path", help="print the installed Things skill directory")
@@ -178,19 +184,31 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.action == "configure":
-        if args.note_style is None and args.source_schemes is None:
-            parser.error("configure needs --note-style or --source-schemes")
+        if all(
+            value is None
+            for value in (
+                args.note_style,
+                args.source_schemes,
+                args.timezone,
+                args.public_url,
+            )
+        ):
+            parser.error(
+                "configure needs --note-style, --source-schemes, --timezone, or --url"
+            )
         try:
             path = save_preferences(
                 note_style=args.note_style,
                 source_schemes=args.source_schemes,
+                timezone=args.timezone,
+                mcp_url=args.public_url,
             )
             saved_schemes = (
                 load_source_schemes(path=path)
                 if args.source_schemes is not None
                 else None
             )
-        except PreferencesError as error:
+        except ConfigError as error:
             parser.error(str(error))
             return
         if args.note_style is not None:
@@ -198,6 +216,10 @@ def main(argv: list[str] | None = None) -> None:
         if saved_schemes is not None:
             schemes = ", ".join(saved_schemes)
             print(f"Source schemes: {schemes or 'none'}")
+        if args.timezone is not None:
+            print(f"Timezone: {args.timezone}")
+        if args.public_url is not None:
+            print(f"MCP URL: {normalize_mcp_url(args.public_url)}")
         print(f"Stored preferences in {path} (mode 0600).")
         print("The next Project uses these preferences. No server restart is needed.")
         return
@@ -230,15 +252,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.action == "serve":
         server.run()
         return
-    token = os.environ.get("THINGS_MCP_TOKEN")
-    if not token:
-        try:
-            _, _, token = load_credentials()
-        except CloudError:
-            token = None
-    if not token:
-        parser.error("serve-http needs THINGS_MCP_TOKEN or mcp_token from login")
-    server.run_http(port=args.port, token=token)
+    try:
+        bearer = load_credentials().bearer
+    except ConfigError:
+        bearer = None
+    if bearer is None:
+        parser.error("serve-http needs mcp_token from login")
+    server.run_http(port=args.port, token=bearer.reveal())
 
 
 def _login(
@@ -246,7 +266,7 @@ def _login(
     *,
     public_url: str,
     rotate_token: bool,
-    timezone_name: str,
+    timezone_name: str | None,
     show_secrets: bool,
 ) -> None:
     if not sys.stdin.isatty():
@@ -258,25 +278,38 @@ def _login(
         parser.error("email and password are required")
     if password != confirm:
         parser.error("password confirmation did not match")
-    try:
-        ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
-        parser.error("--timezone needs an IANA name such as Europe/Berlin")
+    timezone_name = _login_timezone(parser, timezone_name)
     try:
         CloudClient(email, password).verify()
     except CloudError as error:
         parser.error(str(error))
     creds = credentials_path()
     token = _mcp_token(rotate=rotate_token, path=creds)
-    path = save_credentials(
-        email,
-        password,
-        token,
-        timezone_name=timezone_name,
-        path=creds,
+    preferences_file = creds.with_name("preferences.json")
+    existing_url = load_mcp_url(
+        preferences_file=preferences_file,
+        credentials_file=creds,
     )
+    try:
+        mcp_url = (
+            normalize_mcp_url(public_url)
+            if public_url.strip()
+            else existing_url or normalize_mcp_url("http://127.0.0.1:8787")
+        )
+        save_preferences(
+            timezone=timezone_name,
+            mcp_url=mcp_url,
+            path=preferences_file,
+        )
+    except ConfigError as error:
+        parser.error(str(error))
+    path = save_credentials(email, password, McpBearer(token), path=creds)
     _remember_checkout()
-    snippets = _write_mcp_snippets(path.parent, token=token, public_url=public_url)
+    snippets = _write_mcp_snippets(
+        path.parent,
+        token=token,
+        public_url=str(mcp_url),
+    )
     print(f"Stored credentials in {path} (mode 0600, plaintext password).")
     _print_snippets(snippets, http_only=False, show_secrets=show_secrets)
     if rotate_token:
@@ -295,13 +328,14 @@ def _print_config(
 ) -> None:
     creds = credentials_path()
     try:
-        _email, _password, token = load_credentials(path=creds)
-    except CloudError:
+        credentials = load_credentials(path=creds)
+    except ConfigError:
         parser.error(_LOGIN)
         return
-    if not token:
+    if credentials.bearer is None:
         parser.error(_LOGIN)
         return
+    token = credentials.bearer.reveal()
     _remember_checkout()
     snippets = _write_mcp_snippets(creds.parent, token=token, public_url=public_url)
     _print_snippets(snippets, http_only=http_only, show_secrets=show_secrets)
@@ -313,11 +347,11 @@ def _print_config(
 def _mcp_token(*, rotate: bool, path: Path) -> str:
     if not rotate:
         try:
-            _email, _password, existing = load_credentials(path=path)
-        except CloudError:
+            existing = load_credentials(path=path).bearer
+        except ConfigError:
             existing = None
-        if existing:
-            return existing
+        if existing is not None:
+            return existing.reveal()
     return token_urlsafe(32)
 
 
@@ -511,17 +545,20 @@ def _doctor(
 ) -> None:
     creds = credentials_path()
     try:
-        email, _password, token = load_credentials(path=creds)
-    except CloudError:
+        credentials = load_credentials(path=creds)
+    except ConfigError:
         parser.error(_LOGIN)
         return
-    if not token:
+    if credentials.bearer is None:
         parser.error(_LOGIN)
         return
-    print(f"credentials: ok ({email})")
+    print(f"credentials: ok ({credentials.email})")
     failed = False
 
-    timezone_name = load_timezone(path=creds)
+    timezone_name = load_timezone(
+        preferences_file=creds.with_name("preferences.json"),
+        credentials_file=creds,
+    )
     if not timezone_name:
         print("timezone: missing")
         failed = True
@@ -617,11 +654,12 @@ def _server(parser: argparse.ArgumentParser) -> ThingsMCPServer:
 
 def _workspace(parser: argparse.ArgumentParser) -> ThingsWorkspace:
     try:
-        email, password, _token = load_credentials()
-    except CloudError:
+        credentials = load_credentials()
+    except ConfigError:
         parser.error(_LOGIN)
-    library = CloudLibrary(CloudClient(email, password))
-    timezone_name = load_timezone() or os.environ.get("THINGS_TIMEZONE")
+    email = credentials.email
+    library = CloudLibrary(CloudClient(email, credentials.password))
+    timezone_name = load_timezone()
     try:
         timezone = ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
     except ZoneInfoNotFoundError:
@@ -653,8 +691,8 @@ def _workspace(parser: argparse.ArgumentParser) -> ThingsWorkspace:
 
 def _migration_report(parser: argparse.ArgumentParser) -> None:
     try:
-        email, _password, _token = load_credentials()
-    except CloudError:
+        email = load_credentials().email
+    except ConfigError:
         parser.error(_LOGIN)
         return
     journal = SQLiteJournal(journal_path(email))
@@ -748,6 +786,19 @@ def _local_timezone_name() -> str:
     timezone = datetime.now().astimezone().tzinfo
     key = getattr(timezone, "key", None)
     return str(key) if key else "UTC"
+
+
+def _login_timezone(parser: argparse.ArgumentParser, explicit: str | None) -> str:
+    candidate = explicit or _local_timezone_name()
+    if explicit is None and candidate == "UTC":
+        candidate = input(
+            "Owner timezone (IANA, for example Europe/Berlin): "
+        ).strip()
+    try:
+        ZoneInfo(candidate)
+    except ZoneInfoNotFoundError:
+        parser.error("--timezone needs an IANA name such as Europe/Berlin")
+    return candidate
 
 
 if __name__ == "__main__":

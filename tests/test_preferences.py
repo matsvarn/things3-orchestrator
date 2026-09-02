@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from things_orchestrator.preferences import (
-    PreferencesError,
+from things_orchestrator.config import (
+    ConfigError,
     load_note_style,
     load_source_schemes,
     preferences_path,
@@ -37,7 +37,7 @@ def test_save_creates_the_versioned_preference_file(tmp_path: Path) -> None:
 
     save_note_style("visual", path=path)
 
-    assert json.loads(path.read_text()) == {"version": 1, "note_style": "visual"}
+    assert json.loads(path.read_text()) == {"version": 2, "note_style": "visual"}
     assert load_note_style(path=path) == "visual"
 
 
@@ -107,7 +107,7 @@ def test_source_scheme_rejects_built_in_dangerous_and_invalid_values(
     save_note_style("natural", path=path)
     original = path.read_text()
 
-    with pytest.raises(PreferencesError):
+    with pytest.raises(ConfigError):
         save_source_schemes((scheme,), path=path)
 
     assert path.read_text() == original
@@ -120,7 +120,7 @@ def test_combined_preference_change_is_atomic_when_a_scheme_is_invalid(
     save_note_style("natural", path=path)
     original = path.read_text()
 
-    with pytest.raises(PreferencesError):
+    with pytest.raises(ConfigError):
         save_preferences(
             note_style="visual", source_schemes=("javascript",), path=path
         )
@@ -134,7 +134,7 @@ def test_combined_preference_change_is_atomic_when_a_scheme_is_invalid(
     (
         "not json",
         "[]",
-        '{"version": 2, "note_style": "natural"}',
+        '{"version": 3, "note_style": "natural"}',
         '{"version": 1, "note_style": "classic"}',
         '{"version": 1}',
         '{"version": 1, "note_style": "natural", "source_schemes": "obsidian"}',
@@ -145,9 +145,9 @@ def test_invalid_preferences_raise_without_overwrite(tmp_path: Path, body: str) 
     path = tmp_path / "preferences.json"
     path.write_text(body)
 
-    with pytest.raises(PreferencesError):
+    with pytest.raises(ConfigError):
         load_note_style(path=path)
-    with pytest.raises(PreferencesError):
+    with pytest.raises(ConfigError):
         save_note_style("visual", path=path)
 
     assert path.read_text() == body
@@ -158,7 +158,7 @@ def test_non_utf8_preferences_raise_without_overwrite(tmp_path: Path) -> None:
     original = b"\xff\xfe"
     path.write_bytes(original)
 
-    with pytest.raises(PreferencesError):
+    with pytest.raises(ConfigError):
         save_note_style("visual", path=path)
 
     assert path.read_bytes() == original

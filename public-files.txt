@@ -44,6 +44,7 @@ scripts/setup
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
 src/things_orchestrator/cloud.py
+src/things_orchestrator/config.py
 src/things_orchestrator/consistency.py
 src/things_orchestrator/context.py
 src/things_orchestrator/contextual.py
@@ -54,7 +55,6 @@ src/things_orchestrator/library.py
 src/things_orchestrator/live_acceptance.py
 src/things_orchestrator/owner_authority.py
 src/things_orchestrator/owner_text.py
-src/things_orchestrator/preferences.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
 src/things_orchestrator/skills/things-orchestrator/SKILL.md
@@ -72,6 +72,7 @@ tests/fixtures/weekly_review_owner_prompt.txt
 tests/test_capability_proof.py
 tests/test_cli.py
 tests/test_cloud.py
+tests/test_config.py
 tests/test_consistency.py
 tests/test_context.py
 tests/test_contextual.py

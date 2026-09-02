@@ -16,7 +16,7 @@ from things_orchestrator.cli import (
     build_parser,
     main,
 )
-from things_orchestrator.cloud import CloudError
+from things_orchestrator.config import ConfigError, Credentials, McpBearer
 from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 
 ROOT = Path(__file__).parents[1]
@@ -186,7 +186,7 @@ def test_login_prints_stdio_and_http_snippets(
     assert stdio["mcpServers"]["things"] == {"command": wrapper, "args": ["serve"]}
     http = json.loads((tmp_path / "mcp.http.json").read_text())
     assert http["mcpServers"]["things"] == {
-        "url": "https://YOUR-HOST/mcp",
+        "url": "http://127.0.0.1:8787/mcp",
         "headers": {"Authorization": "Bearer fixed-token"},
     }
     hermes = (tmp_path / "mcp.hermes.yaml").read_text()
@@ -195,11 +195,17 @@ def test_login_prints_stdio_and_http_snippets(
     assert skills in hermes
     hermes_http = (tmp_path / "mcp.hermes.http.yaml").read_text()
     assert "Bearer fixed-token" in hermes_http
-    assert "https://YOUR-HOST/mcp" in hermes_http
+    assert "http://127.0.0.1:8787/mcp" in hermes_http
     stored = json.loads(creds.read_text())
     assert stored["mcp_token"] == "fixed-token"
     assert stored["password"] == "secret"
-    assert stored["timezone"] == "Europe/Berlin"
+    assert "timezone" not in stored
+    assert json.loads((tmp_path / "preferences.json").read_text()) == {
+        "version": 2,
+        "note_style": "natural",
+        "timezone": "Europe/Berlin",
+        "mcp_url": "http://127.0.0.1:8787/mcp",
+    }
     checkout = (tmp_path / "checkout").read_text().strip()
     assert Path(checkout) == ROOT.resolve()
     for name in (
@@ -258,13 +264,13 @@ def test_login_keeps_mcp_token_unless_rotated(
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "new-token")
-    main(["login"])
+    main(["login", "--timezone", "Europe/Berlin"])
     assert json.loads(creds.read_text())["mcp_token"] == "keep-me"
-    main(["login", "--rotate-token"])
+    main(["login", "--rotate-token", "--timezone", "Europe/Berlin"])
     assert json.loads(creds.read_text())["mcp_token"] == "new-token"
 
 
-def test_login_and_snippet_generation_do_not_change_preferences(
+def test_login_updates_only_host_preferences_and_preserves_other_keys(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     creds = tmp_path / "credentials.json"
@@ -276,11 +282,17 @@ def test_login_and_snippet_generation_do_not_change_preferences(
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "first-token")
 
-    main(["login"])
-    main(["login", "--rotate-token"])
+    main(["login", "--timezone", "Europe/Berlin"])
+    main(["login", "--rotate-token", "--timezone", "Europe/Berlin"])
     main(["print-config"])
 
-    assert preferences.read_text() == original
+    assert json.loads(preferences.read_text()) == {
+        "version": 2,
+        "note_style": "visual",
+        "future": "keep",
+        "timezone": "Europe/Berlin",
+        "mcp_url": "http://127.0.0.1:8787/mcp",
+    }
 
 
 def test_configure_changes_only_note_style_and_preserves_unknown_keys(
@@ -299,7 +311,7 @@ def test_configure_changes_only_note_style_and_preserves_unknown_keys(
 
     payload = json.loads(path.read_text())
     assert payload == {
-        "version": 1,
+        "version": 2,
         "note_style": "visual",
         "future": {"keep": True},
     }
@@ -344,7 +356,7 @@ def test_configure_sets_and_clears_source_schemes(
     )
 
     assert json.loads(path.read_text()) == {
-        "version": 1,
+        "version": 2,
         "note_style": "natural",
         "source_schemes": ["obsidian", "x-devonthink-item"],
     }
@@ -362,7 +374,9 @@ def test_configure_requires_at_least_one_preference(
         main(["configure"])
 
     assert caught.value.code == 2
-    assert "needs --note-style or --source-schemes" in capsys.readouterr().err
+    assert "needs --note-style, --source-schemes, --timezone, or --url" in (
+        capsys.readouterr().err
+    )
 
 
 def test_migration_report_quarantines_and_reads_disposable_sqlite(
@@ -376,7 +390,7 @@ def test_migration_report_quarantines_and_reads_disposable_sqlite(
     journal.save(IntentRecord("old-pending", "b", "pending"))
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: ("owner@example.com", "unused", None),
+        lambda: Credentials("owner@example.com", "unused", None),
     )
     monkeypatch.setattr("things_orchestrator.cli.journal_path", lambda _email: path)
 
@@ -611,8 +625,8 @@ def test_doctor_url_probes_origin_health(
 def test_serve_without_credentials_points_at_login(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def missing(**_kwargs: object) -> tuple[str, str, str | None]:
-        raise CloudError("unused")
+    def missing(**_kwargs: object) -> Credentials:
+        raise ConfigError("unused")
 
     monkeypatch.setattr("things_orchestrator.cli.load_credentials", missing)
     with pytest.raises(SystemExit) as caught:
@@ -663,7 +677,7 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
 
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: ("owner@example.com", "cloud-secret", None),
+        lambda: Credentials("owner@example.com", "cloud-secret", None),
     )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_timezone", lambda: "Europe/Berlin"
@@ -998,27 +1012,60 @@ def test_login_password_confirm_mismatch(
 
 
 def test_serve_http_without_token(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    creds = tmp_path / "credentials.json"
-    creds.write_text(
-        json.dumps({"email": "user@example.com", "password": "secret"}) + "\n"
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_credentials",
+        lambda: Credentials("user@example.com", "secret", None),
     )
-    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cloud.credentials_path", lambda: creds)
-    monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
-    monkeypatch.setattr("things_orchestrator.cloud.state_cache_path", lambda: tmp_path / "state.json")
-    monkeypatch.delenv("THINGS_MCP_TOKEN", raising=False)
-    monkeypatch.delenv("THINGS_EMAIL", raising=False)
-    monkeypatch.delenv("THINGS_PASSWORD", raising=False)
+    monkeypatch.setattr("things_orchestrator.cli._server", lambda _parser: object())
 
-    def fail_run_http(**_kwargs: object) -> None:
-        raise AssertionError("serve-http must not start without a token")
-
-    monkeypatch.setattr("things_orchestrator.server.ThingsMCPServer.run_http", fail_run_http)
     with pytest.raises(SystemExit) as caught:
         main(["serve-http"])
     assert caught.value.code == 2
     err = capsys.readouterr().err
-    assert "THINGS_MCP_TOKEN" in err
     assert "mcp_token" in err
+
+
+def test_serve_http_uses_only_the_stored_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class Server:
+        def run_http(self, *, port: int, token: str) -> None:
+            seen.update(port=port, token=token)
+
+    monkeypatch.setattr("things_orchestrator.cli._server", lambda _parser: Server())
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_credentials",
+        lambda: Credentials(
+            "user@example.com", "secret", McpBearer("stored-bearer")
+        ),
+    )
+    monkeypatch.setenv("THINGS_MCP_TOKEN", "stale-environment-bearer")
+
+    main(["serve-http"])
+
+    assert seen == {"port": 8787, "token": "stored-bearer"}
+
+
+def test_login_prompts_for_timezone_on_a_utc_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    creds = tmp_path / "credentials.json"
+    _fake_cloud(monkeypatch)
+    answers = iter(("user@example.com", "Europe/Berlin"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr("things_orchestrator.cli._local_timezone_name", lambda: "UTC")
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json"
+    )
+    monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "token")
+
+    main(["login"])
+
+    assert json.loads((tmp_path / "preferences.json").read_text())["timezone"] == (
+        "Europe/Berlin"
+    )
