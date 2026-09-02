@@ -556,6 +556,27 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     assert "keep-me" not in out
 
 
+def test_service_install_dry_run_prints_effects_and_doctor_last(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def planned(action: str, *, dry_run: bool) -> object:
+        seen.append((action, dry_run))
+        return SimpleNamespace(
+            effects=(SimpleNamespace(description="install launchd agent"),),
+            status=SimpleNamespace(value="active"),
+        )
+
+    monkeypatch.setattr("things_orchestrator.cli.service_action", planned)
+    main(["service", "install", "--dry-run"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert seen == [("install", True)]
+    assert lines[0] == "Would: install launchd agent"
+    assert lines[-1] == "Next: things-orchestrator doctor --wait"
+
+
 def _doctor_report(targets: list[object]) -> object:
     receipts = tuple(
         SimpleNamespace(

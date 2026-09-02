@@ -43,6 +43,7 @@ from .deployment import skill_path
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
+from .service import service_action
 from .workspace import ThingsWorkspace
 
 _LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
@@ -62,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="{login,configure,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
+        metavar="{login,configure,service,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
     )
     login = commands.add_parser("login", help="store Things Cloud email and password (TTY only)")
     login.add_argument(
@@ -106,6 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("serve", help="MCP on stdio")
     commands.add_parser("skill-path", help="print the installed Things skill directory")
+    service = commands.add_parser(
+        "service", help="install, uninstall, or inspect the supervised HTTP service"
+    )
+    service_commands = service.add_subparsers(dest="service_action", required=True)
+    for action in ("install", "uninstall", "status"):
+        service_command = service_commands.add_parser(action)
+        service_command.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="show the convergent service effects without applying them",
+        )
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP behind TLS")
     http.add_argument("--port", type=int, default=8787)
     show = commands.add_parser("print-config", help="render one client configuration")
@@ -220,6 +232,19 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.action == "skill-path":
         print(skill_path())
+        return
+    if args.action == "service":
+        try:
+            result = service_action(args.service_action, dry_run=args.dry_run)
+        except (ConfigError, OSError) as error:
+            parser.error(str(error))
+            return
+        for effect in result.effects:
+            prefix = "Would" if args.dry_run else "Applied"
+            print(f"{prefix}: {effect.description}")
+        print(f"service: {result.status.value}")
+        if args.service_action == "install":
+            print("Next: things-orchestrator doctor --wait")
         return
     if args.action == "owner-factor":
         _owner_factor(parser)

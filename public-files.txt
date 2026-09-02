@@ -59,6 +59,7 @@ src/things_orchestrator/owner_authority.py
 src/things_orchestrator/owner_text.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/server.py
+src/things_orchestrator/service.py
 src/things_orchestrator/skills/things-orchestrator/SKILL.md
 src/things_orchestrator/skills/things-orchestrator/agents/openai.yaml
 src/things_orchestrator/skills/things-orchestrator/references/form.md
@@ -92,6 +93,7 @@ tests/test_preferences.py
 tests/test_recurrence.py
 tests/test_release.py
 tests/test_server.py
+tests/test_service.py
 tests/test_source_document.py
 tests/test_v07_dogfood_ux.py
 tests/test_v2_contract.py
