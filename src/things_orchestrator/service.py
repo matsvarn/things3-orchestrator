@@ -206,7 +206,13 @@ def service_status(
     if active_result.returncode == 0:
         return ServiceStatus.ACTIVE
     if path.is_file():
-        return ServiceStatus.INACTIVE
+        return (
+            ServiceStatus.INACTIVE
+            if active_result.returncode == 3
+            else ServiceStatus.UNKNOWN
+        )
+    if active_result.returncode not in {3, 4}:
+        return ServiceStatus.UNKNOWN
     try:
         load_result = subprocess.run(
             ("systemctl", "show", "--property=LoadState", "--value", _UNIT),

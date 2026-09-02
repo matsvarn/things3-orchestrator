@@ -45,7 +45,8 @@ Keep one production server and one stable model Interface.
   through `uv run`. `login` keeps the existing bearer unless
   `--rotate-token`. `print-config --client` writes nothing and prints one
   client artifact. `doctor` performs authenticated Streamable HTTP
-  initialization plus `tools/list` against loopback and an optional origin.
+  initialization plus `tools/list` against loopback, the saved origin, and an
+  optional one-time origin.
   Install paths are in `docs/install.md`, client targets in `docs/clients.md`,
   and lifecycle operations in `docs/operations.md`. Capability evidence is in
   `docs/capability-proof.md`; human workflow coverage is in `docs/dogfood.md`.

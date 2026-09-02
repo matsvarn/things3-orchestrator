@@ -85,10 +85,11 @@ in an SSH session.
 ## Acceptance
 
 `doctor` verifies public health privacy, authenticated health, installed version
-and commit, schema hash, MCP initialization, and the exact eight-tool list. With
-`--url`, it verifies loopback and the public origin. Its last block prints a
-curl command for a client machine; set `THINGS_MCP_TOKEN` in that terminal and
-expect the command to print `8`.
+and commit, schema hash, MCP initialization, and the exact eight-tool list. It
+checks loopback and the saved public origin. Use `--url` to add a one-time
+endpoint that is not saved. Its last block prints a curl command for a client
+machine; set `THINGS_MCP_TOKEN` in that terminal and expect the command to print
+`8`.
 
 Then connect one client with [clients.md](clients.md). Operational commands,
 updates, rollback, backup, and removal are in [operations.md](operations.md).

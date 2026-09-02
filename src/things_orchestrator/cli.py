@@ -495,6 +495,8 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
 
     try:
         targets = [normalize_mcp_url(_LOOPBACK_URL)]
+        if stored_url is not None and stored_url not in targets:
+            targets.append(stored_url)
         if public_url.strip():
             remote = normalize_mcp_url(public_url)
             if remote not in targets:

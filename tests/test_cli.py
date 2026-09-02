@@ -682,7 +682,7 @@ def test_doctor_without_server_exits_nonzero(
     assert "doctor: fail (connection refused)" in out
 
 
-def test_doctor_without_url_checks_loopback_only(
+def test_doctor_without_url_checks_loopback_and_saved_endpoint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
@@ -703,8 +703,12 @@ def test_doctor_without_url_checks_loopback_only(
     monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
     main(["doctor"])
     out = capsys.readouterr().out
-    assert seen == ["http://127.0.0.1:8787/mcp"]
+    assert seen == [
+        "http://127.0.0.1:8787/mcp",
+        "https://tasks.example.com/mcp",
+    ]
     assert "mcp: ok (http://127.0.0.1:8787/mcp; 8 tools" in out
+    assert "mcp: ok (https://tasks.example.com/mcp; 8 tools" in out
 
 
 def test_doctor_passes_wait_to_authenticated_round_trip(
@@ -735,7 +739,7 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
-    _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
+    _seed_preferences(tmp_path, url="https://saved.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
@@ -753,9 +757,13 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     out = capsys.readouterr().out
     assert seen == [
         "http://127.0.0.1:8787/mcp",
+        "https://saved.example.com/mcp",
         "https://tasks.example.com/mcp",
     ]
     assert "mcp: ok (https://tasks.example.com/mcp; 8 tools" in out
+    acceptance = out.split("Client acceptance", maxsplit=1)[1]
+    assert "https://tasks.example.com/mcp" in acceptance
+    assert "https://saved.example.com/mcp" not in acceptance
     assert "$THINGS_MCP_TOKEN" in out
     assert "keep-me" not in out
 

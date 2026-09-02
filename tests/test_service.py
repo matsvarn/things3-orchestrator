@@ -516,6 +516,33 @@ def test_systemd_status_queries_an_orphaned_unit_without_a_file(
 
 
 @pytest.mark.parametrize(
+    ("active_code", "expected"),
+    [
+        (3, ServiceStatus.INACTIVE),
+        (1, ServiceStatus.UNKNOWN),
+        (4, ServiceStatus.UNKNOWN),
+    ],
+)
+def test_systemd_status_distinguishes_stopped_units_from_probe_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_code: int,
+    expected: ServiceStatus,
+) -> None:
+    monkeypatch.setattr(
+        "things_orchestrator.service._SYSTEMD_PATH",
+        tmp_path / "things-orchestrator-http.service",
+    )
+    (tmp_path / "things-orchestrator-http.service").write_text("unit")
+    monkeypatch.setattr(
+        "things_orchestrator.service.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=active_code, stdout=""),
+    )
+
+    assert service_status(platform="linux", uid=1000, home=tmp_path) is expected
+
+
+@pytest.mark.parametrize(
     ("platform", "failed_status"),
     (
         ("darwin", ServiceStatus.LOADED),

@@ -17,7 +17,8 @@ On Linux, read service logs with
 `journalctl -u things-orchestrator-http.service -e`. On macOS, inspect the
 launchd agent in Console.
 
-For a TLS origin, add it to doctor:
+`doctor` automatically checks the TLS origin saved by `login`. Use `--url` to
+add a one-time endpoint that is not saved:
 
 ```console
 things-orchestrator doctor --wait --url https://mcp.example.com

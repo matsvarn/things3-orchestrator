@@ -338,7 +338,7 @@ def save_preferences(
 def _normalize_timezone(value: str) -> str:
     try:
         ZoneInfo(value)
-    except ZoneInfoNotFoundError as error:
+    except (ValueError, ZoneInfoNotFoundError) as error:
         raise ConfigError(
             "Timezone needs an IANA name such as Europe/Berlin"
         ) from error

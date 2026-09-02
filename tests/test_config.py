@@ -79,6 +79,15 @@ def test_legacy_credentials_timezone_is_a_read_only_fallback(tmp_path: Path) -> 
     assert not preferences.exists()
 
 
+@pytest.mark.parametrize("timezone", ("", "/etc/localtime"))
+def test_timezone_rejects_empty_and_absolute_names_without_leaking_value_error(
+    tmp_path: Path,
+    timezone: str,
+) -> None:
+    with pytest.raises(ConfigError, match="IANA name"):
+        save_preferences(timezone=timezone, path=tmp_path / "preferences.json")
+
+
 @pytest.mark.parametrize(
     "raw",
     (
