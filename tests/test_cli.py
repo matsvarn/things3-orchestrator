@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
-from urllib.error import URLError
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +17,7 @@ from things_orchestrator.cli import (
     main,
 )
 from things_orchestrator.config import ConfigError, Credentials, McpBearer
+from things_orchestrator.doctor import DoctorFailure
 from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 
 ROOT = Path(__file__).parents[1]
@@ -133,20 +134,6 @@ def _seed_preferences(
         )
         + "\n"
     )
-
-
-class _HealthResponse:
-    def __init__(self, body: bytes = b'{"ok":true}') -> None:
-        self._body = body
-
-    def __enter__(self) -> _HealthResponse:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self._body
 
 
 def test_login_stores_credentials_and_preferences_without_snippets(
@@ -486,21 +473,22 @@ def test_doctor_without_server_exits_nonzero(
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
 
-    def refused(url: str, timeout: float = 2.0) -> object:
-        raise URLError("connection refused")
+    async def refused(*_args: object, **_kwargs: object) -> object:
+        raise DoctorFailure("connection refused")
 
-    monkeypatch.setattr("things_orchestrator.cli.urlopen", refused)
-    main(["doctor"])
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", refused)
+    with pytest.raises(SystemExit) as caught:
+        main(["doctor"])
+    assert caught.value.code == 1
     out = capsys.readouterr().out
     assert "keep-me" not in out
     assert "secret" not in out
     assert "credentials: ok" in out
     assert "timezone: ok (Europe/Berlin)" in out
-    assert "http url: http://127.0.0.1:8787/mcp" in out
-    assert "loopback health: not listening" in out
+    assert "doctor: fail (connection refused)" in out
 
 
-def test_doctor_hosted_url_requires_loopback(
+def test_doctor_without_url_checks_loopback_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
@@ -508,45 +496,42 @@ def test_doctor_hosted_url_requires_loopback(
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
 
-    def refused(url: str, timeout: float = 2.0) -> object:
-        raise URLError("connection refused")
+    seen: list[str] = []
 
-    monkeypatch.setattr("things_orchestrator.cli.urlopen", refused)
-    with pytest.raises(SystemExit) as caught:
-        main(["doctor"])
-    assert caught.value.code == 1
+    async def healthy(targets: list[object], *_args: object, **_kwargs: object) -> object:
+        seen.extend(str(target) for target in targets)
+        return _doctor_report(targets)
+
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
+    main(["doctor"])
     out = capsys.readouterr().out
-    assert "http url: https://tasks.example.com/mcp" in out
-    assert "loopback health: not listening" in out
+    assert seen == ["http://127.0.0.1:8787/mcp"]
+    assert "mcp: ok (http://127.0.0.1:8787/mcp; 8 tools" in out
 
 
-def test_doctor_wait_retries_until_health_ok(
+def test_doctor_passes_wait_to_authenticated_round_trip(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
-    attempts = {"n": 0}
+    seen_wait: list[bool] = []
 
-    def flaky(url: str, timeout: float = 2.0) -> _HealthResponse:
-        attempts["n"] += 1
-        if attempts["n"] < 3:
-            raise URLError("connection refused")
-        return _HealthResponse()
+    async def healthy(targets: list[object], *_args: object, wait: bool) -> object:
+        seen_wait.append(wait)
+        return _doctor_report(targets)
 
-    monkeypatch.setattr("things_orchestrator.cli.urlopen", flaky)
-    monkeypatch.setattr("things_orchestrator.cli.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
     main(["doctor", "--wait"])
     out = capsys.readouterr().out
-    assert attempts["n"] == 3
-    assert "loopback health: ok" in out
-    assert "http url: https://tasks.example.com/mcp" in out
+    assert seen_wait == [True]
+    assert "service: current" in out
     assert "keep-me" not in out
     assert "secret" not in out
 
 
-def test_doctor_url_probes_origin_health(
+def test_doctor_url_probes_loopback_and_remote_mcp(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     creds = _seed_credentials(tmp_path)
@@ -555,18 +540,32 @@ def test_doctor_url_probes_origin_health(
     monkeypatch.setattr("things_orchestrator.cli.state_cache_path", lambda: tmp_path / "state.json")
     seen: list[str] = []
 
-    def record(url: str, timeout: float = 2.0) -> _HealthResponse:
-        seen.append(url)
-        return _HealthResponse()
+    async def healthy(targets: list[object], *_args: object, **_kwargs: object) -> object:
+        seen.extend(str(target) for target in targets)
+        return _doctor_report(targets)
 
-    monkeypatch.setattr("things_orchestrator.cli.urlopen", record)
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
     main(["doctor", "--url", "https://tasks.example.com/mcp"])
     out = capsys.readouterr().out
-    assert "http://127.0.0.1:8787/health" in seen
-    assert "https://tasks.example.com/health" in seen
-    assert "remote health: ok" in out
-    assert "loopback health: ok" in out
+    assert seen == [
+        "http://127.0.0.1:8787/mcp",
+        "https://tasks.example.com/mcp",
+    ]
+    assert "mcp: ok (https://tasks.example.com/mcp; 8 tools" in out
+    assert "$THINGS_MCP_TOKEN" in out
     assert "keep-me" not in out
+
+
+def _doctor_report(targets: list[object]) -> object:
+    receipts = tuple(
+        SimpleNamespace(
+            url=target,
+            detailed_health={"commit": "a" * 40},
+            tool_names=tuple(range(8)),
+        )
+        for target in targets
+    )
+    return SimpleNamespace(targets=receipts)
 
 
 def test_serve_without_credentials_points_at_login(

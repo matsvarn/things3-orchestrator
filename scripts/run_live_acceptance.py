@@ -94,7 +94,8 @@ async def run(
     expect_commit: str,
 ) -> dict[str, object]:
     expected_version = package_version()
-    async with httpx2.AsyncClient(timeout=10.0) as health_client:
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx2.AsyncClient(headers=headers, timeout=10.0) as health_client:
         response = await health_client.get(health_url)
         response.raise_for_status()
         health = response.json()
@@ -105,7 +106,6 @@ async def run(
     if health.get("version") != expected_version:
         raise RuntimeError("health version differs from the local candidate")
 
-    headers = {"Authorization": f"Bearer {token}"}
     async with httpx2.AsyncClient(headers=headers, timeout=30.0) as http_client:
         async with streamable_http_client(url, http_client=http_client) as streams:
             async with ClientSession(*streams) as session:

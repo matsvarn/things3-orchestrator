@@ -50,6 +50,7 @@ src/things_orchestrator/consistency.py
 src/things_orchestrator/context.py
 src/things_orchestrator/contextual.py
 src/things_orchestrator/deployment.py
+src/things_orchestrator/doctor.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
@@ -79,6 +80,7 @@ tests/test_consistency.py
 tests/test_context.py
 tests/test_contextual.py
 tests/test_deployment.py
+tests/test_doctor.py
 tests/test_dogfood_register.py
 tests/test_interface.py
 tests/test_journal.py

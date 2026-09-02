@@ -5,17 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
 from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any, TextIO, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import anyio
 
 from .client_config import ClientKind, Endpoint, render_client_config
 from .cloud import (
@@ -40,13 +40,13 @@ from .config import (
 )
 from .context import SQLiteContextStore
 from .deployment import skill_path
+from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
 from .workspace import ThingsWorkspace
 
 _LOGIN = "From the clone, run `uv run things-orchestrator login` in a private terminal."
-_LOOPBACK_HEALTH = "http://127.0.0.1:8787/health"
-_HEALTH_WAIT_SECONDS = 15
+_LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor = commands.add_parser(
         "doctor",
-        help="check credentials, snippets, and serve-http /health",
+        help="verify deployment identity and an authenticated MCP round trip",
     )
     doctor.add_argument(
         "--wait",
@@ -139,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         dest="public_url",
         default="",
-        help="also GET {origin}/health (no bearer)",
+        help="also verify this HTTPS origin or /mcp endpoint",
     )
     commands.add_parser("owner-factor", help="enroll the signed legacy-recovery passphrase")
     commands.add_parser("migration-report", help="quarantine and report retained v1 operations")
@@ -382,77 +382,50 @@ def _doctor(
         parser.error(_LOGIN)
         return
     print(f"credentials: ok ({credentials.email})")
-    failed = False
-
     timezone_name = load_timezone(
         preferences_file=creds.with_name("preferences.json"),
         credentials_file=creds,
     )
     if not timezone_name:
-        print("timezone: missing")
-        failed = True
-    else:
-        try:
-            ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError:
-            print(f"timezone: invalid ({timezone_name})")
-            failed = True
-        else:
-            print(f"timezone: ok ({timezone_name})")
-
-    resolved = load_mcp_url(
-        preferences_file=creds.with_name("preferences.json"),
-        credentials_file=creds,
-    ) or normalize_mcp_url("http://127.0.0.1:8787")
-    print(f"http url: {resolved}")
-    hosted = resolved.origin != "http://127.0.0.1:8787"
-
-    loopback = _probe_loopback(wait=wait)
-    print(f"loopback health: {loopback}")
-    if loopback != "ok" and (wait or hosted):
-        failed = True
-
-    if public_url.strip():
-        remote = _probe_health(_origin_health_url(public_url))
-        print(f"remote health: {remote}")
-        if remote != "ok":
-            failed = True
-
-    if failed:
-        sys.exit(1)
-
-
-def _origin_health_url(public_url: str) -> str:
-    raw = public_url.strip().rstrip("/")
-    if raw.endswith("/mcp"):
-        raw = raw[: -len("/mcp")].rstrip("/")
-    return f"{raw}/health"
-
-
-def _probe_loopback(*, wait: bool) -> str:
-    deadline = time.monotonic() + _HEALTH_WAIT_SECONDS
-    status = _probe_health(_LOOPBACK_HEALTH)
-    while wait and status != "ok" and time.monotonic() < deadline:
-        time.sleep(1)
-        status = _probe_health(_LOOPBACK_HEALTH)
-    return status
-
-
-def _probe_health(url: str, *, timeout: float = 2.0) -> str:
+        print("timezone: missing - run login --timezone Europe/Berlin")
+        raise SystemExit(1)
     try:
-        with urlopen(url, timeout=timeout) as response:
-            raw = response.read()
-    except HTTPError:
-        return "fail"
-    except (URLError, TimeoutError, OSError):
-        return "not listening"
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        print(f"timezone: invalid ({timezone_name})")
+        raise SystemExit(1) from None
+    print(f"timezone: ok ({timezone_name})")
+    if timezone_name == "UTC" and public_url.strip():
+        print("timezone: warning - UTC is unusual for a hosted owner account")
+
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return "fail"
-    if isinstance(payload, dict) and payload.get("ok") is True:
-        return "ok"
-    return "fail"
+        targets = [normalize_mcp_url(_LOOPBACK_URL)]
+        if public_url.strip():
+            remote = normalize_mcp_url(public_url)
+            if remote not in targets:
+                targets.append(remote)
+        report = anyio.run(
+            partial(
+                run_doctor,
+                targets,
+                credentials.bearer,
+                wait=wait,
+            )
+        )
+    except (ConfigError, DoctorFailure) as error:
+        print(f"doctor: fail ({error})")
+        raise SystemExit(1) from None
+
+    for receipt in report.targets:
+        commit = str(receipt.detailed_health["commit"])
+        print(
+            f"mcp: ok ({receipt.url}; {len(receipt.tool_names)} tools; "
+            f"commit {commit[:12]})"
+        )
+    print("service: current")
+    client_target = report.targets[-1].url
+    print("Client acceptance (set THINGS_MCP_TOKEN on that machine):")
+    print(curl_tool_count_command(client_target))
 
 
 def _checkout_wrapper() -> Path:

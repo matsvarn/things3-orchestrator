@@ -163,7 +163,9 @@ def tool_contract_hash() -> str:
     )
 
 
-def health_payload() -> dict[str, object]:
+def health_payload(*, authenticated: bool = False) -> dict[str, object]:
+    if not authenticated:
+        return {"ok": True}
     payload: dict[str, object] = {
         "ok": True,
         "version": package_version(),

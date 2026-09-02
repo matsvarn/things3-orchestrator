@@ -4,6 +4,7 @@ import asyncio
 
 from jsonschema import validate
 from mcp.types import ToolAnnotations
+from starlette.testclient import TestClient
 
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.server import ThingsMCPServer, bearer_matches
@@ -104,6 +105,33 @@ def test_bearer_comparison_requires_exact_token() -> None:
     assert bearer_matches("Bearer other", "secret") is False
     assert bearer_matches(None, "secret") is False
     assert bearer_matches("Bearer secret", "") is False
+
+
+def test_health_is_public_liveness_and_authenticated_deployment_detail() -> None:
+    app = _server().build_http_app(token="secret")
+
+    with TestClient(app) as client:
+        public = client.get("/health")
+        authenticated = client.get(
+            "/health", headers={"Authorization": "Bearer secret"}
+        )
+        rejected = client.get(
+            "/health", headers={"Authorization": "Bearer wrong"}
+        )
+        rejected_mcp = client.post(
+            "/mcp",
+            headers={"Authorization": "Bearer wrong"},
+            follow_redirects=False,
+        )
+
+    assert public.status_code == 200
+    assert public.json() == {"ok": True}
+    assert authenticated.status_code == 200
+    assert authenticated.json()["ok"] is True
+    assert authenticated.json()["tool_schema_hash"].startswith("sha256:")
+    assert "capabilities" in authenticated.json()
+    assert rejected.status_code == 401
+    assert rejected_mcp.status_code == 401
 
 
 def test_public_result_schema_contains_no_private_operation_controls() -> None:
