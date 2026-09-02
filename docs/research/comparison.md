@@ -26,8 +26,8 @@ reviewed
 [source snapshot](https://github.com/wbopan/things-cloud-mcp/blob/32a4b90c091e8a1688d0c4c22c408bb1603ebd86/oauth.go#L67-L130).
 
 Things Orchestrator stores one account on the owner's host. See the
-[trust boundary](trust.md) and the local credential implementation in
-[`cloud.py`](../src/things_orchestrator/cloud.py).
+[trust boundary](../trust.md) and the local credential implementation in
+[`cloud.py`](../../src/things_orchestrator/cloud.py).
 
 These differences do not make any option risk-free. Both Cloud options use an
 unofficial protocol. Cultured Code can change that protocol or disable an

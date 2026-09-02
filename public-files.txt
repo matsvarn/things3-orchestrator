@@ -17,12 +17,13 @@ docs/adr/0006-common-caller-owner-safe-v2.md
 docs/adr/0007-authenticated-bounded-v2-writes.md
 docs/capability-proof.md
 docs/clients.md
-docs/comparison.md
 docs/dogfood.md
-docs/host.md
+docs/install.md
 docs/maintainer.md
+docs/operations.md
 docs/owner.md
 docs/recovery.md
+docs/research/comparison.md
 docs/research/things3-cloud.md
 docs/research/weekly-review-best-practice.md
 docs/trust.md

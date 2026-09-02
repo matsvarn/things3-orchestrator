@@ -1,6 +1,7 @@
 # Use Things Orchestrator v2
 
-Install the local service with `scripts/setup` before the first client session.
+Install the supervised HTTP service with [install.md](install.md) before the
+first client session.
 
 Ask to read Today, Inbox, Week, Repeating, Logbook, Projects, Areas, tags, or
 Trash. Search by a distinctive title fragment, or read exact IDs.

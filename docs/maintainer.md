@@ -14,8 +14,15 @@ Keep one production server and one stable model Interface.
   constructs the v1 `CommitCall` language.
 - `consistency.py` owns native-state conflict detection for diagnostics
   and review signals.
-- `deployment.py` owns package version, cache version, `/health`
-  capabilities, `tool_schema_hash`, and `tool_contract_hash`.
+- `config.py` owns credentials, owner preferences, normalized MCP endpoints,
+  and the exact plugin launcher binding.
+- `client_config.py` renders one client artifact from one endpoint and bearer.
+- `deployment.py` owns package resources, version, installed Git identity,
+  cache version, authenticated health detail, `tool_schema_hash`, and
+  `tool_contract_hash`.
+- `doctor.py` proves public health privacy, authenticated health, MCP
+  initialization, the exact tool list, hashes, version, and commit.
+- `service.py` owns launchd and systemd lifecycle planning and execution.
 - `journal.py` creates immutable v2 operations, performs legal compare-and-set
   transitions, claims the account fence, and appends exact receipt rows. The
   journal path is namespaced by account. It rehashes the complete persisted
@@ -32,22 +39,16 @@ Keep one production server and one stable model Interface.
 - `live_acceptance.py` owns the restart-safe disposable write workflow used as
   a release gate. It persists request IDs before mutation and passes only after
   receipt and Trash read-back.
-- `cli.py` is the owner-facing seam: `login`, `serve`, `serve-http`,
-  `print-config`, and `doctor`. Callers run `uv run things-orchestrator`
-  from the checkout. `plugin/bin` locates that checkout when a client
-  copies the plugin. Do not `pip install` this package as the install
-  path: the wheel has no `plugin/` (skills or wrapper). `login` writes
-  Hermes YAML plus `mcp.stdio.json` / `mcp.http.json`, keeps `mcp_token`
-  unless `--rotate-token`, and keeps an HTTP URL already set. Default
-  `login` / `print-config` print snippet paths. `--show-secrets` prints
-  bodies including the MCP bearer. `doctor` checks credentials,
-  snippets, timezone, and loopback `http://127.0.0.1:8787/health`.
-  Loopback is required after a hosted URL is set, or with `--wait`.
-  `doctor --url` checks remote `/health`.
-  Per-client wiring lives in `docs/clients.md`. A VPS plus a client is
-  `docs/host.md`. Hermes is the default paste. Capability evidence is
-  `docs/capability-proof.md`. Human workflow coverage and rerun status are in
-  `docs/dogfood.md`.
+- `cli.py` is the owner-facing seam: `login`, `configure`, `service`,
+  `serve-http`, `print-config`, and `doctor`. Production installs use an exact
+  Git tag through `uv tool install`; clone development uses the same commands
+  through `uv run`. `login` keeps the existing bearer unless
+  `--rotate-token`. `print-config --client` writes nothing and prints one
+  client artifact. `doctor` performs authenticated Streamable HTTP
+  initialization plus `tools/list` against loopback and an optional origin.
+  Install paths are in `docs/install.md`, client targets in `docs/clients.md`,
+  and lifecycle operations in `docs/operations.md`. Capability evidence is in
+  `docs/capability-proof.md`; human workflow coverage is in `docs/dogfood.md`.
 
 For public write changes, deploy the exact candidate before tagging it. Run the
 live acceptance workflow from `docs/capability-proof.md` to a `cleaned` result.
@@ -62,9 +63,10 @@ Debounce normal reads with the history cursor. Treat HTTP 409 as stale
 evidence. Do not replay the old write after a pull. Use the configured owner
 timezone for Today, Logbook, and reminder dates.
 
-The MCP server does not care which chat client you use. Skills live under
-`plugin/skills/` and stay out of the Python wheel. Each client catalogs that
-folder itself — `docs/clients.md`.
+The MCP server does not care which chat client you use. The canonical skill is
+packaged under `src/things_orchestrator/skills/`; CI requires the Codex plugin
+copy to be byte-identical. `things-orchestrator skill-path` prints the installed
+directory.
 
 ## Public source allowlist
 

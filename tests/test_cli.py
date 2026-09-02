@@ -389,13 +389,14 @@ def test_print_config_renders_without_writing_and_hides_token(
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     main(["print-config", "--url", "https://tasks.example.com"])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert "secret" not in _stdout_without_secret_flag(out)
     assert "keep-me" not in out
     assert "Bearer" in out
     assert "https://tasks.example.com/mcp" in out
     assert "Bearer <mcp_token>" in out
-    assert "deprecated default" in out
+    assert "deprecated default" in captured.err
     assert not list(tmp_path.glob("mcp.*"))
 
 
@@ -412,12 +413,49 @@ def test_print_config_show_secrets_prints_bearer(
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr("things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json")
     main(["print-config", "--client", "codex", "--show-secrets", "--url", "https://tasks.example.com"])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert '"secret"' not in out
     assert "keep-me" in out
     assert "Bearer keep-me" in out
-    assert "~/.codex/config.toml" in out
+    assert "~/.codex/config.toml" in captured.err
     assert "mcp_servers.things" in out
+
+
+def test_caddy_config_stdout_is_directly_pipeable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {"email": "user@example.com", "password": "secret", "mcp_token": "keep-me"}
+        )
+        + "\n"
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+
+    main(
+        [
+            "print-config",
+            "--client",
+            "caddy",
+            "--url",
+            "https://mcp.example.com",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "mcp.example.com {\n"
+        "\treverse_proxy 127.0.0.1:8787 {\n"
+        "\t\tflush_interval -1\n"
+        "\t}\n"
+        "}\n"
+    )
+    assert "Install this as /etc/caddy/Caddyfile" in captured.err
+    assert "keep-me" not in captured.out + captured.err
 
 
 def test_print_config_uses_saved_url_without_mutating_preferences(
@@ -692,8 +730,8 @@ def test_readme_is_safe_to_publish() -> None:
     readme = (ROOT / "README.md").read_text()
     assert "<this-repo>" not in readme
     assert "unofficial" in readme.lower()
-    assert "not on PyPI" in readme
-    assert "Use the clone" in readme
+    assert "uv tool install" in readme
+    assert "@v0.9.0" in readme
     assert "disable an account" in readme
     assert "SECURITY.md" in readme
     assert "MIT" in (ROOT / "LICENSE").read_text()
@@ -720,19 +758,33 @@ def test_readme_is_safe_to_publish() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert "Python :: 3.13" in pyproject
     assert "Python :: 3.14" in pyproject
-    assert "Mac can be off" in readme
     assert "docs/trust.md" in readme
-    assert "docs/comparison.md" in readme
-    assert "docs/host.md" in readme
-    assert "docs/capability-proof.md" in readme
+    assert "docs/install.md" in readme
+    assert "docs/clients.md" in readme
+    assert "docs/comparison.md" not in readme
+    assert "docs/host.md" not in readme
+    assert "docs/capability-proof.md" not in readme
     trust = (ROOT / "docs/trust.md").read_text()
     assert "model provider" in trust
     assert "fully private" in trust
-    comparison = (ROOT / "docs/comparison.md").read_text()
+    comparison = (ROOT / "docs/research/comparison.md").read_text()
     assert "Reviewed on 2026-08-14" in comparison
     assert "hald/things-mcp" in comparison
     assert "thingscloudmcp.com" in comparison
     assert "wbopan/things-cloud-mcp" in comparison
+    install = (ROOT / "docs/install.md").read_text()
+    assert "sudo tailscale serve --bg 8787" in install
+    assert "one-time prompt" in install
+    assert "sudo apt install caddy" in install
+    assert "/etc/caddy/Caddyfile" in install
+    assert "sudo systemctl reload caddy" in install
+    clients = (ROOT / "docs/clients.md").read_text()
+    assert "cursor.com/agents" in clients
+    assert "environment interpolation is unavailable" in clients
+    assert "cannot be viewed" in clients
+    assert "bearer_token_env_var" in clients
+    assert "Do not add a second" in clients
+    assert not (ROOT / "docs/host.md").exists()
     assert not (ROOT / "docs/public-launch.md").exists()
 
 
@@ -744,10 +796,11 @@ def test_parser_names_the_owner_commands() -> None:
     assert "print-config" in help_text
     assert "doctor" in help_text
     assert "configure" in help_text
+    assert "service" in help_text
     assert "skill-path" in help_text
-    assert "uv run things-orchestrator login" in help_text
+    assert "things-orchestrator login" in help_text
     compact = help_text.replace("-\n", "-").replace("\n", " ")
-    assert "things-orchestrator doctor" in compact
+    assert "doctor --wait" in compact
     with pytest.raises(SystemExit):
         build_parser().parse_args(["serve-http", "--host", "0.0.0.0"])
 

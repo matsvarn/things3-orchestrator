@@ -54,10 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Things Cloud MCP server with eight bounded v2 tools.",
         epilog=(
-            "From the clone: uv run things-orchestrator login. "
-            "HTTP host: uv run things-orchestrator doctor. "
-            "This Mac: merge the Hermes YAML into ~/.hermes/config.yaml. "
-            "VPS: docs/host.md."
+            "Install an exact Git tag, then run things-orchestrator login, "
+            "service install, doctor --wait, and print-config --client CLIENT. "
+            "Clone development uses the same commands through uv run."
         ),
     )
     commands = parser.add_subparsers(
@@ -372,16 +371,25 @@ def _print_config(
         parser.error(str(error))
         return
     if client is None:
-        print("No --client selected; rendering generic HTTP JSON (deprecated default).")
-    print(rendered.guidance)
+        print(
+            "No --client selected; rendering generic HTTP JSON (deprecated default).",
+            file=sys.stderr,
+        )
+    print(rendered.guidance, file=sys.stderr)
     print(rendered.body, end="")
     if rendered.secondary_body is not None:
-        print("Alternative JSON:")
+        print("Alternative JSON:", file=sys.stderr)
         print(rendered.secondary_body, end="")
     if not show_secrets:
-        print("Token is hidden. Add --show-secrets only in a private terminal.")
-    print("The HTTP Bearer is the MCP token, not the Cloud password.")
-    print("Do not paste the Cloud password into chat.")
+        print(
+            "Token is hidden. Add --show-secrets only in a private terminal.",
+            file=sys.stderr,
+        )
+    print(
+        "The HTTP Bearer is the MCP token, not the Cloud password.",
+        file=sys.stderr,
+    )
+    print("Do not paste the Cloud password into chat.", file=sys.stderr)
 
 
 def _mcp_token(*, rotate: bool, path: Path) -> str:
