@@ -121,14 +121,17 @@ def _seed_credentials(
 
 
 def _seed_preferences(
-    tmp_path: Path, *, url: str = "http://127.0.0.1:8787/mcp"
+    tmp_path: Path,
+    *,
+    url: str = "http://127.0.0.1:8787/mcp",
+    timezone: str = "Europe/Berlin",
 ) -> None:
     (tmp_path / "preferences.json").write_text(
         json.dumps(
             {
                 "version": 2,
                 "note_style": "natural",
-                "timezone": "Europe/Berlin",
+                "timezone": timezone,
                 "mcp_url": url,
             }
         )
@@ -593,6 +596,31 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     assert "mcp: ok (https://tasks.example.com/mcp; 8 tools" in out
     assert "$THINGS_MCP_TOKEN" in out
     assert "keep-me" not in out
+
+
+def test_doctor_warns_for_utc_when_saved_endpoint_is_hosted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = _seed_credentials(tmp_path, timezone="UTC")
+    _seed_preferences(
+        tmp_path,
+        url="https://tasks.example.com/mcp",
+        timezone="UTC",
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
+    )
+
+    async def healthy(targets: list[object], *_args: object, **_kwargs: object) -> object:
+        return _doctor_report(targets)
+
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
+    main(["doctor"])
+
+    assert "UTC is unusual for a hosted owner account" in capsys.readouterr().out
 
 
 def test_service_install_dry_run_prints_effects_and_doctor_last(

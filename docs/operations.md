@@ -14,8 +14,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/mcp
 ```
 
 On Linux, read service logs with
-`journalctl -u things-orchestrator-http.service -e`. On macOS, use Console or
-`log stream --predicate 'process == "things-orchestrator"'`.
+`journalctl -u things-orchestrator-http.service -e`. On macOS, inspect the
+launchd agent in Console.
 
 For a TLS origin, add it to doctor:
 

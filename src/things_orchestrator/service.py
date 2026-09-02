@@ -233,8 +233,13 @@ def _plan_service(
             ),
             ServiceEffect(
                 "command",
-                "enable and start systemd service",
-                argv=("sudo", "systemctl", "enable", "--now", _UNIT),
+                "enable systemd service",
+                argv=("sudo", "systemctl", "enable", _UNIT),
+            ),
+            ServiceEffect(
+                "command",
+                "restart systemd service",
+                argv=("sudo", "systemctl", "restart", _UNIT),
             ),
         )
         return ServicePlan(platform, action, effects, ServiceStatus.ACTIVE)

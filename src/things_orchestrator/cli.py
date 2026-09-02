@@ -429,7 +429,12 @@ def _doctor(
         print(f"timezone: invalid ({timezone_name})")
         raise SystemExit(1) from None
     print(f"timezone: ok ({timezone_name})")
-    if timezone_name == "UTC" and public_url.strip():
+    stored_url = load_mcp_url(
+        preferences_file=creds.with_name("preferences.json"),
+        credentials_file=creds,
+    )
+    hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"
+    if timezone_name == "UTC" and (public_url.strip() or hosted):
         print("timezone: warning - UTC is unusual for a hosted owner account")
 
     try:

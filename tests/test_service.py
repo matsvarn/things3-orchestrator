@@ -102,6 +102,7 @@ def test_linux_install_writes_reloads_and_starts_the_supervisor() -> None:
         "write",
         "command",
         "command",
+        "command",
     ]
     assert plan.effects[0].path == Path(
         "/etc/systemd/system/things-orchestrator-http.service"
@@ -112,6 +113,11 @@ def test_linux_install_writes_reloads_and_starts_the_supervisor() -> None:
         "sudo",
         "systemctl",
         "enable",
-        "--now",
+        "things-orchestrator-http.service",
+    )
+    assert plan.effects[3].argv == (
+        "sudo",
+        "systemctl",
+        "restart",
         "things-orchestrator-http.service",
     )
