@@ -21,6 +21,7 @@ from .config import ConfigError
 _LABEL = "com.matsvarnskuhler.things-orchestrator-http"
 _UNIT = "things-orchestrator-http.service"
 _SYSTEMD_PATH = Path("/etc/systemd/system") / _UNIT
+_SETTLE_TIMEOUT = 5.0
 
 
 class ServiceStatus(str, Enum):
@@ -45,6 +46,7 @@ class ServiceEffect:
     elevated: bool = False
     argv: tuple[str, ...] = ()
     settles_to: ServiceStatus | None = None
+    settles_also: tuple[ServiceStatus, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,7 +144,13 @@ def service_action(
     if not dry_run:
         for effect in plan.effects:
             _apply(effect, platform=platform, uid=uid, home=home)
-        status = service_status(platform=platform, uid=uid, home=home)
+        status = _wait_for_plan_result(
+            plan,
+            platform=platform,
+            uid=uid,
+            home=home,
+            timeout=_SETTLE_TIMEOUT,
+        )
     else:
         status = plan.result_status
     return ServiceOperationResult(
@@ -160,40 +168,23 @@ def service_status(
     home: Path,
 ) -> ServiceStatus:
     path = _service_path(platform, home)
-    if not path.is_file():
-        return ServiceStatus.NOT_INSTALLED
-    command: tuple[str, ...]
     if platform == "darwin":
-        command = ("launchctl", "print", f"gui/{uid}/{_LABEL}")
-    else:
-        command = ("systemctl", "is-active", "--quiet", _UNIT)
-    try:
-        if platform == "darwin":
+        try:
             launchctl_result = subprocess.run(
-                command,
+                ("launchctl", "print", f"gui/{uid}/{_LABEL}"),
                 check=False,
                 capture_output=True,
                 text=True,
             )
-        else:
-            systemctl_result = subprocess.run(
-                command,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    except OSError:
-        return (
-            ServiceStatus.UNKNOWN
-            if platform == "darwin"
-            else ServiceStatus.INACTIVE
-        )
-    if platform == "darwin":
+        except OSError:
+            return ServiceStatus.UNKNOWN
         if launchctl_result.returncode != 0:
+            if launchctl_result.returncode != 113:
+                return ServiceStatus.UNKNOWN
             return (
                 ServiceStatus.INACTIVE
-                if launchctl_result.returncode == 113
-                else ServiceStatus.UNKNOWN
+                if path.is_file()
+                else ServiceStatus.NOT_INSTALLED
             )
         return (
             ServiceStatus.ACTIVE
@@ -203,11 +194,58 @@ def service_status(
             )
             else ServiceStatus.LOADED
         )
-    return (
-        ServiceStatus.ACTIVE
-        if systemctl_result.returncode == 0
-        else ServiceStatus.INACTIVE
-    )
+    try:
+        active_result = subprocess.run(
+            ("systemctl", "is-active", "--quiet", _UNIT),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return ServiceStatus.UNKNOWN
+    if active_result.returncode == 0:
+        return ServiceStatus.ACTIVE
+    if path.is_file():
+        return ServiceStatus.INACTIVE
+    try:
+        load_result = subprocess.run(
+            ("systemctl", "show", "--property=LoadState", "--value", _UNIT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ServiceStatus.UNKNOWN
+    if load_result.returncode != 0:
+        return ServiceStatus.UNKNOWN
+    load_state = load_result.stdout.strip()
+    if load_state == "loaded":
+        return ServiceStatus.LOADED
+    if load_state == "not-found":
+        return ServiceStatus.NOT_INSTALLED
+    return ServiceStatus.UNKNOWN
+
+
+def _wait_for_plan_result(
+    plan: ServicePlan,
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+    timeout: float,
+) -> ServiceStatus:
+    deadline = time.monotonic() + timeout
+    while True:
+        observed = service_status(platform=platform, uid=uid, home=home)
+        if observed is plan.result_status:
+            return observed
+        if time.monotonic() >= deadline:
+            raise ServiceApplyError(
+                f"Service {plan.action} did not reach {plan.result_status.value} "
+                f"(observed {observed.value}). The operation may be partially applied; "
+                "rerun the same command safely."
+            )
+        time.sleep(0.05)
 
 
 def resolve_console_script() -> Path:
@@ -296,6 +334,7 @@ def _plan_service(
                     "stop launchd agent",
                     argv=("launchctl", "bootout", f"{domain}/{_LABEL}"),
                     settles_to=ServiceStatus.INACTIVE,
+                    settles_also=(ServiceStatus.NOT_INSTALLED,),
                 ),
             )
             if status in {
@@ -482,8 +521,9 @@ def _wait_for_service_status(
     expected = effect.settles_to
     if expected is None:
         raise AssertionError("settling effect has no expected status")
+    accepted = (expected, *effect.settles_also)
     deadline = time.monotonic() + timeout
-    while service_status(platform=platform, uid=uid, home=home) is not expected:
+    while service_status(platform=platform, uid=uid, home=home) not in accepted:
         if time.monotonic() >= deadline:
             command_failure = ""
             if command_result.returncode != 0:
@@ -492,9 +532,10 @@ def _wait_for_service_status(
                 if stderr:
                     detail = f"{detail}: {stderr}"
                 command_failure = f" ({_command_text(effect.argv)}; {detail})"
+            expected_label = " or ".join(status.value for status in accepted)
             raise ServiceApplyError(
                 f"Service effect failed: {effect.description} did not reach "
-                f"{expected.value}{command_failure}. The operation may be partially "
+                f"{expected_label}{command_failure}. The operation may be partially "
                 "applied; rerun the same command safely."
             )
         time.sleep(0.05)
