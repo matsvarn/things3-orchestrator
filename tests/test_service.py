@@ -7,6 +7,7 @@ from typing import Literal
 
 import pytest
 
+from things_orchestrator.config import ConfigError
 from things_orchestrator.service import (
     ServiceApplyError,
     ServiceEffect,
@@ -605,6 +606,115 @@ def test_service_install_waits_for_the_declared_active_state(
     result = service_action("install", dry_run=False)
 
     assert isinstance(result, ServiceOperationResult)
+    assert result.status is ServiceStatus.ACTIVE
+
+
+def test_service_identity_comes_from_the_real_uid_not_login_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    plan = ServicePlan("linux", "install", (), ServiceStatus.ACTIVE)
+    monkeypatch.setenv("LOGNAME", "forged-account")
+    monkeypatch.setenv("USER", "forged-account")
+    monkeypatch.setattr("things_orchestrator.service._platform", lambda: "linux")
+    monkeypatch.setattr(
+        "things_orchestrator.service.resolve_console_script", lambda: EXECUTABLE
+    )
+    monkeypatch.setattr("things_orchestrator.service.os.getuid", lambda: 1000)
+    monkeypatch.setattr(
+        "things_orchestrator.service.pwd.getpwuid",
+        lambda uid: SimpleNamespace(pw_name="trusted-account") if uid == 1000 else None,
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.service.service_status",
+        lambda **_kwargs: ServiceStatus.INACTIVE,
+    )
+
+    def capture_plan(**kwargs: object) -> ServicePlan:
+        captured.update(kwargs)
+        return plan
+
+    monkeypatch.setattr("things_orchestrator.service._plan_service", capture_plan)
+
+    service_action("install", dry_run=True)
+
+    assert captured["user"] == "trusted-account"
+
+
+def test_service_status_does_not_require_a_passwd_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("things_orchestrator.service._platform", lambda: "linux")
+    monkeypatch.setattr(
+        "things_orchestrator.service.resolve_console_script", lambda: EXECUTABLE
+    )
+    monkeypatch.setattr("things_orchestrator.service.os.getuid", lambda: 4242)
+    monkeypatch.setattr(
+        "things_orchestrator.service.pwd.getpwuid",
+        lambda _uid: (_ for _ in ()).throw(KeyError("missing")),
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.service.service_status",
+        lambda **_kwargs: ServiceStatus.INACTIVE,
+    )
+
+    result = service_action("status", dry_run=False)
+
+    assert result.status is ServiceStatus.INACTIVE
+
+
+def test_service_install_reports_a_missing_passwd_entry_as_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("things_orchestrator.service._platform", lambda: "linux")
+    monkeypatch.setattr(
+        "things_orchestrator.service.resolve_console_script", lambda: EXECUTABLE
+    )
+    monkeypatch.setattr("things_orchestrator.service.os.getuid", lambda: 4242)
+    monkeypatch.setattr(
+        "things_orchestrator.service.pwd.getpwuid",
+        lambda _uid: (_ for _ in ()).throw(KeyError("missing")),
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.service.service_status",
+        lambda **_kwargs: ServiceStatus.INACTIVE,
+    )
+
+    with pytest.raises(ConfigError, match="UID 4242"):
+        service_action("install", dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("platform", "action", "status"),
+    (
+        ("linux", "uninstall", ServiceStatus.ACTIVE),
+        ("darwin", "install", ServiceStatus.INACTIVE),
+        ("darwin", "uninstall", ServiceStatus.ACTIVE),
+    ),
+)
+def test_actions_that_do_not_render_a_systemd_user_skip_passwd_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: Literal["darwin", "linux"],
+    action: Literal["install", "uninstall"],
+    status: ServiceStatus,
+) -> None:
+    plan = ServicePlan(platform, action, (), ServiceStatus.ACTIVE)
+    monkeypatch.setattr("things_orchestrator.service._platform", lambda: platform)
+    monkeypatch.setattr(
+        "things_orchestrator.service.resolve_console_script", lambda: EXECUTABLE
+    )
+    monkeypatch.setattr("things_orchestrator.service.os.getuid", lambda: 4242)
+    monkeypatch.setattr(
+        "things_orchestrator.service.pwd.getpwuid",
+        lambda _uid: (_ for _ in ()).throw(KeyError("missing")),
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.service.service_status", lambda **_kwargs: status
+    )
+    monkeypatch.setattr("things_orchestrator.service._plan_service", lambda **_kwargs: plan)
+
+    result = service_action(action, dry_run=True)
+
     assert result.status is ServiceStatus.ACTIVE
 
 

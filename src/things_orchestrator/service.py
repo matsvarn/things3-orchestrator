@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import getpass
 import os
 import plistlib
+import pwd
 import shutil
 import subprocess
 import sys
@@ -125,12 +125,17 @@ def service_action(
 ) -> ServiceOperationResult:
     platform = _platform()
     executable = resolve_console_script()
-    user = getpass.getuser()
     uid = os.getuid()
     home = Path.home()
     status = service_status(platform=platform, uid=uid, home=home)
     if action == "status":
         return ServiceOperationResult(action, status, (), applied=False)
+    user: str | None = None
+    if platform == "linux" and action == "install":
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError as error:
+            raise ConfigError(f"No local account exists for UID {uid}") from error
     plan = _plan_service(
         action=action,
         platform=platform,
@@ -277,7 +282,7 @@ def _plan_service(
     action: Literal["install", "uninstall"],
     platform: Literal["darwin", "linux"],
     executable: Path,
-    user: str,
+    user: str | None,
     uid: int,
     home: Path,
     status: ServiceStatus,
@@ -353,6 +358,8 @@ def _plan_service(
         effects = stop + (ServiceEffect("remove", f"remove {path}", path=path),)
         return ServicePlan(platform, action, effects, ServiceStatus.NOT_INSTALLED)
     if action == "install":
+        if user is None:
+            raise AssertionError("Linux service install requires a local account")
         effects = (
             ServiceEffect(
                 "write",
