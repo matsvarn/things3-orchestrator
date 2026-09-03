@@ -67,6 +67,10 @@ class CloudError(RuntimeError):
     pass
 
 
+class CloudOutcomeUnknown(CloudError):
+    """The provider may still commit a write whose response was lost."""
+
+
 def _note(text: str) -> dict[str, Any]:
     return {"_t": "tx", "ch": zlib.crc32(text.encode()) & 0xFFFFFFFF, "v": text, "t": 1}
 
@@ -387,12 +391,12 @@ class CloudClient:
         try:
             head = self._commit_visible(envelopes, ancestor)
         except CloudError as error:
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud outcome is unknown; reconciliation failed"
             ) from error
         if head is not None:
             return {"server-head-index": head}
-        raise CloudError(
+        raise CloudOutcomeUnknown(
             "Things Cloud outcome is unknown; reconcile the workspace before retrying"
         )
 
@@ -732,11 +736,11 @@ class CloudLibrary(MemoryLibrary):
         try:
             self._pull(force=True)
         except CloudError as error:
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud outcome is unknown; commit read-back failed"
             ) from error
         if not all(self._pulled_matches(item) for item in envelopes):
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud read-back did not match the requested changes"
             )
         verified = self._verified_titles(writes)

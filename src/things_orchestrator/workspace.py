@@ -13,7 +13,7 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
 
-from .cloud import CloudError
+from .cloud import CloudError, CloudOutcomeUnknown
 from .config import ConfigError, Preferences
 from .consistency import Conflict, diagnose, item_conflicts
 from .context import (
@@ -3713,11 +3713,17 @@ class ThingsWorkspace:
             )
         try:
             applied = self._library.apply(writes)
-        except CloudError:
+        except CloudError as error:
             failed = self._refresh(force=True)
             if failed is not None:
                 return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
-            return self._reconcile_v2(operation, writes, before, session=session)
+            return self._reconcile_v2(
+                operation,
+                writes,
+                before,
+                session=session,
+                settle_before=not _outcome_unknown(error),
+            )
         if not applied.read_back_verified:
             failed = self._refresh(force=True)
             if failed is not None:
@@ -3731,6 +3737,7 @@ class ThingsWorkspace:
         before: list[JsonDict | None],
         *,
         session: V2ApplySession | None = None,
+        settle_before: bool = True,
     ) -> JsonDict:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
@@ -3740,7 +3747,9 @@ class ThingsWorkspace:
             state = "applied"
         elif any(matched):
             state = "partial"
-        elif self._v2_current_equals_before(operation, writes, before):
+        elif settle_before and self._v2_current_equals_before(
+            operation, writes, before
+        ):
             state = "not_applied"
         else:
             return {
@@ -10820,6 +10829,8 @@ def _pending_attempts(record: IntentRecord) -> int:
 
 
 def _outcome_unknown(error: CloudError) -> bool:
+    if isinstance(error, CloudOutcomeUnknown):
+        return True
     text = str(error).casefold()
     return any(
         term in text for term in ("timed out", "unknown", "read-back", "read back")
