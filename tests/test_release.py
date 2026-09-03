@@ -992,6 +992,63 @@ def test_single_quoted_backslash_newline_cannot_normalize_print_config(
     ]
 
 
+def test_variable_executable_cannot_hide_print_config_intent(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        'CLI=things-orchestrator; "$CLI" print-config --client codex\n'
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "command", "label"),
+    [
+        (
+            "uv",
+            "ORG=matsvarn; NAME=things3-orchestrator; "
+            'uv tool install "git+https://github.com/$ORG/$NAME.git@v0.8.0"',
+            "uv",
+        ),
+        (
+            "uv",
+            "UV=uv; $UV tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"',
+            "uv",
+        ),
+        (
+            "uv",
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3%2Dorchestrator.git@v0.8.0"',
+            "uv",
+        ),
+        (
+            "codex",
+            "ORG=matsvarn; NAME=things3-orchestrator; "
+            'codex plugin marketplace add "$ORG/$NAME" --ref v0.8.0',
+            "Codex marketplace",
+        ),
+    ],
+)
+def test_indirect_install_intent_is_rejected(
+    required_kind: str, command: str, label: str
+) -> None:
+    assert install_tag_errors(
+        command + "\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: unsupported {label} install command",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
