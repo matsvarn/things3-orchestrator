@@ -1160,6 +1160,83 @@ def test_operations_release_template_is_an_exact_exemption() -> None:
     ) == []
 
 
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        "``notes\nstill notes``\n",
+        "<!--\nhidden\n-->\n",
+    ],
+    ids=["multiline-code-span", "html-comment"],
+)
+def test_hidden_markdown_cannot_complete_install_continuation(
+    hidden: str,
+) -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n'
+        f"{hidden}"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        "``notes\nstill notes``\n",
+        "<!--\nhidden\n-->\n",
+    ],
+    ids=["multiline-code-span", "html-comment"],
+)
+def test_hidden_markdown_cannot_complete_print_config_continuation(
+    hidden: str, tmp_path: Path
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex --show-secrets \\\n"
+        f"{hidden}"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "line"),
+    [
+        (
+            'uv tool install --force "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@<new-tag>" \\\n',
+            1,
+        ),
+        (
+            '```console\nuv tool install --force "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@<new-tag>" \\\n```\n',
+            2,
+        ),
+    ],
+    ids=["eof", "closing-fence"],
+)
+def test_incomplete_operations_template_is_not_exempt(
+    markdown: str, line: int
+) -> None:
+    assert install_tag_errors(
+        markdown,
+        source=Path("docs/operations.md"),
+        version="0.9.1",
+        required_kind=None,
+    ) == [f"docs/operations.md:{line}: unsupported uv install command"]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
