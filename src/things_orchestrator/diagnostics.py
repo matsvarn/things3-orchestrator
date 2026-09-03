@@ -256,8 +256,9 @@ def _operation_counts(
 
 
 def _service_status() -> str | None:
+    service_platform: Literal["darwin", "linux"]
     if sys.platform == "darwin":
-        service_platform: Literal["darwin", "linux"] = "darwin"
+        service_platform = "darwin"
     elif sys.platform.startswith("linux"):
         service_platform = "linux"
     else:
