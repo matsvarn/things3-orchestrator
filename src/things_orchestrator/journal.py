@@ -731,6 +731,7 @@ class SQLiteJournal:
                 owner_public_key = None
         self._owner_public_key = owner_public_key
         _ensure_private_dir(self.path.parent)
+        self._canonical_path()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -809,6 +810,7 @@ class SQLiteJournal:
                 "INSERT OR IGNORE INTO owner_journal_secrets_v2 VALUES (1,?)",
                 (token_bytes(32),),
             )
+        self._canonical_path()
         self.path.chmod(0o600)
 
     def get(self, intent_id: str) -> IntentRecord | None:
@@ -1578,19 +1580,36 @@ class SQLiteJournal:
 
     @contextmanager
     def _apply_owner(self) -> Iterator[None]:
-        key = str(self.path.resolve())
-        with _SQLITE_APPLY_LOCKS_GUARD:
-            thread_lock = _SQLITE_APPLY_LOCKS.setdefault(key, RLock())
-        with thread_lock:
-            lock_path = self.path.with_name(f"{self.path.name}.apply.lock")
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                os.chmod(lock_path, 0o600)
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+        while True:
+            canonical_path = self._canonical_path()
+            key = str(canonical_path)
+            with _SQLITE_APPLY_LOCKS_GUARD:
+                thread_lock = _SQLITE_APPLY_LOCKS.setdefault(key, RLock())
+            with thread_lock:
+                lock_path = canonical_path.with_name(
+                    f"{canonical_path.name}.apply.lock"
+                )
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    os.chmod(lock_path, 0o600)
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    if self._canonical_path() != canonical_path:
+                        continue
+                    yield
+                    return
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(descriptor)
+
+    def _canonical_path(self) -> Path:
+        canonical_path = self.path.resolve()
+        try:
+            link_count = canonical_path.stat().st_nlink
+        except FileNotFoundError:
+            return canonical_path
+        if link_count > 1:
+            raise RuntimeError("hard-linked SQLite journals are not supported")
+        return canonical_path
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)

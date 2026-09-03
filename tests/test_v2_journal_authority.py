@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -1731,6 +1732,32 @@ with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
     assert retry_waited
     assert not retry.is_alive()
     assert results[0]["state"] == "not_applied"
+
+
+def test_sqlite_journal_rejects_existing_hard_link(tmp_path: Path) -> None:
+    real_path = tmp_path / "real.sqlite3"
+    SQLiteJournal(real_path)
+    alias_path = tmp_path / "alias.sqlite3"
+    os.link(real_path, alias_path)
+
+    with pytest.raises(
+        RuntimeError, match="hard-linked SQLite journals are not supported"
+    ):
+        SQLiteJournal(alias_path)
+
+
+def test_sqlite_apply_owner_rejects_hard_link_added_after_init(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(path)
+    os.link(path, tmp_path / "alias.sqlite3")
+
+    with pytest.raises(
+        RuntimeError, match="hard-linked SQLite journals are not supported"
+    ):
+        with journal.apply_session_v2("missing"):
+            pass
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
