@@ -424,6 +424,88 @@ def test_escaped_backtick_runs_do_not_hide_install_commands(opener: str) -> None
     ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
 
 
+def test_multiline_code_span_keeps_physical_commands_separate(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "``things-orchestrator print-config --client codex --show-secrets\n"
+        "things-orchestrator print-config --client hermes``\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+def test_visible_install_command_is_checked_beside_inline_code() -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.8.0" (see `uv`)\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+def test_visible_print_config_is_checked_beside_inline_code(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex (see `--help`)\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+def test_shell_wrapper_cannot_hide_unsafe_print_config(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "bash -lc 'things-orchestrator print-config --client codex'\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "wrapper"),
+    [
+        (
+            "uv",
+            "sh -c 'uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"\'',
+        ),
+        (
+            "codex",
+            "zsh -lc 'codex plugin marketplace add "
+            "matsvarn/things3-orchestrator --ref v0.8.0'",
+        ),
+    ],
+)
+def test_shell_wrapper_cannot_hide_stale_install(
+    required_kind: str, wrapper: str
+) -> None:
+    assert install_tag_errors(
+        f"{wrapper}\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
+        f"{'install tag' if required_kind == 'uv' else 'ref'} v0.8.0 differs from v0.9.1"
+    ]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
