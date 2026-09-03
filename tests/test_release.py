@@ -803,6 +803,48 @@ def test_print_config_rejects_noncanonical_arguments(
     assert instruction_errors(tmp_path) == [f"guide.md:1: {message}"]
 
 
+def test_shell_continuation_cannot_split_a_stale_install_target() -> None:
+    markdown = r'''```console
+uv tool install "git+https://github.com/matsvarn/things3-"\
+"orchestrator.git@v0.8.0"
+```
+'''
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+def test_indented_shell_continuation_preserves_canonical_install() -> None:
+    markdown = r'''```console
+uv tool install \
+  "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
+```
+'''
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == []
+
+
+def test_indented_shell_continuation_preserves_safe_print_config(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client \\\n"
+        "  codex --show-secrets\n"
+    )
+
+    assert instruction_errors(tmp_path) == []
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
