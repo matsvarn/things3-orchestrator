@@ -20,6 +20,7 @@ from things_orchestrator.journal import (
     IntentRecord,
     MemoryJournal,
     SQLiteJournal,
+    V2ApplySession,
     V2Operation,
     _v2_sql_values,
     read_operation_state_counts,
@@ -1803,6 +1804,186 @@ def test_apply_session_cannot_settle_after_context_exit(
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None
     assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_rejects_foreign_thread_while_context_is_active(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_foreign_thread_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+    results: list[bool] = []
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        caller = Thread(
+            target=lambda: results.append(
+                session.settle(
+                    state="applied",
+                    response={"state": "applied"},
+                    rows=rows,
+                )
+            )
+        )
+        caller.start()
+        Event().wait(0.05)
+    caller.join(5)
+
+    assert not caller.is_alive()
+    assert results == [False]
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_rejects_forked_process_while_context_is_active(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_foreign_process_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        child = os.fork()
+        if child == 0:
+            changed = session.settle(
+                state="applied",
+                response={"state": "applied"},
+                rows=rows,
+            )
+            os._exit(1 if changed else 0)
+        _pid, status = os.waitpid(child, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_close_waits_for_started_owner_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    settle_entered = Event()
+    allow_settle = Event()
+
+    class BlockingMemoryJournal(MemoryJournal):
+        def _settle_v2_locked(self, *args: object, **kwargs: object) -> bool:
+            settle_entered.set()
+            allow_settle.wait(5)
+            return super()._settle_v2_locked(  # type: ignore[misc]
+                *args, **kwargs
+            )
+
+    class BlockingSQLiteJournal(SQLiteJournal):
+        def _settle_v2_owned(self, *args: object, **kwargs: object) -> bool:
+            settle_entered.set()
+            allow_settle.wait(5)
+            return super()._settle_v2_owned(  # type: ignore[misc]
+                *args, **kwargs
+            )
+
+    journal: MemoryJournal | SQLiteJournal = (
+        BlockingMemoryJournal()
+        if journal_kind == "memory"
+        else BlockingSQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_close_race_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+    session_ready = Event()
+    start_settle = Event()
+    sessions: list[V2ApplySession] = []
+    results: list[bool] = []
+
+    def own_and_settle() -> None:
+        with journal.apply_session_v2(operation.operation_id) as session:
+            assert session is not None
+            sessions.append(session)
+            session_ready.set()
+            start_settle.wait(5)
+            results.append(
+                session.settle(
+                    state="applied",
+                    response={"state": "applied"},
+                    rows=rows,
+                )
+            )
+
+    owner = Thread(target=own_and_settle)
+    owner.start()
+    assert session_ready.wait(5)
+    start_settle.set()
+    assert settle_entered.wait(5)
+    close_finished = Event()
+
+    def close_session() -> None:
+        close = getattr(sessions[0], "close")
+        close()
+        close_finished.set()
+
+    closer = Thread(target=close_session)
+    closer.start()
+    close_overtook_settlement = close_finished.wait(0.1)
+    allow_settle.set()
+    owner.join(5)
+    closer.join(5)
+
+    assert not close_overtook_settlement
+    assert not owner.is_alive() and not closer.is_alive()
+    assert results == [True]
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "applied"
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
