@@ -25,11 +25,11 @@ GIT_INSTALL_TAG = re.compile(
     r"(?P<tag>v[^\s]+)\Z"
 )
 ANY_CODEX_TARGET = re.compile(
-    r"[^\s'\"]+/things3-orchestrator(?!\.git)", re.IGNORECASE
+    r"[^\s'\"]+/things3-orchestrator(?=\s|\Z)", re.IGNORECASE
 )
-UV_INSTALL_INTENT = re.compile(r"(?:\A|\s)tool\s+install(?:\s|\Z)")
+UV_INSTALL_INTENT = re.compile(r"(?:\A|\s)tool\s+install\s+\S")
 CODEX_INSTALL_INTENT = re.compile(
-    r"(?:\A|\s)plugin\s+marketplace\s+add(?:\s|\Z)"
+    r"(?:\A|\s)plugin\s+marketplace\s+add\s+\S"
 )
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
@@ -65,13 +65,13 @@ def metadata() -> None:
         ROOT / "docs/install.md": "uv",
         ROOT / "docs/clients.md": "codex",
     }
-    for path, required_kind in install_guides.items():
+    for path in markdown_files():
         errors.extend(
             install_tag_errors(
                 path.read_text(),
                 source=path.relative_to(ROOT),
                 version=project["version"],
-                required_kind=required_kind,
+                required_kind=install_guides.get(path),
             )
         )
 
@@ -268,7 +268,7 @@ def install_tag_errors(
     *,
     source: Path,
     version: str,
-    required_kind: str,
+    required_kind: str | None,
 ) -> list[str]:
     expected = f"v{version}"
     found_required = False
@@ -278,8 +278,10 @@ def install_tag_errors(
         number = shell_command.line
         tokens = shell_command.tokens
         raw = " ".join(tokens)
-        if _has_command_intent(
-            tokens, UV_INSTALL_INTENT
+        if _is_operations_release_template(tokens, source=source):
+            continue
+        if _has_uv_install_intent(
+            tokens
         ) or "things3-orchestrator.git" in raw.casefold():
             tag = (
                 _exact_uv_install_tag(
@@ -305,7 +307,7 @@ def install_tag_errors(
                     )
 
         if (
-            _has_command_intent(tokens, CODEX_INSTALL_INTENT)
+            _has_codex_install_intent(tokens)
             or ANY_CODEX_TARGET.search(raw) is not None
         ):
             reference = (
@@ -326,7 +328,7 @@ def install_tag_errors(
                         f"{source}:{number}: Codex marketplace ref {reference} "
                         f"differs from {expected}",
                     )
-    if not found_required:
+    if required_kind is not None and not found_required:
         errors.append(f"{source}: missing {required_kind} install for {expected}")
     return errors
 
@@ -452,11 +454,11 @@ def _outside_fence_parts(
             in_html_comment = False
             index = closing + 3
             continue
-        if line.startswith("<!--", index):
+        if line.startswith("<!--", index) and not _is_escaped(line, index):
             in_html_comment = True
             index += 4
             continue
-        if line[index] == "`" and not _backtick_is_escaped(line, index):
+        if line[index] == "`" and not _is_escaped(line, index):
             width = 1
             while index + width < len(line) and line[index + width] == "`":
                 width += 1
@@ -479,7 +481,7 @@ def _outside_fence_parts(
     return "".join(visible), code, in_html_comment, code_span
 
 
-def _backtick_is_escaped(line: str, index: int) -> bool:
+def _is_escaped(line: str, index: int) -> bool:
     backslashes = 0
     index -= 1
     while index >= 0 and line[index] == "\\":
@@ -573,17 +575,62 @@ def _shell_segments(command: str) -> list[tuple[str, ...]]:
     return result
 
 
-def _has_command_intent(tokens: tuple[str, ...], pattern: re.Pattern[str]) -> bool:
-    return pattern.search(" ".join(tokens)) is not None
+def _has_uv_install_intent(tokens: tuple[str, ...]) -> bool:
+    if UV_INSTALL_INTENT.search(" ".join(tokens)) is not None:
+        return True
+    return (
+        len(tokens) >= 3
+        and tokens[:2] == ("uv", "tool")
+        and tokens[2].startswith("$")
+    )
+
+
+def _has_codex_install_intent(tokens: tuple[str, ...]) -> bool:
+    if CODEX_INSTALL_INTENT.search(" ".join(tokens)) is not None:
+        return True
+    return bool(
+        len(tokens) >= 3
+        and tokens[:2] == ("codex", "plugin")
+        and (
+            tokens[2].startswith("$")
+            or (
+                len(tokens) >= 4
+                and tokens[2] == "marketplace"
+                and tokens[3].startswith("$")
+            )
+        )
+    )
 
 
 def _has_print_config_intent(tokens: tuple[str, ...]) -> bool:
     raw = " ".join(tokens)
     if "things-orchestrator print-config" in raw:
         return True
+    if (
+        len(tokens) >= 2
+        and tokens[0] == "things-orchestrator"
+        and tokens[1].startswith("$")
+        and any(
+            token == "--client" or token.startswith("--client=")
+            for token in tokens[2:]
+        )
+    ):
+        return True
     return any(
         token == "print-config" and index > 0 and tokens[index - 1].startswith("$")
         for index, token in enumerate(tokens)
+    )
+
+
+def _is_operations_release_template(
+    tokens: tuple[str, ...], *, source: Path
+) -> bool:
+    return source == Path("docs/operations.md") and tokens == (
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "git+https://github.com/matsvarn/things3-orchestrator.git@<new-tag>",
     )
 
 
