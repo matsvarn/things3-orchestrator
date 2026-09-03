@@ -15,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 from secrets import token_bytes
 from threading import Lock, RLock
-from typing import ContextManager, Iterator, Literal, Protocol, cast, overload
+from typing import Callable, ContextManager, Iterator, Literal, Protocol, cast, overload
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -42,6 +42,10 @@ V2State = Literal[
     "rejected",
 ]
 V2ApplyState = Literal["applied", "unchanged", "not_applied", "partial"]
+
+
+def _utc_datetime_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def account_id_key(account_id: str) -> str:
@@ -76,6 +80,21 @@ class V2Operation:
     authorization: str | None = None
     resolution: Literal["accepted_as_is", "superseded"] | None = None
     receipt_hash: str | None = None
+
+
+def _approval_expired(operation: V2Operation, now: datetime) -> bool:
+    return (
+        operation.expires_at is None
+        or datetime.fromisoformat(operation.expires_at) <= now
+    )
+
+
+def _expired_approval_response(operation: V2Operation) -> JsonDict:
+    return {
+        "state": "stale",
+        "instruction": "The owner approval window expired.",
+        "operation_id": operation.operation_id,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +178,7 @@ class Journal(Protocol):
     def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]: ...
     def create_v2(self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def transition_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict | None = None, authorization: object = None, resolution: Literal["accepted_as_is", "superseded"] | None = None) -> bool: ...
-    def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]: ...
+    def authorize_v2(self, operation_id: str, authorization: object, *, now: Callable[[], datetime] = _utc_datetime_now) -> tuple[bool, list[str]]: ...
     def apply_session_v2(
         self, operation_id: str
     ) -> ContextManager[V2ApplySession | None]: ...
@@ -167,7 +186,11 @@ class Journal(Protocol):
         self, operation: V2Operation, *, claim_fence: bool
     ) -> ContextManager[V2CreateApplyStart]: ...
     def authorize_apply_session_v2(
-        self, operation_id: str, authorization: object
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: Callable[[], datetime] = _utc_datetime_now,
     ) -> ContextManager[V2AuthorizeApplyStart]: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2ApplyState, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
@@ -520,7 +543,13 @@ class MemoryJournal:
             return None
         return current
 
-    def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]:
+    def authorize_v2(
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: Callable[[], datetime] = _utc_datetime_now,
+    ) -> tuple[bool, list[str]]:
         with self._lock:
             current = self._v2_operations.get(operation_id)
             if current is None or current.state != "awaiting_owner":
@@ -536,6 +565,18 @@ class MemoryJournal:
                 or request.operation_id != operation_id
                 or self.verify_v2_authorization(current, "approve", authorization) is None
             ):
+                return False, []
+            if _approval_expired(current, now()):
+                response = _expired_approval_response(current)
+                self._v2_operations[operation_id] = replace(
+                    current,
+                    state="stale",
+                    response=response,
+                )
+                created, _settled = self._v2_times.get(
+                    operation_id, (_utc_now(), None)
+                )
+                self._v2_times[operation_id] = (created, _utc_now())
                 return False, []
             blockers = self.blocking_v2_operations(current.account_id)
             if blockers:
@@ -585,11 +626,15 @@ class MemoryJournal:
 
     @contextmanager
     def authorize_apply_session_v2(
-        self, operation_id: str, authorization: object
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: Callable[[], datetime] = _utc_datetime_now,
     ) -> Iterator[V2AuthorizeApplyStart]:
         with self._lock:
             authorized, blockers = self.authorize_v2(
-                operation_id, authorization
+                operation_id, authorization, now=now
             )
             operation = (
                 self._v2_operation_for_mutation_locked(operation_id)
@@ -1154,12 +1199,24 @@ class SQLiteJournal:
         finally:
             connection.close()
 
-    def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]:
+    def authorize_v2(
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: Callable[[], datetime] = _utc_datetime_now,
+    ) -> tuple[bool, list[str]]:
         with self._apply_owner():
-            return self._authorize_v2_owned(operation_id, authorization)
+            return self._authorize_v2_owned(
+                operation_id, authorization, now=now()
+            )
 
     def _authorize_v2_owned(
-        self, operation_id: str, authorization: object
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: datetime,
     ) -> tuple[bool, list[str]]:
         connection = self._connect()
         try:
@@ -1188,6 +1245,21 @@ class SQLiteJournal:
                 or self.verify_v2_authorization(operation, "approve", authorization) is None
             ):
                 connection.rollback()
+                return False, []
+            if _approval_expired(operation, now):
+                response = _expired_approval_response(operation)
+                connection.execute(
+                    """UPDATE owner_operations_v2
+                       SET state='stale', response_json=?
+                       WHERE operation_id=? AND state='awaiting_owner'""",
+                    (_json(response), operation_id),
+                )
+                connection.execute(
+                    """UPDATE owner_operation_times_v2
+                       SET settled_at=? WHERE operation_id=?""",
+                    (now.isoformat(), operation_id),
+                )
+                connection.commit()
                 return False, []
             blockers = _sqlite_blockers(connection, operation.account_id)
             if blockers:
@@ -1254,11 +1326,15 @@ class SQLiteJournal:
 
     @contextmanager
     def authorize_apply_session_v2(
-        self, operation_id: str, authorization: object
+        self,
+        operation_id: str,
+        authorization: object,
+        *,
+        now: Callable[[], datetime] = _utc_datetime_now,
     ) -> Iterator[V2AuthorizeApplyStart]:
         with self._apply_owner():
             authorized, blockers = self._authorize_v2_owned(
-                operation_id, authorization
+                operation_id, authorization, now=now()
             )
             operation = self.get_v2_operation(operation_id)
             if authorized and operation is not None:

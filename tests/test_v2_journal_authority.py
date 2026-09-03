@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
+from typing import Callable
 
 import pytest
 
@@ -1044,9 +1045,15 @@ def test_host_approval_rejects_conflict_inserted_after_authorization(
 ) -> None:
     class RacingJournal(MemoryJournal):
         def authorize_v2(
-            self, operation_id: str, authorization: object
+            self,
+            operation_id: str,
+            authorization: object,
+            *,
+            now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         ) -> tuple[bool, list[str]]:
-            result = super().authorize_v2(operation_id, authorization)
+            result = super().authorize_v2(
+                operation_id, authorization, now=now
+            )
             if result[0]:
                 original = self._v2_operations[operation_id]  # noqa: SLF001
                 conflicting = _with_manifest(

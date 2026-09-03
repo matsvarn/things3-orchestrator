@@ -4092,7 +4092,7 @@ class ThingsWorkspace:
             self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
             return response
         with self._journal.authorize_apply_session_v2(
-            operation_id, authorization
+            operation_id, authorization, now=self._clock
         ) as start:
             if start.authorized:
                 return self._apply_v2_session(operation_id, start.session)
