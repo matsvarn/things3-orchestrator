@@ -845,6 +845,153 @@ def test_indented_shell_continuation_preserves_safe_print_config(
     assert instruction_errors(tmp_path) == []
 
 
+def test_visible_install_before_multiline_code_span_is_checked() -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.8.0" ``notes\n'
+        "continued notes``\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+def test_visible_print_config_before_multiline_code_span_is_checked(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex ``notes\n"
+        "continued notes``\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n',
+        '```console\nuv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n```\n',
+    ],
+    ids=["eof", "closing-fence"],
+)
+def test_incomplete_install_continuation_is_rejected(markdown: str) -> None:
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: unsupported uv install command"
+        if not markdown.startswith("```")
+        else "guide.md:2: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "things-orchestrator print-config --client codex --show-secrets \\\n",
+        "```console\n"
+        "things-orchestrator print-config --client codex --show-secrets \\\n"
+        "```\n",
+    ],
+    ids=["eof", "closing-fence"],
+)
+def test_incomplete_print_config_continuation_is_rejected(
+    markdown: str, tmp_path: Path
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(markdown)
+
+    line = 2 if markdown.startswith("```") else 1
+    assert instruction_errors(tmp_path) == [
+        f"guide.md:{line}: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "canonical", "variant", "label"),
+    [
+        (
+            "uv",
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            'uv tool install "git+https://github.com/matsvarn/'
+            'Things3-Orchestrator.git@v0.8.0"',
+            "uv",
+        ),
+        (
+            "uv",
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            'uv tool install "git+https://github.com/MATSVARN/'
+            'THINGS3-ORCHESTRATOR.git@v0.8.0"',
+            "uv",
+        ),
+        (
+            "codex",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1",
+            "codex plugin marketplace add matsvarn/Things3-Orchestrator "
+            "--ref v0.8.0",
+            "Codex marketplace",
+        ),
+    ],
+)
+def test_case_variant_install_targets_cannot_escape_validation(
+    required_kind: str, canonical: str, variant: str, label: str
+) -> None:
+    assert install_tag_errors(
+        f"{canonical}\n{variant}\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [f"guide.md:2: unsupported {label} install command"]
+
+
+def test_single_quoted_backslash_newline_cannot_normalize_an_install() -> None:
+    markdown = (
+        "uv tool install 'git+https://github.com/matsvarn/"
+        "things3-orchestrator.git@v0.9.1\\\n"
+        "'\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
+
+
+def test_single_quoted_backslash_newline_cannot_normalize_print_config(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client 'codex\\\n"
+        "' --show-secrets\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
