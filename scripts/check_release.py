@@ -305,7 +305,8 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     fence: tuple[str, int] | None = None
     in_html_comment = False
     code_span: tuple[int, int, list[str]] | None = None
-    for number, raw_line in enumerate(markdown.splitlines(), start=1):
+    lines = markdown.splitlines()
+    for number, raw_line in enumerate(lines, start=1):
         if fence is not None:
             line = raw_line.strip()
             if _closes_fence(raw_line, fence):
@@ -337,6 +338,7 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                 number=number,
                 in_html_comment=in_html_comment,
                 code_span=code_span,
+                future_lines=lines[number:],
             )
             line = visible.strip()
             if inline:
@@ -381,6 +383,7 @@ def _outside_fence_parts(
     number: int,
     in_html_comment: bool,
     code_span: tuple[int, int, list[str]] | None,
+    future_lines: list[str],
 ) -> tuple[
     str,
     list[tuple[int, str]],
@@ -412,7 +415,7 @@ def _outside_fence_parts(
             in_html_comment = True
             index += 4
             continue
-        if line[index] == "`":
+        if line[index] == "`" and not _backtick_is_escaped(line, index):
             width = 1
             while index + width < len(line) and line[index + width] == "`":
                 width += 1
@@ -421,11 +424,27 @@ def _outside_fence_parts(
                 code.append((number, line[index + width : closing]))
                 index = closing + width
                 continue
+            if not any(
+                _code_span_close(future, 0, width) is not None
+                for future in future_lines
+            ):
+                visible.append("`" * width)
+                index += width
+                continue
             code_span = (width, number, [line[index + width :]])
             break
         visible.append(line[index])
         index += 1
     return "".join(visible), code, in_html_comment, code_span
+
+
+def _backtick_is_escaped(line: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and line[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
 
 
 def _code_span_close(line: str, start: int, width: int) -> int | None:
