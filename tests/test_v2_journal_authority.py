@@ -1760,6 +1760,43 @@ def test_sqlite_apply_owner_rejects_hard_link_added_after_init(
             pass
 
 
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_cannot_settle_after_context_exit(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_late_settle_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+    assert not session.settle(
+        state="applied",
+        response={"state": "applied"},
+        rows=[
+            {
+                "sequence": 1,
+                "action": "create",
+                "target_id": "task:a",
+                "desired": {},
+                "observed": {},
+                "result": "applied",
+            }
+        ],
+    )
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+
+
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
     journal = MemoryJournal()
     operation = _operation(
