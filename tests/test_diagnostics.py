@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,92 @@ def test_endpoint_classification_never_returns_the_endpoint() -> None:
         == "tailnet"
     )
     assert classify_endpoint(normalize_mcp_url("https://mcp.example.com")) == "public"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://[fd7a:115c:a1e0::53]/mcp", "tailnet"),
+        ("https://[fd00::53]/mcp", "public"),
+        ("https://[2001:db8::53]/mcp", "public"),
+        ("http://[::1]:8787/mcp", "loopback"),
+    ],
+)
+def test_endpoint_classification_handles_tailscale_ipv6_exactly(
+    url: str, expected: str
+) -> None:
+    assert classify_endpoint(normalize_mcp_url(url)) == expected
+
+
+def test_diagnostics_count_operations_across_email_capitalization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = tmp_path / "journal.sqlite3"
+    with sqlite3.connect(journal) as connection:
+        connection.execute(
+            "CREATE TABLE owner_operations_v2 (account_id TEXT, state TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO owner_operations_v2 VALUES (?, ?)",
+            [
+                ("Owner@Example.com", "pending"),
+                ("owner@example.COM", "applied"),
+                ("someone-else@example.com", "rejected"),
+            ],
+        )
+    monkeypatch.setattr(diagnostics, "journal_path", lambda _email: journal)
+
+    counts = diagnostics._operation_counts(
+        Credentials("OWNER@example.com", "private-password", None)
+    )
+
+    assert counts == (("v2.applied", 1), ("v2.pending", 1))
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        '{"email":"private@example.com","password":',
+        '{"email":"private@example.com"}',
+        '{"email":"private@example.com","password":"private","mcp_token":""}',
+        None,
+    ],
+)
+def test_unreadable_credentials_have_a_fixed_value_free_diagnostic_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: str | None
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    credentials = tmp_path / "things-orchestrator/credentials.json"
+
+    assert diagnostics.collect_cloud_check() == CloudCheck("not_configured")
+
+    credentials.parent.mkdir()
+    if contents is None:
+        credentials.mkdir()
+    else:
+        credentials.write_text(contents)
+    monkeypatch.setattr(
+        diagnostics,
+        "installed_identity",
+        lambda: DeploymentIdentity(
+            version="0.9.1",
+            commit="a" * 40,
+            requested_revision=None,
+            source="pep610",
+        ),
+    )
+    monkeypatch.setattr(diagnostics, "_service_status", lambda: None)
+    monkeypatch.setattr(diagnostics, "_endpoint_class", lambda _path: None)
+
+    cloud = diagnostics.collect_cloud_check()
+    report = diagnostics.collect_support_report()
+
+    assert cloud == CloudCheck("credentials_unreadable")
+    assert report.cloud_check == CloudCheck("credentials_unreadable")
+    serialized = report.to_json()
+    assert "private@example.com" not in serialized
+    assert "password" not in serialized
+    assert str(credentials) not in serialized
 
 
 def test_support_report_serialization_is_value_free_and_deterministic(

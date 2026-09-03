@@ -112,6 +112,50 @@ def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_case_only_relogin_preserves_v2_idempotency_and_pending_fence(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+
+    retry = _operation(
+        "op_duplicate",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    outcome, stored, blockers = journal.create_v2(retry, claim_fence=True)
+
+    assert outcome == "existing"
+    assert stored == original
+    assert stored.account_id == "Owner@Example.com"
+    assert blockers == []
+    assert journal.get_v2_request(
+        "owner@example.com", original.api_version, original.request_id
+    ) == original
+
+    different = _operation(
+        "op_blocked",
+        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+    )
+    outcome, stored, blockers = journal.create_v2(different, claim_fence=True)
+
+    assert outcome == "blocked"
+    assert stored is None
+    assert blockers == ["op_original"]
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
 def test_operation_state_counts_are_aggregate_and_account_scoped(
     journal_kind: str, tmp_path: Path
 ) -> None:

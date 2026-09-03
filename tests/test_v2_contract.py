@@ -1493,6 +1493,68 @@ def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:
     assert library.apply_calls == 1
 
 
+def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
+    class FirstSession(MemoryLibrary):
+        apply_calls = 0
+
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.applied = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            if self.applied:
+                raise CloudError("private unavailable detail")
+
+        def apply(self, writes: list[object]) -> object:
+            self.apply_calls += 1
+            self.applied = True
+            raise CloudError("private uncertain detail")
+
+    class ReloginSession(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[object]) -> object:
+            self.apply_calls += 1
+            return super().apply(writes)  # type: ignore[arg-type]
+
+    journal = MemoryJournal()
+    first_library = FirstSession()
+    first = ThingsV2(
+        ThingsWorkspace(
+            first_library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="Owner@Example.com",
+        )
+    )
+    arguments = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+
+    pending = first.dispatch("things_update", arguments)
+
+    assert pending.state == "pending"
+    assert first_library.apply_calls == 1
+
+    relogin_library = ReloginSession(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    relogin = ThingsV2(
+        ThingsWorkspace(
+            relogin_library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+    resumed = relogin.dispatch("things_update", arguments)
+
+    assert resumed.operation_id == pending.operation_id
+    assert resumed.state == "not_applied"
+    assert relogin_library.apply_calls == 0
+
+
 def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() -> None:
     class RejectedWrite(MemoryLibrary):
         apply_calls = 0

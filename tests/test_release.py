@@ -5,6 +5,9 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import pytest
+
+import scripts.check_release as check_release
 from scripts.check_release import (
     archive_skill_mismatches,
     archive_versions,
@@ -118,4 +121,113 @@ things-orchestrator print-config --client=cursor-cloud
         "guide.md:4: usable client config needs --show-secrets",
         "guide.md:7: usable client config needs --show-secrets",
         "guide.md:8: usable client config needs --show-secrets",
+    ]
+
+
+def test_wrapped_client_commands_cannot_evade_secret_checks(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        """# Connect
+
+```console
+things-orchestrator print-config \\
+  --url https://example.com \\
+  --client claude-code
+things-orchestrator print-config \\
+  --show-secrets \\
+  --client cursor
+things-orchestrator print-config \\
+  --client hermes \\
+  --show-secrets
+```
+"""
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:4: usable client config needs --show-secrets"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "current_command", "stale_command"),
+    [
+        (
+            "README.md",
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"',
+        ),
+        (
+            "docs/clients.md",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.8.0",
+        ),
+        (
+            "docs/clients.md",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref=v0.8.0",
+        ),
+    ],
+)
+def test_metadata_rejects_each_stale_install_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    current_command: str,
+    stale_command: str,
+) -> None:
+    target = check_release.ROOT / relative_path
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        text = original_read_text(path, *args, **kwargs)
+        if path == target:
+            assert current_command in text
+            return text.replace(current_command, f"{current_command}\n{stale_command}")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    with pytest.raises(SystemExit, match="v0.8.0"):
+        check_release.metadata()
+
+
+def test_non_command_historical_release_tags_are_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = check_release.ROOT / "README.md"
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        text = original_read_text(path, *args, **kwargs)
+        return f"{text}\nVersion v0.8.0 was released earlier.\n" if path == target else text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    check_release.metadata()
+
+
+def test_comments_and_later_shell_commands_do_not_supply_show_secrets(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        """# Connect
+
+```console
+things-orchestrator print-config --client codex # --show-secrets
+things-orchestrator print-config --client hermes; echo --show-secrets
+things-orchestrator print-config --client cursor && echo --show-secrets
+```
+"""
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:4: usable client config needs --show-secrets",
+        "guide.md:5: usable client config needs --show-secrets",
+        "guide.md:6: usable client config needs --show-secrets",
     ]
