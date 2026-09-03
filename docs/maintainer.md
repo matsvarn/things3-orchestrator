@@ -61,8 +61,9 @@ Do not expose v1 tools or add advanced scopes during this cutover. Keep
 discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each
 UUID. Treat post timeouts as unknown until a Cloud read proves the state.
-Debounce normal reads with the history cursor. Treat HTTP 409 as stale
-evidence. Do not replay the old write after a pull. Use the configured owner
+Debounce normal reads with the history cursor. Treat a write HTTP 409 as
+definitive rejection without a commit. Do not replay the old write after a
+pull. Use the configured owner
 timezone for Today, Logbook, and reminder dates.
 
 The MCP server does not care which chat client you use. The canonical skill is

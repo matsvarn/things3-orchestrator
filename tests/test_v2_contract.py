@@ -8,10 +8,11 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from things_orchestrator.cloud import CloudError
+from things_orchestrator.cloud import CloudError, CloudWriteRejected
 from things_orchestrator.journal import (
     JsonDict,
     MemoryJournal,
+    SQLiteJournal,
     V2Operation,
     v2_manifest_hash,
 )
@@ -25,6 +26,7 @@ from things_orchestrator.server import ThingsMCPServer
 from things_orchestrator.v2 import (
     CaptureCall,
     CaptureDiscoveryCall,
+    OperationDraft,
     ProjectCapture,
     PublicResult,
     TaskCapture,
@@ -1493,7 +1495,421 @@ def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:
     assert library.apply_calls == 1
 
 
-def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() -> None:
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_outcome_unknown_before_state_stays_pending_until_delayed_commit_appears(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class DelayedCommitLibrary(MemoryLibrary):
+        apply_calls = 0
+        delayed_writes: list[Write] = []
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.delayed_writes = writes
+            raise CloudError(
+                "Things Cloud outcome is unknown; reconcile the workspace before retrying"
+            )
+
+        def land_delayed_commit(self) -> None:
+            MemoryLibrary.apply(self, self.delayed_writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = DelayedCommitLibrary(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    call = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+
+    first = ThingsV2(workspace).dispatch("things_update", call)
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert first.state == "pending"
+    assert first.code == "pending_unknown"
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+    immediate = ThingsV2(workspace).dispatch("things_update", call)
+
+    assert immediate.state == "pending"
+    assert immediate.code == "pending_unknown"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+    library.land_delayed_commit()
+    settled = ThingsV2(workspace).dispatch("things_update", call)
+
+    assert settled.state == "applied"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "applied"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_mixed_snapshot_after_unknown_batch_stays_pending_until_all_land(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class DelayedMixedBatchLibrary(MemoryLibrary):
+        apply_calls = 0
+        delayed_writes: list[Write] = []
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.delayed_writes = writes
+            raise CloudError("Things Cloud outcome is unknown")
+
+        def land_delayed_batch(self) -> None:
+            MemoryLibrary.apply(self, self.delayed_writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "mixed-unknown.sqlite3")
+    )
+    library = DelayedMixedBatchLibrary(
+        [
+            Record(uuid="a", kind="task", title="Already desired"),
+            Record(uuid="b", kind="task", title="Before"),
+        ]
+    )
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+    call = {
+        "request_id": REQUEST,
+        "items": [
+            {"id": "task:a", "set": {"title": "Already desired"}},
+            {"id": "task:b", "set": {"title": "After"}},
+        ],
+    }
+
+    first = interface.dispatch("things_update", call)
+    immediate = interface.dispatch("things_update", call)
+
+    assert first.state == immediate.state == "pending"
+    assert first.code == immediate.code == "pending_unknown"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+    library.land_delayed_batch()
+    settled = interface.dispatch("things_update", call)
+
+    assert settled.state == "applied"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "applied"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_verified_provider_readback_can_settle_genuine_partial(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class VerifiedPartialLibrary(MemoryLibrary):
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            result = MemoryLibrary.apply(self, writes[:1])
+            return ApplyResult(
+                verified=result.verified,
+                created=result.created,
+                read_back_verified=True,
+            )
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "verified-partial.sqlite3")
+    )
+    result = ThingsV2(
+        ThingsWorkspace(
+            VerifiedPartialLibrary(
+                [
+                    Record(uuid="a", kind="task", title="Before A"),
+                    Record(uuid="b", kind="task", title="Before B"),
+                ]
+            ),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [
+                {"id": "task:a", "set": {"title": "After A"}},
+                {"id": "task:b", "set": {"title": "After B"}},
+            ],
+        },
+    )
+
+    assert result.state == "partial"
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "partial"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Things Cloud timed out",
+        "Things Cloud is unreachable",
+        "Things Cloud HTTP 500",
+    ],
+)
+def test_cloud_error_after_dispatch_remains_pending_without_typed_rejection_proof(
+    journal_kind: str, message: str, tmp_path: Path,
+) -> None:
+    class DefinitiveFailureLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            raise CloudError(message)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = DefinitiveFailureLibrary(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [{"id": "task:a", "set": {"title": "B"}}],
+        },
+    )
+
+    assert result.state == "pending"
+    assert result.code == "pending_unknown"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_typed_cloud_rejection_settles_not_applied_and_releases_fence(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class ConflictLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            raise CloudWriteRejected("Things Cloud conflict; read fresh facts")
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = ConflictLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [{"id": "task:a", "set": {"title": "B"}}],
+        },
+    )
+
+    assert result.state == "not_applied"
+    assert result.code == "not_applied_precondition"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "not_applied"
+    assert stored.dispatch_started is True
+    assert journal.blocking_v2_operations("owner@example.com") == []
+    receipt = journal.v2_receipt_page(
+        "owner@example.com", stored.operation_id, limit=10
+    )
+    assert receipt.rows[0]["proof"] == "provider_rejected"
+    assert receipt.rows[0]["observed"] is None
+
+
+def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
+    class FirstSession(MemoryLibrary):
+        apply_calls = 0
+
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.applied = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            if self.applied:
+                raise CloudError("private unavailable detail")
+
+        def apply(self, writes: list[object]) -> object:
+            self.apply_calls += 1
+            self.applied = True
+            raise CloudError("private uncertain detail")
+
+    class ReloginSession(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    journal = MemoryJournal()
+    first_library = FirstSession()
+    first = ThingsV2(
+        ThingsWorkspace(
+            first_library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="Owner@Example.com",
+        )
+    )
+    arguments = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+
+    pending = first.dispatch("things_update", arguments)
+
+    assert pending.state == "pending"
+    assert first_library.apply_calls == 1
+
+    relogin_library = ReloginSession(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    relogin = ThingsV2(
+        ThingsWorkspace(
+            relogin_library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+    resumed = relogin.dispatch("things_update", arguments)
+
+    assert resumed.operation_id == pending.operation_id
+    assert resumed.state == "pending"
+    assert resumed.code == "pending_unknown"
+    assert relogin_library.apply_calls == 0
+
+
+def test_ambiguous_casefolded_requests_reject_before_cloud_io() -> None:
+    class CountingLibrary(MemoryLibrary):
+        refreshes = 0
+        apply_calls = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    arguments = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+    draft = OperationDraft.build(
+        "things_update",
+        REQUEST,
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    def pending_operation(
+        account_id: str, operation_id: str, request_hash: str
+    ) -> V2Operation:
+        manifest = {
+            "version": "v1",
+            "account_id": account_id,
+            "api_version": "2",
+            "schema_version": "v2.0",
+            "request_hash": request_hash,
+            "tool": "things_update",
+            "preconditions": {},
+            "writes": [
+                {"action": "update", "uuid": "a", "kind": "task", "title": "B"}
+            ],
+            "touched": [["title"]],
+            "before": [{"id": "task:a", "title": "A"}],
+            "display_titles": ["A"],
+            "requires_owner": False,
+            "safety_policy_digest": "sha256:test",
+            "expires_at": None,
+        }
+        return V2Operation(
+            account_id=account_id,
+            api_version="2",
+            request_id=REQUEST,
+            request_hash=request_hash,
+            operation_id=operation_id,
+            tool="things_update",
+            state="pending",
+            manifest=manifest,
+            manifest_hash=v2_manifest_hash(manifest),
+            safety_policy_digest="sha256:test",
+        )
+
+    for login in ("Owner@Example.com", "owner@example.com"):
+        journal = MemoryJournal()
+        original = pending_operation(
+            "Owner@Example.com", "op_original", draft.request_hash
+        )
+        conflicting = pending_operation(
+            "owner@example.com", "op_conflicting", "sha256:conflicting"
+        )
+        journal._v2_operations = {
+            original.operation_id: original,
+            conflicting.operation_id: conflicting,
+        }
+        library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+        result = ThingsV2(
+            ThingsWorkspace(
+                library,
+                journal=journal,
+                clock=lambda: NOW,
+                account_id=login,
+            )
+        ).dispatch("things_update", arguments)
+
+        assert result.state == "rejected"
+        assert result.code == "request_conflict"
+        assert result.operation_id is None
+        assert library.refreshes == 0
+        assert library.apply_calls == 0
+
+
+def test_exact_retry_keeps_dispatched_error_fenced_despite_before_evidence() -> None:
     class RejectedWrite(MemoryLibrary):
         apply_calls = 0
 
@@ -1517,11 +1933,12 @@ def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() 
     first = interface.dispatch("things_update", arguments)
     repeated = interface.dispatch("things_update", arguments)
 
-    assert first.state == repeated.state == "not_applied"
-    assert first.next_action == repeated.next_action == "read_receipt"
+    assert first.state == repeated.state == "pending"
+    assert first.code == repeated.code == "pending_unknown"
+    assert first.next_action == repeated.next_action == "retry_same"
     assert library.apply_calls == 1
     receipt = interface.dispatch(
         "things_receipt", {"operation_id": first.operation_id}
     )
-    assert receipt.state == "not_applied"
-    assert receipt.rows[0]["observed"]["title"]["value"] == "Before"
+    assert receipt.state == "pending"
+    assert receipt.rows == []

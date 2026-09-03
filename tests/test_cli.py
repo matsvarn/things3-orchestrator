@@ -25,6 +25,12 @@ from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 ROOT = Path(__file__).parents[1]
 
 
+@pytest.mark.parametrize("abbreviation", ["--cl", "--cli"])
+def test_parser_rejects_abbreviated_client_option(abbreviation: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["print-config", abbreviation, "codex"])
+
+
 class _TTYBuffer(StringIO):
     def isatty(self) -> bool:
         return True
@@ -930,6 +936,26 @@ def test_cloud_check_prints_value_free_json_and_fails_on_non_ok(
 
     assert caught.value.code == 1
     assert json.loads(capsys.readouterr().out) == {"status": "unreachable"}
+
+
+def test_cloud_check_exits_one_for_unreadable_saved_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    credentials = tmp_path / "things-orchestrator/credentials.json"
+    credentials.parent.mkdir()
+    credentials.write_text('{"email":"private@example.com","password":')
+
+    with pytest.raises(SystemExit) as caught:
+        main(["cloud-check"])
+
+    assert caught.value.code == 1
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"status": "credentials_unreadable"}
+    assert "private@example.com" not in output
+    assert str(credentials) not in output
 
 
 def test_support_bundle_prints_only_the_diagnostics_report(

@@ -1,23 +1,33 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
-from dataclasses import replace
+import subprocess
+import sys
+from contextlib import contextmanager
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from threading import Event, Thread
+from typing import Callable
 
 import pytest
 
+from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import (
     IntentRecord,
     MemoryJournal,
     SQLiteJournal,
+    V2ApplySession,
     V2Operation,
+    _v2_sql_values,
     read_operation_state_counts,
     v2_manifest_hash,
     v2_manifest_is_valid,
 )
-from things_orchestrator.library import MemoryLibrary, Record
+from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
 from things_orchestrator.owner_authority import (
     authorization_binding,
     enroll_owner_factor,
@@ -26,7 +36,7 @@ from things_orchestrator.owner_authority import (
     verified_authorization,
     verify_owner_factor,
 )
-from things_orchestrator.v2 import SAFETY_POLICY_DIGEST
+from things_orchestrator.v2 import SAFETY_POLICY_DIGEST, OperationDraft
 from things_orchestrator.workspace import ThingsWorkspace
 
 
@@ -90,6 +100,31 @@ def _with_manifest(operation: V2Operation, **changes: object) -> V2Operation:
     )
 
 
+def _inject_v2_operation(
+    journal: MemoryJournal | SQLiteJournal, operation: V2Operation
+) -> None:
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[operation.operation_id] = operation  # noqa: SLF001
+        journal._v2_times[operation.operation_id] = (  # noqa: SLF001
+            "2020-01-01T00:00:00+00:00",
+            None if operation.state in {"awaiting_owner", "pending"} else "2020-01-01T00:00:00+00:00",
+        )
+        return
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(operation),
+        )
+        connection.execute(
+            "INSERT INTO owner_operation_times_v2 VALUES (?,?,?)",
+            (
+                operation.operation_id,
+                "2020-01-01T00:00:00+00:00",
+                None if operation.state in {"awaiting_owner", "pending"} else "2020-01-01T00:00:00+00:00",
+            ),
+        )
+
+
 def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> None:
     path = tmp_path / "journal.sqlite3"
     first = SQLiteJournal(path)
@@ -109,6 +144,97 @@ def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> 
     assert stored is None
     assert blockers == ["op_first"]
     assert second.get_v2_request(blocked.account_id, blocked.api_version, blocked.request_id) is None
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_case_only_relogin_preserves_v2_idempotency_and_pending_fence(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+
+    retry = _operation(
+        "op_duplicate",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    outcome, stored, blockers = journal.create_v2(retry, claim_fence=True)
+
+    assert outcome == "existing"
+    assert stored == original
+    assert stored.account_id == "Owner@Example.com"
+    assert blockers == []
+    assert journal.get_v2_request(
+        "owner@example.com", original.api_version, original.request_id
+    ) == original
+
+    different = _operation(
+        "op_blocked",
+        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+    )
+    outcome, stored, blockers = journal.create_v2(different, claim_fence=True)
+
+    assert outcome == "blocked"
+    assert stored is None
+    assert blockers == ["op_original"]
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[conflicting.operation_id] = conflicting
+    else:
+        with sqlite3.connect(journal.path) as connection:
+            connection.execute(
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                _v2_sql_values(conflicting),
+            )
+
+    for login in ("Owner@Example.com", "owner@example.com"):
+        with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+            journal.get_v2_request(login, original.api_version, original.request_id)
+
+    retry = _operation(
+        "op_retry",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+        journal.create_v2(retry, claim_fence=True)
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
@@ -681,6 +807,1613 @@ def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> No
     assert journal.get_v2_operation(operation.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
 
 
+def test_owner_approval_rejects_ambiguous_canonical_request_before_cloud_io(
+    tmp_path: Path,
+) -> None:
+    class CountingLibrary(MemoryLibrary):
+        refreshes = 0
+        apply_calls = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=False)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id=original.request_id,
+            state="awaiting_owner",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+    authorization = verified_authorization(
+        original,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    library = CountingLibrary()
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id="Owner@Example.com",
+    )
+
+    result = workspace.host_approve_v2(original.operation_id, authorization)
+
+    assert result == {
+        "state": "rejected",
+        "instruction": "Conflicting stored operations share this request_id.",
+    }
+    assert library.refreshes == 0
+    assert library.apply_calls == 0
+    stored = journal.get_v2_operation(original.operation_id)
+    assert stored is not None and stored.state == "awaiting_owner"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        MemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3", owner_public_key=public_key)
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=False)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id=original.request_id,
+            state="awaiting_owner",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+    else:
+        with sqlite3.connect(journal.path) as connection:
+            connection.execute(
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                _v2_sql_values(conflicting),
+            )
+    authorization = verified_authorization(
+        original,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    assert journal.authorize_v2(original.operation_id, authorization) == (False, [])
+    stored = journal.get_v2_operation(original.operation_id)
+    assert stored is not None and stored.state == "awaiting_owner"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("mutation", ["transition", "settle"])
+def test_every_journal_mutation_rechecks_canonical_ambiguity(
+    journal_kind: str, mutation: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{mutation}.sqlite3")
+    )
+    state = "awaiting_owner" if mutation == "transition" else "pending"
+    original = _with_manifest(
+        replace(
+            _operation(
+                "op_original",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state=state,
+            ),
+            account_id="Owner@Example.com",
+        )
+    )
+    assert journal.create_v2(
+        original, claim_fence=state == "pending"
+    )[0] == "created"
+    conflicting = _with_manifest(
+        replace(
+            _operation(
+                "op_conflicting",
+                request_id=original.request_id,
+                state=state,
+            ),
+            request_hash="sha256:conflicting-request",
+        )
+    )
+    _inject_v2_operation(journal, conflicting)
+
+    if mutation == "transition":
+        changed = journal.transition_v2(
+            original.operation_id,
+            expected="awaiting_owner",
+            state="stale",
+            response={"state": "stale"},
+        )
+    else:
+        changed = journal.settle_v2(
+            original.operation_id,
+            expected="pending",
+            state="applied",
+            response={"state": "applied"},
+            rows=[{"sequence": 1, "result": "applied"}],
+        )
+
+    assert changed is False
+    assert journal.get_v2_operation(original.operation_id) == original
+    assert journal.get_v2_operation(conflicting.operation_id) == conflicting
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_prune_preserves_active_tombstone_ambiguity_without_mutation(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "prune.sqlite3")
+    )
+    original = _with_manifest(
+        replace(
+            _operation(
+                "op_original",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            ),
+            account_id="Owner@Example.com",
+        )
+    )
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    assert journal.settle_v2(
+        original.operation_id,
+        expected="pending",
+        state="applied",
+        response={"state": "applied"},
+        rows=[{"sequence": 1, "result": "applied"}],
+    )
+    assert journal.prune_v2(now="2030-01-01T00:00:00+00:00") == 1
+    conflicting = _with_manifest(
+        replace(
+            _operation(
+                "op_conflicting",
+                request_id=original.request_id,
+                state="applied",
+            ),
+            request_hash="sha256:conflicting-request",
+            response={"state": "applied"},
+        )
+    )
+    _inject_v2_operation(journal, conflicting)
+    before_bytes = journal.path.read_bytes() if isinstance(journal, SQLiteJournal) else None
+    before_active = journal.get_v2_operation(conflicting.operation_id)
+
+    with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+        journal.prune_v2(now="2031-01-01T00:00:00+00:00")
+
+    assert journal.get_v2_operation(conflicting.operation_id) == before_active
+    if isinstance(journal, SQLiteJournal):
+        assert journal.path.read_bytes() == before_bytes
+        with sqlite3.connect(journal.path) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM owner_operations_v2"
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT count(*) FROM owner_tombstones_v2"
+            ).fetchone() == (1,)
+    else:
+        assert len(journal._v2_operations) == 1  # noqa: SLF001
+        assert len(journal._v2_tombstones) == 1  # noqa: SLF001
+
+
+def test_host_approval_rejects_conflict_inserted_after_authorization(
+    tmp_path: Path,
+) -> None:
+    class RacingJournal(MemoryJournal):
+        def authorize_v2(
+            self,
+            operation_id: str,
+            authorization: object,
+            *,
+            now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        ) -> tuple[bool, list[str]]:
+            result = super().authorize_v2(
+                operation_id, authorization, now=now
+            )
+            if result[0]:
+                original = self._v2_operations[operation_id]  # noqa: SLF001
+                conflicting = _with_manifest(
+                    replace(
+                        original,
+                        account_id=original.account_id.lower(),
+                        operation_id="op_conflicting",
+                        request_hash="sha256:conflicting-request",
+                    )
+                )
+                _inject_v2_operation(self, conflicting)
+            return result
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = RacingJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        )
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    library = CountingLibrary()
+
+    result = ThingsWorkspace(
+        library, journal=journal, account_id=operation.account_id
+    ).host_approve_v2(operation.operation_id, authorization)
+
+    assert result == {
+        "state": "rejected",
+        "code": "request_conflict",
+        "next_action": "correct_request",
+        "instruction": (
+            "Conflicting stored operations share this request_id. "
+            "No Cloud write was attempted."
+        ),
+    }
+    assert library.apply_calls == 0
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
+def test_apply_session_serializes_cloud_write_and_concurrent_retry(
+    journal_kind: str, entrypoint: str, tmp_path: Path
+) -> None:
+    class BlockingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.entered = Event()
+            self.release = Event()
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().apply(writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{entrypoint}.sqlite3")
+    )
+    library = BlockingLibrary()
+    operation_id: str | None = None
+    authorization: object = None
+    if entrypoint == "approve":
+        factor_dir = tmp_path / journal_kind
+        factor_dir.mkdir()
+        factor = factor_dir / "owner-factor.json"
+        enroll_owner_factor("correct horse battery staple", path=factor)
+        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+        journal = (
+            MemoryJournal(owner_public_key=public_key)
+            if journal_kind == "memory"
+            else SQLiteJournal(
+                tmp_path / f"{entrypoint}.sqlite3",
+                owner_public_key=public_key,
+            )
+        )
+        operation = _with_manifest(
+            _operation(
+                "op_approved",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            tool="things_update",
+            writes=[
+                {
+                    "action": "update",
+                    "uuid": "a",
+                    "kind": "task",
+                    "title": "B",
+                }
+            ],
+            touched=[["title"]],
+            before=[{"id": "task:a", "title": "A"}],
+            display_titles=["A"],
+        )
+        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        operation_id = operation.operation_id
+        authorization = verified_authorization(
+            operation,
+            action="approve",
+            passphrase="correct horse battery staple",
+            path=factor,
+        )
+        assert authorization is not None
+    workspace_one = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    )
+    workspace_two = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    )
+    results: list[dict[str, object]] = []
+    finished = Event()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    def invoke(workspace: ThingsWorkspace) -> None:
+        result = (
+            workspace.execute_v2(draft)
+            if entrypoint == "execute"
+            else workspace.host_approve_v2(operation_id or "", authorization)
+        )
+        results.append(result)
+
+    first = Thread(target=invoke, args=(workspace_one,))
+    first.start()
+    assert library.entered.wait(5)
+    second = Thread(target=invoke, args=(workspace_two,))
+    second.start()
+    finished.wait(0.1)
+    retry_waited = second.is_alive()
+    library.release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert retry_waited
+    assert library.apply_calls == 1
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert results[0]["operation_id"] == results[1]["operation_id"]
+
+
+def test_pending_retry_reads_only_after_outcome_unknown_writer_exits(
+    tmp_path: Path,
+) -> None:
+    class LateCommitLibrary(MemoryLibrary):
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.apply_entered = Event()
+            self.allow_apply = Event()
+            self.retry_read_old_state = Event()
+            self.remote_applied = False
+            self.creator_refresh_failed = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            if self.remote_applied:
+                if not self.creator_refresh_failed:
+                    self.creator_refresh_failed = True
+                    raise CloudError("outcome unavailable after remote commit")
+                return
+            if self.apply_entered.is_set():
+                self.retry_read_old_state.set()
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_entered.set()
+            assert self.allow_apply.wait(5)
+            super().apply(writes)
+            self.remote_applied = True
+            raise CloudError("connection lost after remote commit")
+
+    journal = SQLiteJournal(tmp_path / "outcome-unknown.sqlite3")
+    library = LateCommitLibrary()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+
+    def execute() -> None:
+        results.append(
+            ThingsWorkspace(
+                library, journal=journal, account_id="owner@example.com"
+            ).execute_v2(draft)
+        )
+
+    creator = Thread(target=execute)
+    creator.start()
+    assert library.apply_entered.wait(5)
+    retry = Thread(target=execute)
+    retry.start()
+    read_before_writer_exit = library.retry_read_old_state.wait(0.2)
+    library.allow_apply.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert not creator.is_alive() and not retry.is_alive()
+    assert read_before_writer_exit is False
+    assert [result["state"] for result in results] == ["pending", "applied"]
+    assert library.records["a"].title == "B"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
+def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
+    journal_kind: str, entrypoint: str, tmp_path: Path
+) -> None:
+    class PauseMixin:
+        def _initialize_pause(self) -> None:
+            self.pending_visible = Event()
+            self.release_creator = Event()
+
+        def _pause_creator(self) -> None:
+            self.pending_visible.set()
+            assert self.release_creator.wait(5)
+
+        def create_v2(self, *args: object, **kwargs: object) -> object:
+            result = super().create_v2(*args, **kwargs)  # type: ignore[misc]
+            if entrypoint == "execute" and result[0] == "created":
+                self._pause_creator()
+            return result
+
+        @contextmanager
+        def create_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            with super().create_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                if entrypoint == "execute" and start.outcome == "created":
+                    self._pause_creator()
+                yield start
+
+        def authorize_v2(self, *args: object, **kwargs: object) -> object:
+            result = super().authorize_v2(*args, **kwargs)  # type: ignore[misc]
+            if entrypoint == "approve" and result[0]:
+                self._pause_creator()
+            return result
+
+        @contextmanager
+        def authorize_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            with super().authorize_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                if entrypoint == "approve" and start.authorized:
+                    self._pause_creator()
+                yield start
+
+    class GapMemoryJournal(PauseMixin, MemoryJournal):
+        def __init__(self, *, owner_public_key: bytes | None = None) -> None:
+            super().__init__(owner_public_key=owner_public_key)
+            self._initialize_pause()
+
+    class GapSQLiteJournal(PauseMixin, SQLiteJournal):
+        def __init__(
+            self, path: Path, *, owner_public_key: bytes | None = None
+        ) -> None:
+            super().__init__(path, owner_public_key=owner_public_key)
+            self._initialize_pause()
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    public_key: bytes | None = None
+    factor: Path | None = None
+    if entrypoint == "approve":
+        factor = tmp_path / "owner-factor.json"
+        enroll_owner_factor("correct horse battery staple", path=factor)
+        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        GapMemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else GapSQLiteJournal(
+            tmp_path / f"{entrypoint}.sqlite3", owner_public_key=public_key
+        )
+    )
+    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+    operation_id: str | None = None
+    authorization: object = None
+    if entrypoint == "approve":
+        operation = _with_manifest(
+            _operation(
+                "op_approved",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            tool="things_update",
+            writes=[
+                {
+                    "action": "update",
+                    "uuid": "a",
+                    "kind": "task",
+                    "title": "B",
+                }
+            ],
+            touched=[["title"]],
+            before=[{"id": "task:a", "title": "A"}],
+            display_titles=["A"],
+        )
+        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        operation_id = operation.operation_id
+        assert factor is not None
+        authorization = verified_authorization(
+            operation,
+            action="approve",
+            passphrase="correct horse battery staple",
+            path=factor,
+        )
+        assert authorization is not None
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+
+    def invoke() -> None:
+        workspace = ThingsWorkspace(
+            library, journal=journal, account_id="owner@example.com"
+        )
+        results.append(
+            workspace.execute_v2(draft)
+            if entrypoint == "execute"
+            else workspace.host_approve_v2(operation_id or "", authorization)
+        )
+
+    creator = Thread(target=invoke)
+    creator.start()
+    assert journal.pending_visible.wait(5)
+    retry = Thread(target=invoke)
+    retry.start()
+    retry.join(0.2)
+    retry_finished_in_gap = not retry.is_alive()
+    journal.release_creator.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert not creator.is_alive() and not retry.is_alive()
+    assert retry_finished_in_gap is False
+    assert library.apply_calls == 1
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert library.records["a"].title == "B"
+
+
+def test_sqlite_apply_owner_outwaits_short_database_busy_timeout(
+    tmp_path: Path,
+) -> None:
+    class ShortTimeoutJournal(SQLiteJournal):
+        def _connect(self) -> sqlite3.Connection:
+            connection = super()._connect()
+            connection.execute("PRAGMA busy_timeout=25")
+            return connection
+
+    class BlockingLibrary(MemoryLibrary):
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.entered = Event()
+            self.release = Event()
+            self.apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().apply(writes)
+
+    journal = ShortTimeoutJournal(tmp_path / "short-timeout.sqlite3")
+    library = BlockingLibrary()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def execute() -> None:
+        try:
+            results.append(
+                ThingsWorkspace(
+                    library, journal=journal, account_id="owner@example.com"
+                ).execute_v2(draft)
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    creator = Thread(target=execute)
+    creator.start()
+    assert library.entered.wait(5)
+    retry = Thread(target=execute)
+    retry.start()
+    retry.join(0.15)
+    retry_waited = retry.is_alive()
+    library.release.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert retry_waited
+    assert errors == []
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert library.apply_calls == 1
+
+
+def test_sqlite_process_death_keeps_pending_for_reconcile_without_replay(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_crash", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    path = tmp_path / "crash.sqlite3"
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import os
+import sys
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+journal = SQLiteJournal(Path(sys.argv[1]))
+with journal.create_apply_session_v2(operation, claim_fence=True) as start:
+    assert start.outcome == "created"
+    assert start.session is not None
+    os._exit(0)
+""",
+            str(path),
+            json.dumps(asdict(operation)),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert child.returncode == 0
+    journal = SQLiteJournal(path)
+    pending = journal.get_v2_operation(operation.operation_id)
+    assert pending is not None and pending.state == "pending"
+
+    class NoReplayLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = NoReplayLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    ).execute_v2(draft)
+
+    assert result["state"] == "not_applied"
+    assert library.apply_calls == 0
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_dispatch_marker_survives_apply_session_without_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "dispatch-marker.sqlite3")
+    )
+    operation = _operation(
+        "op_dispatch_marker",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    journal.create_v2(operation, claim_fence=True)
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        rows = [
+            {
+                "sequence": 1,
+                "action": "create",
+                "target_id": "task:a",
+                "desired": {},
+                "observed": None,
+                "result": "not_applied",
+                "proof": "provider_rejected",
+            }
+        ]
+        assert not session.settle_rejected(
+            response={"state": "not_applied"}, rows=rows
+        )
+        assert session.mark_dispatched() is True
+        assert not session.settle(
+            state="unchanged",
+            response={"state": "unchanged"},
+            rows=[
+                {
+                    "sequence": 1,
+                    "action": "create",
+                    "target_id": "task:a",
+                    "desired": {},
+                    "observed": {},
+                    "result": "unchanged",
+                }
+            ],
+        )
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+
+def test_sqlite_migration_marks_legacy_pending_as_possibly_dispatched(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    pending = _operation(
+        "op_legacy_pending",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    awaiting = _operation(
+        "op_legacy_awaiting",
+        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+        state="awaiting_owner",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE owner_operations_v2 (
+                account_id TEXT NOT NULL,
+                api_version TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                operation_id TEXT PRIMARY KEY,
+                tool TEXT NOT NULL,
+                state TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL,
+                safety_policy_digest TEXT NOT NULL,
+                expires_at TEXT,
+                response_json TEXT,
+                authorization TEXT,
+                resolution TEXT,
+                receipt_hash TEXT,
+                UNIQUE(account_id, api_version, request_id)
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(pending)[:-1],
+        )
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(awaiting)[:-1],
+        )
+
+    journal = SQLiteJournal(path)
+
+    migrated_pending = journal.get_v2_operation(pending.operation_id)
+    migrated_awaiting = journal.get_v2_operation(awaiting.operation_id)
+    assert migrated_pending is not None
+    assert migrated_pending.dispatch_started is True
+    assert migrated_awaiting is not None
+    assert migrated_awaiting.dispatch_started is False
+
+
+def test_sqlite_process_death_after_dispatch_marker_keeps_uncertain_pending(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_dispatched_crash", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    path = tmp_path / "dispatched-crash.sqlite3"
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import os
+import sys
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
+    operation, claim_fence=True
+) as start:
+    assert start.session is not None
+    assert start.session.mark_dispatched()
+    os._exit(0)
+""",
+            str(path),
+            json.dumps(asdict(operation)),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert child.returncode == 0
+    journal = SQLiteJournal(path)
+    pending = journal.get_v2_operation(operation.operation_id)
+    assert pending is not None and pending.state == "pending"
+    assert pending.dispatch_started is True
+
+    class NoReplayLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = NoReplayLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    ).execute_v2(draft)
+
+    assert result["state"] == "pending"
+    assert result["code"] == "pending_unknown"
+    assert library.apply_calls == 0
+
+
+def test_sqlite_apply_owner_blocks_exact_retry_across_processes(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_cross_process", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    path = tmp_path / "cross-process.sqlite3"
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import time
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+ready = Path(sys.argv[3])
+release = Path(sys.argv[4])
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
+    operation, claim_fence=True
+) as start:
+    assert start.outcome == "created"
+    ready.write_text("ready")
+    while not release.exists():
+        time.sleep(0.01)
+""",
+            str(path),
+            json.dumps(asdict(operation)),
+            str(ready),
+            str(release),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    for _attempt in range(500):
+        if ready.exists():
+            break
+        Event().wait(0.01)
+    assert ready.exists()
+    journal = SQLiteJournal(path)
+
+    class NoReplayLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = NoReplayLibrary([Record(uuid="a", kind="task", title="A")])
+    results: list[dict[str, object]] = []
+    retry = Thread(
+        target=lambda: results.append(
+            ThingsWorkspace(
+                library, journal=journal, account_id="owner@example.com"
+            ).execute_v2(draft)
+        )
+    )
+    retry.start()
+    retry.join(0.2)
+    retry_waited = retry.is_alive()
+    release.write_text("release")
+    assert child.wait(timeout=5) == 0
+    retry.join(5)
+
+    assert retry_waited
+    assert not retry.is_alive()
+    assert results[0]["state"] == "not_applied"
+    assert library.apply_calls == 0
+
+
+def test_sqlite_apply_owner_is_shared_by_real_and_symlink_database_paths(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_symlink", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    real_path = tmp_path / "real.sqlite3"
+    SQLiteJournal(real_path)
+    alias_path = tmp_path / "alias.sqlite3"
+    alias_path.symlink_to(real_path)
+    ready = tmp_path / "symlink-ready"
+    release = tmp_path / "symlink-release"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import time
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+ready = Path(sys.argv[3])
+release = Path(sys.argv[4])
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
+    operation, claim_fence=True
+) as start:
+    assert start.outcome == "created"
+    ready.write_text("ready")
+    while not release.exists():
+        time.sleep(0.01)
+""",
+            str(real_path),
+            json.dumps(asdict(operation)),
+            str(ready),
+            str(release),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    for _attempt in range(500):
+        if ready.exists():
+            break
+        Event().wait(0.01)
+    assert ready.exists()
+    journal = SQLiteJournal(alias_path)
+    library = MemoryLibrary([Record(uuid="a", kind="task", title="A")])
+    results: list[dict[str, object]] = []
+    retry = Thread(
+        target=lambda: results.append(
+            ThingsWorkspace(
+                library, journal=journal, account_id="owner@example.com"
+            ).execute_v2(draft)
+        )
+    )
+    retry.start()
+    retry.join(0.2)
+    retry_waited = retry.is_alive()
+    release.write_text("release")
+    assert child.wait(timeout=5) == 0
+    retry.join(5)
+
+    assert retry_waited
+    assert not retry.is_alive()
+    assert results[0]["state"] == "not_applied"
+
+
+def test_sqlite_journal_rejects_existing_hard_link(tmp_path: Path) -> None:
+    real_path = tmp_path / "real.sqlite3"
+    SQLiteJournal(real_path)
+    alias_path = tmp_path / "alias.sqlite3"
+    os.link(real_path, alias_path)
+
+    with pytest.raises(
+        RuntimeError, match="hard-linked SQLite journals are not supported"
+    ):
+        SQLiteJournal(alias_path)
+
+
+def test_sqlite_apply_owner_rejects_hard_link_added_after_init(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "journal.sqlite3"
+    journal = SQLiteJournal(path)
+    os.link(path, tmp_path / "alias.sqlite3")
+
+    with pytest.raises(
+        RuntimeError, match="hard-linked SQLite journals are not supported"
+    ):
+        with journal.apply_session_v2("missing"):
+            pass
+
+
+def test_sqlite_journal_pins_symlink_target_before_owned_connections(
+    tmp_path: Path,
+) -> None:
+    alias_path = tmp_path / "alias.sqlite3"
+    replacement_path = tmp_path / "replacement.sqlite3"
+
+    class RetargetingJournal(SQLiteJournal):
+        def __init__(self) -> None:
+            self._alias_path = alias_path
+            self._replacement_path = replacement_path
+            self._retarget_armed = False
+            self._canonical_calls = 0
+            super().__init__(alias_path)
+
+        def arm_retarget(self) -> None:
+            self._retarget_armed = True
+
+        def _canonical_path(self) -> Path:
+            canonical = super()._canonical_path()
+            if self._retarget_armed:
+                self._canonical_calls += 1
+                if self._canonical_calls == 2:
+                    self._alias_path.unlink()
+                    self._alias_path.symlink_to(self._replacement_path)
+            return canonical
+
+    operation = _operation(
+        "op_symlink_retarget",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    original_path = tmp_path / "original.sqlite3"
+    original = SQLiteJournal(original_path)
+    replacement = SQLiteJournal(replacement_path)
+    assert original.create_v2(operation, claim_fence=True)[0] == "created"
+    assert replacement.create_v2(operation, claim_fence=True)[0] == "created"
+    alias_path.symlink_to(original_path)
+    journal = RetargetingJournal()
+    journal.arm_retarget()
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        assert session.settle(
+            state="not_applied",
+            response={"state": "not_applied"},
+            rows=[
+                {
+                    "sequence": 1,
+                    "action": "create",
+                    "target_id": "task:a",
+                    "desired": {},
+                    "observed": {},
+                    "result": "not_applied",
+                }
+            ],
+        )
+
+    original_stored = original.get_v2_operation(operation.operation_id)
+    replacement_stored = replacement.get_v2_operation(operation.operation_id)
+    assert original_stored is not None
+    assert replacement_stored is not None
+    assert original_stored.state == "not_applied"
+    assert replacement_stored.state == "pending"
+
+
+def test_sqlite_journal_pins_new_relative_path_at_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requested = Path("state/journal.sqlite3")
+
+    journal = SQLiteJournal(requested)
+
+    assert journal.path == (tmp_path / requested).resolve()
+    assert journal.path.is_file()
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_cannot_settle_after_context_exit(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_late_settle_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+    assert not session.mark_dispatched()
+    assert not session.settle(
+        state="applied",
+        response={"state": "applied"},
+        rows=[
+            {
+                "sequence": 1,
+                "action": "create",
+                "target_id": "task:a",
+                "desired": {},
+                "observed": {},
+                "result": "applied",
+            }
+        ],
+    )
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+    assert stored.dispatch_started is False
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_rejects_foreign_thread_while_context_is_active(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_foreign_thread_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+    results: list[bool] = []
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        caller = Thread(
+            target=lambda: results.append(
+                session.settle(
+                    state="applied",
+                    response={"state": "applied"},
+                    rows=rows,
+                )
+            )
+        )
+        caller.start()
+        Event().wait(0.05)
+    caller.join(5)
+
+    assert not caller.is_alive()
+    assert results == [False]
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_rejects_forked_process_while_context_is_active(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_foreign_process_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        child = os.fork()
+        if child == 0:
+            changed = session.settle(
+                state="applied",
+                response={"state": "applied"},
+                rows=rows,
+            )
+            os._exit(1 if changed else 0)
+        _pid, status = os.waitpid(child, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_apply_session_close_waits_for_started_owner_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    settle_entered = Event()
+    allow_settle = Event()
+
+    class BlockingMemoryJournal(MemoryJournal):
+        def _settle_v2_locked(self, *args: object, **kwargs: object) -> bool:
+            settle_entered.set()
+            allow_settle.wait(5)
+            return super()._settle_v2_locked(  # type: ignore[misc]
+                *args, **kwargs
+            )
+
+    class BlockingSQLiteJournal(SQLiteJournal):
+        def _settle_v2_owned(self, *args: object, **kwargs: object) -> bool:
+            settle_entered.set()
+            allow_settle.wait(5)
+            return super()._settle_v2_owned(  # type: ignore[misc]
+                *args, **kwargs
+            )
+
+    journal: MemoryJournal | SQLiteJournal = (
+        BlockingMemoryJournal()
+        if journal_kind == "memory"
+        else BlockingSQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    operation = _operation(
+        f"op_close_race_{journal_kind}",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
+    session_ready = Event()
+    start_settle = Event()
+    sessions: list[V2ApplySession] = []
+    results: list[bool] = []
+
+    def own_and_settle() -> None:
+        with journal.apply_session_v2(operation.operation_id) as session:
+            assert session is not None
+            sessions.append(session)
+            session_ready.set()
+            start_settle.wait(5)
+            results.append(
+                session.settle(
+                    state="applied",
+                    response={"state": "applied"},
+                    rows=rows,
+                )
+            )
+
+    owner = Thread(target=own_and_settle)
+    owner.start()
+    assert session_ready.wait(5)
+    start_settle.set()
+    assert settle_entered.wait(5)
+    close_finished = Event()
+
+    def close_session() -> None:
+        close = getattr(sessions[0], "close")
+        close()
+        close_finished.set()
+
+    closer = Thread(target=close_session)
+    closer.start()
+    close_overtook_settlement = close_finished.wait(0.1)
+    allow_settle.set()
+    owner.join(5)
+    closer.join(5)
+
+    assert not close_overtook_settlement
+    assert not owner.is_alive() and not closer.is_alive()
+    assert results == [True]
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "applied"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_authorize_apply_session_rejects_expired_operation(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        MemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else SQLiteJournal(
+            tmp_path / "journal.sqlite3", owner_public_key=public_key
+        )
+    )
+    expires_at = "2030-01-01T00:00:01+00:00"
+    operation = _with_manifest(
+        replace(
+            _operation(
+                f"op_expired_{journal_kind}",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            expires_at=expires_at,
+        ),
+        expires_at=expires_at,
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    with journal.authorize_apply_session_v2(
+        operation.operation_id,
+        authorization,
+        now=lambda: datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc),
+    ) as start:
+        assert not start.authorized
+        assert start.session is None
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "stale"
+    assert stored.response == {
+        "state": "stale",
+        "instruction": "The owner approval window expired.",
+        "operation_id": operation.operation_id,
+    }
+
+
+def test_host_approval_rechecks_expiry_after_waiting_for_apply_owner(
+    tmp_path: Path,
+) -> None:
+    attempted = Event()
+
+    class WaitingSQLiteJournal(SQLiteJournal):
+        @contextmanager
+        def authorize_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            attempted.set()
+            with super().authorize_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                yield start
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = WaitingSQLiteJournal(
+        tmp_path / "journal.sqlite3", owner_public_key=public_key
+    )
+    expires_at = "2030-01-01T00:00:01+00:00"
+    operation = _with_manifest(
+        replace(
+            _operation(
+                "op_expiry_sqlite",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            expires_at=expires_at,
+        ),
+        expires_at=expires_at,
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    blocker = _with_manifest(
+        replace(
+            _operation(
+                "op_blocker_sqlite",
+                request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+            ),
+            account_id="other@example.com",
+        )
+    )
+    _inject_v2_operation(journal, blocker)
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    entered = Event()
+    release = Event()
+
+    def hold_owner() -> None:
+        with journal.apply_session_v2(blocker.operation_id) as session:
+            assert session is not None
+            entered.set()
+            release.wait(5)
+
+    holder = Thread(target=hold_owner)
+    holder.start()
+    assert entered.wait(5)
+    now = [datetime(2030, 1, 1, tzinfo=timezone.utc)]
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id=operation.account_id,
+        clock=lambda: now[0],
+    )
+    results: list[dict[str, object]] = []
+    approver = Thread(
+        target=lambda: results.append(
+            workspace.host_approve_v2(operation.operation_id, authorization)
+        )
+    )
+    approver.start()
+    assert attempted.wait(5)
+    now[0] = datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
+    release.set()
+    holder.join(5)
+    approver.join(5)
+
+    assert not holder.is_alive() and not approver.is_alive()
+    assert results == [
+        {
+            "state": "stale",
+            "instruction": "The owner approval window expired.",
+            "operation_id": operation.operation_id,
+        }
+    ]
+    assert library.apply_calls == 0
+
+
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
     journal = MemoryJournal()
     operation = _operation(
@@ -1103,6 +2836,114 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
     assert stored.authorization == authorization.record
 
 
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("target_kind", ["missing", "other-account", "nonpending"])
+def test_host_not_applied_settlement_rejects_nonowned_pending_target(
+    journal_kind: str, target_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{target_kind}.sqlite3")
+    )
+    operation_id = "op_missing"
+    stored_state: str | None = None
+    if target_kind != "missing":
+        operation = _operation(
+            f"op_{target_kind}",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        )
+        if target_kind == "other-account":
+            operation = _with_manifest(
+                replace(operation, account_id="other@example.com")
+            )
+        operation_id = operation.operation_id
+        journal.create_v2(operation, claim_fence=True)
+        if target_kind == "nonpending":
+            assert journal.settle_v2(
+                operation_id,
+                expected="pending",
+                state="applied",
+                response={"state": "applied", "operation_id": operation_id},
+                rows=[{"sequence": 1}],
+            )
+            stored_state = "applied"
+        else:
+            stored_state = "pending"
+    workspace = ThingsWorkspace(
+        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
+        journal=journal,
+        account_id="owner@example.com",
+    )
+
+    result = workspace.host_settle_not_applied_v2(operation_id, "forged")
+
+    assert result["state"] == "rejected"
+    assert result["code"] == "missing_target"
+    stored = journal.get_v2_operation(operation_id)
+    if stored_state is None:
+        assert stored is None
+    else:
+        assert stored is not None and stored.state == stored_state
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_dispatched_pending_refuses_signed_not_applied_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    factor = tmp_path / f"{journal_kind}-owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = (
+        MemoryJournal(
+            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+        )
+        if journal_kind == "memory"
+        else SQLiteJournal(
+            tmp_path / "signed-dispatched.sqlite3",
+            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
+        )
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_signed_dispatched",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        writes=[
+            {"action": "update", "uuid": "a", "kind": "task", "title": "New"}
+        ],
+        before=[{"id": "task:a", "title": "Old"}],
+        touched=[["title"]],
+        preconditions={"task:a": "frozen"},
+        display_titles=["Old"],
+    )
+    journal.create_v2(operation, claim_fence=True)
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        assert session.mark_dispatched() is True
+    authorization = verified_authorization(
+        operation,
+        action="settle_not_applied",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    workspace = ThingsWorkspace(
+        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
+        journal=journal,
+        account_id=operation.account_id,
+    )
+
+    result = workspace.host_settle_not_applied_v2(
+        operation.operation_id, authorization
+    )
+
+    assert result["state"] == "pending"
+    assert result["code"] == "pending_unknown"
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+
 def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> None:
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
@@ -1124,7 +2965,7 @@ def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> No
 
 def test_workspace_returns_persisted_winner_when_settlement_cas_loses() -> None:
     class LosingJournal(MemoryJournal):
-        def settle_v2(self, operation_id: str, **kwargs: object) -> bool:
+        def _settle_v2_locked(self, operation_id: str, **kwargs: object) -> bool:
             current = self._v2_operations[operation_id]  # noqa: SLF001
             self._v2_operations[operation_id] = replace(  # noqa: SLF001
                 current,

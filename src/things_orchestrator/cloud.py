@@ -67,6 +67,14 @@ class CloudError(RuntimeError):
     pass
 
 
+class CloudOutcomeUnknown(CloudError):
+    """The provider may still commit a write whose response was lost."""
+
+
+class CloudWriteRejected(CloudError):
+    """The provider proved that a write request did not commit."""
+
+
 def _note(text: str) -> dict[str, Any]:
     return {"_t": "tx", "ch": zlib.crc32(text.encode()) & 0xFFFFFFFF, "v": text, "t": 1}
 
@@ -241,6 +249,8 @@ class CloudClient:
         except HTTPError as error:
             if error.code == 401:
                 raise CloudError("Things Cloud credentials were rejected") from error
+            if error.code == 409 and method == "POST":
+                raise CloudWriteRejected("Things Cloud HTTP 409") from error
             if error.code in {408, 504}:
                 raise CloudError("Things Cloud timed out") from error
             if error.code == 429 and retry:
@@ -387,12 +397,12 @@ class CloudClient:
         try:
             head = self._commit_visible(envelopes, ancestor)
         except CloudError as error:
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud outcome is unknown; reconciliation failed"
             ) from error
         if head is not None:
             return {"server-head-index": head}
-        raise CloudError(
+        raise CloudOutcomeUnknown(
             "Things Cloud outcome is unknown; reconcile the workspace before retrying"
         )
 
@@ -724,19 +734,22 @@ class CloudLibrary(MemoryLibrary):
         try:
             envelopes, _ = self._plan(writes)
             self.client.commit(envelopes)
-        except CloudError as error:
-            if "HTTP 409" not in str(error):
-                raise
-            self._pull(force=True)
-            raise CloudError("Things Cloud conflict; read fresh facts") from error
+        except CloudWriteRejected as error:
+            try:
+                self._pull(force=True)
+            except CloudError:
+                pass
+            raise CloudWriteRejected(
+                "Things Cloud conflict; read fresh facts"
+            ) from error
         try:
             self._pull(force=True)
         except CloudError as error:
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud outcome is unknown; commit read-back failed"
             ) from error
         if not all(self._pulled_matches(item) for item in envelopes):
-            raise CloudError(
+            raise CloudOutcomeUnknown(
                 "Things Cloud read-back did not match the requested changes"
             )
         verified = self._verified_titles(writes)

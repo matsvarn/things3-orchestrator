@@ -12,10 +12,14 @@ read-back from a private host terminal:
 uv run things-orchestrator operation-reconcile op_EXAMPLE
 ```
 
-If read-back proves that none of the writes landed, the operation becomes
-terminal `not_applied`. If every write landed, it becomes `applied`. A fully
-classified mixed result becomes terminal `partial` and includes its exact
-receipt. Corrective work uses a fresh request ID.
+Before dispatch, frozen before-state evidence can settle the operation as
+`not_applied`. After dispatch starts, that evidence alone is insufficient
+because a delayed commit may still land. Only a provider response that proves
+the POST was rejected (currently HTTP 409) can then settle `not_applied`. Every
+write matching becomes `applied`; a fully classified mixed result becomes
+terminal `partial` and includes its exact receipt. Timeouts, unreachable
+responses, HTTP 500 responses, and unavailable read-back remain `pending`.
+Corrective work uses a fresh request ID.
 
 Legacy `awaiting_owner` rows from older builds are retired as `stale` without
 Cloud I/O. Never replay their stored batch. Read current Things state and send

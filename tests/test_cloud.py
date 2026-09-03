@@ -5,6 +5,7 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -13,6 +14,7 @@ from things_orchestrator.cloud import (
     CloudClient,
     CloudError,
     CloudLibrary,
+    CloudWriteRejected,
     Envelope,
     HistoryPage,
     fold_events,
@@ -2496,8 +2498,6 @@ def test_fold_create_replaces_task_fields() -> None:
 
 
 def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> None:
-    from things_orchestrator.cloud import CloudError
-
     class ConflictClient:
         def __init__(self) -> None:
             self.history_id = "h"
@@ -2523,7 +2523,7 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
         def commit(self, envelopes: list[Envelope]) -> None:
             self.posts += 1
             if self.posts == 1:
-                raise CloudError("Things Cloud HTTP 409")
+                raise CloudWriteRejected("Things Cloud HTTP 409")
             self.pending = [
                 {"uuid": item.uuid, "e": item.kind, "t": item.action, "p": item.payload}
                 for item in envelopes
@@ -2534,12 +2534,68 @@ def test_apply_stops_after_conflict_and_requires_fresh_facts(tmp_path: Path) -> 
     library.records["abc"] = Record(
         uuid="abc", kind="task", title="Call", entity="Task6"
     )
-    with pytest.raises(CloudError, match="read fresh facts"):
+    with pytest.raises(CloudWriteRejected, match="read fresh facts"):
         library.apply(
             [Write(action="update", uuid="abc", kind="task", title="Call bank")]
         )
     assert client.posts == 1
     assert library.records["abc"].title == "Call"
+
+
+def test_cloud_client_types_only_post_409_as_definitive_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise HTTPError("https://example.invalid", 409, "conflict", {}, None)
+
+    monkeypatch.setattr("things_orchestrator.cloud.urlopen", reject)
+    client = CloudClient("a@b.c", "pw")
+
+    with pytest.raises(CloudWriteRejected, match="HTTP 409"):
+        client._request("POST", "/commit", body=b"{}")  # noqa: SLF001
+    with pytest.raises(CloudError) as read_error:
+        client._request("GET", "/history")  # noqa: SLF001
+    assert not isinstance(read_error.value, CloudWriteRejected)
+
+
+def test_conflict_remains_typed_when_the_followup_pull_fails(
+    tmp_path: Path,
+) -> None:
+    class ConflictThenUnreadableClient:
+        history_id = "h"
+        server_index = 1
+        loaded_index = 1
+        pulls = 0
+
+        def verify(self) -> str:
+            return self.history_id
+
+        def items(self, start_index: int) -> HistoryPage:
+            del start_index
+            self.pulls += 1
+            if self.pulls > 1:
+                raise CloudError("Things Cloud is unreachable")
+            return HistoryPage(
+                events=[], current=1, groups=0, end_size=1, latest_size=1
+            )
+
+        def commit(self, envelopes: list[Envelope]) -> None:
+            del envelopes
+            raise CloudWriteRejected("Things Cloud HTTP 409")
+
+    client = ConflictThenUnreadableClient()
+    library = CloudLibrary(  # type: ignore[arg-type]
+        client, cache=tmp_path / "state.json"
+    )
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
+
+    with pytest.raises(CloudWriteRejected, match="read fresh facts"):
+        library.apply(
+            [Write(action="update", uuid="abc", kind="task", title="Call bank")]
+        )
 
 
 def test_commit_retries_404_after_verify() -> None:

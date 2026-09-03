@@ -230,10 +230,13 @@ inspection continue. Another mutation returns the blocking operation ID,
 creates no operation, consumes no request ID, and writes nothing. A pending
 fence cannot be blindly force-cleared.
 
-Recovery may force-refresh and observe a pending operation from the CLI. If
-read-back proves that no frozen write landed, a signed CLI action can settle it
-as `not_applied`. Recovery never reposts the old writes. A partial operation records every applied and
-not-applied row and never replays the remainder. Exact CLI-only resolution
+Recovery may force-refresh and observe a pending operation from the CLI. Before
+dispatch starts, complete frozen before-state evidence can settle it as
+`not_applied`. After dispatch starts, before-state evidence cannot rule out a
+delayed commit; only a typed provider response that proves rejection (currently
+write HTTP 409) may settle `not_applied`. Recovery never reposts the old writes.
+A partial operation records every applied and not-applied row and never replays
+the remainder. Exact CLI-only resolution
 records `accepted_as_is` or `superseded`, atomically moves
 `partial -> partial_resolved`, and releases the fence without Cloud I/O. Any
 corrective work is a fresh operation with a fresh request ID and manifest.

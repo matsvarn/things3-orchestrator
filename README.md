@@ -80,8 +80,12 @@ The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.
 An uncertain outcome returns `pending`. Retry the exact same request ID and
 arguments to force read-back reconciliation; the retry never reposts the frozen
-writes. A fully classified mixed outcome returns terminal `partial` with an
-exact receipt. Corrective work always uses a fresh request ID.
+writes. Once dispatch starts, seeing only the frozen before-state is not proof
+that the write cannot still land. A provider response that proves rejection
+(currently HTTP 409) can settle `not_applied`; timeouts, unreachable responses,
+and server errors remain fenced until positive read-back evidence appears. A
+fully classified mixed outcome returns terminal `partial` with an exact receipt.
+Corrective work always uses a fresh request ID.
 
 `things_find` accepts owner text with an optional exact container, or a
 `within`-only Project/Area membership read. When a page returns

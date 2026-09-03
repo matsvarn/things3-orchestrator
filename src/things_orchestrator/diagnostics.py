@@ -35,6 +35,7 @@ from .service import service_status
 
 CloudStatus = Literal[
     "ok",
+    "credentials_unreadable",
     "credentials_rejected",
     "timeout",
     "unreachable",
@@ -42,6 +43,9 @@ CloudStatus = Literal[
     "not_configured",
 ]
 EndpointClass = Literal["loopback", "tailnet", "public"]
+
+_TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
+_TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
 
 class DiagnosticLibrary(Protocol):
@@ -142,9 +146,9 @@ def classify_endpoint(url: McpUrl) -> EndpointClass:
         return "tailnet" if normalized.endswith(".ts.net") else "public"
     if address.is_loopback:
         return "loopback"
-    if isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network(
-        "100.64.0.0/10"
-    ):
+    if isinstance(address, ipaddress.IPv4Address) and address in _TAILSCALE_IPV4:
+        return "tailnet"
+    if isinstance(address, ipaddress.IPv6Address) and address in _TAILSCALE_IPV6:
         return "tailnet"
     return "public"
 
@@ -176,7 +180,10 @@ def build_support_report(
 
 
 def collect_cloud_check() -> CloudCheck:
-    credentials = _credentials()
+    try:
+        credentials = _credentials()
+    except ConfigError:
+        return CloudCheck("credentials_unreadable")
     if credentials is None:
         return CloudCheck("not_configured")
     return _fresh_cloud_check(credentials)
@@ -184,12 +191,17 @@ def collect_cloud_check() -> CloudCheck:
 
 def collect_support_report() -> SupportReport:
     credentials_file = credentials_path()
-    credentials = _credentials(path=credentials_file)
-    cloud = (
-        CloudCheck("not_configured")
-        if credentials is None
-        else _fresh_cloud_check(credentials)
-    )
+    try:
+        credentials = _credentials(path=credentials_file)
+    except ConfigError:
+        credentials = None
+        cloud = CloudCheck("credentials_unreadable")
+    else:
+        cloud = (
+            CloudCheck("not_configured")
+            if credentials is None
+            else _fresh_cloud_check(credentials)
+        )
     endpoint = _endpoint_class(credentials_file)
     operations = _operation_counts(credentials)
     return build_support_report(
@@ -224,10 +236,14 @@ def _fresh_cloud_check(credentials: Credentials) -> CloudCheck:
 
 
 def _credentials(*, path: Path | None = None) -> Credentials | None:
+    target = path or credentials_path()
     try:
-        return load_credentials(path=path)
-    except ConfigError:
+        target.lstat()
+    except FileNotFoundError:
         return None
+    except OSError as error:
+        raise ConfigError("Saved credentials are unreadable") from error
+    return load_credentials(path=target)
 
 
 def _endpoint_class(credentials_file: Path) -> EndpointClass | None:
