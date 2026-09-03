@@ -7,6 +7,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
@@ -1795,6 +1796,176 @@ def test_apply_session_cannot_settle_after_context_exit(
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None
     assert stored.state == "pending"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_authorize_apply_session_rejects_expired_operation(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        MemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else SQLiteJournal(
+            tmp_path / "journal.sqlite3", owner_public_key=public_key
+        )
+    )
+    expires_at = "2030-01-01T00:00:01+00:00"
+    operation = _with_manifest(
+        replace(
+            _operation(
+                f"op_expired_{journal_kind}",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            expires_at=expires_at,
+        ),
+        expires_at=expires_at,
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    with journal.authorize_apply_session_v2(
+        operation.operation_id,
+        authorization,
+        now=lambda: datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc),
+    ) as start:
+        assert not start.authorized
+        assert start.session is None
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None
+    assert stored.state == "stale"
+    assert stored.response == {
+        "state": "stale",
+        "instruction": "The owner approval window expired.",
+        "operation_id": operation.operation_id,
+    }
+
+
+def test_host_approval_rechecks_expiry_after_waiting_for_apply_owner(
+    tmp_path: Path,
+) -> None:
+    attempted = Event()
+
+    class WaitingSQLiteJournal(SQLiteJournal):
+        @contextmanager
+        def authorize_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            attempted.set()
+            with super().authorize_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                yield start
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = WaitingSQLiteJournal(
+        tmp_path / "journal.sqlite3", owner_public_key=public_key
+    )
+    expires_at = "2030-01-01T00:00:01+00:00"
+    operation = _with_manifest(
+        replace(
+            _operation(
+                "op_expiry_sqlite",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            expires_at=expires_at,
+        ),
+        expires_at=expires_at,
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    blocker = _with_manifest(
+        replace(
+            _operation(
+                "op_blocker_sqlite",
+                request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+            ),
+            account_id="other@example.com",
+        )
+    )
+    _inject_v2_operation(journal, blocker)
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    entered = Event()
+    release = Event()
+
+    def hold_owner() -> None:
+        with journal.apply_session_v2(blocker.operation_id) as session:
+            assert session is not None
+            entered.set()
+            release.wait(5)
+
+    holder = Thread(target=hold_owner)
+    holder.start()
+    assert entered.wait(5)
+    now = [datetime(2030, 1, 1, tzinfo=timezone.utc)]
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id=operation.account_id,
+        clock=lambda: now[0],
+    )
+    results: list[dict[str, object]] = []
+    approver = Thread(
+        target=lambda: results.append(
+            workspace.host_approve_v2(operation.operation_id, authorization)
+        )
+    )
+    approver.start()
+    assert attempted.wait(5)
+    now[0] = datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
+    release.set()
+    holder.join(5)
+    approver.join(5)
+
+    assert not holder.is_alive() and not approver.is_alive()
+    assert results == [
+        {
+            "state": "stale",
+            "instruction": "The owner approval window expired.",
+            "operation_id": operation.operation_id,
+        }
+    ]
+    assert library.apply_calls == 0
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
