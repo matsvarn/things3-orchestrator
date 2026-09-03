@@ -373,3 +373,40 @@ uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0
         version="0.9.1",
         required_kind="uv",
     ) == ["guide.md:4: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_multiline_commonmark_code_spans_are_checked(width: int) -> None:
+    delimiter = "`" * width
+    markdown = (
+        f"An old example used {delimiter}uv tool install\n"
+        '"git+https://github.com/matsvarn/'
+        f'things3-orchestrator.git@v0.8.0"{delimiter}.\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+@pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
+def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
+    opener = "```console" if mixed_closer.startswith("`") else "~~~console"
+    closer = "```" if mixed_closer.startswith("`") else "~~~"
+    markdown = f"""{opener}
+{mixed_closer}
+<!--
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"
+-->
+{closer}
+"""
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:4: uv install tag v0.8.0 differs from v0.9.1"]

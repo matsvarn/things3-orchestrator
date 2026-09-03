@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -27,7 +28,7 @@ from things_orchestrator.owner_authority import (
     verified_authorization,
     verify_owner_factor,
 )
-from things_orchestrator.v2 import SAFETY_POLICY_DIGEST
+from things_orchestrator.v2 import SAFETY_POLICY_DIGEST, OperationDraft
 from things_orchestrator.workspace import ThingsWorkspace
 
 
@@ -89,6 +90,31 @@ def _with_manifest(operation: V2Operation, **changes: object) -> V2Operation:
         manifest=manifest,
         manifest_hash=v2_manifest_hash(manifest),
     )
+
+
+def _inject_v2_operation(
+    journal: MemoryJournal | SQLiteJournal, operation: V2Operation
+) -> None:
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[operation.operation_id] = operation  # noqa: SLF001
+        journal._v2_times[operation.operation_id] = (  # noqa: SLF001
+            "2020-01-01T00:00:00+00:00",
+            None if operation.state in {"awaiting_owner", "pending"} else "2020-01-01T00:00:00+00:00",
+        )
+        return
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(operation),
+        )
+        connection.execute(
+            "INSERT INTO owner_operation_times_v2 VALUES (?,?,?)",
+            (
+                operation.operation_id,
+                "2020-01-01T00:00:00+00:00",
+                None if operation.state in {"awaiting_owner", "pending"} else "2020-01-01T00:00:00+00:00",
+            ),
+        )
 
 
 def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> None:
@@ -886,6 +912,298 @@ def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
 
     assert journal.authorize_v2(original.operation_id, authorization) == (False, [])
     assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("mutation", ["transition", "settle"])
+def test_every_journal_mutation_rechecks_canonical_ambiguity(
+    journal_kind: str, mutation: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{mutation}.sqlite3")
+    )
+    state = "awaiting_owner" if mutation == "transition" else "pending"
+    original = _with_manifest(
+        replace(
+            _operation(
+                "op_original",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state=state,
+            ),
+            account_id="Owner@Example.com",
+        )
+    )
+    assert journal.create_v2(
+        original, claim_fence=state == "pending"
+    )[0] == "created"
+    conflicting = _with_manifest(
+        replace(
+            _operation(
+                "op_conflicting",
+                request_id=original.request_id,
+                state=state,
+            ),
+            request_hash="sha256:conflicting-request",
+        )
+    )
+    _inject_v2_operation(journal, conflicting)
+
+    if mutation == "transition":
+        changed = journal.transition_v2(
+            original.operation_id,
+            expected="awaiting_owner",
+            state="stale",
+            response={"state": "stale"},
+        )
+    else:
+        changed = journal.settle_v2(
+            original.operation_id,
+            expected="pending",
+            state="applied",
+            response={"state": "applied"},
+            rows=[{"sequence": 1, "result": "applied"}],
+        )
+
+    assert changed is False
+    assert journal.get_v2_operation(original.operation_id) == original
+    assert journal.get_v2_operation(conflicting.operation_id) == conflicting
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_prune_preserves_active_tombstone_ambiguity_without_mutation(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "prune.sqlite3")
+    )
+    original = _with_manifest(
+        replace(
+            _operation(
+                "op_original",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            ),
+            account_id="Owner@Example.com",
+        )
+    )
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    assert journal.settle_v2(
+        original.operation_id,
+        expected="pending",
+        state="applied",
+        response={"state": "applied"},
+        rows=[{"sequence": 1, "result": "applied"}],
+    )
+    assert journal.prune_v2(now="2030-01-01T00:00:00+00:00") == 1
+    conflicting = _with_manifest(
+        replace(
+            _operation(
+                "op_conflicting",
+                request_id=original.request_id,
+                state="applied",
+            ),
+            request_hash="sha256:conflicting-request",
+            response={"state": "applied"},
+        )
+    )
+    _inject_v2_operation(journal, conflicting)
+    before_bytes = journal.path.read_bytes() if isinstance(journal, SQLiteJournal) else None
+    before_active = journal.get_v2_operation(conflicting.operation_id)
+
+    with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+        journal.prune_v2(now="2031-01-01T00:00:00+00:00")
+
+    assert journal.get_v2_operation(conflicting.operation_id) == before_active
+    if isinstance(journal, SQLiteJournal):
+        assert journal.path.read_bytes() == before_bytes
+        with sqlite3.connect(journal.path) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM owner_operations_v2"
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT count(*) FROM owner_tombstones_v2"
+            ).fetchone() == (1,)
+    else:
+        assert len(journal._v2_operations) == 1  # noqa: SLF001
+        assert len(journal._v2_tombstones) == 1  # noqa: SLF001
+
+
+def test_host_approval_rejects_conflict_inserted_after_authorization(
+    tmp_path: Path,
+) -> None:
+    class RacingJournal(MemoryJournal):
+        def authorize_v2(
+            self, operation_id: str, authorization: object
+        ) -> tuple[bool, list[str]]:
+            result = super().authorize_v2(operation_id, authorization)
+            if result[0]:
+                original = self._v2_operations[operation_id]  # noqa: SLF001
+                conflicting = _with_manifest(
+                    replace(
+                        original,
+                        account_id=original.account_id.lower(),
+                        operation_id="op_conflicting",
+                        request_hash="sha256:conflicting-request",
+                    )
+                )
+                _inject_v2_operation(self, conflicting)
+            return result
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = RacingJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        )
+    )
+    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    authorization = verified_authorization(
+        operation,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    library = CountingLibrary()
+
+    result = ThingsWorkspace(
+        library, journal=journal, account_id=operation.account_id
+    ).host_approve_v2(operation.operation_id, authorization)
+
+    assert result == {
+        "state": "rejected",
+        "code": "request_conflict",
+        "next_action": "correct_request",
+        "instruction": (
+            "Conflicting stored operations share this request_id. "
+            "No Cloud write was attempted."
+        ),
+    }
+    assert library.apply_calls == 0
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
+def test_apply_session_serializes_cloud_write_and_concurrent_retry(
+    journal_kind: str, entrypoint: str, tmp_path: Path
+) -> None:
+    class BlockingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.entered = Event()
+            self.release = Event()
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().apply(writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{entrypoint}.sqlite3")
+    )
+    library = BlockingLibrary()
+    operation_id: str | None = None
+    authorization: object = None
+    if entrypoint == "approve":
+        factor_dir = tmp_path / journal_kind
+        factor_dir.mkdir()
+        factor = factor_dir / "owner-factor.json"
+        enroll_owner_factor("correct horse battery staple", path=factor)
+        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+        journal = (
+            MemoryJournal(owner_public_key=public_key)
+            if journal_kind == "memory"
+            else SQLiteJournal(
+                tmp_path / f"{entrypoint}.sqlite3",
+                owner_public_key=public_key,
+            )
+        )
+        operation = _with_manifest(
+            _operation(
+                "op_approved",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            tool="things_update",
+            writes=[
+                {
+                    "action": "update",
+                    "uuid": "a",
+                    "kind": "task",
+                    "title": "B",
+                }
+            ],
+            touched=[["title"]],
+            before=[{"id": "task:a", "title": "A"}],
+            display_titles=["A"],
+        )
+        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        operation_id = operation.operation_id
+        authorization = verified_authorization(
+            operation,
+            action="approve",
+            passphrase="correct horse battery staple",
+            path=factor,
+        )
+        assert authorization is not None
+    workspace_one = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    )
+    workspace_two = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    )
+    results: list[dict[str, object]] = []
+    finished = Event()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    def invoke(workspace: ThingsWorkspace) -> None:
+        result = (
+            workspace.execute_v2(draft)
+            if entrypoint == "execute"
+            else workspace.host_approve_v2(operation_id or "", authorization)
+        )
+        results.append(result)
+
+    first = Thread(target=invoke, args=(workspace_one,))
+    first.start()
+    assert library.entered.wait(5)
+    second = Thread(target=invoke, args=(workspace_two,))
+    second.start()
+    finished.wait(0.1)
+    retry_waited = second.is_alive()
+    library.release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert retry_waited
+    assert library.apply_calls == 1
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert results[0]["operation_id"] == results[1]["operation_id"]
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
