@@ -350,6 +350,11 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                         (start, segment) for segment in _shell_segments(logical)
                     )
                     fragments = []
+                if line:
+                    commands.extend(
+                        (number, segment)
+                        for segment in _shell_segments(line)
+                    )
                 for code_start, code in inline:
                     commands.extend(
                         (code_start, segment)
@@ -469,7 +474,9 @@ def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
     return marker[0] == character and len(marker) >= minimum
 
 
-def _shell_segments(command: str) -> list[tuple[str, ...]]:
+def _shell_segments(
+    command: str, *, depth: int = 0
+) -> list[tuple[str, ...]]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
     lexer.commenters = "#"
     lexer.whitespace_split = True
@@ -488,7 +495,24 @@ def _shell_segments(command: str) -> list[tuple[str, ...]]:
             current.append(token)
     if current:
         result.append(tuple(current))
-    return result
+    if depth >= 4:
+        return result
+    expanded: list[tuple[str, ...]] = []
+    for segment in result:
+        expanded.append(segment)
+        payload = _shell_wrapper_payload(segment)
+        if payload is not None:
+            expanded.extend(_shell_segments(payload, depth=depth + 1))
+    return expanded
+
+
+def _shell_wrapper_payload(tokens: tuple[str, ...]) -> str | None:
+    if not tokens or PurePosixPath(tokens[0]).name not in {"bash", "sh", "zsh"}:
+        return None
+    for index, token in enumerate(tokens[1:], start=1):
+        if token in {"-c", "-lc"} and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return None
 
 
 def _client_config_command(tokens: tuple[str, ...]) -> tuple[str, ...] | None:
