@@ -14,6 +14,7 @@ from scripts.check_release import (
     install_tag_errors,
     instruction_errors,
     marketplace_errors,
+    shell_commands,
 )
 
 
@@ -1340,6 +1341,87 @@ def test_print_config_flags_are_not_joined_across_inline_code(
     assert instruction_errors(tmp_path) == [
         "guide.md:1: usable client config needs --show-secrets"
     ]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["\n", "# Heading\n"],
+    ids=["blank-line", "atx-heading"],
+)
+def test_outside_markdown_block_cannot_complete_required_install(
+    boundary: str,
+) -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n'
+        f"{boundary}"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["\n", "# Heading\n"],
+    ids=["blank-line", "atx-heading"],
+)
+def test_outside_markdown_block_cannot_complete_print_config(
+    boundary: str, tmp_path: Path
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex --show-secrets \\\n"
+        f"{boundary}"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "- list item",
+        "1. ordered item",
+        "> quote",
+        "---",
+    ],
+    ids=["unordered-list", "ordered-list", "blockquote", "thematic-break"],
+)
+def test_other_markdown_block_starts_flush_continuation_incomplete(
+    boundary: str,
+) -> None:
+    commands = shell_commands(f"uv tool install \\\n{boundary}\n")
+
+    assert commands[0].line == 1
+    assert commands[0].tokens == ("uv", "tool", "install")
+    assert commands[0].complete is False
+
+
+def test_shell_comment_inside_fence_can_complete_continuation() -> None:
+    markdown = (
+        "```console\n"
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n'
+        "# shell comment\n"
+        "```\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == []
 
 
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
