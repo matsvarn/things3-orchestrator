@@ -19,11 +19,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
-SECRET_CONFIG_COMMAND = re.compile(
-    r"\bthings-orchestrator\s+print-config\b"
-    r"(?=[^\n]*(?:--client(?:=|\s+)"
-    r"(?:codex|hermes|claude-code|cursor|cursor-cloud)\b))"
-)
 GIT_INSTALL_TAG = re.compile(
     r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
 )
@@ -285,17 +280,18 @@ def install_tag_errors(
             for token in tokens[codex_index + 4 :]
         ):
             found_required = found_required or required_kind == "codex"
-            reference = _option_value(tokens[codex_index + 4 :], "--ref")
-            if reference is None:
+            references = _option_values(tokens[codex_index + 4 :], "--ref")
+            if not references or any(reference is None for reference in references):
                 errors.append(
                     f"{source}:{number}: Codex marketplace install needs exact ref "
                     f"{expected}"
                 )
-            elif reference != expected:
-                errors.append(
-                    f"{source}:{number}: Codex marketplace ref {reference} differs "
-                    f"from {expected}"
-                )
+            errors.extend(
+                f"{source}:{number}: Codex marketplace ref {reference} differs "
+                f"from {expected}"
+                for reference in references
+                if reference is not None and reference != expected
+            )
     if not found_required:
         errors.append(f"{source}: missing {required_kind} install for {expected}")
     return errors
@@ -378,6 +374,19 @@ def _option_value(tokens: tuple[str, ...], option: str) -> str | None:
         if token == option and index + 1 < len(tokens):
             return tokens[index + 1]
     return None
+
+
+def _option_values(
+    tokens: tuple[str, ...], option: str
+) -> tuple[str | None, ...]:
+    values: list[str | None] = []
+    for index, token in enumerate(tokens):
+        if token.startswith(f"{option}="):
+            values.append(token.partition("=")[2] or None)
+        elif token == option:
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+            values.append(value if value and not value.startswith("-") else None)
+    return tuple(values)
 
 
 def instructions() -> None:
