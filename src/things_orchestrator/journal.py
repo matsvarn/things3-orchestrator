@@ -809,14 +809,15 @@ class SQLiteJournal:
         *,
         owner_public_key: bytes | None = None,
     ) -> None:
-        self.path = path if path is not None else journal_path()
+        requested_path = path if path is not None else journal_path()
         if owner_public_key is None:
             try:
                 owner_public_key = owner_public_key_path().read_bytes()
             except OSError:
                 owner_public_key = None
         self._owner_public_key = owner_public_key
-        _ensure_private_dir(self.path.parent)
+        _ensure_private_dir(requested_path.parent)
+        self.path = requested_path.resolve()
         self._canonical_path()
         with self._connect() as connection:
             connection.execute(
