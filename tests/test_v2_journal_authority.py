@@ -837,6 +837,57 @@ def test_owner_approval_rejects_ambiguous_canonical_request_before_cloud_io(
     assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        MemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3", owner_public_key=public_key)
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=False)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id=original.request_id,
+            state="awaiting_owner",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+    else:
+        with sqlite3.connect(journal.path) as connection:
+            connection.execute(
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                _v2_sql_values(conflicting),
+            )
+    authorization = verified_authorization(
+        original,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+
+    assert journal.authorize_v2(original.operation_id, authorization) == (False, [])
+    assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+
+
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
     journal = MemoryJournal()
     operation = _operation(
