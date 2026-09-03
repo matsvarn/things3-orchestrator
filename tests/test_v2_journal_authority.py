@@ -18,7 +18,7 @@ from things_orchestrator.journal import (
     v2_manifest_hash,
     v2_manifest_is_valid,
 )
-from things_orchestrator.library import MemoryLibrary, Record
+from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
 from things_orchestrator.owner_authority import (
     authorization_binding,
     enroll_owner_factor,
@@ -771,6 +771,70 @@ def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> No
 
     assert result["state"] == "rejected"
     assert journal.get_v2_operation(operation.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+
+
+def test_owner_approval_rejects_ambiguous_canonical_request_before_cloud_io(
+    tmp_path: Path,
+) -> None:
+    class CountingLibrary(MemoryLibrary):
+        refreshes = 0
+        apply_calls = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    factor = tmp_path / "owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = MemoryJournal(
+        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+            state="awaiting_owner",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=False)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id=original.request_id,
+            state="awaiting_owner",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+    authorization = verified_authorization(
+        original,
+        action="approve",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    library = CountingLibrary()
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        account_id="Owner@Example.com",
+    )
+
+    result = workspace.host_approve_v2(original.operation_id, authorization)
+
+    assert result == {
+        "state": "rejected",
+        "instruction": "Conflicting stored operations share this request_id.",
+    }
+    assert library.refreshes == 0
+    assert library.apply_calls == 0
+    assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:

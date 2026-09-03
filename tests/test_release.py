@@ -333,3 +333,43 @@ def test_html_comments_cannot_supply_the_required_install(markdown: str) -> None
         version="0.9.1",
         required_kind="uv",
     ) == ["guide.md: missing uv install for v0.9.1"]
+
+
+@pytest.mark.parametrize(
+    "inline",
+    [
+        "``uv tool install "
+        '"git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"``',
+        "``uv tool install "
+        '"git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0" '
+        "<!-- literal -->``",
+    ],
+)
+def test_commonmark_code_spans_are_checked_before_html_comments(
+    inline: str,
+) -> None:
+    markdown = f"An old example used {inline}.\n"
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+def test_fence_info_text_is_not_a_valid_closing_fence() -> None:
+    markdown = """```console
+```not-a-close
+<!--
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"
+-->
+```
+"""
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:4: uv install tag v0.8.0 differs from v0.9.1"]
