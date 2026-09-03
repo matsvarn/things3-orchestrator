@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.json_schema import SkipJsonSchema
 
 from .interface import ReadCall, TruncatedField
-from .journal import same_account_id
+from .journal import AmbiguousV2Request, same_account_id
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -888,10 +888,14 @@ class ThingsV2:
     def dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
         current = self.workspace._clock()
         if self._last_prune_date != current.date():
-            self.workspace._journal.prune_v2(
-                now=current.isoformat(), retention_days=7
-            )
-            self._last_prune_date = current.date()
+            try:
+                self.workspace._journal.prune_v2(
+                    now=current.isoformat(), retention_days=7
+                )
+            except AmbiguousV2Request:
+                pass
+            else:
+                self._last_prune_date = current.date()
         call = MODELS[name].model_validate(arguments)
         if isinstance(call, ViewCall):
             return self._view(call)

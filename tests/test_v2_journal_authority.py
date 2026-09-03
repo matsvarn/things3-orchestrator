@@ -1649,7 +1649,7 @@ def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> No
 
 def test_workspace_returns_persisted_winner_when_settlement_cas_loses() -> None:
     class LosingJournal(MemoryJournal):
-        def settle_v2(self, operation_id: str, **kwargs: object) -> bool:
+        def _settle_v2_locked(self, operation_id: str, **kwargs: object) -> bool:
             current = self._v2_operations[operation_id]  # noqa: SLF001
             self._v2_operations[operation_id] = replace(  # noqa: SLF001
                 current,

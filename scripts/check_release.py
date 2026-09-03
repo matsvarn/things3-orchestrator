@@ -304,6 +304,7 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     start = 1
     fence: tuple[str, int] | None = None
     in_html_comment = False
+    code_span: tuple[int, int, list[str]] | None = None
     for number, raw_line in enumerate(markdown.splitlines(), start=1):
         if fence is not None:
             line = raw_line.strip()
@@ -319,11 +320,11 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                 fence = None
                 continue
         else:
-            visible, inline, in_html_comment = _outside_fence_parts(
-                raw_line, in_html_comment=in_html_comment
+            marker = (
+                FENCE_OPEN.match(raw_line)
+                if code_span is None and not in_html_comment
+                else None
             )
-            line = visible.strip()
-            marker = FENCE_OPEN.match(raw_line)
             if marker is not None and not (
                 marker.group("marker").startswith("`")
                 and "`" in marker.group("info")
@@ -331,6 +332,13 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                 opening = marker.group("marker")
                 fence = (opening[0], len(opening))
                 continue
+            visible, inline, in_html_comment, code_span = _outside_fence_parts(
+                raw_line,
+                number=number,
+                in_html_comment=in_html_comment,
+                code_span=code_span,
+            )
+            line = visible.strip()
             if inline:
                 if fragments:
                     logical = " ".join(
@@ -340,11 +348,13 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                         (start, segment) for segment in _shell_segments(logical)
                     )
                     fragments = []
-                for code in inline:
+                for code_start, code in inline:
                     commands.extend(
-                        (number, segment)
+                        (code_start, segment)
                         for segment in _shell_segments(code.strip())
                     )
+                continue
+            if code_span is not None:
                 continue
         if not line and not fragments:
             continue
@@ -366,16 +376,35 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
 
 
 def _outside_fence_parts(
-    line: str, *, in_html_comment: bool
-) -> tuple[str, list[str], bool]:
+    line: str,
+    *,
+    number: int,
+    in_html_comment: bool,
+    code_span: tuple[int, int, list[str]] | None,
+) -> tuple[
+    str,
+    list[tuple[int, str]],
+    bool,
+    tuple[int, int, list[str]] | None,
+]:
     visible: list[str] = []
-    code: list[str] = []
+    code: list[tuple[int, str]] = []
     index = 0
+    if code_span is not None:
+        width, start_number, parts = code_span
+        closing = _code_span_close(line, 0, width)
+        if closing is None:
+            parts.append(line)
+            return "", code, in_html_comment, code_span
+        parts.append(line[:closing])
+        code.append((start_number, "\n".join(parts)))
+        index = closing + width
+        code_span = None
     while index < len(line):
         if in_html_comment:
             closing = line.find("-->", index)
             if closing < 0:
-                return "".join(visible), code, True
+                return "".join(visible), code, True, code_span
             in_html_comment = False
             index = closing + 3
             continue
@@ -389,15 +418,14 @@ def _outside_fence_parts(
                 width += 1
             closing = _code_span_close(line, index + width, width)
             if closing is not None:
-                code.append(line[index + width : closing])
+                code.append((number, line[index + width : closing]))
                 index = closing + width
                 continue
-            visible.append("`" * width)
-            index += width
-            continue
+            code_span = (width, number, [line[index + width :]])
+            break
         visible.append(line[index])
         index += 1
-    return "".join(visible), code, in_html_comment
+    return "".join(visible), code, in_html_comment, code_span
 
 
 def _code_span_close(line: str, start: int, width: int) -> int | None:
@@ -415,7 +443,7 @@ def _code_span_close(line: str, start: int, width: int) -> int | None:
 
 def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
     character, minimum = fence
-    match = re.fullmatch(r" {0,3}([`~]+)[ \t]*", line)
+    match = re.fullmatch(r" {0,3}(`+|~+)[ \t]*", line)
     if match is None:
         return False
     marker = match.group(1)

@@ -74,6 +74,7 @@ from .journal import (
     Journal,
     JsonDict,
     MemoryJournal,
+    V2ApplySession,
     V2Operation,
     V2State,
     same_account_id,
@@ -3640,54 +3641,86 @@ class ThingsWorkspace:
         writes: list[Write] | None = None,
         before: list[JsonDict | None] | None = None,
     ) -> JsonDict:
-        if not v2_manifest_is_valid(operation):
-            return self._invalid_v2_manifest(operation.operation_id)
-        writes = writes or [
-            _write_from_json(cast(dict[str, object], row))
-            for row in cast(list[object], operation.manifest["writes"])
-        ]
-        before = before or cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
-        failed = self._refresh(force=True)
-        if failed is not None:
-            return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
-        if not self._v2_preconditions_match(operation):
-            response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
-            rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
-            settled = self._journal.settle_v2(operation.operation_id, expected="pending", state="not_applied", response=response, rows=rows)
-            return response if settled else self._persisted_v2_outcome(operation.operation_id)
-        if self._writes_match(writes):
-            response = {
-                "state": "unchanged",
-                "code": "unchanged",
-                "next_action": "read_receipt",
-                "instruction": "The requested state was already current.",
-                "operation_id": operation.operation_id,
-            }
-            rows = self._v2_receipt_rows(operation, writes, before, "unchanged")
-            settled = self._journal.settle_v2(
-                operation.operation_id,
-                expected="pending",
-                state="unchanged",
-                response=response,
-                rows=rows,
+        del writes, before
+        with self._journal.apply_session_v2(operation.operation_id) as session:
+            if session is None:
+                try:
+                    current = self._journal.get_v2_operation(operation.operation_id)
+                    if current is not None:
+                        if not v2_manifest_is_valid(current):
+                            return self._invalid_v2_manifest(current.operation_id)
+                        resolved = self._journal.get_v2_request(
+                            current.account_id,
+                            current.api_version,
+                            current.request_id,
+                        )
+                        if (
+                            resolved is None
+                            or resolved.operation_id != current.operation_id
+                        ):
+                            return self._ambiguous_v2_request()
+                except AmbiguousV2Request:
+                    return self._ambiguous_v2_request()
+                return self._persisted_v2_outcome(operation.operation_id)
+            operation = session.operation
+            if not v2_manifest_is_valid(operation):
+                return self._invalid_v2_manifest(operation.operation_id)
+            writes = [
+                _write_from_json(cast(dict[str, object], row))
+                for row in cast(list[object], operation.manifest["writes"])
+            ]
+            before = cast(
+                list[JsonDict | None],
+                operation.manifest.get("before", [None] * len(writes)),
             )
-            return response if settled else self._persisted_v2_outcome(
-                operation.operation_id
-            )
-        try:
-            applied = self._library.apply(writes)
-        except CloudError:
             failed = self._refresh(force=True)
             if failed is not None:
                 return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
-            return self._reconcile_v2(operation, writes, before)
-        if not applied.read_back_verified:
-            failed = self._refresh(force=True)
-            if failed is not None:
-                return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
-        return self._reconcile_v2(operation, writes, before)
+            if not self._v2_preconditions_match(operation):
+                response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "A frozen precondition changed before the Cloud write.", "operation_id": operation.operation_id}
+                rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
+                settled = session.settle(
+                    state="not_applied", response=response, rows=rows
+                )
+                return response if settled else self._persisted_v2_outcome(operation.operation_id)
+            if self._writes_match(writes):
+                response = {
+                    "state": "unchanged",
+                    "code": "unchanged",
+                    "next_action": "read_receipt",
+                    "instruction": "The requested state was already current.",
+                    "operation_id": operation.operation_id,
+                }
+                rows = self._v2_receipt_rows(operation, writes, before, "unchanged")
+                settled = session.settle(
+                    state="unchanged", response=response, rows=rows
+                )
+                return response if settled else self._persisted_v2_outcome(
+                    operation.operation_id
+                )
+            try:
+                applied = self._library.apply(writes)
+            except CloudError:
+                failed = self._refresh(force=True)
+                if failed is not None:
+                    return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
+                return self._reconcile_v2(
+                    operation, writes, before, session=session
+                )
+            if not applied.read_back_verified:
+                failed = self._refresh(force=True)
+                if failed is not None:
+                    return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
+            return self._reconcile_v2(operation, writes, before, session=session)
 
-    def _reconcile_v2(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None]) -> JsonDict:
+    def _reconcile_v2(
+        self,
+        operation: V2Operation,
+        writes: list[Write],
+        before: list[JsonDict | None],
+        *,
+        session: V2ApplySession | None = None,
+    ) -> JsonDict:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
         matched = [self._writes_match([write]) for write in writes]
@@ -3730,12 +3763,18 @@ class ThingsWorkspace:
             "item_ids": item_ids,
         }
         rows = self._v2_receipt_rows(operation, writes, before, state)
-        settled = self._journal.settle_v2(
-            operation.operation_id,
-            expected="pending",
-            state=cast(Any, state),
-            response=response,
-            rows=rows,
+        settled = (
+            session.settle(
+                state=cast(Any, state), response=response, rows=rows
+            )
+            if session is not None
+            else self._journal.settle_v2(
+                operation.operation_id,
+                expected="pending",
+                state=cast(Any, state),
+                response=response,
+                rows=rows,
+            )
         )
         return (
             response if settled else self._persisted_v2_outcome(operation.operation_id)
