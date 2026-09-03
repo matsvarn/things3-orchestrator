@@ -1237,6 +1237,111 @@ def test_incomplete_operations_template_is_not_exempt(
     ) == [f"docs/operations.md:{line}: unsupported uv install command"]
 
 
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        'uv tool install \\\n```console\n'
+        '"git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1"\n```\n',
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" \\\n<!-- note -->\n',
+    ],
+    ids=["opening-fence", "single-line-comment"],
+)
+def test_markdown_boundary_cannot_complete_install_continuation(
+    markdown: str,
+) -> None:
+    errors = ["guide.md:1: unsupported uv install command"]
+    if markdown.startswith("uv tool install \\"):
+        errors.append("guide.md:3: unsupported uv install command")
+    errors.append("guide.md: missing uv install for v0.9.1")
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == errors
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "things-orchestrator print-config --client codex \\\n"
+        "```console\n--show-secrets\n```\n",
+        "things-orchestrator print-config --client codex --show-secrets \\\n"
+        "<!-- note -->\n",
+    ],
+    ids=["opening-fence", "single-line-comment"],
+)
+def test_markdown_boundary_cannot_supply_print_config_secret(
+    markdown: str, tmp_path: Path
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(markdown)
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "```console\n\n```\n",
+        "<!-- note -->\n",
+    ],
+    ids=["opening-fence", "single-line-comment"],
+)
+def test_markdown_boundary_cannot_complete_operations_template(
+    boundary: str,
+) -> None:
+    markdown = (
+        'uv tool install --force "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@<new-tag>" \\\n'
+        f"{boundary}"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("docs/operations.md"),
+        version="0.9.1",
+        required_kind=None,
+    ) == ["docs/operations.md:1: unsupported uv install command"]
+
+
+def test_visible_install_parts_are_not_joined_across_inline_code() -> None:
+    markdown = (
+        "uv tool install `NOT-A-SHELL-TOKEN` "
+        '"git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1"\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
+
+
+def test_print_config_flags_are_not_joined_across_inline_code(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex "
+        "`NOT-A-SHELL-TOKEN` --show-secrets\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
