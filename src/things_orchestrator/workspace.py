@@ -75,6 +75,7 @@ from .journal import (
     JsonDict,
     MemoryJournal,
     V2ApplySession,
+    V2ApplyState,
     V2Operation,
     V2State,
     same_account_id,
@@ -3734,6 +3735,7 @@ class ThingsWorkspace:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
         matched = [self._writes_match([write]) for write in writes]
+        state: V2ApplyState
         if all(matched):
             state = "applied"
         elif any(matched):
@@ -3774,14 +3776,12 @@ class ThingsWorkspace:
         }
         rows = self._v2_receipt_rows(operation, writes, before, state)
         settled = (
-            session.settle(
-                state=cast(Any, state), response=response, rows=rows
-            )
+            session.settle(state=state, response=response, rows=rows)
             if session is not None
             else self._journal.settle_v2(
                 operation.operation_id,
                 expected="pending",
-                state=cast(Any, state),
+                state=state,
                 response=response,
                 rows=rows,
             )

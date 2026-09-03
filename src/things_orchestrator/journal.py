@@ -41,6 +41,7 @@ V2State = Literal[
     "declined",
     "rejected",
 ]
+V2ApplyState = Literal["applied", "unchanged", "not_applied", "partial"]
 
 
 def account_id_key(account_id: str) -> str:
@@ -116,7 +117,7 @@ class V2ApplySession(Protocol):
     def settle(
         self,
         *,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
@@ -168,7 +169,7 @@ class Journal(Protocol):
     def authorize_apply_session_v2(
         self, operation_id: str, authorization: object
     ) -> ContextManager[V2AuthorizeApplyStart]: ...
-    def settle_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
+    def settle_v2(self, operation_id: str, *, expected: V2State, state: V2ApplyState, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
     def cutover_v1(self) -> JsonDict: ...
@@ -181,16 +182,22 @@ class _MemoryV2ApplySession:
     def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
         self._journal = journal
         self.operation = operation
+        self._active = True
+
+    def close(self) -> None:
+        self._active = False
 
     def settle(
         self,
         *,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
+        if not self._active:
+            return False
         return self._journal._settle_v2_locked(
             self.operation.operation_id,
             expected="pending",
@@ -210,16 +217,22 @@ class _SQLiteV2ApplySession:
     ) -> None:
         self._journal = journal
         self.operation = operation
+        self._active = True
+
+    def close(self) -> None:
+        self._active = False
 
     def settle(
         self,
         *,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
+        if not self._active:
+            return False
         return self._journal._settle_v2_owned(
             self.operation.operation_id,
             expected="pending",
@@ -383,7 +396,7 @@ class MemoryJournal:
         operation_id: str,
         *,
         expected: V2State,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
@@ -405,7 +418,7 @@ class MemoryJournal:
         operation_id: str,
         *,
         expected: V2State,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
@@ -543,7 +556,11 @@ class MemoryJournal:
             if operation is None or operation.state != "pending":
                 yield None
                 return
-            yield _MemoryV2ApplySession(self, operation)
+            session = _MemoryV2ApplySession(self, operation)
+            try:
+                yield session
+            finally:
+                session.close()
 
     @contextmanager
     def create_apply_session_v2(
@@ -560,7 +577,11 @@ class MemoryJournal:
                 and stored.state == "pending"
                 else None
             )
-            yield V2CreateApplyStart(outcome, stored, blockers, session)
+            try:
+                yield V2CreateApplyStart(outcome, stored, blockers, session)
+            finally:
+                if session is not None:
+                    session.close()
 
     @contextmanager
     def authorize_apply_session_v2(
@@ -580,7 +601,11 @@ class MemoryJournal:
                 if operation is not None and operation.state == "pending"
                 else None
             )
-            yield V2AuthorizeApplyStart(authorized, blockers, session)
+            try:
+                yield V2AuthorizeApplyStart(authorized, blockers, session)
+            finally:
+                if session is not None:
+                    session.close()
 
     def v2_receipt_page(
         self,
@@ -1200,7 +1225,11 @@ class SQLiteJournal:
             if request is None or request.operation_id != operation_id:
                 yield None
                 return
-            yield _SQLiteV2ApplySession(self, operation)
+            session = _SQLiteV2ApplySession(self, operation)
+            try:
+                yield session
+            finally:
+                session.close()
 
     @contextmanager
     def create_apply_session_v2(
@@ -1217,7 +1246,11 @@ class SQLiteJournal:
                 and stored.state == "pending"
                 else None
             )
-            yield V2CreateApplyStart(outcome, stored, blockers, session)
+            try:
+                yield V2CreateApplyStart(outcome, stored, blockers, session)
+            finally:
+                if session is not None:
+                    session.close()
 
     @contextmanager
     def authorize_apply_session_v2(
@@ -1245,14 +1278,18 @@ class SQLiteJournal:
                 if operation is not None and operation.state == "pending"
                 else None
             )
-            yield V2AuthorizeApplyStart(authorized, blockers, session)
+            try:
+                yield V2AuthorizeApplyStart(authorized, blockers, session)
+            finally:
+                if session is not None:
+                    session.close()
 
     def settle_v2(
         self,
         operation_id: str,
         *,
         expected: V2State,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
@@ -1274,7 +1311,7 @@ class SQLiteJournal:
         operation_id: str,
         *,
         expected: V2State,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
@@ -1317,7 +1354,7 @@ class SQLiteJournal:
         operation_id: str,
         *,
         expected: V2State,
-        state: V2State,
+        state: V2ApplyState,
         response: JsonDict,
         rows: list[JsonDict],
         authorization: object = None,
