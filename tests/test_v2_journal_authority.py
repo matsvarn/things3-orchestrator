@@ -1561,6 +1561,105 @@ with journal.create_apply_session_v2(operation, claim_fence=True) as start:
     assert library.apply_calls == 0
 
 
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_dispatch_marker_survives_apply_session_without_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "dispatch-marker.sqlite3")
+    )
+    operation = _operation(
+        "op_dispatch_marker",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    journal.create_v2(operation, claim_fence=True)
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        assert session.mark_dispatched() is True
+
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+
+def test_sqlite_process_death_after_dispatch_marker_keeps_uncertain_pending(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_dispatched_crash", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    path = tmp_path / "dispatched-crash.sqlite3"
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import os
+import sys
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
+    operation, claim_fence=True
+) as start:
+    assert start.session is not None
+    assert start.session.mark_dispatched()
+    os._exit(0)
+""",
+            str(path),
+            json.dumps(asdict(operation)),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert child.returncode == 0
+    journal = SQLiteJournal(path)
+    pending = journal.get_v2_operation(operation.operation_id)
+    assert pending is not None and pending.state == "pending"
+    assert pending.dispatch_started is True
+
+    class NoReplayLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = NoReplayLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    ).execute_v2(draft)
+
+    assert result["state"] == "pending"
+    assert result["code"] == "pending_unknown"
+    assert library.apply_calls == 0
+
+
 def test_sqlite_apply_owner_blocks_exact_retry_across_processes(
     tmp_path: Path,
 ) -> None:
@@ -2652,6 +2751,63 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None and stored.state == "not_applied"
     assert stored.authorization == authorization.record
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_dispatched_pending_refuses_signed_not_applied_settlement(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    factor = tmp_path / f"{journal_kind}-owner-factor.json"
+    enroll_owner_factor("correct horse battery staple", path=factor)
+    journal = (
+        MemoryJournal(
+            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
+        )
+        if journal_kind == "memory"
+        else SQLiteJournal(
+            tmp_path / "signed-dispatched.sqlite3",
+            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
+        )
+    )
+    operation = _with_manifest(
+        _operation(
+            "op_signed_dispatched",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        writes=[
+            {"action": "update", "uuid": "a", "kind": "task", "title": "New"}
+        ],
+        before=[{"id": "task:a", "title": "Old"}],
+        touched=[["title"]],
+        preconditions={"task:a": "frozen"},
+        display_titles=["Old"],
+    )
+    journal.create_v2(operation, claim_fence=True)
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        assert session.mark_dispatched() is True
+    authorization = verified_authorization(
+        operation,
+        action="settle_not_applied",
+        passphrase="correct horse battery staple",
+        path=factor,
+    )
+    assert authorization is not None
+    workspace = ThingsWorkspace(
+        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
+        journal=journal,
+        account_id=operation.account_id,
+    )
+
+    result = workspace.host_settle_not_applied_v2(
+        operation.operation_id, authorization
+    )
+
+    assert result["state"] == "pending"
+    assert result["code"] == "pending_unknown"
+    stored = journal.get_v2_operation(operation.operation_id)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
 
 
 def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> None:

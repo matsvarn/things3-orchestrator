@@ -1537,18 +1537,28 @@ def test_outcome_unknown_before_state_stays_pending_until_delayed_commit_appears
     assert first.state == "pending"
     assert first.code == "pending_unknown"
     assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+    immediate = ThingsV2(workspace).dispatch("things_update", call)
+
+    assert immediate.state == "pending"
+    assert immediate.code == "pending_unknown"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
 
     library.land_delayed_commit()
-    second = ThingsV2(workspace).dispatch("things_update", call)
+    settled = ThingsV2(workspace).dispatch("things_update", call)
 
-    assert second.state == "applied"
+    assert settled.state == "applied"
     assert library.apply_calls == 1
     stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
     assert stored is not None and stored.state == "applied"
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-def test_definitive_cloud_rejection_can_settle_not_applied(
+def test_cloud_error_after_dispatch_remains_pending_without_typed_rejection_proof(
     journal_kind: str, tmp_path: Path,
 ) -> None:
     class DefinitiveFailureLibrary(MemoryLibrary):
@@ -1581,10 +1591,12 @@ def test_definitive_cloud_rejection_can_settle_not_applied(
         },
     )
 
-    assert result.state == "not_applied"
+    assert result.state == "pending"
+    assert result.code == "pending_unknown"
     assert library.apply_calls == 1
     stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
-    assert stored is not None and stored.state == "not_applied"
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
 
 
 def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
