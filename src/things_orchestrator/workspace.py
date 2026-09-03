@@ -3748,7 +3748,13 @@ class ThingsWorkspace:
             failed = self._refresh(force=True)
             if failed is not None:
                 return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
-        return self._reconcile_v2(operation, writes, before, session=session)
+        return self._reconcile_v2(
+            operation,
+            writes,
+            before,
+            session=session,
+            provider_readback_final=applied.read_back_verified,
+        )
 
     def _reconcile_v2(
         self,
@@ -3757,6 +3763,7 @@ class ThingsWorkspace:
         before: list[JsonDict | None],
         *,
         session: V2ApplySession | None = None,
+        provider_readback_final: bool = False,
     ) -> JsonDict:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
@@ -3764,7 +3771,9 @@ class ThingsWorkspace:
         state: V2ApplyState
         if all(matched):
             state = "applied"
-        elif any(matched):
+        elif any(matched) and (
+            not operation.dispatch_started or provider_readback_final
+        ):
             state = "partial"
         elif not operation.dispatch_started and self._v2_current_equals_before(
             operation, writes, before
@@ -3954,9 +3963,25 @@ class ThingsWorkspace:
     def host_settle_not_applied_v2(self, operation_id: str, authorization: object) -> JsonDict:
         """Settle pending only when forced evidence proves no frozen write landed."""
 
+        try:
+            operation = self._unambiguous_host_operation_v2(operation_id)
+        except AmbiguousV2Request:
+            operation = None
+        if operation is None or operation.state != "pending":
+            return self._missing_pending_v2_target()
         with self._journal.apply_session_v2(operation_id) as session:
             if session is None:
-                return self._persisted_v2_outcome(operation_id)
+                return self._missing_pending_v2_target()
+            try:
+                guarded = self._unambiguous_host_operation_v2(operation_id)
+            except AmbiguousV2Request:
+                guarded = None
+            if (
+                guarded is None
+                or guarded.state != "pending"
+                or guarded.operation_id != session.operation.operation_id
+            ):
+                return self._missing_pending_v2_target()
             operation = session.operation
             if self._journal.verify_v2_authorization(operation, "settle_not_applied", authorization) is None:
                 return {"state": "rejected", "code": "validation_error", "next_action": "run_cli", "instruction": "Verified CLI authorization is required.", "operation_id": operation_id}
@@ -3978,6 +4003,15 @@ class ThingsWorkspace:
                 authorization=authorization, action="settle_not_applied",
             )
             return response if settled else self._persisted_v2_outcome(operation_id)
+
+    @staticmethod
+    def _missing_pending_v2_target() -> JsonDict:
+        return {
+            "state": "rejected",
+            "code": "missing_target",
+            "next_action": "correct_request",
+            "instruction": "That pending operation does not belong to this account.",
+        }
 
     def _v2_current_equals_before(
         self,
