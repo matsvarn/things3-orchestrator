@@ -1,28 +1,5 @@
 # Changelog
 
-## 0.9.1 - 2026-09-03
-
-### Added
-
-- `cloud-check` authenticates and folds Things Cloud history from a fresh
-  temporary cache, then prints only a fixed status and aggregate structural
-  counts.
-- `support-bundle` prints stable-schema JSON with value-free deployment,
-  contract, Cloud, service, endpoint-class, and operation-state diagnostics.
-
-### Changed
-
-- Hermes onboarding now emits native `hermes mcp add` and
-  `hermes skills install` commands with a release-pinned skill URL. Hermes
-  prompts for the bearer, so the command and shell history never contain it.
-- Release checks validate the repository marketplace, synchronize public
-  versions, and reject usable secret-bearing client commands that omit
-  `--show-secrets`.
-- Client and operations guides now distinguish same-host Codex stdio, remote
-  Codex HTTP, and native Hermes setup.
-- The existing repository marketplace path is now documented and validated for
-  same-host Codex stdio use without claiming an official marketplace listing.
-
 ## 0.9.0 - 2026-09-02
 
 ### Added

@@ -24,9 +24,6 @@ the protocol, block access, or disable an account. Use at your own risk.
 - Rotate the MCP bearer with `login --rotate-token` if a client configuration
   leaked. That token is not the Cloud password; still treat it as a
   secret.
-- Use `support-bundle` for issue diagnostics. It reports aggregate states and
-  fixed error classes without Things content, IDs, credentials, hostnames,
-  URLs, or raw journal rows. Inspect its JSON before sharing it.
 
 ## Do not
 

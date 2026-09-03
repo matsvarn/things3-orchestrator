@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tomllib
 from contextlib import contextmanager
 from hashlib import sha256
 from io import StringIO
@@ -536,35 +535,6 @@ def test_print_config_show_secrets_prints_bearer(
     assert "mcp_servers.things" in out
 
 
-@pytest.mark.parametrize("show_secrets", [False, True])
-def test_hermes_print_config_keeps_the_bearer_out_of_commands(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    show_secrets: bool,
-) -> None:
-    creds = _seed_credentials(tmp_path, token="private-bearer")
-    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    argv = ["print-config", "--client", "hermes"]
-    if show_secrets:
-        argv.append("--show-secrets")
-
-    main(argv)
-
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    if show_secrets:
-        assert "do not paste this into a shell" in captured.err
-        assert "private-bearer" in captured.err
-    else:
-        assert "private-bearer" not in combined
-        assert "Token is hidden" in captured.err
-    assert "private-bearer" not in captured.out
-    assert "hermes mcp add things" in captured.out
-    assert "hermes skills install" in captured.out
-    assert "prompts" in captured.err
-
-
 def test_caddy_config_stdout_is_directly_pipeable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -916,40 +886,6 @@ def test_serve_without_credentials_points_at_login(
     assert "THINGS_PASSWORD" not in err
 
 
-def test_cloud_check_prints_value_free_json_and_fails_on_non_ok(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    check = SimpleNamespace(
-        status="unreachable",
-        as_dict=lambda: {"status": "unreachable"},
-    )
-    monkeypatch.setattr("things_orchestrator.cli.collect_cloud_check", lambda: check)
-
-    with pytest.raises(SystemExit) as caught:
-        main(["cloud-check"])
-
-    assert caught.value.code == 1
-    assert json.loads(capsys.readouterr().out) == {"status": "unreachable"}
-
-
-def test_support_bundle_prints_only_the_diagnostics_report(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    report = SimpleNamespace(
-        to_json=lambda: '{"cloud_check":{"status":"ok"},"version":"0.9.1"}\n'
-    )
-    monkeypatch.setattr(
-        "things_orchestrator.cli.collect_support_report", lambda: report
-    )
-
-    main(["support-bundle"])
-
-    assert json.loads(capsys.readouterr().out) == {
-        "cloud_check": {"status": "ok"},
-        "version": "0.9.1",
-    }
-
-
 def test_server_binds_a_persistent_context_store_to_the_cloud_account(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1036,11 +972,10 @@ def test_obsolete_setup_and_hand_edited_service_template_are_removed() -> None:
 
 def test_readme_is_safe_to_publish() -> None:
     readme = (ROOT / "README.md").read_text()
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     assert "<this-repo>" not in readme
     assert "unofficial" in readme.lower()
     assert "uv tool install" in readme
-    assert f"@v{version}" in readme
+    assert "@v0.9.0" in readme
     assert "disable an account" in readme
     assert "SECURITY.md" in readme
     assert "MIT" in (ROOT / "LICENSE").read_text()
@@ -1110,7 +1045,6 @@ def test_parser_names_the_owner_commands() -> None:
     assert "things-orchestrator login" in help_text
     compact = help_text.replace("-\n", "-").replace("\n", " ")
     assert "doctor --wait" in compact
-    assert "print-config --client CLIENT --show-secrets" in compact
     with pytest.raises(SystemExit):
         build_parser().parse_args(["serve-http", "--host", "0.0.0.0"])
 

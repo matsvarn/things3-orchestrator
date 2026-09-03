@@ -1,4 +1,4 @@
-"""Owner command-line interface."""
+"""Owner commands: login, configure, serve, print-config, and doctor."""
 
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ from .config import (
 )
 from .context import SQLiteContextStore
 from .deployment import skill_path
-from .diagnostics import collect_cloud_check, collect_support_report
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .server import ThingsMCPServer
@@ -61,15 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Things Cloud MCP server with eight bounded v2 tools.",
         epilog=(
             "Install an exact Git tag, then run things-orchestrator login, "
-            "service install, doctor --wait, and print-config --client CLIENT "
-            "--show-secrets in a private terminal. "
+            "service install, doctor --wait, and print-config --client CLIENT. "
             "Clone development uses the same commands through uv run."
         ),
     )
     commands = parser.add_subparsers(
         dest="action",
         required=True,
-        metavar="COMMAND",
+        metavar="{login,configure,service,serve,serve-http,print-config,doctor,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}",
     )
     login = commands.add_parser(
         "login", help="store Things Cloud email and password (TTY only)"
@@ -159,14 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="public_url",
         default="",
         help="also verify this HTTPS origin or /mcp endpoint",
-    )
-    commands.add_parser(
-        "cloud-check",
-        help="read and fold current Cloud state, then print only aggregate counts",
-    )
-    commands.add_parser(
-        "support-bundle",
-        help="print value-free deployment diagnostics as stable-schema JSON",
     )
     commands.add_parser(
         "owner-factor", help="enroll the signed legacy-recovery passphrase"
@@ -274,15 +264,6 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         return
     if args.action == "doctor":
         _doctor(parser, wait=args.wait, public_url=args.public_url)
-        return
-    if args.action == "cloud-check":
-        check = collect_cloud_check()
-        print(json.dumps(check.as_dict(), sort_keys=True))
-        if check.status != "ok":
-            raise SystemExit(1)
-        return
-    if args.action == "support-bundle":
-        print(collect_support_report().to_json(), end="")
         return
     if args.action == "skill-path":
         print(skill_path())
@@ -441,6 +422,7 @@ def _print_config(
         rendered = render_client_config(
             kind,
             Endpoint(url, credentials.bearer),
+            skill_dir=skill_path(),
             show_secrets=show_secrets,
         )
     except ConfigError as error:
@@ -452,17 +434,11 @@ def _print_config(
             file=sys.stderr,
         )
     print(rendered.guidance, file=sys.stderr)
-    if kind is ClientKind.HERMES and show_secrets:
-        print(
-            "MCP bearer for the private Hermes prompt "
-            f"(do not paste this into a shell): {credentials.bearer.reveal()}",
-            file=sys.stderr,
-        )
     print(rendered.body, end="")
     if rendered.secondary_body is not None:
         print("Alternative JSON:", file=sys.stderr)
         print(rendered.secondary_body, end="")
-    if not show_secrets and kind is not ClientKind.CADDY:
+    if not show_secrets:
         print(
             "Token is hidden. Add --show-secrets only in a private terminal.",
             file=sys.stderr,

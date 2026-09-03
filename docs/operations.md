@@ -30,39 +30,14 @@ Install the new exact tag, refresh the service definition, and prove the running
 artifact:
 
 ```console
-uv tool install --force "git+https://github.com/matsvarn/things3-orchestrator.git@<new-tag>"
+uv tool install --force "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
 things-orchestrator service install
 things-orchestrator doctor --wait
 ```
 
-For rollback, replace `<new-tag>` with `<previous-tag>` and repeat the commands.
-Doctor fails with
+For rollback, repeat those commands with the previous tag. Doctor fails with
 `service: stale - restart` if the running commit differs from the installed
 commit.
-
-## Create value-free diagnostics
-
-Verify Cloud authentication and a fresh full-history fold without writing to
-Things or reusing the normal state cache:
-
-```console
-things-orchestrator cloud-check
-```
-
-The command returns only a fixed status and aggregate counts. It exits with
-status 1 when the Cloud read fails.
-
-Create a support report before filing an issue:
-
-```console
-things-orchestrator support-bundle
-```
-
-The JSON contains the installed version and commit, platform name, Python
-version, tool hashes, Cloud status and counts, endpoint class, service status,
-and operation-state counts when available. It omits account values, network
-locations, Things content and IDs, credentials, raw errors, and journal rows.
-Inspect the report before sharing it.
 
 ## Rotate the MCP bearer
 

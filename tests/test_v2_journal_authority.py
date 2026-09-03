@@ -13,7 +13,6 @@ from things_orchestrator.journal import (
     MemoryJournal,
     SQLiteJournal,
     V2Operation,
-    read_operation_state_counts,
     v2_manifest_hash,
     v2_manifest_is_valid,
 )
@@ -109,69 +108,6 @@ def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> 
     assert stored is None
     assert blockers == ["op_first"]
     assert second.get_v2_request(blocked.account_id, blocked.api_version, blocked.request_id) is None
-
-
-@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-def test_operation_state_counts_are_aggregate_and_account_scoped(
-    journal_kind: str, tmp_path: Path
-) -> None:
-    journal = (
-        MemoryJournal()
-        if journal_kind == "memory"
-        else SQLiteJournal(tmp_path / "journal.sqlite3")
-    )
-    pending = _operation(
-        "private-operation-id",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-    )
-    other_account = replace(
-        _operation(
-            "other-private-operation-id",
-            request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
-        ),
-        account_id="other@example.com",
-    )
-    other_account = _with_manifest(other_account, account_id="other@example.com")
-    journal.create_v2(pending, claim_fence=True)
-    journal.create_v2(other_account, claim_fence=True)
-    journal.save(
-        IntentRecord(
-            intent_id="private-legacy-id",
-            fingerprint="private-fingerprint",
-            state="stale",
-        )
-    )
-
-    assert journal.operation_state_counts("owner@example.com") == (
-        ("legacy.stale", 1),
-        ("v2.pending", 1),
-    )
-
-
-def test_read_operation_state_counts_does_not_migrate_an_old_journal(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "old.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE intents (intent_id TEXT PRIMARY KEY, state TEXT NOT NULL)"
-        )
-        connection.execute("INSERT INTO intents VALUES ('private-id', 'pending')")
-    before = path.read_bytes()
-
-    assert read_operation_state_counts(path, "owner@example.com") == (
-        ("legacy.pending", 1),
-    )
-
-    assert path.read_bytes() == before
-    with sqlite3.connect(path) as connection:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-    assert tables == {"intents"}
 
 
 def test_sqlite_terminal_settlement_rolls_back_state_and_receipts_together(tmp_path: Path) -> None:
