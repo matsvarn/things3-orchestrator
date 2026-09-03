@@ -1049,6 +1049,117 @@ def test_indirect_install_intent_is_rejected(
     ]
 
 
+def test_escaped_html_comment_opener_cannot_hide_stale_install() -> None:
+    markdown = r'''\<!--
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"
+-->
+'''
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+def test_escaped_html_comment_opener_cannot_hide_print_config(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "\\<!--\n"
+        "things-orchestrator print-config --client codex\n"
+        "-->\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:2: usable client config needs --show-secrets"
+    ]
+
+
+def test_variable_things_subcommand_with_client_intent_is_rejected(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        'things-orchestrator "$ACTION" --client codex --show-secrets\n'
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "command", "label"),
+    [
+        (
+            "uv",
+            'uv tool "$ACTION" "git+https://github.com/$ORG/$NAME.git@$TAG"',
+            "uv",
+        ),
+        (
+            "codex",
+            'codex plugin "$ACTION" "$ORG/$NAME" --ref "$TAG"',
+            "Codex marketplace",
+        ),
+        (
+            "codex",
+            'codex plugin marketplace "$ACTION" "$ORG/$NAME" --ref "$TAG"',
+            "Codex marketplace",
+        ),
+    ],
+)
+def test_variable_install_subcommand_is_rejected(
+    required_kind: str, command: str, label: str
+) -> None:
+    assert install_tag_errors(
+        command + "\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: unsupported {label} install command",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
+def test_metadata_scans_stale_install_in_recovery_guide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = check_release.ROOT / "docs/recovery.md"
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        text = original_read_text(path, *args, **kwargs)
+        if path == target:
+            return (
+                f'{text}\nuv tool install "git+https://github.com/matsvarn/'
+                'things3-orchestrator.git@v0.8.0"\n'
+            )
+        return text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    with pytest.raises(SystemExit, match="docs/recovery.md.*v0.8.0"):
+        check_release.metadata()
+
+
+def test_operations_release_template_is_an_exact_exemption() -> None:
+    markdown = (
+        'uv tool install --force "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@<new-tag>"\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("docs/operations.md"),
+        version="0.9.1",
+        required_kind=None,
+    ) == []
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
