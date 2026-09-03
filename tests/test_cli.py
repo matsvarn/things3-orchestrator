@@ -25,6 +25,12 @@ from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
 ROOT = Path(__file__).parents[1]
 
 
+@pytest.mark.parametrize("abbreviation", ["--cl", "--cli"])
+def test_parser_rejects_abbreviated_client_option(abbreviation: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["print-config", abbreviation, "codex"])
+
+
 class _TTYBuffer(StringIO):
     def isatty(self) -> bool:
         return True

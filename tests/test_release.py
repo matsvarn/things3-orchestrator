@@ -593,6 +593,77 @@ def test_echoed_install_never_counts_as_required() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("required_kind", "tag", "command", "label"),
+    [
+        (
+            "uv",
+            "v0.8.0",
+            "uv --quiet tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@{tag}"',
+            "uv",
+        ),
+        (
+            "uv",
+            "v0.9.1",
+            "uv --quiet tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@{tag}"',
+            "uv",
+        ),
+        (
+            "codex",
+            "v0.8.0",
+            "codex -c features.foo=false plugin marketplace add "
+            "matsvarn/things3-orchestrator --ref {tag}",
+            "Codex marketplace",
+        ),
+        (
+            "codex",
+            "v0.9.1",
+            "codex -c features.foo=false plugin marketplace add "
+            "matsvarn/things3-orchestrator --ref {tag}",
+            "Codex marketplace",
+        ),
+    ],
+)
+def test_noncanonical_direct_install_never_counts_as_required(
+    required_kind: str, tag: str, command: str, label: str
+) -> None:
+    assert install_tag_errors(
+        command.format(tag=tag) + "\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: unsupported {label} install command",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "--client caddy --client codex",
+        "--client=caddy --client hermes",
+        "--client caddy --client=cursor-cloud --show-secrets",
+        "--cl codex",
+        "--cli hermes",
+        "--show-secrets",
+    ],
+)
+def test_print_config_requires_one_exact_client_option(
+    arguments: str, tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(f"things-orchestrator print-config {arguments}\n")
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: print-config needs exactly one exact --client"
+    ]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
