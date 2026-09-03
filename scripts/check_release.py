@@ -321,12 +321,10 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
     lines = markdown.splitlines()
     for number, raw_line in enumerate(lines, start=1):
         if fence is not None:
-            line = raw_line.strip()
+            line = raw_line
             if _closes_fence(raw_line, fence):
                 if fragments:
-                    logical = " ".join(
-                        fragment for fragment in fragments if fragment
-                    )
+                    logical = "".join(fragments)
                     commands.extend(
                         ShellCommand(start, tokens)
                         for tokens in _shell_segments(logical)
@@ -354,18 +352,16 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 code_span=code_span,
                 future_lines=lines[number:],
             )
-            line = visible.strip()
+            line = visible
             if inline:
                 if fragments:
-                    logical = " ".join(
-                        fragment for fragment in fragments if fragment
-                    )
+                    logical = "".join(fragments)
                     commands.extend(
                         ShellCommand(start, tokens)
                         for tokens in _shell_segments(logical)
                     )
                     fragments = []
-                if line:
+                if line.strip():
                     commands.extend(
                         ShellCommand(number, tokens)
                         for tokens in _shell_segments(line)
@@ -378,23 +374,23 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 continue
             if code_span is not None:
                 continue
-        if not line and not fragments:
+        if not line.strip() and not fragments:
             continue
         if not fragments:
             start = number
         continued = line.endswith("\\")
-        fragments.append(line[:-1].rstrip() if continued else line)
+        fragments.append(line[:-1] if continued else line)
         if continued:
             continue
-        logical = " ".join(fragment for fragment in fragments if fragment)
+        logical = "".join(fragments)
         fragments = []
-        if not logical:
+        if not logical.strip():
             continue
         commands.extend(
             ShellCommand(start, tokens) for tokens in _shell_segments(logical)
         )
     if fragments:
-        logical = " ".join(fragment for fragment in fragments if fragment)
+        logical = "".join(fragments)
         commands.extend(
             ShellCommand(start, tokens) for tokens in _shell_segments(logical)
         )
