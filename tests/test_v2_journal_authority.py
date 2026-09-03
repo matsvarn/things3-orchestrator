@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
+import subprocess
+import sys
+from contextlib import contextmanager
+from dataclasses import asdict, replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
+from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import (
     IntentRecord,
     MemoryJournal,
@@ -860,7 +864,8 @@ def test_owner_approval_rejects_ambiguous_canonical_request_before_cloud_io(
     }
     assert library.refreshes == 0
     assert library.apply_calls == 0
-    assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+    stored = journal.get_v2_operation(original.operation_id)
+    assert stored is not None and stored.state == "awaiting_owner"
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
@@ -911,7 +916,8 @@ def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
     assert authorization is not None
 
     assert journal.authorize_v2(original.operation_id, authorization) == (False, [])
-    assert journal.get_v2_operation(original.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+    stored = journal.get_v2_operation(original.operation_id)
+    assert stored is not None and stored.state == "awaiting_owner"
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
@@ -1204,6 +1210,345 @@ def test_apply_session_serializes_cloud_write_and_concurrent_retry(
     assert library.apply_calls == 1
     assert [result["state"] for result in results] == ["applied", "applied"]
     assert results[0]["operation_id"] == results[1]["operation_id"]
+
+
+def test_pending_retry_reads_only_after_outcome_unknown_writer_exits(
+    tmp_path: Path,
+) -> None:
+    class LateCommitLibrary(MemoryLibrary):
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.apply_entered = Event()
+            self.allow_apply = Event()
+            self.retry_read_old_state = Event()
+            self.remote_applied = False
+            self.creator_refresh_failed = False
+
+        def refresh(self, *, force: bool = False) -> None:
+            if self.remote_applied:
+                if not self.creator_refresh_failed:
+                    self.creator_refresh_failed = True
+                    raise CloudError("outcome unavailable after remote commit")
+                return
+            if self.apply_entered.is_set():
+                self.retry_read_old_state.set()
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_entered.set()
+            assert self.allow_apply.wait(5)
+            super().apply(writes)
+            self.remote_applied = True
+            raise CloudError("connection lost after remote commit")
+
+    journal = SQLiteJournal(tmp_path / "outcome-unknown.sqlite3")
+    library = LateCommitLibrary()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+
+    def execute() -> None:
+        results.append(
+            ThingsWorkspace(
+                library, journal=journal, account_id="owner@example.com"
+            ).execute_v2(draft)
+        )
+
+    creator = Thread(target=execute)
+    creator.start()
+    assert library.apply_entered.wait(5)
+    retry = Thread(target=execute)
+    retry.start()
+    read_before_writer_exit = library.retry_read_old_state.wait(0.2)
+    library.allow_apply.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert not creator.is_alive() and not retry.is_alive()
+    assert read_before_writer_exit is False
+    assert [result["state"] for result in results] == ["pending", "applied"]
+    assert library.records["a"].title == "B"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
+def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
+    journal_kind: str, entrypoint: str, tmp_path: Path
+) -> None:
+    class PauseMixin:
+        def _initialize_pause(self) -> None:
+            self.pending_visible = Event()
+            self.release_creator = Event()
+
+        def _pause_creator(self) -> None:
+            self.pending_visible.set()
+            assert self.release_creator.wait(5)
+
+        def create_v2(self, *args: object, **kwargs: object) -> object:
+            result = super().create_v2(*args, **kwargs)  # type: ignore[misc]
+            if entrypoint == "execute" and result[0] == "created":
+                self._pause_creator()
+            return result
+
+        @contextmanager
+        def create_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            with super().create_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                if entrypoint == "execute" and start.outcome == "created":
+                    self._pause_creator()
+                yield start
+
+        def authorize_v2(self, *args: object, **kwargs: object) -> object:
+            result = super().authorize_v2(*args, **kwargs)  # type: ignore[misc]
+            if entrypoint == "approve" and result[0]:
+                self._pause_creator()
+            return result
+
+        @contextmanager
+        def authorize_apply_session_v2(
+            self, *args: object, **kwargs: object
+        ) -> object:
+            with super().authorize_apply_session_v2(  # type: ignore[misc]
+                *args, **kwargs
+            ) as start:
+                if entrypoint == "approve" and start.authorized:
+                    self._pause_creator()
+                yield start
+
+    class GapMemoryJournal(PauseMixin, MemoryJournal):
+        def __init__(self, *, owner_public_key: bytes | None = None) -> None:
+            super().__init__(owner_public_key=owner_public_key)
+            self._initialize_pause()
+
+    class GapSQLiteJournal(PauseMixin, SQLiteJournal):
+        def __init__(
+            self, path: Path, *, owner_public_key: bytes | None = None
+        ) -> None:
+            super().__init__(path, owner_public_key=owner_public_key)
+            self._initialize_pause()
+
+    class CountingLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    public_key: bytes | None = None
+    factor: Path | None = None
+    if entrypoint == "approve":
+        factor = tmp_path / "owner-factor.json"
+        enroll_owner_factor("correct horse battery staple", path=factor)
+        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
+    journal = (
+        GapMemoryJournal(owner_public_key=public_key)
+        if journal_kind == "memory"
+        else GapSQLiteJournal(
+            tmp_path / f"{entrypoint}.sqlite3", owner_public_key=public_key
+        )
+    )
+    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+    operation_id: str | None = None
+    authorization: object = None
+    if entrypoint == "approve":
+        operation = _with_manifest(
+            _operation(
+                "op_approved",
+                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                state="awaiting_owner",
+            ),
+            tool="things_update",
+            writes=[
+                {
+                    "action": "update",
+                    "uuid": "a",
+                    "kind": "task",
+                    "title": "B",
+                }
+            ],
+            touched=[["title"]],
+            before=[{"id": "task:a", "title": "A"}],
+            display_titles=["A"],
+        )
+        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        operation_id = operation.operation_id
+        assert factor is not None
+        authorization = verified_authorization(
+            operation,
+            action="approve",
+            passphrase="correct horse battery staple",
+            path=factor,
+        )
+        assert authorization is not None
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+
+    def invoke() -> None:
+        workspace = ThingsWorkspace(
+            library, journal=journal, account_id="owner@example.com"
+        )
+        results.append(
+            workspace.execute_v2(draft)
+            if entrypoint == "execute"
+            else workspace.host_approve_v2(operation_id or "", authorization)
+        )
+
+    creator = Thread(target=invoke)
+    creator.start()
+    assert journal.pending_visible.wait(5)
+    retry = Thread(target=invoke)
+    retry.start()
+    retry.join(0.2)
+    retry_finished_in_gap = not retry.is_alive()
+    journal.release_creator.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert not creator.is_alive() and not retry.is_alive()
+    assert retry_finished_in_gap is False
+    assert library.apply_calls == 1
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert library.records["a"].title == "B"
+
+
+def test_sqlite_apply_owner_outwaits_short_database_busy_timeout(
+    tmp_path: Path,
+) -> None:
+    class ShortTimeoutJournal(SQLiteJournal):
+        def _connect(self) -> sqlite3.Connection:
+            connection = super()._connect()
+            connection.execute("PRAGMA busy_timeout=25")
+            return connection
+
+    class BlockingLibrary(MemoryLibrary):
+        def __init__(self) -> None:
+            super().__init__([Record(uuid="a", kind="task", title="A")])
+            self.entered = Event()
+            self.release = Event()
+            self.apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().apply(writes)
+
+    journal = ShortTimeoutJournal(tmp_path / "short-timeout.sqlite3")
+    library = BlockingLibrary()
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def execute() -> None:
+        try:
+            results.append(
+                ThingsWorkspace(
+                    library, journal=journal, account_id="owner@example.com"
+                ).execute_v2(draft)
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    creator = Thread(target=execute)
+    creator.start()
+    assert library.entered.wait(5)
+    retry = Thread(target=execute)
+    retry.start()
+    retry.join(0.15)
+    retry_waited = retry.is_alive()
+    library.release.set()
+    creator.join(5)
+    retry.join(5)
+
+    assert retry_waited
+    assert errors == []
+    assert [result["state"] for result in results] == ["applied", "applied"]
+    assert library.apply_calls == 1
+
+
+def test_sqlite_process_death_keeps_pending_for_reconcile_without_replay(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_crash", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    path = tmp_path / "crash.sqlite3"
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import os
+import sys
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+journal = SQLiteJournal(Path(sys.argv[1]))
+with journal.create_apply_session_v2(operation, claim_fence=True) as start:
+    assert start.outcome == "created"
+    assert start.session is not None
+    os._exit(0)
+""",
+            str(path),
+            json.dumps(asdict(operation)),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert child.returncode == 0
+    journal = SQLiteJournal(path)
+    pending = journal.get_v2_operation(operation.operation_id)
+    assert pending is not None and pending.state == "pending"
+
+    class NoReplayLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    library = NoReplayLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsWorkspace(
+        library, journal=journal, account_id="owner@example.com"
+    ).execute_v2(draft)
+
+    assert result["state"] == "not_applied"
+    assert library.apply_calls == 0
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:

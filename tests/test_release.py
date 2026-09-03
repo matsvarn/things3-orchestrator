@@ -392,6 +392,38 @@ def test_multiline_commonmark_code_spans_are_checked(width: int) -> None:
     ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
 
 
+@pytest.mark.parametrize("opener", ["`", "``", "````"])
+def test_unmatched_backtick_runs_do_not_hide_install_commands(opener: str) -> None:
+    markdown = (
+        f"This unmatched delimiter is literal: {opener}\n"
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.8.0"\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+@pytest.mark.parametrize("opener", [r"\`", r"\``", r"\````"])
+def test_escaped_backtick_runs_do_not_hide_install_commands(opener: str) -> None:
+    markdown = (
+        f"This escaped delimiter is literal: {opener}\n"
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.8.0"\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
