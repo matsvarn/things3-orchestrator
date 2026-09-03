@@ -278,7 +278,9 @@ def install_tag_errors(
         number = shell_command.line
         tokens = shell_command.tokens
         raw = " ".join(tokens)
-        if _is_operations_release_template(tokens, source=source):
+        if shell_command.complete and _is_operations_release_template(
+            tokens, source=source
+        ):
             continue
         if _has_uv_install_intent(
             tokens
@@ -393,6 +395,15 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         ShellCommand(code_start, tokens)
                         for tokens in _shell_segments(code.strip())
                     )
+                continue
+            if fragments and (code_span is not None or in_html_comment):
+                fragments.append(line)
+                logical = "".join(fragments)
+                commands.extend(
+                    ShellCommand(start, tokens, complete=False)
+                    for tokens in _shell_segments(logical)
+                )
+                fragments = []
                 continue
             if code_span is not None and not line.strip() and not fragments:
                 continue
