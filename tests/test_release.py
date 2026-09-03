@@ -246,3 +246,59 @@ things-orchestrator print-config --client cursor && echo --show-secrets
         "guide.md:5: usable client config needs --show-secrets",
         "guide.md:6: usable client config needs --show-secrets",
     ]
+
+
+def test_inline_code_client_commands_require_show_secrets(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "Run `things-orchestrator print-config --client codex` on the host.\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "current_command", "stale_inline"),
+    [
+        (
+            "README.md",
+            'uv tool install "git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "`uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"`',
+        ),
+        (
+            "docs/clients.md",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1",
+            "`codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.8.0`",
+        ),
+    ],
+)
+def test_metadata_rejects_stale_install_tags_in_inline_code(
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    current_command: str,
+    stale_inline: str,
+) -> None:
+    target = check_release.ROOT / relative_path
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        text = original_read_text(path, *args, **kwargs)
+        if path == target:
+            assert current_command in text
+            return text.replace(
+                current_command,
+                f"{current_command}\nAn older example used {stale_inline}.",
+            )
+        return text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    with pytest.raises(SystemExit, match="v0.8.0"):
+        check_release.metadata()

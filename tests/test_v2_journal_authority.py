@@ -13,6 +13,7 @@ from things_orchestrator.journal import (
     MemoryJournal,
     SQLiteJournal,
     V2Operation,
+    _v2_sql_values,
     read_operation_state_counts,
     v2_manifest_hash,
     v2_manifest_is_valid,
@@ -153,6 +154,53 @@ def test_case_only_relogin_preserves_v2_idempotency_and_pending_fence(
     assert outcome == "blocked"
     assert stored is None
     assert blockers == ["op_original"]
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
+    journal_kind: str, tmp_path: Path
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    original = replace(
+        _operation(
+            "op_original",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        account_id="Owner@Example.com",
+    )
+    original = _with_manifest(original)
+    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    conflicting = replace(
+        _operation(
+            "op_conflicting",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        ),
+        request_hash="sha256:conflicting-request",
+    )
+    conflicting = _with_manifest(conflicting)
+    if isinstance(journal, MemoryJournal):
+        journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+    else:
+        with sqlite3.connect(journal.path) as connection:
+            connection.execute(
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                _v2_sql_values(conflicting),
+            )
+
+    for login in ("Owner@Example.com", "owner@example.com"):
+        with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+            journal.get_v2_request(login, original.api_version, original.request_id)
+
+    retry = _operation(
+        "op_retry",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+        journal.create_v2(retry, claim_fence=True)
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])

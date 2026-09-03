@@ -25,6 +25,7 @@ from things_orchestrator.server import ThingsMCPServer
 from things_orchestrator.v2 import (
     CaptureCall,
     CaptureDiscoveryCall,
+    OperationDraft,
     ProjectCapture,
     PublicResult,
     TaskCapture,
@@ -1513,9 +1514,9 @@ def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> Non
     class ReloginSession(MemoryLibrary):
         apply_calls = 0
 
-        def apply(self, writes: list[object]) -> object:
+        def apply(self, writes: list[Write]) -> ApplyResult:
             self.apply_calls += 1
-            return super().apply(writes)  # type: ignore[arg-type]
+            return super().apply(writes)
 
     journal = MemoryJournal()
     first_library = FirstSession()
@@ -1553,6 +1554,91 @@ def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> Non
     assert resumed.operation_id == pending.operation_id
     assert resumed.state == "not_applied"
     assert relogin_library.apply_calls == 0
+
+
+def test_ambiguous_casefolded_requests_reject_before_cloud_io() -> None:
+    class CountingLibrary(MemoryLibrary):
+        refreshes = 0
+        apply_calls = 0
+
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            return super().apply(writes)
+
+    arguments = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+    draft = OperationDraft.build(
+        "things_update",
+        REQUEST,
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+
+    def pending_operation(
+        account_id: str, operation_id: str, request_hash: str
+    ) -> V2Operation:
+        manifest = {
+            "version": "v1",
+            "account_id": account_id,
+            "api_version": "2",
+            "schema_version": "v2.0",
+            "request_hash": request_hash,
+            "tool": "things_update",
+            "preconditions": {},
+            "writes": [
+                {"action": "update", "uuid": "a", "kind": "task", "title": "B"}
+            ],
+            "touched": [["title"]],
+            "before": [{"id": "task:a", "title": "A"}],
+            "display_titles": ["A"],
+            "requires_owner": False,
+            "safety_policy_digest": "sha256:test",
+            "expires_at": None,
+        }
+        return V2Operation(
+            account_id=account_id,
+            api_version="2",
+            request_id=REQUEST,
+            request_hash=request_hash,
+            operation_id=operation_id,
+            tool="things_update",
+            state="pending",
+            manifest=manifest,
+            manifest_hash=v2_manifest_hash(manifest),
+            safety_policy_digest="sha256:test",
+        )
+
+    for login in ("Owner@Example.com", "owner@example.com"):
+        journal = MemoryJournal()
+        original = pending_operation(
+            "Owner@Example.com", "op_original", draft.request_hash
+        )
+        conflicting = pending_operation(
+            "owner@example.com", "op_conflicting", "sha256:conflicting"
+        )
+        journal._v2_operations = {  # noqa: SLF001
+            original.operation_id: original,
+            conflicting.operation_id: conflicting,
+        }
+        library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
+        result = ThingsV2(
+            ThingsWorkspace(
+                library,
+                journal=journal,
+                clock=lambda: NOW,
+                account_id=login,
+            )
+        ).dispatch("things_update", arguments)
+
+        assert result.state == "rejected"
+        assert result.code == "request_conflict"
+        assert result.operation_id is None
+        assert library.refreshes == 0
+        assert library.apply_calls == 0
 
 
 def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() -> None:
