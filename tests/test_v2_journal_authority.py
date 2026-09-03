@@ -1645,6 +1645,94 @@ with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
     assert library.apply_calls == 0
 
 
+def test_sqlite_apply_owner_is_shared_by_real_and_symlink_database_paths(
+    tmp_path: Path,
+) -> None:
+    draft = OperationDraft.build(
+        "things_update",
+        "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        {"items": [{"id": "task:a", "set": {"title": "B"}}]},
+    )
+    operation = _with_manifest(
+        replace(
+            _operation("op_symlink", request_id=draft.request_id),
+            request_hash=draft.request_hash,
+        ),
+        tool="things_update",
+        writes=[
+            {
+                "action": "update",
+                "uuid": "a",
+                "kind": "task",
+                "title": "B",
+            }
+        ],
+        touched=[["title"]],
+        before=[{"id": "task:a", "title": "A"}],
+        display_titles=["A"],
+    )
+    real_path = tmp_path / "real.sqlite3"
+    SQLiteJournal(real_path)
+    alias_path = tmp_path / "alias.sqlite3"
+    alias_path.symlink_to(real_path)
+    ready = tmp_path / "symlink-ready"
+    release = tmp_path / "symlink-release"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import time
+from pathlib import Path
+from things_orchestrator.journal import SQLiteJournal, V2Operation
+
+operation = V2Operation(**json.loads(sys.argv[2]))
+ready = Path(sys.argv[3])
+release = Path(sys.argv[4])
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
+    operation, claim_fence=True
+) as start:
+    assert start.outcome == "created"
+    ready.write_text("ready")
+    while not release.exists():
+        time.sleep(0.01)
+""",
+            str(real_path),
+            json.dumps(asdict(operation)),
+            str(ready),
+            str(release),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    for _attempt in range(500):
+        if ready.exists():
+            break
+        Event().wait(0.01)
+    assert ready.exists()
+    journal = SQLiteJournal(alias_path)
+    library = MemoryLibrary([Record(uuid="a", kind="task", title="A")])
+    results: list[dict[str, object]] = []
+    retry = Thread(
+        target=lambda: results.append(
+            ThingsWorkspace(
+                library, journal=journal, account_id="owner@example.com"
+            ).execute_v2(draft)
+        )
+    )
+    retry.start()
+    retry.join(0.2)
+    retry_waited = retry.is_alive()
+    release.write_text("release")
+    assert child.wait(timeout=5) == 0
+    retry.join(5)
+
+    assert retry_waited
+    assert not retry.is_alive()
+    assert results[0]["state"] == "not_applied"
+
+
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
     journal = MemoryJournal()
     operation = _operation(
