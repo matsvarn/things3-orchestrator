@@ -22,8 +22,7 @@ LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 GIT_INSTALL_TAG = re.compile(
     r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
 )
-INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
-FENCE = re.compile(r"\A(`{3,}|~{3,})")
+FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
 
@@ -303,12 +302,12 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     commands: list[tuple[int, tuple[str, ...]]] = []
     fragments: list[str] = []
     start = 1
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     in_html_comment = False
     for number, raw_line in enumerate(markdown.splitlines(), start=1):
         if fence is not None:
             line = raw_line.strip()
-            if line.startswith(fence):
+            if _closes_fence(raw_line, fence):
                 if fragments:
                     logical = " ".join(
                         fragment for fragment in fragments if fragment
@@ -320,15 +319,18 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                 fence = None
                 continue
         else:
-            visible, in_html_comment = _strip_html_comments(
+            visible, inline, in_html_comment = _outside_fence_parts(
                 raw_line, in_html_comment=in_html_comment
             )
             line = visible.strip()
-            marker = FENCE.match(line)
-            if marker is not None:
-                fence = marker.group(1)
+            marker = FENCE_OPEN.match(raw_line)
+            if marker is not None and not (
+                marker.group("marker").startswith("`")
+                and "`" in marker.group("info")
+            ):
+                opening = marker.group("marker")
+                fence = (opening[0], len(opening))
                 continue
-            inline = INLINE_CODE.findall(line)
             if inline:
                 if fragments:
                     logical = " ".join(
@@ -363,25 +365,61 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     return commands
 
 
-def _strip_html_comments(
+def _outside_fence_parts(
     line: str, *, in_html_comment: bool
-) -> tuple[str, bool]:
+) -> tuple[str, list[str], bool]:
     visible: list[str] = []
-    remaining = line
-    while remaining:
+    code: list[str] = []
+    index = 0
+    while index < len(line):
         if in_html_comment:
-            _hidden, marker, remaining = remaining.partition("-->")
-            if not marker:
-                return "".join(visible), True
+            closing = line.find("-->", index)
+            if closing < 0:
+                return "".join(visible), code, True
             in_html_comment = False
+            index = closing + 3
             continue
-        before, marker, after = remaining.partition("<!--")
-        visible.append(before)
-        if not marker:
-            break
-        in_html_comment = True
-        remaining = after
-    return "".join(visible), in_html_comment
+        if line.startswith("<!--", index):
+            in_html_comment = True
+            index += 4
+            continue
+        if line[index] == "`":
+            width = 1
+            while index + width < len(line) and line[index + width] == "`":
+                width += 1
+            closing = _code_span_close(line, index + width, width)
+            if closing is not None:
+                code.append(line[index + width : closing])
+                index = closing + width
+                continue
+            visible.append("`" * width)
+            index += width
+            continue
+        visible.append(line[index])
+        index += 1
+    return "".join(visible), code, in_html_comment
+
+
+def _code_span_close(line: str, start: int, width: int) -> int | None:
+    delimiter = "`" * width
+    index = start
+    while (index := line.find(delimiter, index)) >= 0:
+        before_is_tick = index > 0 and line[index - 1] == "`"
+        after = index + width
+        after_is_tick = after < len(line) and line[after] == "`"
+        if not before_is_tick and not after_is_tick:
+            return index
+        index = after
+    return None
+
+
+def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
+    character, minimum = fence
+    match = re.fullmatch(r" {0,3}([`~]+)[ \t]*", line)
+    if match is None:
+        return False
+    marker = match.group(1)
+    return marker[0] == character and len(marker) >= minimum
 
 
 def _shell_segments(command: str) -> list[tuple[str, ...]]:

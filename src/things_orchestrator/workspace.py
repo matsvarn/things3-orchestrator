@@ -3812,6 +3812,14 @@ class ThingsWorkspace:
     def host_get_operation_v2(self, operation_id: str) -> V2Operation | None:
         """Return an operation only when it belongs to this workspace account."""
 
+        try:
+            return self._unambiguous_host_operation_v2(operation_id)
+        except AmbiguousV2Request:
+            return None
+
+    def _unambiguous_host_operation_v2(
+        self, operation_id: str
+    ) -> V2Operation | None:
         operation = self._journal.get_v2_operation(operation_id)
         if (
             operation is None
@@ -3819,6 +3827,11 @@ class ThingsWorkspace:
             or not v2_manifest_is_valid(operation)
         ):
             return None
+        resolved = self._journal.get_v2_request(
+            operation.account_id, operation.api_version, operation.request_id
+        )
+        if resolved is None or resolved.operation_id != operation.operation_id:
+            raise AmbiguousV2Request()
         return operation
 
     @staticmethod
@@ -3987,10 +4000,14 @@ class ThingsWorkspace:
         )
 
     def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
-        operation = self._journal.get_v2_operation(operation_id)
-        if operation is None or not same_account_id(
-            operation.account_id, self._account_id
-        ):
+        try:
+            operation = self._unambiguous_host_operation_v2(operation_id)
+        except AmbiguousV2Request:
+            return {
+                "state": "rejected",
+                "instruction": "Conflicting stored operations share this request_id.",
+            }
+        if operation is None:
             return {"state": "rejected", "instruction": "That operation does not belong to this account."}
         if self._journal.verify_v2_authorization(operation, "approve", authorization) is None:
             return {"state": "rejected", "instruction": "Verified host authorization is required.", "operation_id": operation_id}
@@ -4015,10 +4032,12 @@ class ThingsWorkspace:
         return self._apply_v2(pending)
 
     def host_decline_v2(self, operation_id: str, authorization: object) -> bool:
-        operation = self._journal.get_v2_operation(operation_id)
+        try:
+            operation = self._unambiguous_host_operation_v2(operation_id)
+        except AmbiguousV2Request:
+            return False
         return bool(
             operation is not None
-            and same_account_id(operation.account_id, self._account_id)
             and self._journal.verify_v2_authorization(operation, "decline", authorization) is not None
             and self._journal.transition_v2(
                 operation_id,
@@ -4037,10 +4056,12 @@ class ThingsWorkspace:
     ) -> bool:
         from .v2 import SAFETY_POLICY_DIGEST
 
-        operation = self._journal.get_v2_operation(operation_id)
+        try:
+            operation = self._unambiguous_host_operation_v2(operation_id)
+        except AmbiguousV2Request:
+            return False
         return bool(
             operation is not None
-            and same_account_id(operation.account_id, self._account_id)
             and operation.safety_policy_digest != SAFETY_POLICY_DIGEST
             and self._journal.verify_v2_authorization(operation, resolution, authorization) is not None
             and self._journal.transition_v2(
