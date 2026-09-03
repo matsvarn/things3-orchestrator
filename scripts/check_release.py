@@ -21,8 +21,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 GIT_INSTALL_TAG = re.compile(
-    r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
+    r"\Agit\+https://github\.com/matsvarn/things3-orchestrator\.git@"
+    r"(?P<tag>v[^\s]+)\Z"
 )
+ANY_CODEX_TARGET = re.compile(r"[^\s'\"]+/things3-orchestrator(?!\.git)")
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
@@ -32,7 +34,6 @@ SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrat
 class ShellCommand:
     line: int
     tokens: tuple[str, ...]
-    direct: bool
 
 
 def fail(messages: list[str]) -> None:
@@ -240,44 +241,12 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
     sources = markdown_files() if root.resolve() == ROOT else sorted(root.rglob("*.md"))
     for source in sources:
         for shell_command in shell_commands(source.read_text()):
-            command = _client_config_command(shell_command.tokens)
-            if command is None:
-                joined = " ".join(shell_command.tokens)
-                if (
-                    "things-orchestrator print-config" in joined
-                    and _subsequence_index(
-                        shell_command.tokens,
-                        ("things-orchestrator", "print-config"),
-                    )
-                    is None
-                    and _shell_wrapper_payload(shell_command.tokens) is None
-                ):
-                    errors.append(
-                        f"{source.relative_to(root)}:{shell_command.line}: "
-                        "client config command must be direct"
-                    )
-                continue
-            client_values = _option_values(command[2:], "--client")
-            indirect = not shell_command.direct or command != shell_command.tokens
-            if indirect:
-                client = client_values[0] if len(client_values) == 1 else None
-                if (
-                    client
-                    in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}
-                    and "--show-secrets" not in command
-                ):
-                    message = "usable client config needs --show-secrets"
-                else:
-                    message = "client config command must be direct"
-            elif len(client_values) != 1 or client_values[0] is None:
-                message = "print-config needs exactly one exact --client"
-            elif (
-                client_values[0]
-                in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}
-                and "--show-secrets" not in command
+            if "things-orchestrator print-config" not in " ".join(
+                shell_command.tokens
             ):
-                message = "usable client config needs --show-secrets"
-            else:
+                continue
+            message = _print_config_error(shell_command.tokens)
+            if message is None:
                 continue
             errors.append(
                 f"{source.relative_to(root)}:{shell_command.line}: {message}"
@@ -295,87 +264,48 @@ def install_tag_errors(
     expected = f"v{version}"
     found_required = False
     errors: list[str] = []
+    seen_errors: set[str] = set()
     for shell_command in shell_commands(markdown):
         number = shell_command.line
         tokens = shell_command.tokens
-        wrapper_payload = _shell_wrapper_payload(tokens)
-        uv_target = any(
-            token.startswith("git+") and "things3-orchestrator" in token
-            for token in tokens
-        )
-        uv_index = _subsequence_index(tokens, ("uv", "tool", "install"))
-        if uv_index is not None and any(
-            "things3-orchestrator" in token for token in tokens[uv_index + 3 :]
-        ):
-            direct = shell_command.direct and uv_index == 0
-            if not direct:
-                errors.append(
-                    f"{source}:{number}: uv install command must be direct"
-                )
-            found_required = found_required or (required_kind == "uv" and direct)
-            tags = [
-                match.group("tag")
-                for token in tokens[uv_index + 3 :]
-                if (match := GIT_INSTALL_TAG.fullmatch(token)) is not None
-            ]
-            if not tags:
-                errors.append(
-                    f"{source}:{number}: uv install needs exact tag {expected}"
+        raw = " ".join(tokens)
+        if "things3-orchestrator.git" in raw:
+            tag = _exact_uv_install_tag(
+                tokens, allow_force=source == Path("docs/operations.md")
+            )
+            if tag is None:
+                _append_unique(
+                    errors,
+                    seen_errors,
+                    f"{source}:{number}: unsupported uv install command",
                 )
             else:
-                errors.extend(
-                    f"{source}:{number}: uv install tag {tag} differs from {expected}"
-                    for tag in tags
-                    if tag != expected
-                )
-        elif uv_target and wrapper_payload is None:
-            message = (
-                "unsupported uv install command"
-                if shell_command.direct
-                else "uv install command must be direct"
-            )
-            errors.append(
-                f"{source}:{number}: {message}"
-            )
+                found_required = found_required or required_kind == "uv"
+                if tag != expected:
+                    _append_unique(
+                        errors,
+                        seen_errors,
+                        f"{source}:{number}: uv install tag {tag} differs "
+                        f"from {expected}",
+                    )
 
-        codex_target = "matsvarn/things3-orchestrator" in tokens
-        codex_index = _subsequence_index(
-            tokens, ("codex", "plugin", "marketplace", "add")
-        )
-        if codex_index is not None and any(
-            token == "matsvarn/things3-orchestrator"
-            for token in tokens[codex_index + 4 :]
-        ):
-            direct = shell_command.direct and codex_index == 0
-            if not direct:
-                errors.append(
-                    f"{source}:{number}: Codex marketplace install command "
-                    "must be direct"
+        if ANY_CODEX_TARGET.search(raw) is not None:
+            reference = _exact_codex_install_ref(tokens)
+            if reference is None:
+                _append_unique(
+                    errors,
+                    seen_errors,
+                    f"{source}:{number}: unsupported Codex marketplace install command",
                 )
-            found_required = found_required or (
-                required_kind == "codex" and direct
-            )
-            references = _option_values(tokens[codex_index + 4 :], "--ref")
-            if not references or any(reference is None for reference in references):
-                errors.append(
-                    f"{source}:{number}: Codex marketplace install needs exact ref "
-                    f"{expected}"
-                )
-            errors.extend(
-                f"{source}:{number}: Codex marketplace ref {reference} differs "
-                f"from {expected}"
-                for reference in references
-                if reference is not None and reference != expected
-            )
-        elif codex_target and wrapper_payload is None:
-            message = (
-                "unsupported Codex marketplace install command"
-                if shell_command.direct
-                else "Codex marketplace install command must be direct"
-            )
-            errors.append(
-                f"{source}:{number}: {message}"
-            )
+            else:
+                found_required = found_required or required_kind == "codex"
+                if reference != expected:
+                    _append_unique(
+                        errors,
+                        seen_errors,
+                        f"{source}:{number}: Codex marketplace ref {reference} "
+                        f"differs from {expected}",
+                    )
     if not found_required:
         errors.append(f"{source}: missing {required_kind} install for {expected}")
     return errors
@@ -398,8 +328,8 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         fragment for fragment in fragments if fragment
                     )
                     commands.extend(
-                        ShellCommand(start, tokens, direct)
-                        for tokens, direct in _shell_segments(logical)
+                        ShellCommand(start, tokens)
+                        for tokens in _shell_segments(logical)
                     )
                     fragments = []
                 fence = None
@@ -431,19 +361,19 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         fragment for fragment in fragments if fragment
                     )
                     commands.extend(
-                        ShellCommand(start, tokens, direct)
-                        for tokens, direct in _shell_segments(logical)
+                        ShellCommand(start, tokens)
+                        for tokens in _shell_segments(logical)
                     )
                     fragments = []
                 if line:
                     commands.extend(
-                        ShellCommand(number, tokens, direct)
-                        for tokens, direct in _shell_segments(line)
+                        ShellCommand(number, tokens)
+                        for tokens in _shell_segments(line)
                     )
                 for code_start, code in inline:
                     commands.extend(
-                        ShellCommand(code_start, tokens, direct)
-                        for tokens, direct in _shell_segments(code.strip())
+                        ShellCommand(code_start, tokens)
+                        for tokens in _shell_segments(code.strip())
                     )
                 continue
             if code_span is not None:
@@ -461,14 +391,12 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
         if not logical:
             continue
         commands.extend(
-            ShellCommand(start, tokens, direct)
-            for tokens, direct in _shell_segments(logical)
+            ShellCommand(start, tokens) for tokens in _shell_segments(logical)
         )
     if fragments:
         logical = " ".join(fragment for fragment in fragments if fragment)
         commands.extend(
-            ShellCommand(start, tokens, direct)
-            for tokens, direct in _shell_segments(logical)
+            ShellCommand(start, tokens) for tokens in _shell_segments(logical)
         )
     return commands
 
@@ -565,16 +493,14 @@ def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
     return marker[0] == character and len(marker) >= minimum
 
 
-def _shell_segments(
-    command: str, *, depth: int = 0, direct: bool = True
-) -> list[tuple[tuple[str, ...], bool]]:
+def _shell_segments(command: str) -> list[tuple[str, ...]]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
     lexer.commenters = "#"
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError:
-        return []
+        return [(command,)]
     result: list[tuple[str, ...]] = []
     current: list[str] = []
     for token in tokens:
@@ -586,74 +512,100 @@ def _shell_segments(
             current.append(token)
     if current:
         result.append(tuple(current))
-    if depth >= 4:
-        return [(segment, direct) for segment in result]
-    expanded: list[tuple[tuple[str, ...], bool]] = []
-    for segment in result:
-        expanded.append((segment, direct))
-        payload = _shell_wrapper_payload(segment)
-        if payload is not None:
-            expanded.extend(
-                _shell_segments(payload, depth=depth + 1, direct=False)
-            )
-    return expanded
+    return result
 
 
-def _shell_wrapper_payload(tokens: tuple[str, ...]) -> str | None:
-    if not tokens:
+def _exact_uv_install_tag(
+    tokens: tuple[str, ...], *, allow_force: bool
+) -> str | None:
+    if tokens[:3] != ("uv", "tool", "install"):
         return None
-    shell_index = 0
-    if PurePosixPath(tokens[0]).name == "env":
-        shell_index = 1
-        while shell_index < len(tokens) and (
-            tokens[shell_index].startswith("-")
-            or "=" in tokens[shell_index]
-        ):
-            shell_index += 1
-    if shell_index >= len(tokens) or PurePosixPath(
-        tokens[shell_index]
-    ).name not in {"bash", "sh", "zsh"}:
+    arguments = tokens[3:]
+    if allow_force and len(arguments) == 2 and arguments[0] == "--force":
+        target = arguments[1]
+    elif len(arguments) == 1:
+        target = arguments[0]
+    else:
         return None
-    for index, token in enumerate(
-        tokens[shell_index + 1 :], start=shell_index + 1
-    ):
-        if token.startswith("-") and "c" in token[1:] and index + 1 < len(tokens):
-            return tokens[index + 1]
+    match = GIT_INSTALL_TAG.fullmatch(target)
+    return match.group("tag") if match is not None else None
+
+
+def _exact_codex_install_ref(tokens: tuple[str, ...]) -> str | None:
+    prefix = (
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "matsvarn/things3-orchestrator",
+        "--ref",
+    )
+    if len(tokens) != 7 or tokens[:6] != prefix or not tokens[6].startswith("v"):
+        return None
+    return tokens[6]
+
+
+def _print_config_error(tokens: tuple[str, ...]) -> str | None:
+    if tokens[:2] != ("things-orchestrator", "print-config"):
+        return "unsupported print-config command"
+    clients: list[str | None] = []
+    show_secrets = 0
+    urls = 0
+    unsupported = False
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("--client="):
+            clients.append(token.partition("=")[2] or None)
+        elif token == "--client":
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+            if value is None or value.startswith("-"):
+                clients.append(None)
+            else:
+                clients.append(value)
+                index += 1
+        elif token == "--show-secrets":
+            show_secrets += 1
+        elif token.startswith("--url="):
+            urls += 1
+            unsupported = unsupported or not token.partition("=")[2]
+        elif token == "--url":
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+            if value is None or value.startswith("-"):
+                unsupported = True
+            else:
+                urls += 1
+                index += 1
+        else:
+            unsupported = True
+        index += 1
+
+    if len(clients) != 1 or clients[0] is None:
+        return "print-config needs exactly one exact --client"
+    client = clients[0]
+    supported = {
+        "caddy",
+        "claude-code",
+        "codex",
+        "cursor",
+        "cursor-cloud",
+        "hermes",
+    }
+    if client not in supported:
+        return "unsupported print-config client"
+    if unsupported or show_secrets > 1 or urls > 1:
+        return "unsupported print-config command"
+    if client != "caddy" and show_secrets != 1:
+        return "usable client config needs --show-secrets"
     return None
 
 
-def _client_config_command(tokens: tuple[str, ...]) -> tuple[str, ...] | None:
-    start = _subsequence_index(tokens, ("things-orchestrator", "print-config"))
-    if start is None:
-        return None
-    return tokens[start:]
-
-
-def _subsequence_index(
-    tokens: tuple[str, ...], expected: tuple[str, ...]
-) -> int | None:
-    width = len(expected)
-    return next(
-        (
-            index
-            for index in range(len(tokens) - width + 1)
-            if tokens[index : index + width] == expected
-        ),
-        None,
-    )
-
-
-def _option_values(
-    tokens: tuple[str, ...], option: str
-) -> tuple[str | None, ...]:
-    values: list[str | None] = []
-    for index, token in enumerate(tokens):
-        if token.startswith(f"{option}="):
-            values.append(token.partition("=")[2] or None)
-        elif token == option:
-            value = tokens[index + 1] if index + 1 < len(tokens) else None
-            values.append(value if value and not value.startswith("-") else None)
-    return tuple(values)
+def _append_unique(
+    errors: list[str], seen: set[str], message: str
+) -> None:
+    if message not in seen:
+        errors.append(message)
+        seen.add(message)
 
 
 def instructions() -> None:

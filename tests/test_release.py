@@ -150,7 +150,7 @@ things-orchestrator print-config \\
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "current_command", "stale_command"),
+    ("relative_path", "current_command", "stale_command", "error"),
     [
         (
             "README.md",
@@ -158,6 +158,7 @@ things-orchestrator print-config \\
             'things3-orchestrator.git@v0.9.1"',
             'uv tool install "git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"',
+            "v0.8.0",
         ),
         (
             "docs/clients.md",
@@ -165,6 +166,7 @@ things-orchestrator print-config \\
             "--ref v0.9.1",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref v0.8.0",
+            "v0.8.0",
         ),
         (
             "docs/clients.md",
@@ -172,6 +174,7 @@ things-orchestrator print-config \\
             "--ref v0.9.1",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref=v0.8.0",
+            "unsupported Codex marketplace install command",
         ),
     ],
 )
@@ -180,6 +183,7 @@ def test_metadata_rejects_each_stale_install_tag(
     relative_path: str,
     current_command: str,
     stale_command: str,
+    error: str,
 ) -> None:
     target = check_release.ROOT / relative_path
     original_read_text = Path.read_text
@@ -193,7 +197,7 @@ def test_metadata_rejects_each_stale_install_tag(
 
     monkeypatch.setattr(Path, "read_text", read_text)
 
-    with pytest.raises(SystemExit, match="v0.8.0"):
+    with pytest.raises(SystemExit, match=error):
         check_release.metadata()
 
 
@@ -207,7 +211,8 @@ def test_one_marketplace_command_cannot_hide_a_conflicting_ref() -> None:
     )
 
     assert errors == [
-        "guide.md:1: Codex marketplace ref v0.8.0 differs from v0.9.1"
+        "guide.md:1: unsupported Codex marketplace install command",
+        "guide.md: missing codex install for v0.9.1",
     ]
 
 
@@ -336,17 +341,27 @@ def test_html_comments_cannot_supply_the_required_install(markdown: str) -> None
 
 
 @pytest.mark.parametrize(
-    "inline",
+    ("inline", "expected"),
     [
-        "``uv tool install "
-        '"git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"``',
-        "``uv tool install "
-        '"git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0" '
-        "<!-- literal -->``",
+        (
+            "``uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"``',
+            ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"],
+        ),
+        (
+            "``uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0" <!-- literal -->``',
+            [
+                "guide.md:1: unsupported uv install command",
+                "guide.md: missing uv install for v0.9.1",
+            ],
+        ),
     ],
 )
 def test_commonmark_code_spans_are_checked_before_html_comments(
-    inline: str,
+    inline: str, expected: list[str],
 ) -> None:
     markdown = f"An old example used {inline}.\n"
 
@@ -355,7 +370,7 @@ def test_commonmark_code_spans_are_checked_before_html_comments(
         source=Path("guide.md"),
         version="0.9.1",
         required_kind="uv",
-    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+    ) == expected
 
 
 def test_fence_info_text_is_not_a_valid_closing_fence() -> None:
@@ -435,7 +450,10 @@ def test_visible_install_command_is_checked_beside_inline_code() -> None:
         source=Path("guide.md"),
         version="0.9.1",
         required_kind="uv",
-    ) == ["guide.md:1: uv install tag v0.8.0 differs from v0.9.1"]
+    ) == [
+        "guide.md:1: unsupported uv install command",
+        "guide.md: missing uv install for v0.9.1",
+    ]
 
 
 def test_visible_print_config_is_checked_beside_inline_code(
@@ -447,7 +465,7 @@ def test_visible_print_config_is_checked_beside_inline_code(
     )
 
     assert instruction_errors(tmp_path) == [
-        "guide.md:1: usable client config needs --show-secrets"
+        "guide.md:1: unsupported print-config command"
     ]
 
 
@@ -458,7 +476,7 @@ def test_shell_wrapper_cannot_hide_unsafe_print_config(tmp_path: Path) -> None:
     )
 
     assert instruction_errors(tmp_path) == [
-        "guide.md:1: usable client config needs --show-secrets"
+        "guide.md:1: unsupported print-config command"
     ]
 
 
@@ -476,7 +494,7 @@ def test_shell_wrapper_variants_cannot_hide_unsafe_print_config(
     guide.write_text(f"{wrapper}\n")
 
     assert instruction_errors(tmp_path) == [
-        "guide.md:1: usable client config needs --show-secrets"
+        "guide.md:1: unsupported print-config command"
     ]
 
 
@@ -490,7 +508,7 @@ def test_safe_but_wrapped_print_config_is_not_an_approved_command(
     )
 
     assert instruction_errors(tmp_path) == [
-        "guide.md:1: client config command must be direct"
+        "guide.md:1: unsupported print-config command"
     ]
 
 
@@ -533,34 +551,31 @@ def test_shell_wrapper_cannot_hide_stale_install(
         version="0.9.1",
         required_kind=required_kind,
     ) == [
-        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
-        "install command must be direct",
-        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
-        f"{'install tag' if required_kind == 'uv' else 'ref'} v0.8.0 differs from v0.9.1",
+        f"guide.md:1: unsupported "
+        f"{required_kind if required_kind == 'uv' else 'Codex marketplace'} "
+        "install command",
         f"guide.md: missing {required_kind} install for v0.9.1",
     ]
 
 
 @pytest.mark.parametrize(
-    ("required_kind", "wrapper", "mismatch"),
+    ("required_kind", "wrapper"),
     [
         (
             "uv",
             "env sh -c 'uv tool install "
             '"git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"\'',
-            "uv install tag v0.8.0 differs from v0.9.1",
         ),
         (
             "codex",
             "env bash -xc 'codex plugin marketplace add "
             "matsvarn/things3-orchestrator --ref v0.8.0'",
-            "Codex marketplace ref v0.8.0 differs from v0.9.1",
         ),
     ],
 )
 def test_wrapped_install_is_reported_but_never_counts_as_required(
-    required_kind: str, wrapper: str, mismatch: str
+    required_kind: str, wrapper: str
 ) -> None:
     assert install_tag_errors(
         f"{wrapper}\n",
@@ -568,9 +583,9 @@ def test_wrapped_install_is_reported_but_never_counts_as_required(
         version="0.9.1",
         required_kind=required_kind,
     ) == [
-        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
-        "install command must be direct",
-        f"guide.md:1: {mismatch}",
+        f"guide.md:1: unsupported "
+        f"{required_kind if required_kind == 'uv' else 'Codex marketplace'} "
+        "install command",
         f"guide.md: missing {required_kind} install for v0.9.1",
     ]
 
@@ -588,7 +603,7 @@ def test_echoed_install_never_counts_as_required() -> None:
         version="0.9.1",
         required_kind="uv",
     ) == [
-        "guide.md:1: uv install command must be direct",
+        "guide.md:1: unsupported uv install command",
         "guide.md: missing uv install for v0.9.1",
     ]
 
