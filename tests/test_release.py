@@ -11,6 +11,7 @@ import scripts.check_release as check_release
 from scripts.check_release import (
     archive_skill_mismatches,
     archive_versions,
+    install_tag_errors,
     instruction_errors,
     marketplace_errors,
 )
@@ -194,6 +195,20 @@ def test_metadata_rejects_each_stale_install_tag(
 
     with pytest.raises(SystemExit, match="v0.8.0"):
         check_release.metadata()
+
+
+def test_one_marketplace_command_cannot_hide_a_conflicting_ref() -> None:
+    errors = install_tag_errors(
+        "codex plugin marketplace add matsvarn/things3-orchestrator "
+        "--ref v0.9.1 --ref=v0.8.0\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="codex",
+    )
+
+    assert errors == [
+        "guide.md:1: Codex marketplace ref v0.8.0 differs from v0.9.1"
+    ]
 
 
 def test_non_command_historical_release_tags_are_allowed(
