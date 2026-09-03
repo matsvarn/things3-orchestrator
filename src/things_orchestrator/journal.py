@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_bytes
-from threading import Lock, RLock
+from threading import Lock, RLock, get_ident
 from typing import Callable, ContextManager, Iterator, Literal, Protocol, cast, overload
 
 from cryptography.exceptions import InvalidSignature
@@ -201,14 +201,34 @@ class Journal(Protocol):
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
 
 
-class _MemoryV2ApplySession:
-    def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
-        self._journal = journal
+class _OwnedV2ApplySession:
+    def __init__(self, operation: V2Operation) -> None:
         self.operation = operation
         self._active = True
+        self._owner_pid = os.getpid()
+        self._owner_thread_id = get_ident()
+        self._lifecycle_lock = Lock()
 
     def close(self) -> None:
-        self._active = False
+        with self._lifecycle_lock:
+            self._active = False
+
+    def _settle_owned(self, settle: Callable[[], bool]) -> bool:
+        if (
+            os.getpid() != self._owner_pid
+            or get_ident() != self._owner_thread_id
+        ):
+            return False
+        with self._lifecycle_lock:
+            if not self._active:
+                return False
+            return settle()
+
+
+class _MemoryV2ApplySession(_OwnedV2ApplySession):
+    def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
+        super().__init__(operation)
+        self._journal = journal
 
     def settle(
         self,
@@ -219,31 +239,27 @@ class _MemoryV2ApplySession:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        if not self._active:
-            return False
-        return self._journal._settle_v2_locked(
-            self.operation.operation_id,
-            expected="pending",
-            state=state,
-            response=response,
-            rows=rows,
-            authorization=authorization,
-            action=action,
+        return self._settle_owned(
+            lambda: self._journal._settle_v2_locked(
+                self.operation.operation_id,
+                expected="pending",
+                state=state,
+                response=response,
+                rows=rows,
+                authorization=authorization,
+                action=action,
+            )
         )
 
 
-class _SQLiteV2ApplySession:
+class _SQLiteV2ApplySession(_OwnedV2ApplySession):
     def __init__(
         self,
         journal: SQLiteJournal,
         operation: V2Operation,
     ) -> None:
+        super().__init__(operation)
         self._journal = journal
-        self.operation = operation
-        self._active = True
-
-    def close(self) -> None:
-        self._active = False
 
     def settle(
         self,
@@ -254,16 +270,16 @@ class _SQLiteV2ApplySession:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        if not self._active:
-            return False
-        return self._journal._settle_v2_owned(
-            self.operation.operation_id,
-            expected="pending",
-            state=state,
-            response=response,
-            rows=rows,
-            authorization=authorization,
-            action=action,
+        return self._settle_owned(
+            lambda: self._journal._settle_v2_owned(
+                self.operation.operation_id,
+                expected="pending",
+                state=state,
+                response=response,
+                rows=rows,
+                authorization=authorization,
+                action=action,
+            )
         )
 
 
