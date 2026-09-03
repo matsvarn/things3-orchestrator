@@ -40,7 +40,8 @@ Keep one production server and one stable model Interface.
   a release gate. It persists request IDs before mutation and passes only after
   receipt and Trash read-back.
 - `cli.py` is the owner-facing seam: `login`, `configure`, `service`,
-  `serve-http`, `print-config`, and `doctor`. Production installs use an exact
+  `serve-http`, `print-config`, `cloud-check`, `support-bundle`, and `doctor`.
+  Production installs use an exact
   Git tag through `uv tool install`; clone development uses the same commands
   through `uv run`. `login` keeps the existing bearer unless
   `--rotate-token`. `print-config --client` writes nothing and prints one

@@ -5,7 +5,12 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-from scripts.check_release import archive_skill_mismatches, archive_versions
+from scripts.check_release import (
+    archive_skill_mismatches,
+    archive_versions,
+    instruction_errors,
+    marketplace_errors,
+)
 
 
 def test_archive_versions_read_built_package_metadata(tmp_path: Path) -> None:
@@ -42,4 +47,75 @@ def test_archive_skill_mismatches_reports_missing_and_changed_files(
     assert archive_skill_mismatches(wheel, source=skill) == [
         "changed skill file: SKILL.md",
         "missing skill file: extra.md",
+    ]
+
+
+def test_repository_marketplace_points_at_a_valid_local_plugin(tmp_path: Path) -> None:
+    marketplace = tmp_path / ".agents/plugins/marketplace.json"
+    marketplace.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin/.codex-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        '{"name":"things-orchestrator","version":"0.9.1"}\n'
+    )
+    marketplace.write_text(
+        """{
+  "name": "things-orchestrator",
+  "interface": {"displayName": "Things Orchestrator"},
+  "plugins": [{
+    "name": "things-orchestrator",
+    "source": {"source": "local", "path": "./plugin"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Productivity"
+  }]
+}
+"""
+    )
+
+    assert marketplace_errors(tmp_path) == []
+
+
+def test_repository_marketplace_rejects_paths_outside_the_repository(
+    tmp_path: Path,
+) -> None:
+    marketplace = tmp_path / ".agents/plugins/marketplace.json"
+    marketplace.parent.mkdir(parents=True)
+    marketplace.write_text(
+        """{
+  "name": "things-orchestrator",
+  "interface": {"displayName": "Things Orchestrator"},
+  "plugins": [{
+    "name": "things-orchestrator",
+    "source": {"source": "local", "path": "./../private-plugin"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Productivity"
+  }]
+}
+"""
+    )
+
+    assert marketplace_errors(tmp_path) == [
+        "marketplace plugin things-orchestrator path leaves the repository"
+    ]
+
+
+def test_secret_bearing_client_commands_require_show_secrets(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        """# Connect
+
+things-orchestrator print-config --client codex
+things-orchestrator print-config --client hermes
+things-orchestrator print-config --client caddy
+things-orchestrator print-config --client cursor --show-secrets
+things-orchestrator print-config --url https://example.com --client claude-code
+things-orchestrator print-config --client=cursor-cloud
+"""
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:3: usable client config needs --show-secrets",
+        "guide.md:4: usable client config needs --show-secrets",
+        "guide.md:7: usable client config needs --show-secrets",
+        "guide.md:8: usable client config needs --show-secrets",
     ]

@@ -55,6 +55,8 @@ jobs:
         run: uv run python scripts/check_release.py metadata
       - name: Check local Markdown links
         run: uv run python scripts/check_release.py links
+      - name: Check public client commands
+        run: uv run python scripts/check_release.py instructions
       - name: Build release archives
         run: uv build
       - name: Inspect release archive allowlists

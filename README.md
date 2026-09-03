@@ -21,17 +21,22 @@ HTTP service. A single Mac uses loopback. A remote host adds Tailscale Serve or
 Caddy for TLS.
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.0"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
-things-orchestrator print-config --client codex
+things-orchestrator print-config --client codex --show-secrets
 ```
 
 See [Install](docs/install.md) for the Mac, private VPS, tailnet, and public
 HTTPS paths. Then use the compact [client table](docs/clients.md). The serving
 host keeps the Things Cloud password; clients receive only the MCP URL and
 bearer.
+
+For same-host Codex, the repository also contains a self-distributed plugin.
+It is not an official marketplace listing. For Hermes, `print-config` emits
+native setup commands and Hermes prompts for the bearer. See
+[Connect a client](docs/clients.md) for both paths.
 
 ## Use the v2 tools
 
@@ -68,6 +73,8 @@ a Project also completes its open action descendants in the same frozen
 operation, excluding structural headings and hidden repeat templates.
 RT2 repeat facts are read-only. The server rejects RT2 schedule, repeat, and
 lifecycle writes instead of guessing at an unproven Cloud payload.
+
+Four short examples are in [Workflow recipes](docs/workflows.md).
 
 The server force-refreshes Things Cloud on the first mutation request and
 freezes a private manifest. It never rebases that operation onto newer state.

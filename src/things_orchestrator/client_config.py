@@ -6,7 +6,7 @@ import json
 import shlex
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
 
 from .config import ConfigError, McpBearer, McpUrl
 
@@ -38,9 +38,46 @@ def render_client_config(
     client: ClientKind,
     endpoint: Endpoint,
     *,
-    skill_dir: Path,
     show_secrets: bool,
 ) -> RenderedClientConfig:
+    if client is ClientKind.HERMES:
+        try:
+            release = version("things-orchestrator")
+        except PackageNotFoundError:
+            release = "unknown"
+        add_server = " ".join(
+            shlex.quote(part)
+            for part in (
+                "hermes",
+                "mcp",
+                "add",
+                "things",
+                "--url",
+                str(endpoint.url),
+                "--auth",
+                "header",
+            )
+        )
+        install_skill = " ".join(
+            shlex.quote(part)
+            for part in (
+                "hermes",
+                "skills",
+                "install",
+                "https://raw.githubusercontent.com/matsvarn/"
+                f"things3-orchestrator/v{release}/plugin/skills/"
+                "things-orchestrator/SKILL.md",
+                "--yes",
+            )
+        )
+        return RenderedClientConfig(
+            client,
+            f"{add_server}\n{install_skill}\n",
+            "Run both commands one at a time. Hermes prompts for the MCP bearer "
+            "privately and tests the MCP connection. The skill URL is pinned to "
+            f"v{release}.",
+        )
+
     token = endpoint.bearer.reveal() if show_secrets else "<mcp_token>"
     authorization = f"Bearer {token}"
     if client is ClientKind.CODEX:
@@ -54,25 +91,6 @@ def render_client_config(
             client,
             body,
             "Merge this block into ~/.codex/config.toml.",
-        )
-    if client is ClientKind.HERMES:
-        body = (
-            "mcp_servers:\n"
-            "  things:\n"
-            f"    url: {json.dumps(str(endpoint.url))}\n"
-            "    headers:\n"
-            f"      Authorization: {json.dumps(authorization)}\n"
-            "    tools:\n"
-            "      resources: false\n"
-            "      prompts: false\n"
-            "skills:\n"
-            "  external_dirs:\n"
-            f"    - {json.dumps(str(skill_dir))}\n"
-        )
-        return RenderedClientConfig(
-            client,
-            body,
-            "Merge this YAML into the active Hermes profile.",
         )
     if client is ClientKind.CLAUDE_CODE:
         command = " ".join(

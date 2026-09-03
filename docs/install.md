@@ -6,10 +6,14 @@ URL and bearer.
 
 You need [uv](https://docs.astral.sh/uv/) and Things Cloud enabled in Things 3.
 The optional client-side curl acceptance line also needs `jq` on that client.
+This project uses an unsupported Things Cloud protocol and impersonates a
+Things Mac client. Cultured Code can change the protocol, block access, or
+disable an account. Read [Security](../SECURITY.md) before login.
+
 Install an exact Git tag:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.0"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
 ```
 
 Run the next commands in a private terminal. `login` verifies the Things Cloud
@@ -44,6 +48,11 @@ things-orchestrator print-config --client hermes --show-secrets
 `service install` writes a systemd system unit for the current user and starts
 it. It may ask for `sudo`. The unit executes the resolved console script,
 contains no credentials, and restarts after failure.
+
+Run the two commands printed by `print-config` one at a time. Paste the
+separately printed bearer at Hermes's private prompt, never into a shell.
+Hermes adds the authorization scheme; the command lines never contain the
+secret.
 
 ## Private tailnet client
 
