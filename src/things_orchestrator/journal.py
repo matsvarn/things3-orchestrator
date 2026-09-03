@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hmac
 import json
 import os
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_bytes
-from threading import RLock
+from threading import Lock, RLock
 from typing import ContextManager, Iterator, Literal, Protocol, cast, overload
 
 from cryptography.exceptions import InvalidSignature
@@ -43,8 +44,6 @@ V2State = Literal[
 
 
 def account_id_key(account_id: str) -> str:
-    """Return the stable local identity used for one Cloud account."""
-
     return account_id.strip().casefold()
 
 
@@ -112,8 +111,6 @@ class IntentRecord:
 
 
 class V2ApplySession(Protocol):
-    """One exclusive pending-operation window spanning Cloud I/O and settlement."""
-
     operation: V2Operation
 
     def settle(
@@ -125,6 +122,21 @@ class V2ApplySession(Protocol):
         authorization: object = None,
         action: str | None = None,
     ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class V2CreateApplyStart:
+    outcome: Literal["created", "existing", "conflict", "blocked"]
+    operation: V2Operation | None
+    blockers: list[str]
+    session: V2ApplySession | None
+
+
+@dataclass(frozen=True, slots=True)
+class V2AuthorizeApplyStart:
+    authorized: bool
+    blockers: list[str]
+    session: V2ApplySession | None
 
 
 class Journal(Protocol):
@@ -150,6 +162,12 @@ class Journal(Protocol):
     def apply_session_v2(
         self, operation_id: str
     ) -> ContextManager[V2ApplySession | None]: ...
+    def create_apply_session_v2(
+        self, operation: V2Operation, *, claim_fence: bool
+    ) -> ContextManager[V2CreateApplyStart]: ...
+    def authorize_apply_session_v2(
+        self, operation_id: str, authorization: object
+    ) -> ContextManager[V2AuthorizeApplyStart]: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
@@ -188,13 +206,10 @@ class _SQLiteV2ApplySession:
     def __init__(
         self,
         journal: SQLiteJournal,
-        connection: sqlite3.Connection,
         operation: V2Operation,
     ) -> None:
         self._journal = journal
-        self._connection = connection
         self.operation = operation
-        self.settled = False
 
     def settle(
         self,
@@ -205,8 +220,7 @@ class _SQLiteV2ApplySession:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        changed = self._journal._settle_v2_connection(
-            self._connection,
+        return self._journal._settle_v2_owned(
             self.operation.operation_id,
             expected="pending",
             state=state,
@@ -215,8 +229,10 @@ class _SQLiteV2ApplySession:
             authorization=authorization,
             action=action,
         )
-        self.settled = self.settled or changed
-        return changed
+
+
+_SQLITE_APPLY_LOCKS_GUARD = Lock()
+_SQLITE_APPLY_LOCKS: dict[str, RLock] = {}
 
 
 class MemoryJournal:
@@ -528,6 +544,43 @@ class MemoryJournal:
                 yield None
                 return
             yield _MemoryV2ApplySession(self, operation)
+
+    @contextmanager
+    def create_apply_session_v2(
+        self, operation: V2Operation, *, claim_fence: bool
+    ) -> Iterator[V2CreateApplyStart]:
+        with self._lock:
+            outcome, stored, blockers = self.create_v2(
+                operation, claim_fence=claim_fence
+            )
+            session = (
+                _MemoryV2ApplySession(self, stored)
+                if outcome in {"created", "existing"}
+                and stored is not None
+                and stored.state == "pending"
+                else None
+            )
+            yield V2CreateApplyStart(outcome, stored, blockers, session)
+
+    @contextmanager
+    def authorize_apply_session_v2(
+        self, operation_id: str, authorization: object
+    ) -> Iterator[V2AuthorizeApplyStart]:
+        with self._lock:
+            authorized, blockers = self.authorize_v2(
+                operation_id, authorization
+            )
+            operation = (
+                self._v2_operation_for_mutation_locked(operation_id)
+                if authorized
+                else self._v2_operations.get(operation_id)
+            )
+            session = (
+                _MemoryV2ApplySession(self, operation)
+                if operation is not None and operation.state == "pending"
+                else None
+            )
+            yield V2AuthorizeApplyStart(authorized, blockers, session)
 
     def v2_receipt_page(
         self,
@@ -900,6 +953,24 @@ class SQLiteJournal:
         return read_operation_state_counts(self.path, account_id)
 
     def create_v2(
+        self,
+        operation: V2Operation,
+        *,
+        claim_fence: bool,
+        receipt_rows: list[JsonDict] | None = None,
+    ) -> tuple[
+        Literal["created", "existing", "conflict", "blocked"],
+        V2Operation | None,
+        list[str],
+    ]:
+        with self._apply_owner():
+            return self._create_v2_owned(
+                operation,
+                claim_fence=claim_fence,
+                receipt_rows=receipt_rows,
+            )
+
+    def _create_v2_owned(
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
         if not v2_manifest_is_valid(operation):
@@ -956,6 +1027,26 @@ class SQLiteJournal:
             connection.close()
 
     def transition_v2(
+        self,
+        operation_id: str,
+        *,
+        expected: V2State,
+        state: V2State,
+        response: JsonDict | None = None,
+        authorization: object = None,
+        resolution: Literal["accepted_as_is", "superseded"] | None = None,
+    ) -> bool:
+        with self._apply_owner():
+            return self._transition_v2_owned(
+                operation_id,
+                expected=expected,
+                state=state,
+                response=response,
+                authorization=authorization,
+                resolution=resolution,
+            )
+
+    def _transition_v2_owned(
         self,
         operation_id: str,
         *,
@@ -1037,6 +1128,12 @@ class SQLiteJournal:
             connection.close()
 
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]:
+        with self._apply_owner():
+            return self._authorize_v2_owned(operation_id, authorization)
+
+    def _authorize_v2_owned(
+        self, operation_id: str, authorization: object
+    ) -> tuple[bool, list[str]]:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1084,47 +1181,93 @@ class SQLiteJournal:
     def apply_session_v2(
         self, operation_id: str
     ) -> Iterator[V2ApplySession | None]:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            operation = _v2_from_row(row)
+        with self._apply_owner():
+            operation = self.get_v2_operation(operation_id)
             if operation is None or operation.state != "pending":
-                connection.rollback()
                 yield None
                 return
             try:
-                request = _sqlite_v2_request(
-                    connection,
+                request = self.get_v2_request(
                     operation.account_id,
                     operation.api_version,
                     operation.request_id,
                 )
             except AmbiguousV2Request:
-                connection.rollback()
                 yield None
                 return
             if request is None or request.operation_id != operation_id:
-                connection.rollback()
                 yield None
                 return
-            session = _SQLiteV2ApplySession(self, connection, operation)
-            yield session
-            if session.settled:
-                connection.commit()
-            else:
-                connection.rollback()
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
-        finally:
-            connection.close()
+            yield _SQLiteV2ApplySession(self, operation)
+
+    @contextmanager
+    def create_apply_session_v2(
+        self, operation: V2Operation, *, claim_fence: bool
+    ) -> Iterator[V2CreateApplyStart]:
+        with self._apply_owner():
+            outcome, stored, blockers = self._create_v2_owned(
+                operation, claim_fence=claim_fence
+            )
+            session = (
+                _SQLiteV2ApplySession(self, stored)
+                if outcome in {"created", "existing"}
+                and stored is not None
+                and stored.state == "pending"
+                else None
+            )
+            yield V2CreateApplyStart(outcome, stored, blockers, session)
+
+    @contextmanager
+    def authorize_apply_session_v2(
+        self, operation_id: str, authorization: object
+    ) -> Iterator[V2AuthorizeApplyStart]:
+        with self._apply_owner():
+            authorized, blockers = self._authorize_v2_owned(
+                operation_id, authorization
+            )
+            operation = self.get_v2_operation(operation_id)
+            if authorized and operation is not None:
+                try:
+                    request = self.get_v2_request(
+                        operation.account_id,
+                        operation.api_version,
+                        operation.request_id,
+                    )
+                except AmbiguousV2Request:
+                    operation = None
+                else:
+                    if request is None or request.operation_id != operation_id:
+                        operation = None
+            session = (
+                _SQLiteV2ApplySession(self, operation)
+                if operation is not None and operation.state == "pending"
+                else None
+            )
+            yield V2AuthorizeApplyStart(authorized, blockers, session)
 
     def settle_v2(
+        self,
+        operation_id: str,
+        *,
+        expected: V2State,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool:
+        with self._apply_owner():
+            return self._settle_v2_owned(
+                operation_id,
+                expected=expected,
+                state=state,
+                response=response,
+                rows=rows,
+                authorization=authorization,
+                action=action,
+            )
+
+    def _settle_v2_owned(
         self,
         operation_id: str,
         *,
@@ -1258,6 +1401,10 @@ class SQLiteJournal:
         )
 
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int:
+        with self._apply_owner():
+            return self._prune_v2_owned(now=now, retention_days=retention_days)
+
+    def _prune_v2_owned(self, *, now: str, retention_days: int = 7) -> int:
         now_value = datetime.fromisoformat(now).astimezone(timezone.utc)
         threshold = (now_value - timedelta(days=retention_days)).isoformat()
         connection = self._connect()
@@ -1428,6 +1575,22 @@ class SQLiteJournal:
         return _verify_owner_authorization(
             operation, action, authorization, self._owner_public_key
         )
+
+    @contextmanager
+    def _apply_owner(self) -> Iterator[None]:
+        key = str(self.path.resolve())
+        with _SQLITE_APPLY_LOCKS_GUARD:
+            thread_lock = _SQLITE_APPLY_LOCKS.setdefault(key, RLock())
+        with thread_lock:
+            lock_path = self.path.with_name(f"{self.path.name}.apply.lock")
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                os.chmod(lock_path, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
