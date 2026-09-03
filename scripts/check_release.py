@@ -23,6 +23,7 @@ GIT_INSTALL_TAG = re.compile(
     r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
 )
 INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+FENCE = re.compile(r"\A(`{3,}|~{3,})")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
 
@@ -302,22 +303,48 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     commands: list[tuple[int, tuple[str, ...]]] = []
     fragments: list[str] = []
     start = 1
+    fence: str | None = None
+    in_html_comment = False
     for number, raw_line in enumerate(markdown.splitlines(), start=1):
-        line = raw_line.strip()
-        inline = INLINE_CODE.findall(line)
-        if inline:
-            if fragments:
-                logical = " ".join(fragment for fragment in fragments if fragment)
-                commands.extend(
-                    (start, segment) for segment in _shell_segments(logical)
-                )
-                fragments = []
-            for code in inline:
-                commands.extend(
-                    (number, segment) for segment in _shell_segments(code.strip())
-                )
-            continue
-        if line.startswith("```"):
+        if fence is not None:
+            line = raw_line.strip()
+            if line.startswith(fence):
+                if fragments:
+                    logical = " ".join(
+                        fragment for fragment in fragments if fragment
+                    )
+                    commands.extend(
+                        (start, segment) for segment in _shell_segments(logical)
+                    )
+                    fragments = []
+                fence = None
+                continue
+        else:
+            visible, in_html_comment = _strip_html_comments(
+                raw_line, in_html_comment=in_html_comment
+            )
+            line = visible.strip()
+            marker = FENCE.match(line)
+            if marker is not None:
+                fence = marker.group(1)
+                continue
+            inline = INLINE_CODE.findall(line)
+            if inline:
+                if fragments:
+                    logical = " ".join(
+                        fragment for fragment in fragments if fragment
+                    )
+                    commands.extend(
+                        (start, segment) for segment in _shell_segments(logical)
+                    )
+                    fragments = []
+                for code in inline:
+                    commands.extend(
+                        (number, segment)
+                        for segment in _shell_segments(code.strip())
+                    )
+                continue
+        if not line and not fragments:
             continue
         if not fragments:
             start = number
@@ -334,6 +361,27 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
         logical = " ".join(fragment for fragment in fragments if fragment)
         commands.extend((start, segment) for segment in _shell_segments(logical))
     return commands
+
+
+def _strip_html_comments(
+    line: str, *, in_html_comment: bool
+) -> tuple[str, bool]:
+    visible: list[str] = []
+    remaining = line
+    while remaining:
+        if in_html_comment:
+            _hidden, marker, remaining = remaining.partition("-->")
+            if not marker:
+                return "".join(visible), True
+            in_html_comment = False
+            continue
+        before, marker, after = remaining.partition("<!--")
+        visible.append(before)
+        if not marker:
+            break
+        in_html_comment = True
+        remaining = after
+    return "".join(visible), in_html_comment
 
 
 def _shell_segments(command: str) -> list[tuple[str, ...]]:
