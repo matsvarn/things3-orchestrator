@@ -22,6 +22,7 @@ LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 GIT_INSTALL_TAG = re.compile(
     r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
 )
+INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
 
@@ -303,6 +304,21 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
     start = 1
     for number, raw_line in enumerate(markdown.splitlines(), start=1):
         line = raw_line.strip()
+        inline = INLINE_CODE.findall(line)
+        if inline:
+            if fragments:
+                logical = " ".join(fragment for fragment in fragments if fragment)
+                commands.extend(
+                    (start, segment) for segment in _shell_segments(logical)
+                )
+                fragments = []
+            for code in inline:
+                commands.extend(
+                    (number, segment) for segment in _shell_segments(code.strip())
+                )
+            continue
+        if line.startswith("```"):
+            continue
         if not fragments:
             start = number
         continued = line.endswith("\\")

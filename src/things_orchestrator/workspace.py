@@ -68,6 +68,7 @@ from .interface import (
     Status as PublicStatus,
 )
 from .journal import (
+    AmbiguousV2Request,
     IntentRecord,
     IntentState,
     Journal,
@@ -2388,9 +2389,12 @@ class ThingsWorkspace:
         if not isinstance(draft, OperationDraft):
             raise TypeError("execute_v2 needs an OperationDraft")
         journal = self._journal
-        existing = journal.get_v2_request(
-            self._account_id, draft.api_version, draft.request_id
-        )
+        try:
+            existing = journal.get_v2_request(
+                self._account_id, draft.api_version, draft.request_id
+            )
+        except AmbiguousV2Request:
+            return self._ambiguous_v2_request()
         if existing is not None:
             if existing.request_hash != draft.request_hash:
                 return {
@@ -2432,10 +2436,13 @@ class ThingsWorkspace:
             safety_policy_digest=manifest.safety_policy_digest,
             expires_at=manifest.expires_at,
         )
-        outcome, stored, blockers = journal.create_v2(
-            operation,
-            claim_fence=True,
-        )
+        try:
+            outcome, stored, blockers = journal.create_v2(
+                operation,
+                claim_fence=True,
+            )
+        except AmbiguousV2Request:
+            return self._ambiguous_v2_request()
         if outcome == "blocked":
             return {
                 "state": "rejected",
@@ -2459,6 +2466,18 @@ class ThingsWorkspace:
         if result.get("item_ids"):
             return {**result, "_fresh_items": True}
         return result
+
+    @staticmethod
+    def _ambiguous_v2_request() -> JsonDict:
+        return {
+            "state": "rejected",
+            "code": "request_conflict",
+            "next_action": "correct_request",
+            "instruction": (
+                "Conflicting stored operations share this request_id. "
+                "No Cloud write was attempted."
+            ),
+        }
 
     def _prepare_v2_manifest(
         self, draft: object

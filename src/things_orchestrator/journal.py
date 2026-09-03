@@ -51,6 +51,13 @@ def same_account_id(left: str, right: str) -> bool:
     return account_id_key(left) == account_id_key(right)
 
 
+class AmbiguousV2Request(RuntimeError):
+    """Canonical account history contains conflicting rows for one request."""
+
+    def __init__(self) -> None:
+        super().__init__("ambiguous stored v2 request")
+
+
 @dataclass(frozen=True, slots=True)
 class V2Operation:
     account_id: str
@@ -201,23 +208,17 @@ class MemoryJournal:
                 and row.api_version == api_version
                 and row.request_id == request_id
             ]
-            active = _copy_v2(_preferred_v2_operation(candidates, account_id))
-            if active is not None:
-                return active
-            tombstone = next(
-                (
-                    row
-                    for key, row in self._v2_tombstones.items()
-                    if same_account_id(row.account_id, account_id)
-                    and row.api_version == api_version
-                    and hmac.compare_digest(
-                        key,
-                        _v2_request_key(row.account_id, api_version, request_id),
-                    )
-                ),
-                None,
+            candidates.extend(
+                row
+                for key, row in self._v2_tombstones.items()
+                if same_account_id(row.account_id, account_id)
+                and row.api_version == api_version
+                and hmac.compare_digest(
+                    key,
+                    _v2_request_key(row.account_id, api_version, request_id),
+                )
             )
-            return _copy_v2(tombstone)
+            return _copy_v2(_resolve_v2_candidates(candidates))
 
     def get_v2_operation(self, operation_id: str) -> V2Operation | None:
         with self._lock:
@@ -726,9 +727,6 @@ class SQLiteJournal:
                 if (operation := _v2_from_row(row)) is not None
                 and same_account_id(operation.account_id, account_id)
             ]
-            active = _preferred_v2_operation(candidates, account_id)
-            if active is not None:
-                return active
             tombstones = connection.execute(
                 "SELECT * FROM owner_tombstones_v2 WHERE api_version=?",
                 (api_version,),
@@ -739,8 +737,8 @@ class SQLiteJournal:
                     continue
                 expected = _v2_request_key(stored_account, api_version, request_id)
                 if hmac.compare_digest(str(tombstone["request_key_hash"]), expected):
-                    return _v2_from_tombstone(tombstone, request_id)
-        return None
+                    candidates.append(_v2_from_tombstone(tombstone, request_id))
+            return _resolve_v2_candidates(candidates)
 
     def get_v2_operation(self, operation_id: str) -> V2Operation | None:
         with self._connect() as connection:
@@ -798,41 +796,27 @@ class SQLiteJournal:
                 if (found := _v2_from_row(row)) is not None
                 and same_account_id(found.account_id, operation.account_id)
             ]
-            found = _preferred_v2_operation(candidates, operation.account_id)
-            if found is not None:
-                connection.commit()
-                outcome: Literal["existing", "conflict"] = "existing" if found.request_hash == operation.request_hash else "conflict"
-                return outcome, found, []
             tombstones = connection.execute(
                 "SELECT * FROM owner_tombstones_v2 WHERE api_version=?",
                 (operation.api_version,),
             ).fetchall()
-            tombstone = next(
-                (
-                    row
-                    for row in tombstones
-                    if same_account_id(
-                        str(row["account_id"]), operation.account_id
-                    )
-                    and hmac.compare_digest(
-                        str(row["request_key_hash"]),
-                        _v2_request_key(
-                            str(row["account_id"]),
-                            operation.api_version,
-                            operation.request_id,
-                        ),
-                    )
-                ),
-                None,
-            )
-            if tombstone is not None:
-                found = _v2_from_tombstone(tombstone, operation.request_id)
-                connection.commit()
-                outcome = (
-                    "existing"
-                    if found.request_hash == operation.request_hash
-                    else "conflict"
+            for tombstone in tombstones:
+                stored_account = str(tombstone["account_id"])
+                if not same_account_id(stored_account, operation.account_id):
+                    continue
+                expected = _v2_request_key(
+                    stored_account, operation.api_version, operation.request_id
                 )
+                if hmac.compare_digest(
+                    str(tombstone["request_key_hash"]), expected
+                ):
+                    candidates.append(
+                        _v2_from_tombstone(tombstone, operation.request_id)
+                    )
+            found = _resolve_v2_candidates(candidates)
+            if found is not None:
+                connection.commit()
+                outcome: Literal["existing", "conflict"] = "existing" if found.request_hash == operation.request_hash else "conflict"
                 return outcome, found, []
             blockers = _sqlite_blockers(connection, operation.account_id)
             if blockers:
@@ -1567,19 +1551,13 @@ def _v2_request_key(account_id: str, api_version: str, request_id: str) -> str:
     return "sha256:v1:" + sha256(_json(payload).encode()).hexdigest()
 
 
-def _preferred_v2_operation(
-    candidates: list[V2Operation], account_id: str
-) -> V2Operation | None:
+def _resolve_v2_candidates(candidates: list[V2Operation]) -> V2Operation | None:
     if not candidates:
         return None
-    return min(
-        candidates,
-        key=lambda row: (
-            row.state != "pending",
-            row.account_id != account_id,
-            row.operation_id,
-        ),
-    )
+    first = candidates[0]
+    if all(candidate == first for candidate in candidates[1:]):
+        return first
+    raise AmbiguousV2Request()
 
 
 def _legacy_report(
