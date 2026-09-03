@@ -24,7 +24,9 @@ GIT_INSTALL_TAG = re.compile(
     r"\Agit\+https://github\.com/matsvarn/things3-orchestrator\.git@"
     r"(?P<tag>v[^\s]+)\Z"
 )
-ANY_CODEX_TARGET = re.compile(r"[^\s'\"]+/things3-orchestrator(?!\.git)")
+ANY_CODEX_TARGET = re.compile(
+    r"[^\s'\"]+/things3-orchestrator(?!\.git)", re.IGNORECASE
+)
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
@@ -34,6 +36,7 @@ SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrat
 class ShellCommand:
     line: int
     tokens: tuple[str, ...]
+    complete: bool = True
 
 
 def fail(messages: list[str]) -> None:
@@ -245,7 +248,11 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
                 shell_command.tokens
             ):
                 continue
-            message = _print_config_error(shell_command.tokens)
+            message = (
+                _print_config_error(shell_command.tokens)
+                if shell_command.complete
+                else "unsupported print-config command"
+            )
             if message is None:
                 continue
             errors.append(
@@ -269,9 +276,13 @@ def install_tag_errors(
         number = shell_command.line
         tokens = shell_command.tokens
         raw = " ".join(tokens)
-        if "things3-orchestrator.git" in raw:
-            tag = _exact_uv_install_tag(
-                tokens, allow_force=source == Path("docs/operations.md")
+        if "things3-orchestrator.git" in raw.casefold():
+            tag = (
+                _exact_uv_install_tag(
+                    tokens, allow_force=source == Path("docs/operations.md")
+                )
+                if shell_command.complete
+                else None
             )
             if tag is None:
                 _append_unique(
@@ -290,7 +301,9 @@ def install_tag_errors(
                     )
 
         if ANY_CODEX_TARGET.search(raw) is not None:
-            reference = _exact_codex_install_ref(tokens)
+            reference = (
+                _exact_codex_install_ref(tokens) if shell_command.complete else None
+            )
             if reference is None:
                 _append_unique(
                     errors,
@@ -326,7 +339,7 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 if fragments:
                     logical = "".join(fragments)
                     commands.extend(
-                        ShellCommand(start, tokens)
+                        ShellCommand(start, tokens, complete=False)
                         for tokens in _shell_segments(logical)
                     )
                     fragments = []
@@ -357,7 +370,7 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 if fragments:
                     logical = "".join(fragments)
                     commands.extend(
-                        ShellCommand(start, tokens)
+                        ShellCommand(start, tokens, complete=False)
                         for tokens in _shell_segments(logical)
                     )
                     fragments = []
@@ -372,13 +385,13 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         for tokens in _shell_segments(code.strip())
                     )
                 continue
-            if code_span is not None:
+            if code_span is not None and not line.strip() and not fragments:
                 continue
         if not line.strip() and not fragments:
             continue
         if not fragments:
             start = number
-        continued = line.endswith("\\")
+        continued = _continues_shell_line(line)
         fragments.append(line[:-1] if continued else line)
         if continued:
             continue
@@ -392,7 +405,8 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
     if fragments:
         logical = "".join(fragments)
         commands.extend(
-            ShellCommand(start, tokens) for tokens in _shell_segments(logical)
+            ShellCommand(start, tokens, complete=False)
+            for tokens in _shell_segments(logical)
         )
     return commands
 
@@ -487,6 +501,47 @@ def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
         return False
     marker = match.group(1)
     return marker[0] == character and len(marker) >= minimum
+
+
+def _continues_shell_line(line: str) -> bool:
+    trailing_backslashes = len(line) - len(line.rstrip("\\"))
+    if trailing_backslashes % 2 == 0:
+        return False
+
+    quote: str | None = None
+    index = 0
+    limit = len(line) - trailing_backslashes
+    while index < limit:
+        character = line[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if character == '"':
+                quote = None
+                index += 1
+            elif (
+                character == "\\"
+                and index + 1 < limit
+                and line[index + 1] in '$`"\\'
+            ):
+                index += 2
+            else:
+                index += 1
+            continue
+        if character == "#":
+            return False
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        if character == "\\" and index + 1 < limit:
+            index += 2
+            continue
+        index += 1
+    return quote != "'"
 
 
 def _shell_segments(command: str) -> list[tuple[str, ...]]:
