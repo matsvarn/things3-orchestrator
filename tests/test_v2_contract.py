@@ -8,7 +8,7 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from things_orchestrator.cloud import CloudError
+from things_orchestrator.cloud import CloudError, CloudWriteRejected
 from things_orchestrator.journal import (
     JsonDict,
     MemoryJournal,
@@ -1558,15 +1558,23 @@ def test_outcome_unknown_before_state_stays_pending_until_delayed_commit_appears
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Things Cloud timed out",
+        "Things Cloud is unreachable",
+        "Things Cloud HTTP 500",
+    ],
+)
 def test_cloud_error_after_dispatch_remains_pending_without_typed_rejection_proof(
-    journal_kind: str, tmp_path: Path,
+    journal_kind: str, message: str, tmp_path: Path,
 ) -> None:
     class DefinitiveFailureLibrary(MemoryLibrary):
         apply_calls = 0
 
         def apply(self, writes: list[Write]) -> ApplyResult:
             self.apply_calls += 1
-            raise CloudError("Things Cloud HTTP 400")
+            raise CloudError(message)
 
     journal = (
         MemoryJournal()
@@ -1597,6 +1605,47 @@ def test_cloud_error_after_dispatch_remains_pending_without_typed_rejection_proo
     stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
     assert stored is not None and stored.state == "pending"
     assert stored.dispatch_started is True
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_typed_cloud_rejection_settles_not_applied_and_releases_fence(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class ConflictLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            raise CloudWriteRejected("Things Cloud conflict; read fresh facts")
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = ConflictLibrary([Record(uuid="a", kind="task", title="A")])
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [{"id": "task:a", "set": {"title": "B"}}],
+        },
+    )
+
+    assert result.state == "not_applied"
+    assert result.code == "not_applied_precondition"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "not_applied"
+    assert stored.dispatch_started is True
+    assert journal.blocking_v2_operations("owner@example.com") == []
 
 
 def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
