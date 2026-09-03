@@ -590,6 +590,8 @@ def _continues_shell_line(line: str) -> bool:
     trailing_backslashes = len(line) - len(line.rstrip("\\"))
     if trailing_backslashes % 2 == 0:
         return False
+    if _shell_comment_index(line) is not None:
+        return False
 
     quote: str | None = None
     index = 0
@@ -614,8 +616,6 @@ def _continues_shell_line(line: str) -> bool:
             else:
                 index += 1
             continue
-        if character == "#":
-            return False
         if character in {"'", '"'}:
             quote = character
             index += 1
@@ -628,8 +628,11 @@ def _continues_shell_line(line: str) -> bool:
 
 
 def _shell_segments(command: str) -> list[tuple[str, ...]]:
+    comment = _shell_comment_index(command)
+    if comment is not None:
+        command = command[:comment]
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-    lexer.commenters = "#"
+    lexer.commenters = ""
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
@@ -647,6 +650,46 @@ def _shell_segments(command: str) -> list[tuple[str, ...]]:
     if current:
         result.append(tuple(current))
     return result
+
+
+def _shell_comment_index(command: str) -> int | None:
+    quote: str | None = None
+    word_started = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if character == '"':
+                quote = None
+                index += 1
+            elif character == "\\" and index + 1 < len(command):
+                index += 2
+            else:
+                index += 1
+            continue
+        if character == "#" and not word_started:
+            return index
+        if character.isspace() or character in ";&|()<>":
+            word_started = False
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            word_started = True
+            index += 1
+            continue
+        if character == "\\" and index + 1 < len(command):
+            word_started = True
+            index += 2
+            continue
+        word_started = True
+        index += 1
+    return None
 
 
 def _has_uv_install_intent(tokens: tuple[str, ...]) -> bool:
