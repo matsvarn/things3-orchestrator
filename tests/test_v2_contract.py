@@ -1558,6 +1558,114 @@ def test_outcome_unknown_before_state_stays_pending_until_delayed_commit_appears
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_mixed_snapshot_after_unknown_batch_stays_pending_until_all_land(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class DelayedMixedBatchLibrary(MemoryLibrary):
+        apply_calls = 0
+        delayed_writes: list[Write] = []
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.delayed_writes = writes
+            raise CloudError("Things Cloud outcome is unknown")
+
+        def land_delayed_batch(self) -> None:
+            MemoryLibrary.apply(self, self.delayed_writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "mixed-unknown.sqlite3")
+    )
+    library = DelayedMixedBatchLibrary(
+        [
+            Record(uuid="a", kind="task", title="Already desired"),
+            Record(uuid="b", kind="task", title="Before"),
+        ]
+    )
+    interface = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+    call = {
+        "request_id": REQUEST,
+        "items": [
+            {"id": "task:a", "set": {"title": "Already desired"}},
+            {"id": "task:b", "set": {"title": "After"}},
+        ],
+    }
+
+    first = interface.dispatch("things_update", call)
+    immediate = interface.dispatch("things_update", call)
+
+    assert first.state == immediate.state == "pending"
+    assert first.code == immediate.code == "pending_unknown"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "pending"
+    assert stored.dispatch_started is True
+
+    library.land_delayed_batch()
+    settled = interface.dispatch("things_update", call)
+
+    assert settled.state == "applied"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "applied"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_verified_provider_readback_can_settle_genuine_partial(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class VerifiedPartialLibrary(MemoryLibrary):
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            result = MemoryLibrary.apply(self, writes[:1])
+            return ApplyResult(
+                verified=result.verified,
+                created=result.created,
+                read_back_verified=True,
+            )
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "verified-partial.sqlite3")
+    )
+    result = ThingsV2(
+        ThingsWorkspace(
+            VerifiedPartialLibrary(
+                [
+                    Record(uuid="a", kind="task", title="Before A"),
+                    Record(uuid="b", kind="task", title="Before B"),
+                ]
+            ),
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [
+                {"id": "task:a", "set": {"title": "After A"}},
+                {"id": "task:b", "set": {"title": "After B"}},
+            ],
+        },
+    )
+
+    assert result.state == "partial"
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "partial"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
 @pytest.mark.parametrize(
     "message",
     [

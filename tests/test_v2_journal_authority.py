@@ -2837,6 +2837,57 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("target_kind", ["missing", "other-account", "nonpending"])
+def test_host_not_applied_settlement_rejects_nonowned_pending_target(
+    journal_kind: str, target_kind: str, tmp_path: Path,
+) -> None:
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / f"{target_kind}.sqlite3")
+    )
+    operation_id = "op_missing"
+    stored_state: str | None = None
+    if target_kind != "missing":
+        operation = _operation(
+            f"op_{target_kind}",
+            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        )
+        if target_kind == "other-account":
+            operation = _with_manifest(
+                replace(operation, account_id="other@example.com")
+            )
+        operation_id = operation.operation_id
+        journal.create_v2(operation, claim_fence=True)
+        if target_kind == "nonpending":
+            assert journal.settle_v2(
+                operation_id,
+                expected="pending",
+                state="applied",
+                response={"state": "applied", "operation_id": operation_id},
+                rows=[{"sequence": 1}],
+            )
+            stored_state = "applied"
+        else:
+            stored_state = "pending"
+    workspace = ThingsWorkspace(
+        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
+        journal=journal,
+        account_id="owner@example.com",
+    )
+
+    result = workspace.host_settle_not_applied_v2(operation_id, "forged")
+
+    assert result["state"] == "rejected"
+    assert result["code"] == "missing_target"
+    stored = journal.get_v2_operation(operation_id)
+    if stored_state is None:
+        assert stored is None
+    else:
+        assert stored is not None and stored.state == stored_state
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
 def test_dispatched_pending_refuses_signed_not_applied_settlement(
     journal_kind: str, tmp_path: Path,
 ) -> None:
