@@ -463,6 +463,52 @@ def test_shell_wrapper_cannot_hide_unsafe_print_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "wrapper",
+    [
+        "env sh -c 'things-orchestrator print-config --client codex'",
+        "bash -xc 'things-orchestrator print-config --client codex'",
+    ],
+)
+def test_shell_wrapper_variants_cannot_hide_unsafe_print_config(
+    wrapper: str, tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(f"{wrapper}\n")
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+def test_safe_but_wrapped_print_config_is_not_an_approved_command(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "env sh -c 'things-orchestrator print-config "
+        "--client codex --show-secrets'\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: client config command must be direct"
+    ]
+
+
+def test_pipe_stderr_operator_cannot_lend_flags_to_print_config(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex "
+        "|& echo --show-secrets\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: usable client config needs --show-secrets"
+    ]
+
+
+@pytest.mark.parametrize(
     ("required_kind", "wrapper"),
     [
         (
@@ -488,7 +534,62 @@ def test_shell_wrapper_cannot_hide_stale_install(
         required_kind=required_kind,
     ) == [
         f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
-        f"{'install tag' if required_kind == 'uv' else 'ref'} v0.8.0 differs from v0.9.1"
+        "install command must be direct",
+        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
+        f"{'install tag' if required_kind == 'uv' else 'ref'} v0.8.0 differs from v0.9.1",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "wrapper", "mismatch"),
+    [
+        (
+            "uv",
+            "env sh -c 'uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.8.0"\'',
+            "uv install tag v0.8.0 differs from v0.9.1",
+        ),
+        (
+            "codex",
+            "env bash -xc 'codex plugin marketplace add "
+            "matsvarn/things3-orchestrator --ref v0.8.0'",
+            "Codex marketplace ref v0.8.0 differs from v0.9.1",
+        ),
+    ],
+)
+def test_wrapped_install_is_reported_but_never_counts_as_required(
+    required_kind: str, wrapper: str, mismatch: str
+) -> None:
+    assert install_tag_errors(
+        f"{wrapper}\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: {required_kind if required_kind == 'uv' else 'Codex marketplace'} "
+        "install command must be direct",
+        f"guide.md:1: {mismatch}",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
+def test_echoed_install_never_counts_as_required() -> None:
+    markdown = (
+        "echo uv tool install "
+        '"git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1"\n'
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: uv install command must be direct",
+        "guide.md: missing uv install for v0.9.1",
     ]
 
 
