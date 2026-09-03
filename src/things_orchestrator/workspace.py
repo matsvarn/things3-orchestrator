@@ -75,6 +75,7 @@ from .journal import (
     MemoryJournal,
     V2Operation,
     V2State,
+    same_account_id,
     v2_manifest_is_valid,
 )
 from .library import (
@@ -3795,7 +3796,7 @@ class ThingsWorkspace:
         operation = self._journal.get_v2_operation(operation_id)
         if (
             operation is None
-            or operation.account_id != self._account_id
+            or not same_account_id(operation.account_id, self._account_id)
             or not v2_manifest_is_valid(operation)
         ):
             return None
@@ -3968,7 +3969,9 @@ class ThingsWorkspace:
 
     def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
         operation = self._journal.get_v2_operation(operation_id)
-        if operation is None or operation.account_id != self._account_id:
+        if operation is None or not same_account_id(
+            operation.account_id, self._account_id
+        ):
             return {"state": "rejected", "instruction": "That operation does not belong to this account."}
         if self._journal.verify_v2_authorization(operation, "approve", authorization) is None:
             return {"state": "rejected", "instruction": "Verified host authorization is required.", "operation_id": operation_id}
@@ -3996,7 +3999,7 @@ class ThingsWorkspace:
         operation = self._journal.get_v2_operation(operation_id)
         return bool(
             operation is not None
-            and operation.account_id == self._account_id
+            and same_account_id(operation.account_id, self._account_id)
             and self._journal.verify_v2_authorization(operation, "decline", authorization) is not None
             and self._journal.transition_v2(
                 operation_id,
@@ -4018,7 +4021,7 @@ class ThingsWorkspace:
         operation = self._journal.get_v2_operation(operation_id)
         return bool(
             operation is not None
-            and operation.account_id == self._account_id
+            and same_account_id(operation.account_id, self._account_id)
             and operation.safety_policy_digest != SAFETY_POLICY_DIGEST
             and self._journal.verify_v2_authorization(operation, resolution, authorization) is not None
             and self._journal.transition_v2(

@@ -7,6 +7,7 @@ import argparse
 import email.parser
 import json
 import re
+import shlex
 import subprocess
 import tarfile
 import tomllib
@@ -22,6 +23,9 @@ SECRET_CONFIG_COMMAND = re.compile(
     r"\bthings-orchestrator\s+print-config\b"
     r"(?=[^\n]*(?:--client(?:=|\s+)"
     r"(?:codex|hermes|claude-code|cursor|cursor-cloud)\b))"
+)
+GIT_INSTALL_TAG = re.compile(
+    r"\Agit\+https://[^\s]+/things3-orchestrator\.git@(?P<tag>v[^\s]+)\Z"
 )
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
@@ -44,16 +48,20 @@ def metadata() -> None:
     current_heading = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+)\b", changelog, re.MULTILINE)
     if current_heading is None or current_heading.group(1) != project["version"]:
         errors.append("CHANGELOG.md current release differs from pyproject.toml")
-    version_markers = {
-        ROOT / "README.md": f"@v{project['version']}",
-        ROOT / "docs/install.md": f"@v{project['version']}",
-        ROOT / "docs/clients.md": f"--ref v{project['version']}",
+    install_guides = {
+        ROOT / "README.md": "uv",
+        ROOT / "docs/install.md": "uv",
+        ROOT / "docs/clients.md": "codex",
     }
-    for path, marker in version_markers.items():
-        if marker not in path.read_text():
-            errors.append(
-                f"{path.relative_to(ROOT)} install tag differs from pyproject.toml"
+    for path, required_kind in install_guides.items():
+        errors.extend(
+            install_tag_errors(
+                path.read_text(),
+                source=path.relative_to(ROOT),
+                version=project["version"],
+                required_kind=required_kind,
             )
+        )
 
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
     locked = next(
@@ -227,13 +235,149 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     sources = markdown_files() if root.resolve() == ROOT else sorted(root.rglob("*.md"))
     for source in sources:
-        for number, line in enumerate(source.read_text().splitlines(), start=1):
-            if SECRET_CONFIG_COMMAND.search(line) and "--show-secrets" not in line:
+        for number, tokens in shell_commands(source.read_text()):
+            command = _client_config_command(tokens)
+            if command is not None and "--show-secrets" not in command:
                 errors.append(
                     f"{source.relative_to(root)}:{number}: usable client config needs "
                     "--show-secrets"
                 )
     return errors
+
+
+def install_tag_errors(
+    markdown: str,
+    *,
+    source: Path,
+    version: str,
+    required_kind: str,
+) -> list[str]:
+    expected = f"v{version}"
+    found_required = False
+    errors: list[str] = []
+    for number, tokens in shell_commands(markdown):
+        uv_index = _subsequence_index(tokens, ("uv", "tool", "install"))
+        if uv_index is not None and any(
+            "things3-orchestrator" in token for token in tokens[uv_index + 3 :]
+        ):
+            found_required = found_required or required_kind == "uv"
+            tags = [
+                match.group("tag")
+                for token in tokens[uv_index + 3 :]
+                if (match := GIT_INSTALL_TAG.fullmatch(token)) is not None
+            ]
+            if not tags:
+                errors.append(
+                    f"{source}:{number}: uv install needs exact tag {expected}"
+                )
+            else:
+                errors.extend(
+                    f"{source}:{number}: uv install tag {tag} differs from {expected}"
+                    for tag in tags
+                    if tag != expected
+                )
+
+        codex_index = _subsequence_index(
+            tokens, ("codex", "plugin", "marketplace", "add")
+        )
+        if codex_index is not None and any(
+            token == "matsvarn/things3-orchestrator"
+            for token in tokens[codex_index + 4 :]
+        ):
+            found_required = found_required or required_kind == "codex"
+            reference = _option_value(tokens[codex_index + 4 :], "--ref")
+            if reference is None:
+                errors.append(
+                    f"{source}:{number}: Codex marketplace install needs exact ref "
+                    f"{expected}"
+                )
+            elif reference != expected:
+                errors.append(
+                    f"{source}:{number}: Codex marketplace ref {reference} differs "
+                    f"from {expected}"
+                )
+    if not found_required:
+        errors.append(f"{source}: missing {required_kind} install for {expected}")
+    return errors
+
+
+def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
+    commands: list[tuple[int, tuple[str, ...]]] = []
+    fragments: list[str] = []
+    start = 1
+    for number, raw_line in enumerate(markdown.splitlines(), start=1):
+        line = raw_line.strip()
+        if not fragments:
+            start = number
+        continued = line.endswith("\\")
+        fragments.append(line[:-1].rstrip() if continued else line)
+        if continued:
+            continue
+        logical = " ".join(fragment for fragment in fragments if fragment)
+        fragments = []
+        if not logical:
+            continue
+        commands.extend((start, segment) for segment in _shell_segments(logical))
+    if fragments:
+        logical = " ".join(fragment for fragment in fragments if fragment)
+        commands.extend((start, segment) for segment in _shell_segments(logical))
+    return commands
+
+
+def _shell_segments(command: str) -> list[tuple[str, ...]]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.commenters = "#"
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    result: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "&"}:
+            if current:
+                result.append(tuple(current))
+                current = []
+        else:
+            current.append(token)
+    if current:
+        result.append(tuple(current))
+    return result
+
+
+def _client_config_command(tokens: tuple[str, ...]) -> tuple[str, ...] | None:
+    start = _subsequence_index(tokens, ("things-orchestrator", "print-config"))
+    if start is None:
+        return None
+    command = tokens[start:]
+    client = _option_value(command[2:], "--client")
+    if client not in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}:
+        return None
+    return command
+
+
+def _subsequence_index(
+    tokens: tuple[str, ...], expected: tuple[str, ...]
+) -> int | None:
+    width = len(expected)
+    return next(
+        (
+            index
+            for index in range(len(tokens) - width + 1)
+            if tokens[index : index + width] == expected
+        ),
+        None,
+    )
+
+
+def _option_value(tokens: tuple[str, ...], option: str) -> str | None:
+    for index, token in enumerate(tokens):
+        if token.startswith(f"{option}="):
+            return token.partition("=")[2]
+        if token == option and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return None
 
 
 def instructions() -> None:

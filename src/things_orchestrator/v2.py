@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.json_schema import SkipJsonSchema
 
 from .interface import ReadCall, TruncatedField
+from .journal import same_account_id
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -900,7 +901,9 @@ class ThingsV2:
             return self._get(call.ids)
         if isinstance(call, ReceiptCall):
             operation = self.workspace._journal.get_v2_operation(call.operation_id)
-            if operation is None or operation.account_id != self.workspace._account_id:
+            if operation is None or not same_account_id(
+                operation.account_id, self.workspace._account_id
+            ):
                 return PublicResult(state="rejected", code="receipt_missing", next_action="correct_request", instruction="That receipt does not exist for this account.")
             try:
                 page = self.workspace._journal.v2_receipt_page(self.workspace._account_id, call.operation_id, limit=call.limit, cursor=call.cursor)
