@@ -1424,6 +1424,113 @@ def test_shell_comment_inside_fence_can_complete_continuation() -> None:
     ) == []
 
 
+def test_midword_hash_cannot_turn_invalid_secret_flag_into_comment(
+    tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex "
+        "--show-secrets#suffix\n"
+    )
+
+    assert instruction_errors(tmp_path) == [
+        "guide.md:1: unsupported print-config command"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("required_kind", "command", "message"),
+    [
+        (
+            "uv",
+            "uv tool install git+https://github.com/matsvarn/"
+            "things3-orchestrator.git@v0.9.1#subdirectory=src",
+            "uv install tag v0.9.1#subdirectory=src differs from v0.9.1",
+        ),
+        (
+            "codex",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1#suffix",
+            "Codex marketplace ref v0.9.1#suffix differs from v0.9.1",
+        ),
+    ],
+)
+def test_midword_hash_cannot_truncate_install_argument(
+    required_kind: str, command: str, message: str
+) -> None:
+    assert install_tag_errors(
+        command + "\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [f"guide.md:1: {message}"]
+
+
+def test_spaced_shell_comments_remain_valid() -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" # install comment\n'
+        "codex plugin marketplace add matsvarn/things3-orchestrator "
+        "--ref v0.9.1 # Codex comment\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == []
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="codex",
+    ) == []
+
+
+def test_quoted_hash_remains_part_of_print_config_url(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(
+        "things-orchestrator print-config --client codex "
+        "--url 'https://example.com/#fragment' --show-secrets\n"
+    )
+
+    assert instruction_errors(tmp_path) == []
+
+
+def test_midword_hash_does_not_block_shell_continuation() -> None:
+    markdown = (
+        "uv tool install git+https://github.com/matsvarn/"
+        "things3-orchestrator.git@v0.9.1#sub\\\n"
+        "directory=src\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == [
+        "guide.md:1: uv install tag v0.9.1#subdirectory=src differs "
+        "from v0.9.1"
+    ]
+
+
+def test_real_shell_comment_blocks_trailing_backslash_continuation() -> None:
+    markdown = (
+        'uv tool install "git+https://github.com/matsvarn/'
+        'things3-orchestrator.git@v0.9.1" # comment \\\n'
+        "unrelated text\n"
+    )
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == []
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
