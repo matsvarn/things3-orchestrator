@@ -13,6 +13,7 @@ import tarfile
 import tomllib
 import urllib.parse
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -25,6 +26,13 @@ GIT_INSTALL_TAG = re.compile(
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
+
+
+@dataclass(frozen=True, slots=True)
+class ShellCommand:
+    line: int
+    tokens: tuple[str, ...]
+    direct: bool
 
 
 def fail(messages: list[str]) -> None:
@@ -231,13 +239,33 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     sources = markdown_files() if root.resolve() == ROOT else sorted(root.rglob("*.md"))
     for source in sources:
-        for number, tokens in shell_commands(source.read_text()):
-            command = _client_config_command(tokens)
-            if command is not None and "--show-secrets" not in command:
-                errors.append(
-                    f"{source.relative_to(root)}:{number}: usable client config needs "
-                    "--show-secrets"
-                )
+        for shell_command in shell_commands(source.read_text()):
+            command = _client_config_command(shell_command.tokens)
+            if command is None:
+                joined = " ".join(shell_command.tokens)
+                if (
+                    "things-orchestrator print-config" in joined
+                    and _subsequence_index(
+                        shell_command.tokens,
+                        ("things-orchestrator", "print-config"),
+                    )
+                    is None
+                    and _shell_wrapper_payload(shell_command.tokens) is None
+                ):
+                    errors.append(
+                        f"{source.relative_to(root)}:{shell_command.line}: "
+                        "client config command must be direct"
+                    )
+                continue
+            if "--show-secrets" not in command:
+                message = "usable client config needs --show-secrets"
+            elif not shell_command.direct or command != shell_command.tokens:
+                message = "client config command must be direct"
+            else:
+                continue
+            errors.append(
+                f"{source.relative_to(root)}:{shell_command.line}: {message}"
+            )
     return errors
 
 
@@ -251,12 +279,21 @@ def install_tag_errors(
     expected = f"v{version}"
     found_required = False
     errors: list[str] = []
-    for number, tokens in shell_commands(markdown):
+    for shell_command in shell_commands(markdown):
+        number = shell_command.line
+        tokens = shell_command.tokens
+        wrapper_payload = _shell_wrapper_payload(tokens)
+        joined = " ".join(tokens)
         uv_index = _subsequence_index(tokens, ("uv", "tool", "install"))
         if uv_index is not None and any(
             "things3-orchestrator" in token for token in tokens[uv_index + 3 :]
         ):
-            found_required = found_required or required_kind == "uv"
+            direct = shell_command.direct and uv_index == 0
+            if not direct:
+                errors.append(
+                    f"{source}:{number}: uv install command must be direct"
+                )
+            found_required = found_required or (required_kind == "uv" and direct)
             tags = [
                 match.group("tag")
                 for token in tokens[uv_index + 3 :]
@@ -272,6 +309,14 @@ def install_tag_errors(
                     for tag in tags
                     if tag != expected
                 )
+        elif (
+            "uv tool install" in joined
+            and "things3-orchestrator" in joined
+            and wrapper_payload is None
+        ):
+            errors.append(
+                f"{source}:{number}: uv install command must be direct"
+            )
 
         codex_index = _subsequence_index(
             tokens, ("codex", "plugin", "marketplace", "add")
@@ -280,7 +325,15 @@ def install_tag_errors(
             token == "matsvarn/things3-orchestrator"
             for token in tokens[codex_index + 4 :]
         ):
-            found_required = found_required or required_kind == "codex"
+            direct = shell_command.direct and codex_index == 0
+            if not direct:
+                errors.append(
+                    f"{source}:{number}: Codex marketplace install command "
+                    "must be direct"
+                )
+            found_required = found_required or (
+                required_kind == "codex" and direct
+            )
             references = _option_values(tokens[codex_index + 4 :], "--ref")
             if not references or any(reference is None for reference in references):
                 errors.append(
@@ -293,13 +346,21 @@ def install_tag_errors(
                 for reference in references
                 if reference is not None and reference != expected
             )
+        elif (
+            "codex plugin marketplace add" in joined
+            and "matsvarn/things3-orchestrator" in joined
+            and wrapper_payload is None
+        ):
+            errors.append(
+                f"{source}:{number}: Codex marketplace install command must be direct"
+            )
     if not found_required:
         errors.append(f"{source}: missing {required_kind} install for {expected}")
     return errors
 
 
-def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
-    commands: list[tuple[int, tuple[str, ...]]] = []
+def shell_commands(markdown: str) -> list[ShellCommand]:
+    commands: list[ShellCommand] = []
     fragments: list[str] = []
     start = 1
     fence: tuple[str, int] | None = None
@@ -315,7 +376,8 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                         fragment for fragment in fragments if fragment
                     )
                     commands.extend(
-                        (start, segment) for segment in _shell_segments(logical)
+                        ShellCommand(start, tokens, direct)
+                        for tokens, direct in _shell_segments(logical)
                     )
                     fragments = []
                 fence = None
@@ -347,18 +409,19 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
                         fragment for fragment in fragments if fragment
                     )
                     commands.extend(
-                        (start, segment) for segment in _shell_segments(logical)
+                        ShellCommand(start, tokens, direct)
+                        for tokens, direct in _shell_segments(logical)
                     )
                     fragments = []
                 if line:
                     commands.extend(
-                        (number, segment)
-                        for segment in _shell_segments(line)
+                        ShellCommand(number, tokens, direct)
+                        for tokens, direct in _shell_segments(line)
                     )
                 for code_start, code in inline:
                     commands.extend(
-                        (code_start, segment)
-                        for segment in _shell_segments(code.strip())
+                        ShellCommand(code_start, tokens, direct)
+                        for tokens, direct in _shell_segments(code.strip())
                     )
                 continue
             if code_span is not None:
@@ -375,10 +438,16 @@ def shell_commands(markdown: str) -> list[tuple[int, tuple[str, ...]]]:
         fragments = []
         if not logical:
             continue
-        commands.extend((start, segment) for segment in _shell_segments(logical))
+        commands.extend(
+            ShellCommand(start, tokens, direct)
+            for tokens, direct in _shell_segments(logical)
+        )
     if fragments:
         logical = " ".join(fragment for fragment in fragments if fragment)
-        commands.extend((start, segment) for segment in _shell_segments(logical))
+        commands.extend(
+            ShellCommand(start, tokens, direct)
+            for tokens, direct in _shell_segments(logical)
+        )
     return commands
 
 
@@ -475,8 +544,8 @@ def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
 
 
 def _shell_segments(
-    command: str, *, depth: int = 0
-) -> list[tuple[str, ...]]:
+    command: str, *, depth: int = 0, direct: bool = True
+) -> list[tuple[tuple[str, ...], bool]]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
     lexer.commenters = "#"
     lexer.whitespace_split = True
@@ -487,7 +556,7 @@ def _shell_segments(
     result: list[tuple[str, ...]] = []
     current: list[str] = []
     for token in tokens:
-        if token in {";", "&&", "||", "|", "&"}:
+        if token and set(token) <= {";", "&", "|"}:
             if current:
                 result.append(tuple(current))
                 current = []
@@ -496,21 +565,37 @@ def _shell_segments(
     if current:
         result.append(tuple(current))
     if depth >= 4:
-        return result
-    expanded: list[tuple[str, ...]] = []
+        return [(segment, direct) for segment in result]
+    expanded: list[tuple[tuple[str, ...], bool]] = []
     for segment in result:
-        expanded.append(segment)
+        expanded.append((segment, direct))
         payload = _shell_wrapper_payload(segment)
         if payload is not None:
-            expanded.extend(_shell_segments(payload, depth=depth + 1))
+            expanded.extend(
+                _shell_segments(payload, depth=depth + 1, direct=False)
+            )
     return expanded
 
 
 def _shell_wrapper_payload(tokens: tuple[str, ...]) -> str | None:
-    if not tokens or PurePosixPath(tokens[0]).name not in {"bash", "sh", "zsh"}:
+    if not tokens:
         return None
-    for index, token in enumerate(tokens[1:], start=1):
-        if token in {"-c", "-lc"} and index + 1 < len(tokens):
+    shell_index = 0
+    if PurePosixPath(tokens[0]).name == "env":
+        shell_index = 1
+        while shell_index < len(tokens) and (
+            tokens[shell_index].startswith("-")
+            or "=" in tokens[shell_index]
+        ):
+            shell_index += 1
+    if shell_index >= len(tokens) or PurePosixPath(
+        tokens[shell_index]
+    ).name not in {"bash", "sh", "zsh"}:
+        return None
+    for index, token in enumerate(
+        tokens[shell_index + 1 :], start=shell_index + 1
+    ):
+        if token.startswith("-") and "c" in token[1:] and index + 1 < len(tokens):
             return tokens[index + 1]
     return None
 
