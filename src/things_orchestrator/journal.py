@@ -7,13 +7,14 @@ import hmac
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_bytes
 from threading import RLock
-from typing import Literal, Protocol, cast, overload
+from typing import ContextManager, Iterator, Literal, Protocol, cast, overload
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -110,6 +111,22 @@ class IntentRecord:
     result: JsonDict | None = None
 
 
+class V2ApplySession(Protocol):
+    """One exclusive pending-operation window spanning Cloud I/O and settlement."""
+
+    operation: V2Operation
+
+    def settle(
+        self,
+        *,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool: ...
+
+
 class Journal(Protocol):
     """Persistence seam used by the workspace."""
 
@@ -130,6 +147,9 @@ class Journal(Protocol):
     def create_v2(self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def transition_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict | None = None, authorization: object = None, resolution: Literal["accepted_as_is", "superseded"] | None = None) -> bool: ...
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]: ...
+    def apply_session_v2(
+        self, operation_id: str
+    ) -> ContextManager[V2ApplySession | None]: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
@@ -137,6 +157,66 @@ class Journal(Protocol):
     def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool: ...
     def resolve_v1_pending(self, intent_id: str, *, expected_fingerprint: str, expected_plan_digest: str, state: Literal["applied", "stale"], result: JsonDict) -> bool: ...
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
+
+
+class _MemoryV2ApplySession:
+    def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
+        self._journal = journal
+        self.operation = operation
+
+    def settle(
+        self,
+        *,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool:
+        return self._journal._settle_v2_locked(
+            self.operation.operation_id,
+            expected="pending",
+            state=state,
+            response=response,
+            rows=rows,
+            authorization=authorization,
+            action=action,
+        )
+
+
+class _SQLiteV2ApplySession:
+    def __init__(
+        self,
+        journal: SQLiteJournal,
+        connection: sqlite3.Connection,
+        operation: V2Operation,
+    ) -> None:
+        self._journal = journal
+        self._connection = connection
+        self.operation = operation
+        self.settled = False
+
+    def settle(
+        self,
+        *,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool:
+        changed = self._journal._settle_v2_connection(
+            self._connection,
+            self.operation.operation_id,
+            expected="pending",
+            state=state,
+            response=response,
+            rows=rows,
+            authorization=authorization,
+            action=action,
+        )
+        self.settled = self.settled or changed
+        return changed
 
 
 class MemoryJournal:
@@ -293,6 +373,28 @@ class MemoryJournal:
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
+        with self._lock:
+            return self._settle_v2_locked(
+                operation_id,
+                expected=expected,
+                state=state,
+                response=response,
+                rows=rows,
+                authorization=authorization,
+                action=action,
+            )
+
+    def _settle_v2_locked(
+        self,
+        operation_id: str,
+        *,
+        expected: V2State,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool:
         if expected != "pending" or state not in {
             "applied",
             "unchanged",
@@ -300,28 +402,36 @@ class MemoryJournal:
             "partial",
         }:
             return False
-        with self._lock:
-            current = self._v2_operations.get(operation_id)
-            if current is None or current.state != expected or not _legal_v2_transition(expected, state):
+        current = self._v2_operation_for_mutation_locked(operation_id)
+        if (
+            current is None
+            or current.state != expected
+            or not _legal_v2_transition(expected, state)
+        ):
+            return False
+        normalized = _validate_v2_operation_receipts(current, rows)
+        authorization_record = current.authorization
+        if action is not None:
+            authorization_record = self.verify_v2_authorization(
+                current, action, authorization
+            )
+            if authorization_record is None:
                 return False
-            normalized = _validate_v2_operation_receipts(current, rows)
-            authorization_record = current.authorization
-            if action is not None:
-                authorization_record = self.verify_v2_authorization(current, action, authorization)
-                if authorization_record is None:
-                    return False
-            digest = _v2_receipt_hash(normalized)
-            self._v2_receipts[operation_id] = normalized
-            self._v2_operations[operation_id] = replace(
-                current, state=state, response=_copy_json(response), receipt_hash=digest,
-                authorization=authorization_record,
-            )
-            created, _ = self._v2_times.get(operation_id, (_utc_now(), None))
-            self._v2_times[operation_id] = (
-                created,
-                None if state in {"awaiting_owner", "pending"} else _utc_now(),
-            )
-            return True
+        digest = _v2_receipt_hash(normalized)
+        self._v2_receipts[operation_id] = normalized
+        self._v2_operations[operation_id] = replace(
+            current,
+            state=state,
+            response=_copy_json(response),
+            receipt_hash=digest,
+            authorization=authorization_record,
+        )
+        created, _ = self._v2_times.get(operation_id, (_utc_now(), None))
+        self._v2_times[operation_id] = (
+            created,
+            None if state in {"awaiting_owner", "pending"} else _utc_now(),
+        )
+        return True
 
     def transition_v2(
         self,
@@ -336,7 +446,7 @@ class MemoryJournal:
         with self._lock:
             if expected == "pending" or (expected == "awaiting_owner" and state == "pending"):
                 return False
-            current = self._v2_operations.get(operation_id)
+            current = self._v2_operation_for_mutation_locked(operation_id)
             if current is None or current.state != expected or not _legal_v2_transition(expected, state):
                 return False
             authorization_record = current.authorization
@@ -365,6 +475,22 @@ class MemoryJournal:
                 self._v2_times[operation_id] = (created, _utc_now())
             return True
 
+    def _v2_operation_for_mutation_locked(
+        self, operation_id: str
+    ) -> V2Operation | None:
+        current = self._v2_operations.get(operation_id)
+        if current is None:
+            return None
+        try:
+            request = self.get_v2_request(
+                current.account_id, current.api_version, current.request_id
+            )
+        except AmbiguousV2Request:
+            return None
+        if request is None or request.operation_id != operation_id:
+            return None
+        return current
+
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]:
         with self._lock:
             current = self._v2_operations.get(operation_id)
@@ -391,6 +517,17 @@ class MemoryJournal:
                 authorization=cast(OwnerAuthorization, authorization).record,
             )
             return True, []
+
+    @contextmanager
+    def apply_session_v2(
+        self, operation_id: str
+    ) -> Iterator[V2ApplySession | None]:
+        with self._lock:
+            operation = self._v2_operation_for_mutation_locked(operation_id)
+            if operation is None or operation.state != "pending":
+                yield None
+                return
+            yield _MemoryV2ApplySession(self, operation)
 
     def v2_receipt_page(
         self,
@@ -434,6 +571,9 @@ class MemoryJournal:
         threshold = datetime.fromisoformat(now) - timedelta(days=retention_days)
         count = 0
         with self._lock:
+            for operation_id in self._v2_operations:
+                if self._v2_operation_for_mutation_locked(operation_id) is None:
+                    raise AmbiguousV2Request()
             for operation_id, operation in list(self._v2_operations.items()):
                 if operation.state == "awaiting_owner":
                     self.transition_v2(
@@ -829,16 +969,32 @@ class SQLiteJournal:
             return False
         if not _legal_v2_transition(expected, state):
             return False
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            operation = _v2_from_row(row)
+            if operation is None or operation.state != expected:
+                connection.rollback()
+                return False
+            try:
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
+                )
+            except AmbiguousV2Request:
+                connection.rollback()
+                return False
+            if request is None or request.operation_id != operation_id:
+                connection.rollback()
+                return False
             authorization_record: str | None = None
             if state in {"pending", "declined", "partial_resolved"}:
-                row = connection.execute(
-                    "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
-                    (operation_id,),
-                ).fetchone()
-                operation = _v2_from_row(row)
-                if operation is None:
-                    return False
                 action = (
                     "approve"
                     if state == "pending"
@@ -850,6 +1006,7 @@ class SQLiteJournal:
                     operation, action, authorization
                 )
                 if authorization_record is None:
+                    connection.rollback()
                     return False
             cursor = connection.execute(
                 """UPDATE owner_operations_v2 SET state=?, response_json=?,
@@ -870,7 +1027,14 @@ class SQLiteJournal:
                     "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
                     (_utc_now(), operation_id),
                 )
+            connection.commit()
             return changed
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]:
         connection = self._connect()
@@ -916,6 +1080,50 @@ class SQLiteJournal:
         finally:
             connection.close()
 
+    @contextmanager
+    def apply_session_v2(
+        self, operation_id: str
+    ) -> Iterator[V2ApplySession | None]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            operation = _v2_from_row(row)
+            if operation is None or operation.state != "pending":
+                connection.rollback()
+                yield None
+                return
+            try:
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
+                )
+            except AmbiguousV2Request:
+                connection.rollback()
+                yield None
+                return
+            if request is None or request.operation_id != operation_id:
+                connection.rollback()
+                yield None
+                return
+            session = _SQLiteV2ApplySession(self, connection, operation)
+            yield session
+            if session.settled:
+                connection.commit()
+            else:
+                connection.rollback()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def settle_v2(
         self,
         operation_id: str,
@@ -936,37 +1144,19 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            if current is None or current["state"] != expected:
+            changed = self._settle_v2_connection(
+                connection,
+                operation_id,
+                expected=expected,
+                state=state,
+                response=response,
+                rows=rows,
+                authorization=authorization,
+                action=action,
+            )
+            if not changed:
                 connection.rollback()
                 return False
-            current_operation = _v2_from_row(current)
-            assert current_operation is not None
-            normalized = _validate_v2_operation_receipts(current_operation, rows)
-            authorization_record: str | None = None
-            if action is not None:
-                authorization_record = self.verify_v2_authorization(current_operation, action, authorization)
-                if authorization_record is None:
-                    connection.rollback()
-                    return False
-            digest = _insert_v2_receipts(connection, operation_id, normalized)
-            changed = connection.execute(
-                """UPDATE owner_operations_v2
-                   SET state=?, response_json=?, receipt_hash=?, authorization=COALESCE(?, authorization)
-                   WHERE operation_id=? AND state=?""",
-                (state, _json(response), digest, authorization_record, operation_id, expected),
-            ).rowcount
-            if changed != 1:
-                connection.rollback()
-                return False
-            if state not in {"awaiting_owner", "pending"}:
-                connection.execute(
-                    "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
-                    (_utc_now(), operation_id),
-                )
             connection.commit()
             return True
         except BaseException:
@@ -975,6 +1165,72 @@ class SQLiteJournal:
             raise
         finally:
             connection.close()
+
+    def _settle_v2_connection(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        *,
+        expected: V2State,
+        state: V2State,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+    ) -> bool:
+        if (
+            expected != "pending"
+            or state not in {"applied", "unchanged", "not_applied", "partial"}
+            or not _legal_v2_transition(expected, state)
+        ):
+            return False
+        current = connection.execute(
+            "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        current_operation = _v2_from_row(current)
+        if current_operation is None or current_operation.state != expected:
+            return False
+        try:
+            request = _sqlite_v2_request(
+                connection,
+                current_operation.account_id,
+                current_operation.api_version,
+                current_operation.request_id,
+            )
+        except AmbiguousV2Request:
+            return False
+        if request is None or request.operation_id != operation_id:
+            return False
+        normalized = _validate_v2_operation_receipts(current_operation, rows)
+        authorization_record: str | None = None
+        if action is not None:
+            authorization_record = self.verify_v2_authorization(
+                current_operation, action, authorization
+            )
+            if authorization_record is None:
+                return False
+        digest = _insert_v2_receipts(connection, operation_id, normalized)
+        changed = connection.execute(
+            """UPDATE owner_operations_v2
+               SET state=?, response_json=?, receipt_hash=?, authorization=COALESCE(?, authorization)
+               WHERE operation_id=? AND state=?""",
+            (
+                state,
+                _json(response),
+                digest,
+                authorization_record,
+                operation_id,
+                expected,
+            ),
+        ).rowcount
+        if changed != 1:
+            return False
+        connection.execute(
+            "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
+            (_utc_now(), operation_id),
+        )
+        return True
 
     def v2_receipt_page(
         self,
@@ -1004,7 +1260,23 @@ class SQLiteJournal:
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int:
         now_value = datetime.fromisoformat(now).astimezone(timezone.utc)
         threshold = (now_value - timedelta(days=retention_days)).isoformat()
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                "SELECT * FROM owner_operations_v2"
+            ).fetchall()
+            for row in active:
+                operation = _v2_from_row(row)
+                assert operation is not None
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
+                )
+                if request is None or request.operation_id != operation.operation_id:
+                    raise AmbiguousV2Request()
             awaiting_owner = connection.execute(
                 """SELECT operation_id FROM owner_operations_v2
                    WHERE state='awaiting_owner'""",
@@ -1037,7 +1309,14 @@ class SQLiteJournal:
                 connection.execute("DELETE FROM owner_receipts_v2 WHERE operation_id=?", (operation_id,))
                 connection.execute("DELETE FROM owner_operation_times_v2 WHERE operation_id=?", (operation_id,))
                 connection.execute("DELETE FROM owner_operations_v2 WHERE operation_id=?", (operation_id,))
+            connection.commit()
             return len(rows)
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def cutover_v1(self) -> JsonDict:
         connection = self._connect()
