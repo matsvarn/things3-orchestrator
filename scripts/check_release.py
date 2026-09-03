@@ -366,6 +366,18 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 fence = None
                 continue
         else:
+            if (
+                fragments
+                and code_span is None
+                and not in_html_comment
+                and _starts_markdown_block(raw_line)
+            ):
+                logical = "".join(fragments)
+                commands.extend(
+                    ShellCommand(start, tokens, complete=False)
+                    for tokens in _shell_segments(logical)
+                )
+                fragments = []
             marker = (
                 FENCE_OPEN.match(raw_line)
                 if code_span is None and not in_html_comment
@@ -558,6 +570,20 @@ def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
         return False
     marker = match.group(1)
     return marker[0] == character and len(marker) >= minimum
+
+
+def _starts_markdown_block(line: str) -> bool:
+    if not line.strip():
+        return True
+    if re.match(r" {0,3}#{1,6}(?:[ \t]+|$)", line) is not None:
+        return True
+    if re.match(r" {0,3}>", line) is not None:
+        return True
+    if re.match(r" {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]+|$)", line) is not None:
+        return True
+    thematic = line.lstrip(" ") if len(line) - len(line.lstrip(" ")) <= 3 else ""
+    compact = thematic.replace(" ", "").replace("\t", "")
+    return len(compact) >= 3 and len(set(compact)) == 1 and compact[0] in "*_-"
 
 
 def _continues_shell_line(line: str) -> bool:
