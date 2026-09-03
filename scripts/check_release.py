@@ -27,6 +27,10 @@ GIT_INSTALL_TAG = re.compile(
 ANY_CODEX_TARGET = re.compile(
     r"[^\s'\"]+/things3-orchestrator(?!\.git)", re.IGNORECASE
 )
+UV_INSTALL_INTENT = re.compile(r"(?:\A|\s)tool\s+install(?:\s|\Z)")
+CODEX_INSTALL_INTENT = re.compile(
+    r"(?:\A|\s)plugin\s+marketplace\s+add(?:\s|\Z)"
+)
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
@@ -244,9 +248,7 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
     sources = markdown_files() if root.resolve() == ROOT else sorted(root.rglob("*.md"))
     for source in sources:
         for shell_command in shell_commands(source.read_text()):
-            if "things-orchestrator print-config" not in " ".join(
-                shell_command.tokens
-            ):
+            if not _has_print_config_intent(shell_command.tokens):
                 continue
             message = (
                 _print_config_error(shell_command.tokens)
@@ -276,7 +278,9 @@ def install_tag_errors(
         number = shell_command.line
         tokens = shell_command.tokens
         raw = " ".join(tokens)
-        if "things3-orchestrator.git" in raw.casefold():
+        if _has_command_intent(
+            tokens, UV_INSTALL_INTENT
+        ) or "things3-orchestrator.git" in raw.casefold():
             tag = (
                 _exact_uv_install_tag(
                     tokens, allow_force=source == Path("docs/operations.md")
@@ -300,7 +304,10 @@ def install_tag_errors(
                         f"from {expected}",
                     )
 
-        if ANY_CODEX_TARGET.search(raw) is not None:
+        if (
+            _has_command_intent(tokens, CODEX_INSTALL_INTENT)
+            or ANY_CODEX_TARGET.search(raw) is not None
+        ):
             reference = (
                 _exact_codex_install_ref(tokens) if shell_command.complete else None
             )
@@ -564,6 +571,20 @@ def _shell_segments(command: str) -> list[tuple[str, ...]]:
     if current:
         result.append(tuple(current))
     return result
+
+
+def _has_command_intent(tokens: tuple[str, ...], pattern: re.Pattern[str]) -> bool:
+    return pattern.search(" ".join(tokens)) is not None
+
+
+def _has_print_config_intent(tokens: tuple[str, ...]) -> bool:
+    raw = " ".join(tokens)
+    if "things-orchestrator print-config" in raw:
+        return True
+    return any(
+        token == "print-config" and index > 0 and tokens[index - 1].startswith("$")
+        for index, token in enumerate(tokens)
+    )
 
 
 def _exact_uv_install_tag(
