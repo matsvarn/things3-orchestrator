@@ -292,13 +292,44 @@ def test_metadata_rejects_stale_install_tags_in_inline_code(
         text = original_read_text(path, *args, **kwargs)
         if path == target:
             assert current_command in text
-            return text.replace(
-                current_command,
-                f"{current_command}\nAn older example used {stale_inline}.",
-            )
+            return f"{text}\nAn older example used {stale_inline}.\n"
         return text
 
     monkeypatch.setattr(Path, "read_text", read_text)
 
     with pytest.raises(SystemExit, match="v0.8.0"):
         check_release.metadata()
+
+
+def test_shell_command_substitution_inside_a_fence_is_not_markdown_inline_code() -> None:
+    markdown = """```console
+echo `date`; uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.8.0"
+```
+"""
+
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md:2: uv install tag v0.8.0 differs from v0.9.1"]
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "<!-- uv tool install "
+        '"git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1" -->\n',
+        """<!--
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
+-->
+""",
+    ],
+)
+def test_html_comments_cannot_supply_the_required_install(markdown: str) -> None:
+    assert install_tag_errors(
+        markdown,
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind="uv",
+    ) == ["guide.md: missing uv install for v0.9.1"]
