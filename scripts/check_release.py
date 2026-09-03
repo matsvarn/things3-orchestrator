@@ -282,9 +282,14 @@ def install_tag_errors(
             tokens, source=source
         ):
             continue
-        if _has_uv_install_intent(
-            tokens
-        ) or "things3-orchestrator.git" in raw.casefold():
+        if (
+            _has_uv_install_intent(tokens)
+            or (
+                not shell_command.complete
+                and tokens[:3] == ("uv", "tool", "install")
+            )
+            or "things3-orchestrator.git" in raw.casefold()
+        ):
             tag = (
                 _exact_uv_install_tag(
                     tokens, allow_force=source == Path("docs/operations.md")
@@ -310,6 +315,10 @@ def install_tag_errors(
 
         if (
             _has_codex_install_intent(tokens)
+            or (
+                not shell_command.complete
+                and tokens[:4] == ("codex", "plugin", "marketplace", "add")
+            )
             or ANY_CODEX_TARGET.search(raw) is not None
         ):
             reference = (
@@ -366,18 +375,6 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                 marker.group("marker").startswith("`")
                 and "`" in marker.group("info")
             ):
-                opening = marker.group("marker")
-                fence = (opening[0], len(opening))
-                continue
-            visible, inline, in_html_comment, code_span = _outside_fence_parts(
-                raw_line,
-                number=number,
-                in_html_comment=in_html_comment,
-                code_span=code_span,
-                future_lines=lines[number:],
-            )
-            line = visible
-            if inline:
                 if fragments:
                     logical = "".join(fragments)
                     commands.extend(
@@ -385,10 +382,40 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         for tokens in _shell_segments(logical)
                     )
                     fragments = []
-                if line.strip():
+                opening = marker.group("marker")
+                fence = (opening[0], len(opening))
+                continue
+            (
+                visible_parts,
+                inline,
+                in_html_comment,
+                code_span,
+                crossed_boundary,
+            ) = _outside_fence_parts(
+                raw_line,
+                number=number,
+                in_html_comment=in_html_comment,
+                code_span=code_span,
+                future_lines=lines[number:],
+            )
+            if crossed_boundary:
+                if fragments:
+                    fragments.append(visible_parts[0])
+                    logical = "".join(fragments)
                     commands.extend(
-                        ShellCommand(number, tokens)
-                        for tokens in _shell_segments(line)
+                        ShellCommand(start, tokens, complete=False)
+                        for tokens in _shell_segments(logical)
+                    )
+                    fragments = []
+                    visible_parts = visible_parts[1:]
+                for visible in visible_parts:
+                    continued = _continues_shell_line(visible)
+                    logical = visible[:-1] if continued else visible
+                    if not logical.strip():
+                        continue
+                    commands.extend(
+                        ShellCommand(number, tokens, complete=not continued)
+                        for tokens in _shell_segments(logical)
                     )
                 for code_start, code in inline:
                     commands.extend(
@@ -396,17 +423,7 @@ def shell_commands(markdown: str) -> list[ShellCommand]:
                         for tokens in _shell_segments(code.strip())
                     )
                 continue
-            if fragments and (code_span is not None or in_html_comment):
-                fragments.append(line)
-                logical = "".join(fragments)
-                commands.extend(
-                    ShellCommand(start, tokens, complete=False)
-                    for tokens in _shell_segments(logical)
-                )
-                fragments = []
-                continue
-            if code_span is not None and not line.strip() and not fragments:
-                continue
+            line = visible_parts[0]
         if not line.strip() and not fragments:
             continue
         if not fragments:
@@ -439,33 +456,44 @@ def _outside_fence_parts(
     code_span: tuple[int, int, list[str]] | None,
     future_lines: list[str],
 ) -> tuple[
-    str,
+    list[str],
     list[tuple[int, str]],
     bool,
     tuple[int, int, list[str]] | None,
+    bool,
 ]:
-    visible: list[str] = []
+    visible: list[list[str]] = [[]]
     code: list[tuple[int, str]] = []
     index = 0
+    crossed_boundary = code_span is not None or in_html_comment
     if code_span is not None:
         width, start_number, parts = code_span
         closing = _code_span_close(line, 0, width)
         if closing is None:
             parts.append(line)
-            return "", code, in_html_comment, code_span
+            return [""], code, in_html_comment, code_span, crossed_boundary
         parts.append(line[:closing])
         code.append((start_number, "\n".join(parts)))
         index = closing + width
         code_span = None
+        visible.append([])
     while index < len(line):
         if in_html_comment:
             closing = line.find("-->", index)
             if closing < 0:
-                return "".join(visible), code, True, code_span
+                return (
+                    ["".join(part) for part in visible],
+                    code,
+                    True,
+                    code_span,
+                    crossed_boundary,
+                )
             in_html_comment = False
             index = closing + 3
+            visible.append([])
             continue
         if line.startswith("<!--", index) and not _is_escaped(line, index):
+            crossed_boundary = True
             in_html_comment = True
             index += 4
             continue
@@ -475,21 +503,30 @@ def _outside_fence_parts(
                 width += 1
             closing = _code_span_close(line, index + width, width)
             if closing is not None:
+                crossed_boundary = True
                 code.append((number, line[index + width : closing]))
                 index = closing + width
+                visible.append([])
                 continue
             if not any(
                 _code_span_close(future, 0, width) is not None
                 for future in future_lines
             ):
-                visible.append("`" * width)
+                visible[-1].append("`" * width)
                 index += width
                 continue
+            crossed_boundary = True
             code_span = (width, number, [line[index + width :]])
             break
-        visible.append(line[index])
+        visible[-1].append(line[index])
         index += 1
-    return "".join(visible), code, in_html_comment, code_span
+    return (
+        ["".join(part) for part in visible],
+        code,
+        in_html_comment,
+        code_span,
+        crossed_boundary,
+    )
 
 
 def _is_escaped(line: str, index: int) -> bool:
