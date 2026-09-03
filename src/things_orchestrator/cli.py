@@ -56,8 +56,14 @@ _LOGIN = (
 _LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ExactArgumentParser(
         description="Things Cloud MCP server with eight bounded v2 tools.",
         epilog=(
             "Install an exact Git tag, then run things-orchestrator login, "

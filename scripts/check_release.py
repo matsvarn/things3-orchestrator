@@ -257,10 +257,26 @@ def instruction_errors(root: Path = ROOT) -> list[str]:
                         "client config command must be direct"
                     )
                 continue
-            if "--show-secrets" not in command:
+            client_values = _option_values(command[2:], "--client")
+            indirect = not shell_command.direct or command != shell_command.tokens
+            if indirect:
+                client = client_values[0] if len(client_values) == 1 else None
+                if (
+                    client
+                    in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}
+                    and "--show-secrets" not in command
+                ):
+                    message = "usable client config needs --show-secrets"
+                else:
+                    message = "client config command must be direct"
+            elif len(client_values) != 1 or client_values[0] is None:
+                message = "print-config needs exactly one exact --client"
+            elif (
+                client_values[0]
+                in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}
+                and "--show-secrets" not in command
+            ):
                 message = "usable client config needs --show-secrets"
-            elif not shell_command.direct or command != shell_command.tokens:
-                message = "client config command must be direct"
             else:
                 continue
             errors.append(
@@ -283,7 +299,10 @@ def install_tag_errors(
         number = shell_command.line
         tokens = shell_command.tokens
         wrapper_payload = _shell_wrapper_payload(tokens)
-        joined = " ".join(tokens)
+        uv_target = any(
+            token.startswith("git+") and "things3-orchestrator" in token
+            for token in tokens
+        )
         uv_index = _subsequence_index(tokens, ("uv", "tool", "install"))
         if uv_index is not None and any(
             "things3-orchestrator" in token for token in tokens[uv_index + 3 :]
@@ -309,15 +328,17 @@ def install_tag_errors(
                     for tag in tags
                     if tag != expected
                 )
-        elif (
-            "uv tool install" in joined
-            and "things3-orchestrator" in joined
-            and wrapper_payload is None
-        ):
+        elif uv_target and wrapper_payload is None:
+            message = (
+                "unsupported uv install command"
+                if shell_command.direct
+                else "uv install command must be direct"
+            )
             errors.append(
-                f"{source}:{number}: uv install command must be direct"
+                f"{source}:{number}: {message}"
             )
 
+        codex_target = "matsvarn/things3-orchestrator" in tokens
         codex_index = _subsequence_index(
             tokens, ("codex", "plugin", "marketplace", "add")
         )
@@ -346,13 +367,14 @@ def install_tag_errors(
                 for reference in references
                 if reference is not None and reference != expected
             )
-        elif (
-            "codex plugin marketplace add" in joined
-            and "matsvarn/things3-orchestrator" in joined
-            and wrapper_payload is None
-        ):
+        elif codex_target and wrapper_payload is None:
+            message = (
+                "unsupported Codex marketplace install command"
+                if shell_command.direct
+                else "Codex marketplace install command must be direct"
+            )
             errors.append(
-                f"{source}:{number}: Codex marketplace install command must be direct"
+                f"{source}:{number}: {message}"
             )
     if not found_required:
         errors.append(f"{source}: missing {required_kind} install for {expected}")
@@ -604,11 +626,7 @@ def _client_config_command(tokens: tuple[str, ...]) -> tuple[str, ...] | None:
     start = _subsequence_index(tokens, ("things-orchestrator", "print-config"))
     if start is None:
         return None
-    command = tokens[start:]
-    client = _option_value(command[2:], "--client")
-    if client not in {"codex", "hermes", "claude-code", "cursor", "cursor-cloud"}:
-        return None
-    return command
+    return tokens[start:]
 
 
 def _subsequence_index(
@@ -623,15 +641,6 @@ def _subsequence_index(
         ),
         None,
     )
-
-
-def _option_value(tokens: tuple[str, ...], option: str) -> str | None:
-    for index, token in enumerate(tokens):
-        if token.startswith(f"{option}="):
-            return token.partition("=")[2]
-        if token == option and index + 1 < len(tokens):
-            return tokens[index + 1]
-    return None
 
 
 def _option_values(
