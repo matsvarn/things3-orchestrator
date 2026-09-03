@@ -12,6 +12,7 @@ from things_orchestrator.cloud import CloudError
 from things_orchestrator.journal import (
     JsonDict,
     MemoryJournal,
+    SQLiteJournal,
     V2Operation,
     v2_manifest_hash,
 )
@@ -1492,6 +1493,98 @@ def test_remote_applied_then_unreachable_stays_pending_without_replay() -> None:
     assert first.code == "pending_unknown"
     assert first.next_action == second.next_action == "retry_same"
     assert library.apply_calls == 1
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_outcome_unknown_before_state_stays_pending_until_delayed_commit_appears(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class DelayedCommitLibrary(MemoryLibrary):
+        apply_calls = 0
+        delayed_writes: list[Write] = []
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            self.delayed_writes = writes
+            raise CloudError(
+                "Things Cloud outcome is unknown; reconcile the workspace before retrying"
+            )
+
+        def land_delayed_commit(self) -> None:
+            MemoryLibrary.apply(self, self.delayed_writes)
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = DelayedCommitLibrary(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=journal,
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    call = {
+        "request_id": REQUEST,
+        "items": [{"id": "task:a", "set": {"title": "B"}}],
+    }
+
+    first = ThingsV2(workspace).dispatch("things_update", call)
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert first.state == "pending"
+    assert first.code == "pending_unknown"
+    assert stored is not None and stored.state == "pending"
+
+    library.land_delayed_commit()
+    second = ThingsV2(workspace).dispatch("things_update", call)
+
+    assert second.state == "applied"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "applied"
+
+
+@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
+def test_definitive_cloud_rejection_can_settle_not_applied(
+    journal_kind: str, tmp_path: Path,
+) -> None:
+    class DefinitiveFailureLibrary(MemoryLibrary):
+        apply_calls = 0
+
+        def apply(self, writes: list[Write]) -> ApplyResult:
+            self.apply_calls += 1
+            raise CloudError("Things Cloud HTTP 400")
+
+    journal = (
+        MemoryJournal()
+        if journal_kind == "memory"
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
+    )
+    library = DefinitiveFailureLibrary(
+        [Record(uuid="a", kind="task", title="A")]
+    )
+    result = ThingsV2(
+        ThingsWorkspace(
+            library,
+            journal=journal,
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_update",
+        {
+            "request_id": REQUEST,
+            "items": [{"id": "task:a", "set": {"title": "B"}}],
+        },
+    )
+
+    assert result.state == "not_applied"
+    assert library.apply_calls == 1
+    stored = journal.get_v2_request("owner@example.com", "2", REQUEST)
+    assert stored is not None and stored.state == "not_applied"
 
 
 def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
