@@ -1578,6 +1578,20 @@ def test_dispatch_marker_survives_apply_session_without_settlement(
 
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
+        rows = [
+            {
+                "sequence": 1,
+                "action": "create",
+                "target_id": "task:a",
+                "desired": {},
+                "observed": None,
+                "result": "not_applied",
+                "proof": "provider_rejected",
+            }
+        ]
+        assert not session.settle_rejected(
+            response={"state": "not_applied"}, rows=rows
+        )
         assert session.mark_dispatched() is True
         assert not session.settle(
             state="unchanged",

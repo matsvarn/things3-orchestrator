@@ -26,11 +26,14 @@ An exact retry never reposts the batch. It force-refreshes and classifies the
 frozen writes:
 
 - all desired observations match: `applied`;
-- no desired observation matches and every touched field still equals its
-  frozen before value: `not_applied`;
+- before dispatch, no desired observation matches and every touched field still
+  equals its frozen before value: `not_applied`;
+- after dispatch, a typed provider response proves rejection without a commit:
+  `not_applied`;
 - some desired observations match and every write is classified: terminal
   `partial`;
-- evidence remains ambiguous: `pending`, with the account fence intact.
+- evidence remains ambiguous, including before-state after dispatch: `pending`,
+  with the account fence intact.
 
 Applied, unchanged, not-applied, and partial outcomes have immutable receipt
 rows. Corrective work after a partial outcome uses current state and a fresh

@@ -136,6 +136,13 @@ class V2ApplySession(Protocol):
 
     def mark_dispatched(self) -> bool: ...
 
+    def settle_rejected(
+        self,
+        *,
+        response: JsonDict,
+        rows: list[JsonDict],
+    ) -> bool: ...
+
     def settle(
         self,
         *,
@@ -244,6 +251,23 @@ class _MemoryV2ApplySession(_OwnedV2ApplySession):
 
         return self._act_owned(mark)
 
+    def settle_rejected(
+        self,
+        *,
+        response: JsonDict,
+        rows: list[JsonDict],
+    ) -> bool:
+        return self._act_owned(
+            lambda: self._journal._settle_v2_locked(
+                self.operation.operation_id,
+                expected="pending",
+                state="not_applied",
+                response=response,
+                rows=rows,
+                definitive_rejection=True,
+            )
+        )
+
     def settle(
         self,
         *,
@@ -285,6 +309,23 @@ class _SQLiteV2ApplySession(_OwnedV2ApplySession):
             return True
 
         return self._act_owned(mark)
+
+    def settle_rejected(
+        self,
+        *,
+        response: JsonDict,
+        rows: list[JsonDict],
+    ) -> bool:
+        return self._act_owned(
+            lambda: self._journal._settle_v2_owned(
+                self.operation.operation_id,
+                expected="pending",
+                state="not_applied",
+                response=response,
+                rows=rows,
+                definitive_rejection=True,
+            )
+        )
 
     def settle(
         self,
@@ -487,6 +528,7 @@ class MemoryJournal:
         rows: list[JsonDict],
         authorization: object = None,
         action: str | None = None,
+        definitive_rejection: bool = False,
     ) -> bool:
         if expected != "pending" or state not in {
             "applied",
@@ -499,9 +541,10 @@ class MemoryJournal:
         if (
             current is None
             or current.state != expected
-            or (
-                state in {"unchanged", "not_applied"}
-                and current.dispatch_started
+            or not _v2_dispatch_allows_settlement(
+                current,
+                state,
+                definitive_rejection=definitive_rejection,
             )
             or not _legal_v2_transition(expected, state)
         ):
@@ -1452,6 +1495,7 @@ class SQLiteJournal:
         rows: list[JsonDict],
         authorization: object = None,
         action: str | None = None,
+        definitive_rejection: bool = False,
     ) -> bool:
         if (
             expected != "pending"
@@ -1471,6 +1515,7 @@ class SQLiteJournal:
                 rows=rows,
                 authorization=authorization,
                 action=action,
+                definitive_rejection=definitive_rejection,
             )
             if not changed:
                 connection.rollback()
@@ -1535,6 +1580,7 @@ class SQLiteJournal:
         rows: list[JsonDict],
         authorization: object = None,
         action: str | None = None,
+        definitive_rejection: bool = False,
     ) -> bool:
         if (
             expected != "pending"
@@ -1549,9 +1595,10 @@ class SQLiteJournal:
         current_operation = _v2_from_row(current)
         if current_operation is None or current_operation.state != expected:
             return False
-        if (
-            state in {"unchanged", "not_applied"}
-            and current_operation.dispatch_started
+        if not _v2_dispatch_allows_settlement(
+            current_operation,
+            state,
+            definitive_rejection=definitive_rejection,
         ):
             return False
         try:
@@ -2330,6 +2377,21 @@ def _legal_v2_transition(before: V2State, after: V2State) -> bool:
         "pending": {"applied", "unchanged", "not_applied", "partial"},
         "partial": {"partial_resolved"},
     }.get(before, set())
+
+
+def _v2_dispatch_allows_settlement(
+    operation: V2Operation,
+    state: V2ApplyState,
+    *,
+    definitive_rejection: bool,
+) -> bool:
+    if definitive_rejection and not operation.dispatch_started:
+        return False
+    return (
+        not operation.dispatch_started
+        or state in {"applied", "partial"}
+        or (state == "not_applied" and definitive_rejection)
+    )
 
 
 def _retired_awaiting_owner_response(operation_id: str) -> JsonDict:

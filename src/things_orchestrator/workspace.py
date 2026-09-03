@@ -13,7 +13,7 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
 
-from .cloud import CloudError, CloudOutcomeUnknown
+from .cloud import CloudError, CloudOutcomeUnknown, CloudWriteRejected
 from .config import ConfigError, Preferences
 from .consistency import Conflict, diagnose, item_conflicts
 from .context import (
@@ -3718,6 +3718,22 @@ class ThingsWorkspace:
         operation = session.operation
         try:
             applied = self._library.apply(writes)
+        except CloudWriteRejected:
+            response = {
+                "state": "not_applied",
+                "code": "not_applied_precondition",
+                "next_action": "read_receipt",
+                "instruction": (
+                    "Things Cloud rejected the frozen write before commit; "
+                    "nothing was replayed."
+                ),
+                "operation_id": operation.operation_id,
+            }
+            rows = self._v2_rejected_receipt_rows(operation, writes, before)
+            settled = session.settle_rejected(response=response, rows=rows)
+            return response if settled else self._persisted_v2_outcome(
+                operation.operation_id
+            )
         except CloudError:
             failed = self._refresh(force=True)
             if failed is not None:
@@ -4169,6 +4185,27 @@ class ThingsWorkspace:
             desired = self._v2_desired(write, touched[index - 1])
             rows.append({"sequence": index, "action": write.action, "target_id": _write_public_id(write), "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
         return rows
+
+    def _v2_rejected_receipt_rows(
+        self,
+        operation: V2Operation,
+        writes: list[Write],
+        before: list[JsonDict | None],
+    ) -> list[JsonDict]:
+        touched = cast(list[list[str]], operation.manifest["touched"])
+        return [
+            {
+                "sequence": index,
+                "action": write.action,
+                "target_id": _write_public_id(write),
+                "before": _taint_things_text(before[index - 1]),
+                "desired": self._v2_desired(write, touched[index - 1]),
+                "observed": None,
+                "result": "not_applied",
+                "proof": "provider_rejected",
+            }
+            for index, write in enumerate(writes, start=1)
+        ]
 
     def _v2_desired(self, write: Write, fields: Sequence[str]) -> JsonDict:
         selected = set(fields)

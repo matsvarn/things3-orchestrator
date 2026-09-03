@@ -1646,6 +1646,11 @@ def test_typed_cloud_rejection_settles_not_applied_and_releases_fence(
     assert stored is not None and stored.state == "not_applied"
     assert stored.dispatch_started is True
     assert journal.blocking_v2_operations("owner@example.com") == []
+    receipt = journal.v2_receipt_page(
+        "owner@example.com", stored.operation_id, limit=10
+    )
+    assert receipt.rows[0]["proof"] == "provider_rejected"
+    assert receipt.rows[0]["observed"] is None
 
 
 def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> None:
