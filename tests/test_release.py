@@ -664,6 +664,130 @@ def test_print_config_requires_one_exact_client_option(
     ]
 
 
+@pytest.mark.parametrize(
+    ("required_kind", "command", "label"),
+    [
+        (
+            "uv",
+            "exec uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "command uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "sudo uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "env -u HOME uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "uv tool install "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1" --quiet',
+            "uv",
+        ),
+        (
+            "uv",
+            "uv tool install -- "
+            '"git+https://github.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "uv tool install "
+            '"git+https://example.com/matsvarn/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "uv",
+            "uv tool install "
+            '"git+https://github.com/other/'
+            'things3-orchestrator.git@v0.9.1"',
+            "uv",
+        ),
+        (
+            "codex",
+            "codex plugin marketplace add matsvarn/things3-orchestrator "
+            "--ref v0.9.1 --ref v0.9.1",
+            "Codex marketplace",
+        ),
+        (
+            "codex",
+            "codex plugin marketplace add other/things3-orchestrator "
+            "--ref v0.9.1",
+            "Codex marketplace",
+        ),
+    ],
+)
+def test_only_exact_install_grammar_counts_as_required(
+    required_kind: str, command: str, label: str
+) -> None:
+    assert install_tag_errors(
+        command + "\n",
+        source=Path("guide.md"),
+        version="0.9.1",
+        required_kind=required_kind,
+    ) == [
+        f"guide.md:1: unsupported {label} install command",
+        f"guide.md: missing {required_kind} install for v0.9.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        (
+            "things-orchestrator print-config --client garbage --show-secrets",
+            "unsupported print-config client",
+        ),
+        (
+            "things-orchestrator print-config --client codex "
+            "--show-secrets --format json",
+            "unsupported print-config command",
+        ),
+        (
+            "things-orchestrator print-config --client codex --show-secrets --",
+            "unsupported print-config command",
+        ),
+        (
+            "things-orchestrator print-config --client codex "
+            "--show-secrets trailing",
+            "unsupported print-config command",
+        ),
+        (
+            "things-orchestrator print-config --client codex "
+            "--show-secrets --show-secrets",
+            "unsupported print-config command",
+        ),
+    ],
+)
+def test_print_config_rejects_noncanonical_arguments(
+    command: str, message: str, tmp_path: Path,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(command + "\n")
+
+    assert instruction_errors(tmp_path) == [f"guide.md:1: {message}"]
+
+
 @pytest.mark.parametrize("mixed_closer", ["```~", "~~~`"])
 def test_mixed_character_runs_do_not_close_fences(mixed_closer: str) -> None:
     opener = "```console" if mixed_closer.startswith("`") else "~~~console"
