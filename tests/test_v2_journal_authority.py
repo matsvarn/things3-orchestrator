@@ -1769,6 +1769,82 @@ def test_sqlite_apply_owner_rejects_hard_link_added_after_init(
             pass
 
 
+def test_sqlite_journal_pins_symlink_target_before_owned_connections(
+    tmp_path: Path,
+) -> None:
+    alias_path = tmp_path / "alias.sqlite3"
+    replacement_path = tmp_path / "replacement.sqlite3"
+
+    class RetargetingJournal(SQLiteJournal):
+        def __init__(self) -> None:
+            self._alias_path = alias_path
+            self._replacement_path = replacement_path
+            self._retarget_armed = False
+            self._canonical_calls = 0
+            super().__init__(alias_path)
+
+        def arm_retarget(self) -> None:
+            self._retarget_armed = True
+
+        def _canonical_path(self) -> Path:
+            canonical = super()._canonical_path()
+            if self._retarget_armed:
+                self._canonical_calls += 1
+                if self._canonical_calls == 2:
+                    self._alias_path.unlink()
+                    self._alias_path.symlink_to(self._replacement_path)
+            return canonical
+
+    operation = _operation(
+        "op_symlink_retarget",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    original_path = tmp_path / "original.sqlite3"
+    original = SQLiteJournal(original_path)
+    replacement = SQLiteJournal(replacement_path)
+    assert original.create_v2(operation, claim_fence=True)[0] == "created"
+    assert replacement.create_v2(operation, claim_fence=True)[0] == "created"
+    alias_path.symlink_to(original_path)
+    journal = RetargetingJournal()
+    journal.arm_retarget()
+
+    with journal.apply_session_v2(operation.operation_id) as session:
+        assert session is not None
+        assert session.settle(
+            state="not_applied",
+            response={"state": "not_applied"},
+            rows=[
+                {
+                    "sequence": 1,
+                    "action": "create",
+                    "target_id": "task:a",
+                    "desired": {},
+                    "observed": {},
+                    "result": "not_applied",
+                }
+            ],
+        )
+
+    original_stored = original.get_v2_operation(operation.operation_id)
+    replacement_stored = replacement.get_v2_operation(operation.operation_id)
+    assert original_stored is not None
+    assert replacement_stored is not None
+    assert original_stored.state == "not_applied"
+    assert replacement_stored.state == "pending"
+
+
+def test_sqlite_journal_pins_new_relative_path_at_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requested = Path("state/journal.sqlite3")
+
+    journal = SQLiteJournal(requested)
+
+    assert journal.path == (tmp_path / requested).resolve()
+    assert journal.path.is_file()
+
+
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
 def test_apply_session_cannot_settle_after_context_exit(
     journal_kind: str, tmp_path: Path,
