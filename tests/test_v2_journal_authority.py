@@ -183,7 +183,7 @@ def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
     )
     conflicting = _with_manifest(conflicting)
     if isinstance(journal, MemoryJournal):
-        journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
+        journal._v2_operations[conflicting.operation_id] = conflicting
     else:
         with sqlite3.connect(journal.path) as connection:
             connection.execute(

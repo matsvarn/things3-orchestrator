@@ -1620,7 +1620,7 @@ def test_ambiguous_casefolded_requests_reject_before_cloud_io() -> None:
         conflicting = pending_operation(
             "owner@example.com", "op_conflicting", "sha256:conflicting"
         )
-        journal._v2_operations = {  # noqa: SLF001
+        journal._v2_operations = {
             original.operation_id: original,
             conflicting.operation_id: conflicting,
         }
