@@ -1,13 +1,14 @@
 # Connect a client
 
-Every client uses the same MCP URL and bearer. The serving host keeps the
-Things Cloud email and password. Run `print-config` there in a private terminal,
-then transfer only its output to the client.
+HTTP clients use the same MCP URL and bearer. The serving host keeps the Things
+Cloud email and password. Run `print-config` there in a private terminal, then
+transfer only its output to the client. Same-host Codex can instead use the
+self-distributed stdio plugin below.
 
 | Client | Selector | Put the output here |
 |---|---|---|
 | Codex | `codex` | Merge the TOML block into `~/.codex/config.toml`. |
-| Hermes | `hermes` | Merge the YAML into the active Hermes profile. The generated skill path belongs on the agent-runtime host. |
+| Hermes | `hermes` | Run the two native Hermes commands. Hermes prompts for the bearer and tests the connection. |
 | Claude Code | `claude-code` | Run the printed command. For the alternative block, run `claude mcp add-json things '<JSON>'` with the printed JSON as the argument. |
 | Cursor desktop | `cursor` | Merge the `things` entry into `~/.cursor/mcp.json`. |
 | Cursor Cloud Agents | `cursor-cloud` | Paste in the Cloud Agents dashboard at `cursor.com/agents`, not in `.cursor/mcp.json`. |
@@ -22,6 +23,9 @@ things-orchestrator print-config --client codex --show-secrets
 Replace `codex` with the selector from the table. Without `--show-secrets`, the
 output contains `<mcp_token>` instead of the bearer. Use that safe form for
 examples and review. Use the secret form only when configuring a real client.
+For Hermes, the secret form prints the bearer separately from the two native
+commands and warns not to paste it into a shell. Paste only that bearer at the
+private Hermes prompt.
 
 Do not paste the Things Cloud password into any client. Possession of the MCP
 bearer authorizes every bounded v2 mutation, including recoverable Trash and
@@ -29,16 +33,39 @@ repeat Stop. There is no per-client identity.
 
 ## Client-specific facts
 
-- Hermes configuration is profile-specific. Merge the generated block; do not
-  replace the profile or its other MCP servers. Start a new session after MCP
-  or skill changes.
+- Hermes stores the MCP configuration in its active profile. Run
+  `things-orchestrator print-config --client hermes --show-secrets` in a private
+  terminal, then run the two printed commands one at a time on the Hermes host.
+  At the private prompt, enter only the separately printed MCP bearer.
+  Hermes adds the authorization scheme. Start a new Hermes session after MCP
+  or skill changes. The generated skill URL is pinned to the installed release.
 - Cursor Cloud Agents accept MCP configuration only through the dashboard.
   Paste the literal token; environment interpolation is unavailable. The saved
   value cannot be viewed, so bearer rotation requires another paste.
-- Codex uses the generated `http_headers` TOML form. Do not add a second
+- Remote Codex uses the generated `http_headers` TOML form. Do not add a second
   `bearer_token_env_var` configuration for the same server.
-- The Codex plugin remains a stdio packaging detail. Normal installed-tool
-  onboarding uses the HTTP configuration above.
+
+## Install the same-host Codex plugin
+
+Use this path only when Codex and Things Orchestrator run as the same OS user
+on one host. Install and log in to Things Orchestrator first. Then add this Git
+repository as a marketplace and install its plugin:
+
+```console
+codex plugin marketplace add matsvarn/things3-orchestrator --ref v0.9.1
+codex plugin add things-orchestrator@things-orchestrator
+```
+
+This repository marketplace is self-distributed. It is not an official Codex
+marketplace listing or an endorsement by OpenAI or Cultured Code. The plugin
+starts `things-orchestrator serve` over stdio and bundles the Things skill. It
+does not connect to a remote Things Orchestrator host.
+
+To connect Codex to a remote host, use the HTTP renderer instead:
+
+```console
+things-orchestrator print-config --client codex --show-secrets
+```
 
 The connection is ready when the client lists `things_view`, `things_find`,
 `things_get`, `things_capture`, `things_update`, `things_complete`,

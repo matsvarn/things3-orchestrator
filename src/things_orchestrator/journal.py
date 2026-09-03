@@ -109,6 +109,7 @@ class Journal(Protocol):
     def get_v2_request(self, account_id: str, api_version: str, request_id: str) -> V2Operation | None: ...
     def get_v2_operation(self, operation_id: str) -> V2Operation | None: ...
     def blocking_v2_operations(self, account_id: str) -> list[str]: ...
+    def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]: ...
     def create_v2(self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def transition_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict | None = None, authorization: object = None, resolution: Literal["accepted_as_is", "superseded"] | None = None) -> bool: ...
     def authorize_v2(self, operation_id: str, authorization: object) -> tuple[bool, list[str]]: ...
@@ -217,6 +218,18 @@ class MemoryJournal:
                 if row.state == "pending"
             ]
             return sorted({*current, *legacy})
+
+    def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]:
+        with self._lock:
+            counts: dict[str, int] = {}
+            for operation in self._v2_operations.values():
+                if operation.account_id == account_id:
+                    key = f"v2.{operation.state}"
+                    counts[key] = counts.get(key, 0) + 1
+            for record in self._records.values():
+                key = f"legacy.{record.state}"
+                counts[key] = counts.get(key, 0) + 1
+            return tuple(sorted(counts.items()))
 
     def create_v2(
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
@@ -720,6 +733,9 @@ class SQLiteJournal:
             }
         )
 
+    def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]:
+        return read_operation_state_counts(self.path, account_id)
+
     def create_v2(
         self, operation: V2Operation, *, claim_fence: bool, receipt_rows: list[JsonDict] | None = None
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
@@ -1131,6 +1147,43 @@ class SQLiteJournal:
         if row is None:
             raise RuntimeError("v2 cursor key is unavailable")
         return bytes(row["cursor_key"])
+
+
+def read_operation_state_counts(
+    path: Path, account_id: str
+) -> tuple[tuple[str, int], ...]:
+    """Read aggregate states without migrating or otherwise changing the journal."""
+
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        current = (
+            connection.execute(
+                """SELECT state, COUNT(*) AS count FROM owner_operations_v2
+                   WHERE account_id=? GROUP BY state""",
+                (account_id,),
+            ).fetchall()
+            if "owner_operations_v2" in tables
+            else []
+        )
+        legacy = (
+            connection.execute(
+                "SELECT state, COUNT(*) AS count FROM intents GROUP BY state"
+            ).fetchall()
+            if "intents" in tables
+            else []
+        )
+    counts = [
+        *((f"v2.{row['state']}", int(row["count"])) for row in current),
+        *((f"legacy.{row['state']}", int(row["count"])) for row in legacy),
+    ]
+    return tuple(sorted(counts))
 
 
 def journal_path(account: str | None = None) -> Path:

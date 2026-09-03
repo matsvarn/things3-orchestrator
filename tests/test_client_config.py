@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import shlex
 import tomllib
-from pathlib import Path
 
 import pytest
-import yaml
 
 from things_orchestrator.client_config import ClientKind, Endpoint, render_client_config
 from things_orchestrator.config import McpBearer, normalize_mcp_url
@@ -21,10 +19,10 @@ def endpoint() -> Endpoint:
 
 
 def test_codex_config_is_parseable_toml_and_redacted_by_default(
-    endpoint: Endpoint, tmp_path: Path
+    endpoint: Endpoint,
 ) -> None:
     rendered = render_client_config(
-        ClientKind.CODEX, endpoint, skill_dir=tmp_path, show_secrets=False
+        ClientKind.CODEX, endpoint, show_secrets=False
     )
     parsed = tomllib.loads(rendered.body)
 
@@ -35,31 +33,51 @@ def test_codex_config_is_parseable_toml_and_redacted_by_default(
     assert "secret-bearer" not in rendered.body
 
 
-def test_hermes_config_is_parseable_http_yaml_with_the_installed_skill(
-    endpoint: Endpoint, tmp_path: Path
+def test_hermes_config_uses_native_cli_without_putting_the_bearer_in_history(
+    endpoint: Endpoint,
 ) -> None:
     rendered = render_client_config(
-        ClientKind.HERMES, endpoint, skill_dir=tmp_path, show_secrets=True
+        ClientKind.HERMES, endpoint, show_secrets=False
     )
-    parsed = yaml.safe_load(rendered.body)
+    commands = rendered.body.splitlines()
 
-    assert parsed["mcp_servers"]["things"]["url"] == (
-        "https://tasks.example.com/mcp"
-    )
-    assert parsed["mcp_servers"]["things"]["headers"] == {
-        "Authorization": "Bearer secret-bearer"
-    }
-    assert parsed["skills"]["external_dirs"] == [str(tmp_path)]
+    assert shlex.split(commands[0]) == [
+        "hermes",
+        "mcp",
+        "add",
+        "things",
+        "--url",
+        "https://tasks.example.com/mcp",
+        "--auth",
+        "header",
+    ]
+    assert shlex.split(commands[1]) == [
+        "hermes",
+        "skills",
+        "install",
+        "https://raw.githubusercontent.com/matsvarn/things3-orchestrator/"
+        "v0.9.1/plugin/skills/things-orchestrator/SKILL.md",
+        "--yes",
+    ]
+    assert "secret-bearer" not in rendered.body
+    assert "prompt" in rendered.guidance.lower()
+    assert "pinned" in rendered.guidance.lower()
+
+
+def test_hermes_renderer_never_puts_the_secret_in_commands(endpoint: Endpoint) -> None:
+    rendered = render_client_config(ClientKind.HERMES, endpoint, show_secrets=True)
+
+    assert "secret-bearer" not in rendered.body
 
 
 def test_cursor_configs_are_parseable_and_cloud_guidance_is_explicit(
-    endpoint: Endpoint, tmp_path: Path
+    endpoint: Endpoint,
 ) -> None:
     desktop = render_client_config(
-        ClientKind.CURSOR, endpoint, skill_dir=tmp_path, show_secrets=True
+        ClientKind.CURSOR, endpoint, show_secrets=True
     )
     cloud = render_client_config(
-        ClientKind.CURSOR_CLOUD, endpoint, skill_dir=tmp_path, show_secrets=True
+        ClientKind.CURSOR_CLOUD, endpoint, show_secrets=True
     )
 
     assert json.loads(desktop.body)["mcpServers"]["things"]["headers"] == {
@@ -73,10 +91,10 @@ def test_cursor_configs_are_parseable_and_cloud_guidance_is_explicit(
 
 
 def test_claude_code_emits_a_finished_command_and_typed_http_json(
-    endpoint: Endpoint, tmp_path: Path
+    endpoint: Endpoint,
 ) -> None:
     rendered = render_client_config(
-        ClientKind.CLAUDE_CODE, endpoint, skill_dir=tmp_path, show_secrets=True
+        ClientKind.CLAUDE_CODE, endpoint, show_secrets=True
     )
     command = shlex.split(rendered.body)
 
@@ -100,10 +118,10 @@ def test_claude_code_emits_a_finished_command_and_typed_http_json(
 
 
 def test_caddy_uses_the_saved_hostname_and_keeps_streaming_enabled(
-    endpoint: Endpoint, tmp_path: Path
+    endpoint: Endpoint,
 ) -> None:
     rendered = render_client_config(
-        ClientKind.CADDY, endpoint, skill_dir=tmp_path, show_secrets=False
+        ClientKind.CADDY, endpoint, show_secrets=False
     )
 
     assert rendered.body.startswith("tasks.example.com {")

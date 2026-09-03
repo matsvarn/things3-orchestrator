@@ -18,6 +18,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+SECRET_CONFIG_COMMAND = re.compile(
+    r"\bthings-orchestrator\s+print-config\b"
+    r"(?=[^\n]*(?:--client(?:=|\s+)"
+    r"(?:codex|hermes|claude-code|cursor|cursor-cloud)\b))"
+)
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
 
@@ -31,8 +36,24 @@ def metadata() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     manifest = json.loads((ROOT / "plugin/.codex-plugin/plugin.json").read_text())
     errors: list[str] = []
+    errors.extend(marketplace_errors())
     if project["version"] != manifest.get("version"):
         errors.append("pyproject.toml and plugin.json versions differ")
+
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    current_heading = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+)\b", changelog, re.MULTILINE)
+    if current_heading is None or current_heading.group(1) != project["version"]:
+        errors.append("CHANGELOG.md current release differs from pyproject.toml")
+    version_markers = {
+        ROOT / "README.md": f"@v{project['version']}",
+        ROOT / "docs/install.md": f"@v{project['version']}",
+        ROOT / "docs/clients.md": f"--ref v{project['version']}",
+    }
+    for path, marker in version_markers.items():
+        if marker not in path.read_text():
+            errors.append(
+                f"{path.relative_to(ROOT)} install tag differs from pyproject.toml"
+            )
 
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
     locked = next(
@@ -97,6 +118,84 @@ def metadata() -> None:
     print("Release metadata and skill files are valid.")
 
 
+def marketplace_errors(root: Path = ROOT) -> list[str]:
+    path = root / ".agents/plugins/marketplace.json"
+    try:
+        payload: object = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ["repository marketplace is missing or unreadable"]
+    if not isinstance(payload, dict):
+        return ["repository marketplace must contain a JSON object"]
+
+    errors: list[str] = []
+    if not isinstance(payload.get("name"), str) or not payload["name"]:
+        errors.append("repository marketplace needs a name")
+    interface = payload.get("interface")
+    if not isinstance(interface, dict) or not isinstance(
+        interface.get("displayName"), str
+    ):
+        errors.append("repository marketplace needs interface.displayName")
+    plugins = payload.get("plugins")
+    if not isinstance(plugins, list):
+        errors.append("repository marketplace plugins must be an array")
+        return errors
+
+    names: set[str] = set()
+    root_resolved = root.resolve()
+    for index, entry in enumerate(plugins):
+        if not isinstance(entry, dict):
+            errors.append(f"marketplace plugin {index} must be an object")
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            errors.append(f"marketplace plugin {index} needs a name")
+            continue
+        if name in names:
+            errors.append(f"marketplace plugin name is duplicated: {name}")
+        names.add(name)
+
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "local":
+            errors.append(f"marketplace plugin {name} needs a local source")
+            continue
+        source_path = source.get("path")
+        if not isinstance(source_path, str) or not source_path.startswith("./"):
+            errors.append(f"marketplace plugin {name} needs a ./ relative path")
+            continue
+        plugin_root = (root / source_path).resolve()
+        if not plugin_root.is_relative_to(root_resolved):
+            errors.append(f"marketplace plugin {name} path leaves the repository")
+            continue
+        manifest_path = plugin_root / ".codex-plugin/plugin.json"
+        try:
+            manifest: object = json.loads(manifest_path.read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            errors.append(f"marketplace plugin {name} manifest is missing or unreadable")
+            continue
+        if not isinstance(manifest, dict) or manifest.get("name") != name:
+            errors.append(f"marketplace plugin {name} differs from its manifest name")
+
+        policy = entry.get("policy")
+        if not isinstance(policy, dict):
+            errors.append(f"marketplace plugin {name} needs a policy")
+        else:
+            if policy.get("installation") not in {
+                "NOT_AVAILABLE",
+                "AVAILABLE",
+                "INSTALLED_BY_DEFAULT",
+            }:
+                errors.append(
+                    f"marketplace plugin {name} has an invalid installation policy"
+                )
+            if policy.get("authentication") not in {"ON_INSTALL", "ON_USE"}:
+                errors.append(
+                    f"marketplace plugin {name} has an invalid authentication policy"
+                )
+        if not isinstance(entry.get("category"), str) or not entry["category"]:
+            errors.append(f"marketplace plugin {name} needs a category")
+    return errors
+
+
 def markdown_files() -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
@@ -122,6 +221,24 @@ def links() -> None:
                 errors.append(f"{source.relative_to(ROOT)}: missing local link {target}")
     fail(errors)
     print("Local Markdown links are valid.")
+
+
+def instruction_errors(root: Path = ROOT) -> list[str]:
+    errors: list[str] = []
+    sources = markdown_files() if root.resolve() == ROOT else sorted(root.rglob("*.md"))
+    for source in sources:
+        for number, line in enumerate(source.read_text().splitlines(), start=1):
+            if SECRET_CONFIG_COMMAND.search(line) and "--show-secrets" not in line:
+                errors.append(
+                    f"{source.relative_to(root)}:{number}: usable client config needs "
+                    "--show-secrets"
+                )
+    return errors
+
+
+def instructions() -> None:
+    fail(instruction_errors())
+    print("Public client configuration commands are usable and secret-explicit.")
 
 
 def strip_archive_root(names: list[str]) -> list[PurePosixPath]:
@@ -205,9 +322,10 @@ def archive_skill_mismatches(wheel: Path, *, source: Path) -> list[str]:
     return messages
 
 
-def archives() -> None:
-    sdists = sorted((ROOT / "dist").glob("*.tar.gz"))
-    wheels = sorted((ROOT / "dist").glob("*.whl"))
+def archives(dist_dir: Path | None = None) -> None:
+    release_dir = dist_dir or ROOT / "dist"
+    sdists = sorted(release_dir.glob("*.tar.gz"))
+    wheels = sorted(release_dir.glob("*.whl"))
     if len(sdists) != 1 or len(wheels) != 1:
         raise SystemExit("dist must contain exactly one sdist and one wheel")
 
@@ -253,9 +371,20 @@ def archives() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("check", choices=("metadata", "links", "archives"))
-    selected = parser.parse_args().check
-    {"metadata": metadata, "links": links, "archives": archives}[selected]()
+    parser.add_argument(
+        "check", choices=("metadata", "links", "instructions", "archives")
+    )
+    parser.add_argument(
+        "--dist-dir",
+        type=Path,
+        help="directory containing one sdist and wheel for the archives check",
+    )
+    args = parser.parse_args()
+    selected = args.check
+    if selected == "archives":
+        archives(args.dist_dir)
+        return
+    {"metadata": metadata, "links": links, "instructions": instructions}[selected]()
 
 
 if __name__ == "__main__":
