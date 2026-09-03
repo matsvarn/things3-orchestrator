@@ -80,6 +80,7 @@ class V2Operation:
     authorization: str | None = None
     resolution: Literal["accepted_as_is", "superseded"] | None = None
     receipt_hash: str | None = None
+    dispatch_started: bool = False
 
 
 def _approval_expired(operation: V2Operation, now: datetime) -> bool:
@@ -132,6 +133,8 @@ class IntentRecord:
 
 class V2ApplySession(Protocol):
     operation: V2Operation
+
+    def mark_dispatched(self) -> bool: ...
 
     def settle(
         self,
@@ -213,7 +216,7 @@ class _OwnedV2ApplySession:
         with self._lifecycle_lock:
             self._active = False
 
-    def _settle_owned(self, settle: Callable[[], bool]) -> bool:
+    def _act_owned(self, action: Callable[[], bool]) -> bool:
         if (
             os.getpid() != self._owner_pid
             or get_ident() != self._owner_thread_id
@@ -222,13 +225,24 @@ class _OwnedV2ApplySession:
         with self._lifecycle_lock:
             if not self._active:
                 return False
-            return settle()
+            return action()
 
 
 class _MemoryV2ApplySession(_OwnedV2ApplySession):
     def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
         super().__init__(operation)
         self._journal = journal
+
+    def mark_dispatched(self) -> bool:
+        def mark() -> bool:
+            if not self._journal._mark_v2_dispatched_locked(
+                self.operation.operation_id
+            ):
+                return False
+            self.operation = replace(self.operation, dispatch_started=True)
+            return True
+
+        return self._act_owned(mark)
 
     def settle(
         self,
@@ -239,7 +253,7 @@ class _MemoryV2ApplySession(_OwnedV2ApplySession):
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        return self._settle_owned(
+        return self._act_owned(
             lambda: self._journal._settle_v2_locked(
                 self.operation.operation_id,
                 expected="pending",
@@ -261,6 +275,17 @@ class _SQLiteV2ApplySession(_OwnedV2ApplySession):
         super().__init__(operation)
         self._journal = journal
 
+    def mark_dispatched(self) -> bool:
+        def mark() -> bool:
+            if not self._journal._mark_v2_dispatched_owned(
+                self.operation.operation_id
+            ):
+                return False
+            self.operation = replace(self.operation, dispatch_started=True)
+            return True
+
+        return self._act_owned(mark)
+
     def settle(
         self,
         *,
@@ -270,7 +295,7 @@ class _SQLiteV2ApplySession(_OwnedV2ApplySession):
         authorization: object = None,
         action: str | None = None,
     ) -> bool:
-        return self._settle_owned(
+        return self._act_owned(
             lambda: self._journal._settle_v2_owned(
                 self.operation.operation_id,
                 expected="pending",
@@ -474,6 +499,10 @@ class MemoryJournal:
         if (
             current is None
             or current.state != expected
+            or (
+                state in {"unchanged", "not_applied"}
+                and current.dispatch_started
+            )
             or not _legal_v2_transition(expected, state)
         ):
             return False
@@ -499,6 +528,16 @@ class MemoryJournal:
             created,
             None if state in {"awaiting_owner", "pending"} else _utc_now(),
         )
+        return True
+
+    def _mark_v2_dispatched_locked(self, operation_id: str) -> bool:
+        current = self._v2_operation_for_mutation_locked(operation_id)
+        if current is None or current.state != "pending":
+            return False
+        if not current.dispatch_started:
+            self._v2_operations[operation_id] = replace(
+                current, dispatch_started=True
+            )
         return True
 
     def transition_v2(
@@ -860,6 +899,9 @@ class SQLiteJournal:
                         'accepted_as_is','superseded'
                     )),
                     receipt_hash TEXT,
+                    dispatch_started INTEGER NOT NULL DEFAULT 0 CHECK (
+                        dispatch_started IN (0,1)
+                    ),
                     UNIQUE(account_id, api_version, request_id)
                 );
                 CREATE INDEX IF NOT EXISTS owner_operation_fence_v2
@@ -893,6 +935,7 @@ class SQLiteJournal:
                 );
                 """
             )
+            _migrate_v2_dispatch_started(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO owner_journal_secrets_v2 VALUES (1,?)",
                 (token_bytes(32),),
@@ -1092,7 +1135,7 @@ class SQLiteJournal:
                 raise ValueError("routine operation creation must enter pending")
             connection.execute(
                 """INSERT INTO owner_operations_v2 VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )""",
                 _v2_sql_values(operation),
             )
@@ -1441,6 +1484,46 @@ class SQLiteJournal:
         finally:
             connection.close()
 
+    def _mark_v2_dispatched_owned(self, operation_id: str) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            operation = _v2_from_row(row)
+            if operation is None or operation.state != "pending":
+                connection.rollback()
+                return False
+            try:
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
+                )
+            except AmbiguousV2Request:
+                connection.rollback()
+                return False
+            if request is None or request.operation_id != operation_id:
+                connection.rollback()
+                return False
+            if not operation.dispatch_started:
+                connection.execute(
+                    """UPDATE owner_operations_v2 SET dispatch_started=1
+                       WHERE operation_id=? AND state='pending'""",
+                    (operation_id,),
+                )
+            connection.commit()
+            return True
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def _settle_v2_connection(
         self,
         connection: sqlite3.Connection,
@@ -1465,6 +1548,11 @@ class SQLiteJournal:
         ).fetchone()
         current_operation = _v2_from_row(current)
         if current_operation is None or current_operation.state != expected:
+            return False
+        if (
+            state in {"unchanged", "not_applied"}
+            and current_operation.dispatch_started
+        ):
             return False
         try:
             request = _sqlite_v2_request(
@@ -2034,6 +2122,7 @@ def _v2_values(operation: V2Operation) -> dict[str, object]:
         "authorization": operation.authorization,
         "resolution": operation.resolution,
         "receipt_hash": operation.receipt_hash,
+        "dispatch_started": operation.dispatch_started,
     }
 
 
@@ -2054,6 +2143,7 @@ def _v2_sql_values(operation: V2Operation) -> tuple[object, ...]:
         operation.authorization,
         operation.resolution,
         operation.receipt_hash,
+        int(operation.dispatch_started),
     )
 
 
@@ -2080,6 +2170,7 @@ def _v2_from_row(row: sqlite3.Row | None) -> V2Operation | None:
         authorization=cast(str | None, row["authorization"]),
         resolution=cast(Literal["accepted_as_is", "superseded"] | None, row["resolution"]),
         receipt_hash=cast(str | None, row["receipt_hash"]),
+        dispatch_started=bool(row["dispatch_started"]),
     )
 
 
@@ -2104,6 +2195,38 @@ def _v2_from_tombstone(row: sqlite3.Row, request_id: str) -> V2Operation:
         },
         receipt_hash=cast(str | None, row["receipt_hash"]),
     )
+
+
+def _migrate_v2_dispatch_started(connection: sqlite3.Connection) -> None:
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 1:
+        return
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 1:
+            connection.commit()
+            return
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(owner_operations_v2)"
+            ).fetchall()
+        }
+        if "dispatch_started" not in columns:
+            connection.execute(
+                """ALTER TABLE owner_operations_v2
+                   ADD COLUMN dispatch_started INTEGER NOT NULL DEFAULT 0
+                   CHECK (dispatch_started IN (0,1))"""
+            )
+        connection.execute(
+            """UPDATE owner_operations_v2 SET dispatch_started=1
+               WHERE state='pending'"""
+        )
+        connection.execute("PRAGMA user_version=1")
+        connection.commit()
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
 
 
 def _utc_now() -> str:

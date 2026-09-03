@@ -1657,7 +1657,8 @@ def test_case_only_relogin_resumes_pending_without_a_second_cloud_write() -> Non
     resumed = relogin.dispatch("things_update", arguments)
 
     assert resumed.operation_id == pending.operation_id
-    assert resumed.state == "not_applied"
+    assert resumed.state == "pending"
+    assert resumed.code == "pending_unknown"
     assert relogin_library.apply_calls == 0
 
 
@@ -1746,7 +1747,7 @@ def test_ambiguous_casefolded_requests_reject_before_cloud_io() -> None:
         assert library.apply_calls == 0
 
 
-def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() -> None:
+def test_exact_retry_keeps_dispatched_error_fenced_despite_before_evidence() -> None:
     class RejectedWrite(MemoryLibrary):
         apply_calls = 0
 
@@ -1770,11 +1771,12 @@ def test_exact_retry_settles_not_applied_from_complete_frozen_before_evidence() 
     first = interface.dispatch("things_update", arguments)
     repeated = interface.dispatch("things_update", arguments)
 
-    assert first.state == repeated.state == "not_applied"
-    assert first.next_action == repeated.next_action == "read_receipt"
+    assert first.state == repeated.state == "pending"
+    assert first.code == repeated.code == "pending_unknown"
+    assert first.next_action == repeated.next_action == "retry_same"
     assert library.apply_calls == 1
     receipt = interface.dispatch(
         "things_receipt", {"operation_id": first.operation_id}
     )
-    assert receipt.state == "not_applied"
-    assert receipt.rows[0]["observed"]["title"]["value"] == "Before"
+    assert receipt.state == "pending"
+    assert receipt.rows == []

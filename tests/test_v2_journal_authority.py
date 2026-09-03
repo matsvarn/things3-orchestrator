@@ -112,7 +112,7 @@ def _inject_v2_operation(
         return
     with sqlite3.connect(journal.path) as connection:
         connection.execute(
-            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             _v2_sql_values(operation),
         )
         connection.execute(
@@ -221,7 +221,7 @@ def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
     else:
         with sqlite3.connect(journal.path) as connection:
             connection.execute(
-                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _v2_sql_values(conflicting),
             )
 
@@ -908,7 +908,7 @@ def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
     else:
         with sqlite3.connect(journal.path) as connection:
             connection.execute(
-                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _v2_sql_values(conflicting),
             )
     authorization = verified_authorization(
@@ -1579,10 +1579,77 @@ def test_dispatch_marker_survives_apply_session_without_settlement(
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
         assert session.mark_dispatched() is True
+        assert not session.settle(
+            state="unchanged",
+            response={"state": "unchanged"},
+            rows=[
+                {
+                    "sequence": 1,
+                    "action": "create",
+                    "target_id": "task:a",
+                    "desired": {},
+                    "observed": {},
+                    "result": "unchanged",
+                }
+            ],
+        )
 
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None and stored.state == "pending"
     assert stored.dispatch_started is True
+
+
+def test_sqlite_migration_marks_legacy_pending_as_possibly_dispatched(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    pending = _operation(
+        "op_legacy_pending",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+    )
+    awaiting = _operation(
+        "op_legacy_awaiting",
+        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
+        state="awaiting_owner",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE owner_operations_v2 (
+                account_id TEXT NOT NULL,
+                api_version TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                operation_id TEXT PRIMARY KEY,
+                tool TEXT NOT NULL,
+                state TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL,
+                safety_policy_digest TEXT NOT NULL,
+                expires_at TEXT,
+                response_json TEXT,
+                authorization TEXT,
+                resolution TEXT,
+                receipt_hash TEXT,
+                UNIQUE(account_id, api_version, request_id)
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(pending)[:-1],
+        )
+        connection.execute(
+            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _v2_sql_values(awaiting)[:-1],
+        )
+
+    journal = SQLiteJournal(path)
+
+    migrated_pending = journal.get_v2_operation(pending.operation_id)
+    migrated_awaiting = journal.get_v2_operation(awaiting.operation_id)
+    assert migrated_pending is not None
+    assert migrated_pending.dispatch_started is True
+    assert migrated_awaiting is not None
+    assert migrated_awaiting.dispatch_started is False
 
 
 def test_sqlite_process_death_after_dispatch_marker_keeps_uncertain_pending(
@@ -1961,6 +2028,7 @@ def test_apply_session_cannot_settle_after_context_exit(
 
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
+    assert not session.mark_dispatched()
     assert not session.settle(
         state="applied",
         response={"state": "applied"},
@@ -1979,6 +2047,7 @@ def test_apply_session_cannot_settle_after_context_exit(
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None
     assert stored.state == "pending"
+    assert stored.dispatch_started is False
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])

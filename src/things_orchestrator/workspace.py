@@ -3678,6 +3678,8 @@ class ThingsWorkspace:
         operation = session.operation
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
+        if operation.dispatch_started:
+            return self._resume_v2_session(operation_id, session)
         writes = [
             _write_from_json(cast(dict[str, object], row))
             for row in cast(list[object], operation.manifest["writes"])
@@ -3711,9 +3713,12 @@ class ThingsWorkspace:
             return response if settled else self._persisted_v2_outcome(
                 operation.operation_id
             )
+        if not session.mark_dispatched():
+            return self._persisted_v2_outcome(operation.operation_id)
+        operation = session.operation
         try:
             applied = self._library.apply(writes)
-        except CloudError as error:
+        except CloudError:
             failed = self._refresh(force=True)
             if failed is not None:
                 return {"state": "pending", "code": "pending_unknown", "next_action": "retry_same", "instruction": "Retry this exact request to force read-back; the stored operation is never reposted.", "operation_id": operation.operation_id}
@@ -3722,7 +3727,6 @@ class ThingsWorkspace:
                 writes,
                 before,
                 session=session,
-                settle_before=not _outcome_unknown(error),
             )
         if not applied.read_back_verified:
             failed = self._refresh(force=True)
@@ -3737,7 +3741,6 @@ class ThingsWorkspace:
         before: list[JsonDict | None],
         *,
         session: V2ApplySession | None = None,
-        settle_before: bool = True,
     ) -> JsonDict:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
@@ -3747,7 +3750,7 @@ class ThingsWorkspace:
             state = "applied"
         elif any(matched):
             state = "partial"
-        elif settle_before and self._v2_current_equals_before(
+        elif not operation.dispatch_started and self._v2_current_equals_before(
             operation, writes, before
         ):
             state = "not_applied"
