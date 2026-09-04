@@ -7,6 +7,19 @@ reach the selected client and model provider.
 This is not fully private: owner task data can reach the serving host, the MCP
 client, and that configured model provider.
 
+Routines send data to one more system. When enabled, the host polls the
+unsupported Things Cloud history feed and sends a metadata-only event to the
+configured receiver. That event contains a public task ID but no title, notes,
+checklist, project content, account email, or private history key. The receiver
+can learn task content only through its separately authorized MCP connection.
+The webhook secret and MCP bearer are different credentials.
+
+Delivery is at-least-once. The receiver must deduplicate the opaque event ID.
+The generated service marker records that the owner started the supervised
+path; it is not a security attestation against a local process owner. Unknown
+history versions and malformed relevant fields stop cursor advancement instead
+of guessing.
+
 Every title, note, checklist row, and tag label read from Things is untrusted.
 Derived text keeps that taint. Public v2 output places `source=things_cloud`
 and `trust=untrusted` next to text data. Things text cannot choose an action,

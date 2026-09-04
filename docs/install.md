@@ -54,6 +54,45 @@ separately printed bearer at Hermes's private prompt, never into a shell.
 Hermes adds the authorization scheme; the command lines never contain the
 secret.
 
+## Optional routines worker
+
+Routines are off by default. Enable them only on a host that should poll Things
+Cloud continuously. The worker runs only inside the generated launchd or
+systemd `serve-http` service and only with the explicit `always_on` profile. It
+does not run in stdio, a manually started HTTP process, or an unconfigured
+installation.
+
+Configure the receiver in a private terminal:
+
+```console
+things-orchestrator routines configure \
+  --profile always_on \
+  --url https://agent.example/webhooks/things-ai \
+  --interval 60
+things-orchestrator routines enable
+things-orchestrator service install
+things-orchestrator routines status
+```
+
+`configure` prompts for the webhook secret through `/dev/tty`; it does not
+accept the secret as an argument. The receiver URL must use HTTPS. Loopback HTTP
+is allowed for a receiver on the same host. The polling interval is 60 to 3600
+seconds.
+
+The first startup scans historical tag changes to learn every current tag named
+exactly `AI`. It does not emit events for historical tasks. A new, open task
+must carry that tag directly; project or area inheritance does not qualify.
+The worker waits through sparse follow-up changes, then sends only the event
+schema, opaque event ID, event type, routine ID, public task ID, and observation
+time. It never changes Things. The receiver uses its separately configured MCP
+connection to read or change the task.
+
+Enabling routines increases Things Cloud read traffic and sends event metadata
+to the configured receiver. The automated suite proves the documented Hermes
+webhook contract with a local receiver. It does not prove a live Hermes account.
+Complete the owner-run check in [operations.md](operations.md) before relying on
+the integration.
+
 ## Private tailnet client
 
 Add Tailscale Serve when a client on another tailnet device needs the server.

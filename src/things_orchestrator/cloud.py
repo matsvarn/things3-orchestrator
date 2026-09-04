@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import zlib
 from base64 import b64encode
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -186,6 +190,83 @@ class HistoryPage:
     latest_size: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryEvent:
+    uuid: str
+    action: int
+    entity: str
+    payload: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryGroup:
+    index: int
+    events: tuple[HistoryEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryBatch:
+    history_fingerprint: bytes
+    requested_start: int
+    current_head: int
+    groups: tuple[HistoryGroup, ...]
+    caught_up: bool
+
+
+class HistoryIdentityChanged(CloudError):
+    """The account now points at a replacement history."""
+
+
+_VERSIONED_ENTITY = re.compile(r"^(Task|Area|Tag|ChecklistItem)\d+$")
+_KNOWN_VERSIONED_ENTITIES = _TASK_KINDS | _AREA_KINDS | _TAG_KINDS | _CHECKLIST_KINDS
+
+
+def _freeze_mapping(value: dict[str, Any]) -> dict[str, object]:
+    def freeze(item: Any) -> object:
+        if isinstance(item, dict):
+            if not all(isinstance(key, str) for key in item):
+                raise CloudError("Things Cloud history payload was malformed")
+            return MappingProxyType(
+                {str(key): freeze(nested) for key, nested in item.items()}
+            )
+        if isinstance(item, list):
+            return tuple(freeze(nested) for nested in item)
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return item
+        raise CloudError("Things Cloud history payload was malformed")
+
+    if not all(isinstance(key, str) for key in value):
+        raise CloudError("Things Cloud history payload was malformed")
+    return {str(key): freeze(item) for key, item in value.items()}
+
+
+def _validate_grouped_payload(entity: str, payload: dict[str, Any]) -> None:
+    if entity in _TAG_KINDS and "tt" in payload and not isinstance(payload["tt"], str):
+        raise CloudError("Things Cloud tag title was malformed")
+    if entity not in _TASK_KINDS:
+        return
+    if "tp" in payload and (
+        isinstance(payload["tp"], bool)
+        or not isinstance(payload["tp"], int)
+        or payload["tp"] not in {0, 1, 2}
+    ):
+        raise CloudError("Things Cloud task kind was malformed")
+    if "ss" in payload and (
+        isinstance(payload["ss"], bool)
+        or not isinstance(payload["ss"], int)
+        or payload["ss"] not in {0, 2, 3}
+    ):
+        raise CloudError("Things Cloud task lifecycle was malformed")
+    if "tr" in payload and not isinstance(payload["tr"], bool):
+        raise CloudError("Things Cloud task trash state was malformed")
+    tags = payload.get("tg")
+    if "tg" in payload and (
+        not isinstance(tags, list)
+        or not all(isinstance(tag, str) and tag for tag in tags)
+    ):
+        raise CloudError("Things Cloud task tags were malformed")
+
+
 class CloudClient:
     def __init__(self, email: str, password: str, *, endpoint: str = ENDPOINT) -> None:
         self.email = email
@@ -284,21 +365,14 @@ class CloudClient:
         return self.history_id
 
     def items(self, start_index: int, *, retried: bool = False) -> HistoryPage:
+        """Return the legacy flattened, permissive history view."""
+
         if not self.history_id:
             self.verify()
         try:
-            data = self._request(
-                "GET",
-                f"/version/1/history/{self.history_id}/items",
-                query={"start-index": str(start_index)},
-            )
-        except CloudError as error:
-            if retried or "HTTP 404" not in str(error):
-                raise
-            previous = self.history_id
-            self.verify()
-            retry_at = self.loaded_index if self.history_id != previous else start_index
-            return self.items(retry_at, retried=True)
+            data = self._history_data(start_index, retried=retried)
+        except HistoryIdentityChanged:
+            return self.items(self.loaded_index, retried=True)
         if not isinstance(data, dict):
             raise CloudError("Things Cloud history was unreadable")
         current = int(data.get("current-item-index") or 0)
@@ -320,6 +394,107 @@ class CloudClient:
             end_size=int(data.get("end-total-content-size") or 0),
             latest_size=int(data.get("latest-total-content-size") or 0),
         )
+
+    def history_groups(
+        self, start_index: int, *, retried: bool = False
+    ) -> HistoryBatch:
+        """Read one fully validated history page without flattening group positions."""
+
+        if (
+            isinstance(start_index, bool)
+            or not isinstance(start_index, int)
+            or start_index < 0
+        ):
+            raise CloudError("Things Cloud history start index is invalid")
+        if not self.history_id:
+            self.verify()
+        data = self._history_data(start_index, retried=retried)
+        if not isinstance(data, dict):
+            raise CloudError("Things Cloud history was unreadable")
+        current = data.get("current-item-index")
+        raw_groups = data.get("items")
+        if (
+            isinstance(current, bool)
+            or not isinstance(current, int)
+            or current < 0
+            or not isinstance(raw_groups, list)
+        ):
+            raise CloudError("Things Cloud history was unreadable")
+        if current < start_index:
+            raise HistoryIdentityChanged(
+                "Things Cloud history head moved behind the durable cursor"
+            )
+        if start_index + len(raw_groups) > current:
+            raise CloudError("Things Cloud history positions were inconsistent")
+        groups: list[HistoryGroup] = []
+        for offset, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, dict):
+                raise CloudError("Things Cloud history group was malformed")
+            events: list[HistoryEvent] = []
+            for uuid, raw_event in raw_group.items():
+                if (
+                    not isinstance(uuid, str)
+                    or not uuid
+                    or not isinstance(raw_event, dict)
+                ):
+                    raise CloudError("Things Cloud history event was malformed")
+                action = raw_event.get("t")
+                entity = raw_event.get("e")
+                payload = raw_event.get("p")
+                if (
+                    isinstance(action, bool)
+                    or not isinstance(action, int)
+                    or action not in {0, 1, 2}
+                    or not isinstance(entity, str)
+                    or not entity
+                    or not isinstance(payload, dict)
+                ):
+                    raise CloudError("Things Cloud history event was malformed")
+                if (
+                    _VERSIONED_ENTITY.fullmatch(entity)
+                    and entity not in _KNOWN_VERSIONED_ENTITIES
+                ):
+                    raise CloudError(
+                        f"Unsupported Things Cloud entity version: {entity}"
+                    )
+                _validate_grouped_payload(entity, payload)
+                events.append(
+                    HistoryEvent(
+                        uuid=uuid,
+                        action=action,
+                        entity=entity,
+                        payload=MappingProxyType(_freeze_mapping(payload)),
+                    )
+                )
+            groups.append(HistoryGroup(start_index + offset, tuple(events)))
+        caught_up = start_index + len(groups) >= current
+        if not groups and not caught_up:
+            raise CloudError("Things Cloud history returned an unexplained gap")
+        return HistoryBatch(
+            history_fingerprint=sha256(self.history_id.encode("utf-8")).digest(),
+            requested_start=start_index,
+            current_head=current,
+            groups=tuple(groups),
+            caught_up=caught_up,
+        )
+
+    def _history_data(self, start_index: int, *, retried: bool) -> Any:
+        try:
+            return self._request(
+                "GET",
+                f"/version/1/history/{self.history_id}/items",
+                query={"start-index": str(start_index)},
+            )
+        except CloudError as error:
+            if retried or "HTTP 404" not in str(error):
+                raise
+            previous = self.history_id
+            self.verify()
+            if self.history_id != previous:
+                raise HistoryIdentityChanged(
+                    "Things Cloud history identity changed"
+                ) from error
+            return self._history_data(start_index, retried=True)
 
     def commit(self, envelopes: list[Envelope]) -> None:
         if not envelopes:

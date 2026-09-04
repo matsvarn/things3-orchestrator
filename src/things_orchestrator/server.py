@@ -3,9 +3,11 @@ from __future__ import annotations
 import hmac
 import logging
 import re
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from secrets import token_urlsafe
-from typing import Any
+from typing import Any, Literal, Protocol
 
 import anyio
 from mcp.server.context import ServerRequestContext
@@ -80,12 +82,51 @@ _TOOLS = tuple(
 )
 
 
+class RoutineLifecycle(Protocol):
+    async def run(self, stop: anyio.Event) -> None: ...
+
+    def snapshot(self) -> dict[str, object]: ...
+
+
+class ReadinessGate(Protocol):
+    async def wait(self) -> object: ...
+
+
+RoutineLifecycleFactory = Callable[[], RoutineLifecycle]
+
+
+@dataclass(frozen=True, slots=True)
+class RoutineHTTPComposition:
+    state: Literal["disabled", "initializing"]
+    factory: RoutineLifecycleFactory | None = None
+
+    def __post_init__(self) -> None:
+        if (self.state == "disabled") != (self.factory is None):
+            raise ValueError("Routines HTTP composition is inconsistent")
+
+    @classmethod
+    def disabled(cls) -> RoutineHTTPComposition:
+        return cls("disabled")
+
+    @classmethod
+    def enabled(
+        cls, factory: RoutineLifecycleFactory
+    ) -> RoutineHTTPComposition:
+        return cls("initializing", factory)
+
+
 class ThingsMCPServer:
     name = "things"
 
-    def __init__(self, workspace: ThingsWorkspace | ThingsV2) -> None:
+    def __init__(
+        self,
+        workspace: ThingsWorkspace | ThingsV2,
+        *,
+        routines: RoutineHTTPComposition | None = None,
+    ) -> None:
         self._interface = workspace if isinstance(workspace, ThingsV2) else ThingsV2(workspace)
         self._lock = anyio.Lock()
+        self._routines = routines or RoutineHTTPComposition.disabled()
         self._tools_only_server: Server[object] = Server(
             name=self.name,
             version=package_version(),
@@ -162,6 +203,7 @@ class ThingsMCPServer:
         *,
         token: str,
         security_settings: TransportSecuritySettings | None = None,
+        readiness: ReadinessGate | None = None,
     ) -> Starlette:
         if not token:
             raise ValueError("serve-http needs a bearer token")
@@ -173,6 +215,9 @@ class ThingsMCPServer:
             stateless=True,
             security_settings=settings,
         )
+        if self._routines.factory is not None and readiness is None:
+            raise ValueError("Enabled routines need an explicit HTTP readiness gate")
+        active_routine: RoutineLifecycle | None = None
 
         class AuthenticatedMCP:
             async def __call__(
@@ -196,12 +241,42 @@ class ThingsMCPServer:
                 return JSONResponse(health_payload())
             if not bearer_matches(authorization, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return JSONResponse(health_payload(authenticated=True))
+            payload = health_payload(authenticated=True)
+            payload["routines"] = (
+                active_routine.snapshot()
+                if active_routine is not None
+                else {"state": self._routines.state}
+            )
+            return JSONResponse(payload)
 
         @asynccontextmanager
         async def lifespan(_app: Starlette) -> Any:
+            nonlocal active_routine
             async with manager.run():
-                yield
+                if self._routines.factory is None:
+                    yield
+                    return
+                assert readiness is not None
+                routine_factory = self._routines.factory
+                stop = anyio.Event()
+
+                async def run_routine() -> None:
+                    nonlocal active_routine
+                    while not stop.is_set():
+                        with anyio.move_on_after(0.05):
+                            await readiness.wait()
+                            break
+                    if stop.is_set():
+                        return
+                    active_routine = routine_factory()
+                    await active_routine.run(stop)
+
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(run_routine)
+                    try:
+                        yield
+                    finally:
+                        stop.set()
 
         return Starlette(
             routes=[
@@ -213,10 +288,20 @@ class ThingsMCPServer:
         )
 
     def run_http(self, *, port: int, token: str) -> None:
-        app = self.build_http_app(token=token)
+        import asyncio
+
         import uvicorn
 
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        readiness = asyncio.Event()
+        app = self.build_http_app(token=token, readiness=readiness)
+
+        class ReadyServer(uvicorn.Server):
+            async def startup(self, sockets: list[Any] | None = None) -> None:
+                await super().startup(sockets=sockets)
+                readiness.set()
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        ReadyServer(config).run()
 
 
 def bearer_matches(authorization: str | None, token: str) -> bool:

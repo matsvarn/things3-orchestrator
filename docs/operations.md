@@ -17,6 +17,18 @@ On Linux, read service logs with
 `journalctl -u things-orchestrator-http.service -e`. On macOS, inspect the
 launchd agent in Console.
 
+Inspect routines separately:
+
+```console
+things-orchestrator routines status
+things-orchestrator support-bundle
+```
+
+These commands report configuration state and aggregate delivery counts. They
+do not print the account, receiver URL, secret, task IDs, event IDs, or history
+identity. Public health remains `{"ok":true}`. Authenticated health adds only
+the worker state and failure counts.
+
 `doctor` automatically checks the TLS origin saved by `login`. Use `--url` to
 add a one-time endpoint that is not saved:
 
@@ -60,9 +72,35 @@ things-orchestrator support-bundle
 
 The JSON contains the installed version and commit, platform name, Python
 version, tool hashes, Cloud status and counts, endpoint class, service status,
-and operation-state counts when available. It omits account values, network
-locations, Things content and IDs, credentials, raw errors, and journal rows.
-Inspect the report before sharing it.
+operation-state counts, and value-free routine state when available. It omits
+account values, network locations, Things content and IDs, credentials, raw
+errors, receiver details, and database rows. Inspect the report before sharing
+it.
+
+## Operate routines
+
+Disable delivery and polling without deleting configuration or state:
+
+```console
+things-orchestrator routines disable
+```
+
+The running worker checks the saved enabled state at least once per configured
+poll interval. It stops delivery as well as polling. Run `service install` when
+you need an immediate restart into the disabled state.
+
+Enabling is idempotent but does not hot-start a worker:
+
+```console
+things-orchestrator routines enable
+things-orchestrator service install
+```
+
+Cloud failures and delivery failures back off independently. Routine polling
+does not take the MCP request lock. Delivery uses a stable event ID and is
+at-least-once: a receiver can see a retry after it accepted an earlier request
+whose local acknowledgement was interrupted. Hermes-compatible receivers must
+deduplicate `X-Request-ID`.
 
 ## Rotate the MCP bearer
 
@@ -86,13 +124,39 @@ equivalents:
 
 - `~/.config/things-orchestrator/credentials.json`
 - `~/.config/things-orchestrator/preferences.json`
+- `~/.config/things-orchestrator/routines.json`
 - `~/.local/state/things-orchestrator/launcher`
 - `~/.local/state/things-orchestrator/state.json`
 - `~/.local/state/things-orchestrator/journal-*.sqlite3`
 - `~/.local/state/things-orchestrator/contexts-*.sqlite3`
+- `~/.local/state/things-orchestrator/routines/*.sqlite3`
 
-Credentials contain the plaintext Things Cloud password. Store the backup as a
-secret.
+Credentials contain the plaintext Things Cloud password. `routines.json`
+contains the webhook secret. Store the backup as a secret.
+
+Do not copy an active routines database while its WAL may contain committed
+rows. Disable routines, run `service install` to restart without the worker,
+then copy the database. Restore the configuration and matching account-scoped
+database together. Deleting the database discards delivered-event tombstones
+and changes the event namespace; it is not a safe retry procedure.
+
+## Owner-run routine acceptance
+
+Automated tests use fake Things history and a local webhook server. To validate
+a real installation, the owner must:
+
+1. Configure the receiver's MCP connection through `print-config --client
+   hermes --show-secrets` in a private terminal.
+2. Configure and enable routines, then restart the supervised service.
+3. Create a fresh normal task and assign the exact `AI` tag directly.
+4. Confirm one metadata-only webhook reaches the receiver.
+5. Confirm the receiver can call `things_get` for the public task ID through
+   MCP, then perform any intended change through the existing bounded tools.
+6. Remove or trash the disposable task through the normal owner workflow.
+
+Do not use an existing task for this check; baseline startup intentionally does
+not replay historical tasks. Do not claim live Hermes or Grok compatibility
+until this check passes on the intended installation.
 
 ## Configure owner preferences
 

@@ -12,6 +12,7 @@ from things_orchestrator.config import Credentials, normalize_mcp_url
 from things_orchestrator.deployment import DeploymentIdentity
 from things_orchestrator.diagnostics import (
     CloudCheck,
+    RoutineDiagnostic,
     SupportReport,
     build_support_report,
     classify_endpoint,
@@ -19,6 +20,12 @@ from things_orchestrator.diagnostics import (
 )
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.routines_config import (
+    ReceiverSecret,
+    configure_routines,
+    set_routines_enabled,
+)
+from things_orchestrator.routines_store import RoutineStore
 
 
 class _ReadOnlyLibrary(MemoryLibrary):
@@ -260,6 +267,12 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         service="active",
         endpoint_class="public",
         cloud=CloudCheck("ok", (("records", 3), ("tasks", 2))),
+        routines=RoutineDiagnostic(
+            "enabled",
+            True,
+            "live",
+            (("candidates", 1), ("dead", 0), ("delivered", 2), ("pending", 1)),
+        ),
         operation_states=(("v2.applied", 2), ("v2.pending", 1)),
     )
 
@@ -274,6 +287,17 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         "operation_states": {"v2.applied": 2, "v2.pending": 1},
         "platform": "darwin",
         "python": "3.12.11",
+        "routines": {
+            "account_bound": True,
+            "counts": {
+                "candidates": 1,
+                "dead": 0,
+                "delivered": 2,
+                "pending": 1,
+            },
+            "phase": "live",
+            "state": "enabled",
+        },
         "service_status": "active",
         "tool_contract_hash": report.tool_contract_hash,
         "tool_schema_hash": report.tool_schema_hash,
@@ -283,3 +307,123 @@ def test_support_report_serialization_is_value_free_and_deterministic(
     assert str(tmp_path) not in first
     assert "http" not in first
     assert isinstance(report, SupportReport)
+
+
+def test_routines_diagnostic_reads_only_safe_aggregates_without_creating_database(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    database_path = tmp_path / "routines.sqlite3"
+    credentials = Credentials("private@example.com", "private-password", None)
+
+    unconfigured = diagnostics.collect_routines_diagnostic(
+        credentials,
+        config_path=config_path,
+        database_path=database_path,
+    )
+
+    assert unconfigured.as_dict() == {
+        "state": "unconfigured",
+        "account_bound": False,
+    }
+    assert not database_path.exists()
+
+    configured = configure_routines(
+        email=credentials.email,
+        receiver_url="https://private.example/webhooks/private-route",
+        receiver_secret=ReceiverSecret("private-receiver-secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    enabled = set_routines_enabled(
+        True,
+        email=credentials.email,
+        path=config_path,
+    )
+    store = RoutineStore(enabled.profile, path=database_path)
+    store.open()
+    store.close()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE meta SET phase = 'live', history_fingerprint = ?, cursor = 99",
+            (b"private-history-fingerprint!!".ljust(32, b"!"),),
+        )
+        connection.execute(
+            "INSERT INTO candidates VALUES (?, 1, 'task', 'open', 0, 1, 1, 2)",
+            ("private-task-id",),
+        )
+        connection.executemany(
+            "INSERT INTO events (event_id, routine_id, task_uuid, creation_group, observed_at, body, state, next_attempt_at, terminal_at) VALUES (?, 'routine', ?, 1, 1, ?, ?, ?, ?)",
+            (
+                ("private-event-pending", "private-task-p", b"{}", "pending", 1, None),
+                ("private-event-delivered", "private-task-d", None, "delivered", None, 2),
+                ("private-event-dead", "private-task-x", b"{}", "dead", None, 2),
+            ),
+        )
+
+    diagnostic = diagnostics.collect_routines_diagnostic(
+        credentials,
+        config_path=config_path,
+        database_path=database_path,
+    )
+
+    assert configured.state == "disabled"
+    assert diagnostic.as_dict() == {
+        "state": "enabled",
+        "account_bound": True,
+        "phase": "live",
+        "counts": {
+            "candidates": 1,
+            "dead": 1,
+            "delivered": 1,
+            "pending": 1,
+        },
+    }
+    serialized = json.dumps(diagnostic.as_dict(), sort_keys=True)
+    for private in (
+        "private@example.com",
+        "private-password",
+        "private.example",
+        "private-route",
+        "private-receiver-secret",
+        "private-task-id",
+        "private-event-pending",
+        "history_fingerprint",
+        "cursor",
+    ):
+        assert private not in serialized
+
+
+@pytest.mark.parametrize("malformed", (False, True))
+def test_routines_diagnostic_mismatch_or_malformed_config_never_opens_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    malformed: bool,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    database_path = tmp_path / "old-account.sqlite3"
+    if malformed:
+        config_path.write_text('{"version":1,"state":"enabled","profile":')
+    else:
+        configure_routines(
+            email="old-account@example.com",
+            receiver_url="https://private.example/webhooks/private-route",
+            receiver_secret=ReceiverSecret("private-secret"),
+            poll_interval_seconds=60,
+            path=config_path,
+        )
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: pytest.fail("old routines database was opened"),
+    )
+
+    diagnostic = diagnostics.collect_routines_diagnostic(
+        Credentials("current@example.com", "password", None),
+        config_path=config_path,
+        database_path=database_path,
+    )
+
+    assert diagnostic.account_bound is False
+    assert diagnostic.state == ("malformed" if malformed else "disabled")
+    assert not database_path.exists()
