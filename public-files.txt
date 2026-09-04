@@ -5,6 +5,7 @@
 .python-version
 CHANGELOG.md
 LICENSE
+PRODUCT.md
 README.md
 SECURITY.md
 deploy/Caddyfile

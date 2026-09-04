@@ -5,29 +5,47 @@ DOGFOOD = ROOT / "docs" / "dogfood.md"
 WEEKLY_REVIEW_PROMPT = ROOT / "tests" / "fixtures" / "weekly_review_owner_prompt.txt"
 
 
-def test_dogfood_register_covers_each_owner_workflow() -> None:
+def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
     text = DOGFOOD.read_text()
 
-    expected = (
+    supported = (
+        "First correct read",
+        "Useful Inbox capture and refusal gate",
+        "Named home and tag capture",
+        "Ordinary Project capture",
+        "Inbox processing",
+        "Daily focus",
+        "Exact changes and scheduling",
+        "Recurrence lifecycle",
+        "Tags, checklist, and Waiting",
+        "Recoverable Trash",
+        "Install, update, rollback, and recovery",
+    )
+    deferred = (
+        "native heading deletion or Project merge",
+        "restore from Trash or permanent deletion",
+        "arbitrary rich-note replacement",
+        "tag or other registry mutation",
+        "focused Area redesign or other advanced scope editing",
+        "empty-account or full-system setup",
+    )
+
+    for workflow in supported:
+        assert f"**{workflow} — Queued for v0.9.1.**" in text
+    for workflow in deferred:
+        assert workflow in text
+
+
+def test_dogfood_register_preserves_historical_runs() -> None:
+    text = DOGFOOD.read_text()
+
+    historical = (
         "Source-heavy Project capture",
         "Full reorganization",
         "Weekly review",
-        "Routine capture and refusal gate",
-        "Named home and tag capture",
-        "Ordinary Project form",
-        "Inbox processing",
-        "Daily focus",
-        "Exact change and scheduling",
-        "Recurrence lifecycle",
-        "Tags and Waiting",
-        "Project organization and merge",
-        "Trash, restore, permanent delete, and rich-note replacement",
-        "Focused Area redesign",
-        "New-system setup",
-        "Install, update, rollback, and recovery",
     )
 
-    for workflow in expected:
+    for workflow in historical:
         assert workflow in text
 
 
@@ -36,7 +54,9 @@ def test_dogfood_register_keeps_human_and_automated_proof_separate() -> None:
 
     assert "Automated tests and isolated model replays do not count" in text
     assert "Weekly review — Round 1 complete" in text
-    assert "next first-round workflow is Routine capture" in text
+    assert "primary event is one correct current read" in text
+    assert "receipt and Cloud" in text
+    assert "whether the Things skill was installed" in text
     assert "Repeat required" in text
 
 

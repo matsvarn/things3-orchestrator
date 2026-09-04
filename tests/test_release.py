@@ -14,6 +14,7 @@ from scripts.check_release import (
     install_tag_errors,
     instruction_errors,
     marketplace_errors,
+    product_contract_errors,
     shell_commands,
 )
 
@@ -78,6 +79,62 @@ def test_repository_marketplace_points_at_a_valid_local_plugin(tmp_path: Path) -
     )
 
     assert marketplace_errors(tmp_path) == []
+
+
+def test_product_contract_matches_current_release() -> None:
+    assert product_contract_errors() == []
+
+
+def test_product_contract_uses_the_executable_tool_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = next(iter(check_release.V2_MODELS.values()))
+    monkeypatch.setitem(check_release.V2_MODELS, "things_future", model)
+
+    assert product_contract_errors() == [
+        "PRODUCT.md public tool count differs from the executable contract",
+        "PRODUCT.md is missing public tool: things_future",
+    ]
+
+
+def test_product_contract_rejects_an_invented_public_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = check_release.ROOT / "PRODUCT.md"
+    original_read_text = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        text = original_read_text(path, *args, **kwargs)
+        return f"{text}\n- `things_future` does not exist.\n" if path == target else text
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert product_contract_errors() == [
+        "PRODUCT.md names unknown public tool: things_future"
+    ]
+
+
+def test_product_contract_rejects_stale_version_tools_and_boundaries(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "things-orchestrator"\nversion = "0.9.1"\n'
+    )
+    (tmp_path / "PRODUCT.md").write_text(
+        "Release contract: v0.8.0\n"
+        "Unofficial but affiliated.\n"
+        "`things_read` `things_find` `things_get` `things_capture` "
+        "`things_update` `things_complete` `things_trash` `things_receipt`\n"
+    )
+
+    assert product_contract_errors(tmp_path) == [
+        "PRODUCT.md release contract differs from pyproject.toml",
+        "PRODUCT.md public tool count differs from the executable contract",
+        "PRODUCT.md is missing public tool: things_view",
+        "PRODUCT.md names retired public tool: things_read",
+        "PRODUCT.md must state the unofficial affiliation boundary",
+        "PRODUCT.md must state the shared-bearer authority boundary",
+    ]
 
 
 def test_repository_marketplace_rejects_paths_outside_the_repository(

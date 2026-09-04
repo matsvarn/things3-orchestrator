@@ -18,6 +18,8 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from things_orchestrator.v2 import MODELS as V2_MODELS
+
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 GIT_INSTALL_TAG = re.compile(
@@ -34,6 +36,7 @@ CODEX_INSTALL_INTENT = re.compile(
 FENCE_OPEN = re.compile(r"\A {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)\Z")
 SDIST_FILES = {".gitignore", "LICENSE", "PKG-INFO", "README.md", "pyproject.toml"}
 SKILL_ARCHIVE_ROOT = PurePosixPath("things_orchestrator/skills/things-orchestrator")
+RETIRED_PUBLIC_TOOLS = ("things_read", "things_commit", "things_approve")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,7 @@ def metadata() -> None:
     manifest = json.loads((ROOT / "plugin/.codex-plugin/plugin.json").read_text())
     errors: list[str] = []
     errors.extend(marketplace_errors())
+    errors.extend(product_contract_errors())
     if project["version"] != manifest.get("version"):
         errors.append("pyproject.toml and plugin.json versions differ")
 
@@ -136,6 +140,45 @@ def metadata() -> None:
 
     fail(errors)
     print("Release metadata and skill files are valid.")
+
+
+def product_contract_errors(root: Path = ROOT) -> list[str]:
+    path = root / "PRODUCT.md"
+    project_path = root / "pyproject.toml"
+    try:
+        product = path.read_text()
+        version = tomllib.loads(project_path.read_text())["project"]["version"]
+    except (OSError, UnicodeError, KeyError, tomllib.TOMLDecodeError):
+        return ["PRODUCT.md or pyproject.toml is missing or unreadable"]
+
+    errors: list[str] = []
+    if f"Release contract: v{version}" not in product:
+        errors.append("PRODUCT.md release contract differs from pyproject.toml")
+    if f"exactly {len(V2_MODELS)} bounded tools" not in product:
+        errors.append("PRODUCT.md public tool count differs from the executable contract")
+    errors.extend(
+        f"PRODUCT.md is missing public tool: {tool}"
+        for tool in V2_MODELS
+        if f"`{tool}`" not in product
+    )
+    documented_tools = set(re.findall(r"`(things_[a-z_]+)`", product))
+    errors.extend(
+        f"PRODUCT.md names unknown public tool: {tool}"
+        for tool in sorted(
+            documented_tools - V2_MODELS.keys() - set(RETIRED_PUBLIC_TOOLS)
+        )
+    )
+    errors.extend(
+        f"PRODUCT.md names retired public tool: {tool}"
+        for tool in RETIRED_PUBLIC_TOOLS
+        if f"`{tool}`" in product
+    )
+    folded = product.casefold()
+    if "unofficial" not in folded or "not affiliated" not in folded:
+        errors.append("PRODUCT.md must state the unofficial affiliation boundary")
+    if "no read-only bearer" not in folded:
+        errors.append("PRODUCT.md must state the shared-bearer authority boundary")
+    return errors
 
 
 def marketplace_errors(root: Path = ROOT) -> list[str]:
