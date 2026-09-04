@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,12 +47,15 @@ from .deployment import skill_path
 from .diagnostics import (
     collect_cloud_check,
     collect_routines_diagnostic,
+    collect_service_state,
     collect_support_report,
+    probe_routine_runtime,
 )
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .routines import RoutineWorker
 from .routines_config import (
+    ROUTINE_RECEIVER_INSTRUCTION,
     EnabledRoutineConfig,
     ReceiverSecret,
     account_digest,
@@ -72,12 +76,6 @@ _LOGIN = (
     "Clone development may use `uv run things-orchestrator login`."
 )
 _LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
-_GROK_IDEMPOTENCY_INSTRUCTION = (
-    "Treat event_id as the idempotency key and refuse to act if you have "
-    "already acted on that event_id."
-)
-
-
 class _ExactArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs["allow_abbrev"] = False
@@ -165,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="configure, enable, and install the supervised routines service",
         description=(
             "Configure, enable, and install the supervised routines service. "
-            "Receiver values are entered privately through /dev/tty. "
+            "Receiver values are entered in a private terminal. "
             "Hermes is the default receiver."
         ),
     )
@@ -217,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         help=(
             "receiver webhook URL. Omit it to enter the URL privately "
-            "through /dev/tty"
+            "in a private terminal"
         ),
     )
     routines_configure.add_argument(
@@ -232,8 +230,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=120,
         help="event settle window in seconds (1-3600, default: 120)",
     )
-    for routine_action in ("enable", "disable", "status"):
-        routines_commands.add_parser(routine_action)
+    routines_commands.add_parser(
+        "enable",
+        help="enable the saved profile; restart the supervised service to start it",
+        description=(
+            "Enable the saved account-bound routines profile. This command is "
+            "idempotent and does not start a worker until the service restarts."
+        ),
+    )
+    routines_commands.add_parser(
+        "disable",
+        help="stop new polling and delivery without deleting saved state",
+        description=(
+            "Disable routines without deleting configuration, candidates, or "
+            "delivery history. A running worker observes this change within one poll interval."
+        ),
+    )
+    routines_commands.add_parser(
+        "status",
+        help="show safe configuration, service, worker, history, and delivery state",
+        description=(
+            "Read value-free routines status. The command makes one bounded, "
+            "authenticated loopback health probe and never creates the routines database."
+        ),
+    )
     show = commands.add_parser("print-config", help="render one client configuration")
     show.add_argument(
         "--client",
@@ -312,12 +332,12 @@ def main(argv: list[str] | None = None) -> None:
         or argument.startswith(("--secret=", "--key="))
         for argument in arguments
     ):
-        parser.error("The receiver credential must be entered through /dev/tty.")
+        parser.error("Enter the receiver credential in a private terminal.")
     if arguments[:2] == ["routines", "setup"] and any(
         argument == "--url" or argument.startswith("--url=")
         for argument in arguments[2:]
     ):
-        parser.error("Routines setup reads the receiver URL privately through /dev/tty.")
+        parser.error("Routines setup reads the receiver URL in a private terminal.")
     args = parser.parse_args(arguments)
     try:
         _dispatch(parser, args)
@@ -529,13 +549,14 @@ def _routines_command(
                 )
             )
             print(f"supervised service: {service.status.value}")
-            print(
-                "The worker may still be initializing. Check: "
-                "things-orchestrator routines status"
-            )
+            print("Receiver instruction:")
+            print(ROUTINE_RECEIVER_INSTRUCTION)
+            print("Next readiness check:")
+            print("things-orchestrator routines status")
+            print("Wait for trigger_ready=true before the smoke test.")
             if args.receiver == "grok":
-                print("Add this sentence to the Grok routine instruction:")
-                print(_GROK_IDEMPOTENCY_INSTRUCTION)
+                print("Then turn the saved Grok Routine Active.")
+            _print_routines_smoke_test()
             return
         print(
             json.dumps(
@@ -545,20 +566,28 @@ def _routines_command(
         print(
             f"Stored disabled routines profile in {routines_config_path()} (mode 0600)."
         )
+        print("Receiver instruction:")
+        print(ROUTINE_RECEIVER_INSTRUCTION)
+        print()
+        print("Enable routines and restart the supervised service:")
+        print("things-orchestrator routines enable")
+        print("things-orchestrator service install")
         if args.receiver == "grok":
-            print("Add this sentence to the Grok routine instruction:")
-            print(_GROK_IDEMPOTENCY_INSTRUCTION)
-            print()
-            print("Enable routines and restart the supervised service:")
-            print("things-orchestrator routines enable")
-            print("things-orchestrator service install")
-            return
-        print("Enable it, then restart: things-orchestrator service install")
+            print("Keep the saved Grok Routine inactive until trigger_ready=true.")
         return
     if action == "status":
+        routine_service_state = collect_service_state()
+        bearer = credentials.bearer
+        runtime = probe_routine_runtime(
+            bearer.reveal() if bearer is not None else None
+        )
         print(
             json.dumps(
-                collect_routines_diagnostic(credentials).as_dict(),
+                collect_routines_diagnostic(
+                    credentials,
+                    service_state=routine_service_state,
+                    runtime=runtime,
+                ).as_dict(),
                 sort_keys=True,
             )
         )
@@ -582,16 +611,35 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
     if receiver == "grok":
         terminal.write(
             "In Grok Bot, create or edit a Routine, choose \"When a webhook fires\", "
-            "save it, then copy the generated POST URL and key.\n"
-            "Do not put either value in argv or chat. Keep the Grok Routine inactive "
-            "until `things-orchestrator routines status` reports phase `live`, then "
-            "turn Active on.\n"
+            "paste the receiver instruction below, and save it before copying the "
+            "generated POST URL and key.\n"
+            "Keep the Grok Routine inactive until `things-orchestrator routines status` "
+            "reports `trigger_ready=true`. Do not put the URL or key in argv or chat.\n\n"
+            f"{ROUTINE_RECEIVER_INSTRUCTION}\n\n"
         )
         return
+    prompt = ROUTINE_RECEIVER_INSTRUCTION + "\n\nAuthenticated event metadata:\n{__raw__}"
     terminal.write(
-        "Have the Hermes webhook URL and secret ready. "
-        "Do not put either value in argv or chat.\n"
+        "On the Hermes host, run `hermes gateway setup` and enable webhooks. "
+        "Use this receiver instruction:\n\n"
+        f"{ROUTINE_RECEIVER_INSTRUCTION}\n\n"
+        "Then create the route with this command:\n\n"
+        "hermes webhook subscribe things-ai-task-created "
+        "--events task.created "
+        f"--prompt {shlex.quote(prompt)} "
+        "--description 'Run the built-in Things AI task routine'\n\n"
+        "The subscribe command prints the webhook URL and HMAC secret. Enter both "
+        "below. Do not put either value in argv or chat.\n"
     )
+
+
+def _print_routines_smoke_test() -> None:
+    print("Smoke test:")
+    print("1. Create a fresh untagged task. Stop editing it and confirm no delivery.")
+    print("2. Create another fresh task and assign the exact AI tag directly.")
+    print("3. Stop editing it, wait for settlement and polling, then run:")
+    print("things-orchestrator routines status")
+    print("Confirm one delivery and the receiver action on only the selected task.")
 
 
 def _login(
@@ -922,7 +970,7 @@ def _routine_secret_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
     try:
         terminal = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
-        parser.error("Routines configuration needs a controlling /dev/tty.")
+        parser.error("Routines configuration needs a private terminal.")
     try:
         yield terminal
     finally:

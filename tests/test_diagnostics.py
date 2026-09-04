@@ -270,11 +270,16 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         endpoint_class="public",
         cloud=CloudCheck("ok", (("records", 3), ("tasks", 2))),
         routines=RoutineDiagnostic(
-            "enabled",
-            True,
-            "live",
-            (("candidates", 1), ("dead", 0), ("delivered", 2), ("pending", 1)),
+            "enabled", "bound", "active", "running",
+            history_phase="live",
+            trigger_tag_discovered=True,
+            trigger_ready=True,
+            counts=(("candidates", 1), ("dead", 0), ("delivered", 2), ("pending", 1)),
             receiver_kind="grok",
+            poll_interval_seconds=60,
+            settlement_window_seconds=120,
+            last_successful_poll_at=10,
+            last_delivery_at=9,
         ),
         operation_states=(("v2.applied", 2), ("v2.pending", 1)),
     )
@@ -291,16 +296,25 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         "platform": "darwin",
         "python": "3.12.11",
         "routines": {
-            "account_bound": True,
+            "account_binding": "bound",
+            "configuration_state": "enabled",
             "counts": {
                 "candidates": 1,
                 "dead": 0,
                 "delivered": 2,
                 "pending": 1,
             },
-            "phase": "live",
+            "fixed_trigger": "new normal open untrashed task with the exact directly assigned AI tag",
+            "history_phase": "live",
+            "last_delivery_at": 9,
+            "last_successful_poll_at": 10,
+            "poll_interval_seconds": 60,
             "receiver_kind": "grok",
-            "state": "enabled",
+            "service_state": "active",
+            "settlement_window_seconds": 120,
+            "trigger_ready": True,
+            "trigger_tag_discovered": True,
+            "worker_liveness": "running",
         },
         "service_status": "active",
         "tool_contract_hash": report.tool_contract_hash,
@@ -326,10 +340,10 @@ def test_routines_diagnostic_reads_only_safe_aggregates_without_creating_databas
         database_path=database_path,
     )
 
-    assert unconfigured.as_dict() == {
-        "state": "unconfigured",
-        "account_bound": False,
-    }
+    assert unconfigured.configuration_state == "unconfigured"
+    assert unconfigured.account_binding == "not_applicable"
+    assert unconfigured.history_phase == "unknown"
+    assert unconfigured.worker_liveness == "unknown"
     assert not database_path.exists()
 
     configured = configure_routines(
@@ -372,17 +386,19 @@ def test_routines_diagnostic_reads_only_safe_aggregates_without_creating_databas
     )
 
     assert configured.state == "disabled"
-    assert diagnostic.as_dict() == {
-        "state": "enabled",
-        "account_bound": True,
-        "receiver_kind": "hermes",
-        "phase": "live",
-        "counts": {
-            "candidates": 1,
-            "dead": 1,
-            "delivered": 1,
-            "pending": 1,
-        },
+    rendered = diagnostic.as_dict()
+    assert rendered["configuration_state"] == "enabled"
+    assert rendered["account_binding"] == "bound"
+    assert rendered["receiver_kind"] == "hermes"
+    assert rendered["history_phase"] == "live"
+    assert rendered["trigger_tag_discovered"] is False
+    assert rendered["trigger_ready"] is False
+    assert rendered["last_delivery_at"] == 2
+    assert rendered["counts"] == {
+        "candidates": 1,
+        "dead": 1,
+        "delivered": 1,
+        "pending": 1,
     }
     serialized = json.dumps(diagnostic.as_dict(), sort_keys=True)
     for private in (
@@ -429,8 +445,10 @@ def test_routines_diagnostic_mismatch_or_malformed_config_never_opens_database(
         database_path=database_path,
     )
 
-    assert diagnostic.account_bound is False
-    assert diagnostic.state == ("malformed" if malformed else "disabled")
+    assert diagnostic.account_binding == ("unknown" if malformed else "mismatch")
+    assert diagnostic.configuration_state == (
+        "malformed" if malformed else "disabled"
+    )
     assert diagnostic.receiver_kind == (None if malformed else "hermes")
     assert not database_path.exists()
 
@@ -464,11 +482,11 @@ def test_configured_diagnostic_exposes_only_receiver_kind_without_database(
         database_path=database_path,
     )
 
-    assert diagnostic.as_dict() == {
-        "state": "disabled",
-        "account_bound": True,
-        "receiver_kind": receiver_kind,
-    }
+    assert diagnostic.configuration_state == "disabled"
+    assert diagnostic.account_binding == "bound"
+    assert diagnostic.receiver_kind == receiver_kind
+    assert diagnostic.history_phase == "unknown"
+    assert diagnostic.worker_liveness == "unknown"
     serialized = json.dumps(diagnostic.as_dict())
     for private in ("private-route", "private-credential", "private-password"):
         assert private not in serialized
@@ -499,8 +517,128 @@ def test_configured_diagnostic_keeps_receiver_kind_for_unknown_store_phase(
         database_path=tmp_path / "unused.sqlite3",
     )
 
-    assert diagnostic.as_dict() == {
-        "state": "disabled",
-        "account_bound": True,
-        "receiver_kind": "hermes",
-    }
+    assert diagnostic.configuration_state == "disabled"
+    assert diagnostic.account_binding == "bound"
+    assert diagnostic.receiver_kind == "hermes"
+    assert diagnostic.history_phase == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("runtime_state", "expected_liveness"),
+    (
+        ("initializing", "initializing"),
+        ("running", "running"),
+        ("backing_off", "backing_off"),
+        ("stopped", "stopped"),
+        ("future", "unknown"),
+    ),
+)
+def test_routines_diagnostic_uses_runtime_only_as_live_liveness_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runtime_state: str,
+    expected_liveness: str,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configured = configure_routines(
+        email="owner@example.com",
+        receiver_url="https://agent.example/webhooks/route",
+        receiver_secret=ReceiverSecret("secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    set_routines_enabled(True, email="owner@example.com", path=config_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts("live", 4, 1, 0, 0, 2, 0, 70),
+    )
+
+    result = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+        service_state="active",
+        runtime={
+            "state": runtime_state,
+            "last_successful_poll_at": 80,
+            "last_delivery_at": 75,
+        },
+    )
+
+    assert configured.state == "disabled"
+    assert result.worker_liveness == expected_liveness
+    assert result.history_phase == "live"
+    assert result.trigger_tag_discovered is True
+    assert result.trigger_ready is (expected_liveness in {"running", "backing_off"})
+    assert result.last_successful_poll_at == (
+        80 if expected_liveness != "unknown" else None
+    )
+    assert result.last_delivery_at == 70
+
+
+def test_live_database_does_not_imply_a_running_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configure_routines(
+        email="owner@example.com",
+        receiver_url="https://agent.example/webhooks/route",
+        receiver_secret=ReceiverSecret("secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    set_routines_enabled(True, email="owner@example.com", path=config_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts("live", 4, 1, 0, 0, 1, 0, 70),
+    )
+
+    result = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+        service_state="inactive",
+        runtime={"state": "running", "last_successful_poll_at": 80},
+    )
+
+    assert result.history_phase == "live"
+    assert result.service_state == "inactive"
+    assert result.worker_liveness == "stopped"
+    assert result.trigger_tag_discovered is True
+    assert result.trigger_ready is False
+
+
+@pytest.mark.parametrize(("ai_tags", "ready"), ((0, False), (1, True)))
+def test_trigger_readiness_requires_an_exact_current_ai_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ai_tags: int,
+    ready: bool,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configure_routines(
+        email="owner@example.com",
+        receiver_url="https://agent.example/webhooks/route",
+        receiver_secret=ReceiverSecret("secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    set_routines_enabled(True, email="owner@example.com", path=config_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts("live", 4, ai_tags, 0, 0, 0, 0),
+    )
+
+    result = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+        service_state="active",
+        runtime={"state": "running", "last_successful_poll_at": 80},
+    )
+
+    assert result.trigger_tag_discovered is bool(ai_tags)
+    assert result.trigger_ready is ready

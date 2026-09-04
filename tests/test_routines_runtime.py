@@ -1006,14 +1006,19 @@ def test_runtime_status_combines_poll_and_delivery_failure_state() -> None:
         "state": "backing_off",
         "cloud_failures": 0,
         "delivery_failures": 1,
+        "last_successful_poll_at": 0,
     }
     assert snapshots == {
         "after_retry": backing_off,
-        "after_clean_poll": backing_off,
+        "after_clean_poll": {
+            **backing_off,
+            "last_successful_poll_at": 60,
+        },
         "after_clean_drain": {
             "state": "running",
             "cloud_failures": 0,
             "delivery_failures": 0,
+            "last_successful_poll_at": 60,
         },
     }
     assert attempts == [("evt_retry", "pending")]

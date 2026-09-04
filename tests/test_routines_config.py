@@ -376,19 +376,18 @@ def test_cli_reads_secret_only_from_private_tty_and_reports_restart(
     status = next(
         json.loads(line)
         for line in output.splitlines()
-        if line.startswith("{") and '"phase"' in line
+        if line.startswith("{") and '"history_phase"' in line
     )
-    assert status == {
-        "account_bound": True,
-        "counts": {
-            "candidates": 0,
-            "dead": 0,
-            "delivered": 0,
-            "pending": 0,
-        },
-        "phase": "uninitialized",
-        "receiver_kind": "hermes",
-        "state": "enabled",
+    assert status["configuration_state"] == "enabled"
+    assert status["account_binding"] == "bound"
+    assert status["history_phase"] == "uninitialized"
+    assert status["worker_liveness"] in {"stopped", "unknown"}
+    assert status["receiver_kind"] == "hermes"
+    assert status["counts"] == {
+        "candidates": 0,
+        "dead": 0,
+        "delivered": 0,
+        "pending": 0,
     }
     assert (owner_dir / "routines.json").stat().st_mode & 0o777 == 0o600
 
@@ -411,7 +410,7 @@ def test_cli_rejects_secret_argv_without_echoing_its_value(
     captured = capsys.readouterr()
     assert "must-not-render" not in captured.out
     assert "must-not-render" not in captured.err
-    assert "/dev/tty" in captured.err
+    assert "private terminal" in captured.err
 
 
 def test_cli_renders_malformed_private_receiver_url_without_traceback_or_value(

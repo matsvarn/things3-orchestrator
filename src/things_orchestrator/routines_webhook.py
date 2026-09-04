@@ -211,12 +211,12 @@ def _classify_http(status: int, body: bytes, retry_after: str | None) -> Deliver
         and acknowledgement.get("status") == "accepted"
     ):
         return DeliveryResult("delivered", "accepted", status)
-    if (
-        status == 200
-        and isinstance(acknowledgement, dict)
-        and acknowledgement.get("status") == "duplicate"
-    ):
-        return DeliveryResult("delivered", "duplicate", status)
+    if status == 200 and isinstance(acknowledgement, dict):
+        acknowledgement_status = acknowledgement.get("status")
+        if acknowledgement_status == "delivered":
+            return DeliveryResult("delivered", "delivered", status)
+        if acknowledgement_status == "duplicate":
+            return DeliveryResult("delivered", "duplicate", status)
     return _classify_non_success(status, retry_after)
 
 

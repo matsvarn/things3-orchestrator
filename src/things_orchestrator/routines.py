@@ -80,22 +80,39 @@ class RuntimeSnapshot:
     state: RuntimeState
     cloud_failures: int = 0
     delivery_failures: int = 0
+    last_successful_poll_at: int | None = None
+    last_delivery_at: int | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "state": self.state,
             "cloud_failures": self.cloud_failures,
             "delivery_failures": self.delivery_failures,
         }
+        if self.last_successful_poll_at is not None:
+            result["last_successful_poll_at"] = self.last_successful_poll_at
+        if self.last_delivery_at is not None:
+            result["last_delivery_at"] = self.last_delivery_at
+        return result
 
 
 def _active_snapshot(
-    cloud_failures: int, delivery_failures: int
+    cloud_failures: int,
+    delivery_failures: int,
+    *,
+    last_successful_poll_at: int | None = None,
+    last_delivery_at: int | None = None,
 ) -> RuntimeSnapshot:
     state: Literal["running", "backing_off"] = (
         "backing_off" if cloud_failures or delivery_failures else "running"
     )
-    return RuntimeSnapshot(state, cloud_failures, delivery_failures)
+    return RuntimeSnapshot(
+        state,
+        cloud_failures,
+        delivery_failures,
+        last_successful_poll_at,
+        last_delivery_at,
+    )
 
 
 class RoutineWorker:
@@ -124,7 +141,9 @@ class RoutineWorker:
         self._config_loader = config_loader
         self._wait_for_stop = wait_for_stop
         self._limiter = anyio.CapacityLimiter(1)
-        self._snapshot = RuntimeSnapshot("initializing")
+        self._last_successful_poll_at: int | None = None
+        self._last_delivery_at: int | None = None
+        self._snapshot = self._snapshot_for("initializing")
 
     def snapshot(self) -> dict[str, object]:
         return self._snapshot.as_dict()
@@ -135,18 +154,18 @@ class RoutineWorker:
         try:
             await self._sync(self._store.open)
         except Exception:
-            self._snapshot = RuntimeSnapshot("stopped")
+            self._snapshot = self._snapshot_for("stopped")
             return
         next_poll = self._monotonic()
         next_delivery = self._monotonic()
         next_config = self._monotonic() + self._profile.poll_interval_seconds
-        self._snapshot = _active_snapshot(cloud_failures, delivery_failures)
+        self._snapshot = self._active_snapshot(cloud_failures, delivery_failures)
         try:
             while not stop.is_set():
                 now_mono = self._monotonic()
                 if now_mono >= next_config:
                     if not await self._still_enabled():
-                        self._snapshot = RuntimeSnapshot(
+                        self._snapshot = self._snapshot_for(
                             "disabled", cloud_failures, delivery_failures
                         )
                         return
@@ -163,13 +182,13 @@ class RoutineWorker:
                             next_poll = self._monotonic() + self._cloud_delay(
                                 cloud_failures
                             )
-                            self._snapshot = _active_snapshot(
+                            self._snapshot = self._active_snapshot(
                                 cloud_failures, delivery_failures
                             )
                         else:
                             cloud_failures = 0
                             next_poll = self._monotonic()
-                            self._snapshot = _active_snapshot(
+                            self._snapshot = self._active_snapshot(
                                 cloud_failures, delivery_failures
                             )
                     except Exception:
@@ -177,7 +196,7 @@ class RoutineWorker:
                         next_poll = self._monotonic() + self._cloud_delay(
                             cloud_failures
                         )
-                        self._snapshot = _active_snapshot(
+                        self._snapshot = self._active_snapshot(
                             cloud_failures, delivery_failures
                         )
                     else:
@@ -185,7 +204,7 @@ class RoutineWorker:
                         next_poll = self._monotonic() + (
                             self._profile.poll_interval_seconds if caught_up else 0
                         )
-                        self._snapshot = _active_snapshot(
+                        self._snapshot = self._active_snapshot(
                             cloud_failures, delivery_failures
                         )
                     continue
@@ -196,7 +215,7 @@ class RoutineWorker:
                             stop=stop, poll_due_at=next_poll
                         )
                     except _RoutineDisabled:
-                        self._snapshot = RuntimeSnapshot(
+                        self._snapshot = self._snapshot_for(
                             "disabled", cloud_failures, delivery_failures
                         )
                         return
@@ -205,13 +224,13 @@ class RoutineWorker:
                         next_delivery = self._monotonic() + self._delivery_delay(
                             delivery_failures
                         )
-                        self._snapshot = _active_snapshot(
+                        self._snapshot = self._active_snapshot(
                             cloud_failures, delivery_failures
                         )
                     else:
                         delivery_failures = delivery_failures + failed if failed else 0
                         next_delivery = self._monotonic() + (1 if attempted else 5)
-                        self._snapshot = _active_snapshot(
+                        self._snapshot = self._active_snapshot(
                             cloud_failures, delivery_failures
                         )
                     continue
@@ -223,7 +242,7 @@ class RoutineWorker:
                 await self._wait_for_stop(delay, stop)
         finally:
             if self._snapshot.state != "disabled":
-                self._snapshot = RuntimeSnapshot(
+                self._snapshot = self._snapshot_for(
                     "stopped", cloud_failures, delivery_failures
                 )
             try:
@@ -234,9 +253,11 @@ class RoutineWorker:
     async def _poll_once(self) -> bool:
         cursor = await self._sync(self._store.cursor)
         batch = await self._sync(partial(self._cloud.history_groups, cursor))
+        observed_at = self._epoch()
         await self._sync(
-            partial(self._store.apply_batch, batch, observed_at=self._epoch())
+            partial(self._store.apply_batch, batch, observed_at=observed_at)
         )
+        self._last_successful_poll_at = observed_at
         return batch.caught_up
 
     async def _drain_due(
@@ -295,6 +316,8 @@ class RoutineWorker:
                 result=result.code,
             )
         )
+        if state == "delivered":
+            self._last_delivery_at = now
 
     async def _still_enabled(self) -> bool:
         try:
@@ -321,3 +344,27 @@ class RoutineWorker:
             * (2 ** min(max(failures - 1, 0), 30)),
         )
         return max(1.0, self._jitter(ceiling))
+
+    def _snapshot_for(
+        self,
+        state: RuntimeState,
+        cloud_failures: int = 0,
+        delivery_failures: int = 0,
+    ) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            state,
+            cloud_failures,
+            delivery_failures,
+            self._last_successful_poll_at,
+            self._last_delivery_at,
+        )
+
+    def _active_snapshot(
+        self, cloud_failures: int, delivery_failures: int
+    ) -> RuntimeSnapshot:
+        return _active_snapshot(
+            cloud_failures,
+            delivery_failures,
+            last_successful_poll_at=self._last_successful_poll_at,
+            last_delivery_at=self._last_delivery_at,
+        )

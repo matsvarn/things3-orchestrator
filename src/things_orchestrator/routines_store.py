@@ -106,6 +106,7 @@ class StoreCounts:
     pending: int
     delivered: int
     dead: int
+    last_delivery_at: int | None = None
 
 
 def routine_database_path(account_digest: str) -> Path:
@@ -311,6 +312,7 @@ class RoutineStore:
             states = dict(
                 connection.execute("SELECT state, COUNT(*) FROM events GROUP BY state")
             )
+            last_delivery_at = _last_delivery_at(connection)
         return StoreCounts(
             phase=str(meta[3]),
             cursor=int(meta[5]),
@@ -319,6 +321,7 @@ class RoutineStore:
             pending=int(states.get("pending", 0)),
             delivered=int(states.get("delivered", 0)),
             dead=int(states.get("dead", 0)),
+            last_delivery_at=last_delivery_at,
         )
 
     def _reduce_tag(self, connection: sqlite3.Connection, event: HistoryEvent) -> None:
@@ -539,6 +542,7 @@ def read_routine_counts(path: Path, account_digest: str) -> StoreCounts | None:
                 pending=int(states.get("pending", 0)),
                 delivered=int(states.get("delivered", 0)),
                 dead=int(states.get("dead", 0)),
+                last_delivery_at=_last_delivery_at(connection),
             )
     except sqlite3.Error:
         return None
@@ -582,3 +586,10 @@ def _count(connection: sqlite3.Connection, table: str) -> int:
         raise RoutineStoreError("Unsupported count table")
     row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
     return int(row[0]) if row is not None else 0
+
+
+def _last_delivery_at(connection: sqlite3.Connection) -> int | None:
+    row = connection.execute(
+        "SELECT MAX(terminal_at) FROM events WHERE state = 'delivered'"
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])

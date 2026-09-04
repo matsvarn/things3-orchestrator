@@ -25,6 +25,7 @@ def _receiver(url: str, secret: str = "receiver-secret") -> HermesReceiver:
 @pytest.mark.parametrize(
     "status, body, expected_kind, expected_code",
     (
+        (200, b'{"status":"delivered"}', "delivered", "delivered"),
         (202, b'{"status":"accepted"}', "delivered", "accepted"),
         (200, b'{"status":"duplicate"}', "delivered", "duplicate"),
         (202, b'{"status":"duplicate"}', "retry", "ambiguous_2xx"),
