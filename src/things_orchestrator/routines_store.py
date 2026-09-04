@@ -16,7 +16,12 @@ from secrets import token_bytes
 from typing import cast
 
 from .cloud import HistoryBatch, HistoryEvent
-from .routines_config import RoutineProfile, routines_state_dir
+from .routines_config import (
+    ROUTINE_EVENT_TYPE,
+    ROUTINE_TRIGGER_TAG,
+    RoutineProfile,
+    routines_state_dir,
+)
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -106,6 +111,7 @@ class StoreCounts:
     pending: int
     delivered: int
     dead: int
+    last_delivery_at: int | None = None
 
 
 def routine_database_path(account_digest: str) -> Path:
@@ -311,6 +317,7 @@ class RoutineStore:
             states = dict(
                 connection.execute("SELECT state, COUNT(*) FROM events GROUP BY state")
             )
+            last_delivery_at = _last_delivery_at(connection)
         return StoreCounts(
             phase=str(meta[3]),
             cursor=int(meta[5]),
@@ -319,6 +326,7 @@ class RoutineStore:
             pending=int(states.get("pending", 0)),
             delivered=int(states.get("delivered", 0)),
             dead=int(states.get("dead", 0)),
+            last_delivery_at=last_delivery_at,
         )
 
     def _reduce_tag(self, connection: sqlite3.Connection, event: HistoryEvent) -> None:
@@ -327,7 +335,7 @@ class RoutineStore:
             return
         if "tt" not in event.payload and event.action == 1:
             return
-        if event.payload.get("tt") == "AI":
+        if event.payload.get("tt") == ROUTINE_TRIGGER_TAG:
             connection.execute(
                 "INSERT OR IGNORE INTO ai_tags VALUES (?)", (event.uuid,)
             )
@@ -506,7 +514,7 @@ def canonical_event_body(
     return json.dumps(
         {
             "event_id": event_id,
-            "event_type": "task.created",
+            "event_type": ROUTINE_EVENT_TYPE,
             "observed_at": observed_at,
             "routine_id": routine_id,
             "schema_version": 1,
@@ -539,6 +547,7 @@ def read_routine_counts(path: Path, account_digest: str) -> StoreCounts | None:
                 pending=int(states.get("pending", 0)),
                 delivered=int(states.get("delivered", 0)),
                 dead=int(states.get("dead", 0)),
+                last_delivery_at=_last_delivery_at(connection),
             )
     except sqlite3.Error:
         return None
@@ -582,3 +591,10 @@ def _count(connection: sqlite3.Connection, table: str) -> int:
         raise RoutineStoreError("Unsupported count table")
     row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
     return int(row[0]) if row is not None else 0
+
+
+def _last_delivery_at(connection: sqlite3.Connection) -> int | None:
+    row = connection.execute(
+        "SELECT MAX(terminal_at) FROM events WHERE state = 'delivered'"
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])

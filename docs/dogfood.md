@@ -28,6 +28,22 @@ tool names, schemas, or expected calls before the run. Record:
 Do not aggregate skill-installed and schema-only clients into one success rate.
 The skill contains retry and trust guidance that bare MCP schemas do not.
 
+## 2026-09-04 owner-run routine acceptance
+
+An owner ran the built-in routine on a private VPS with a supervised worker.
+The durable history phase reached `live`. A fresh untagged task was the negative
+control and produced no webhook. Assigning the exact `AI` tag directly to that
+fresh candidate during its settlement window produced one event. Grok fetched
+the selected task through MCP and updated that task's notes.
+
+The final routine counts were zero candidates, zero pending events, one
+delivered event, and zero dead letters. This content-free record reports owner
+acceptance for that topology only. It does not prove general Grok or Hermes
+compatibility. The record does not include the exact deployed commit SHA, Grok
+client version, installed skill state, or owner intervention details. It also
+excludes task content, account identity, task and event IDs, receiver
+credentials, webhook details, and host identity.
+
 ## v0.9.1 activation events
 
 The primary event is one correct current read from a natural prompt in a fresh
@@ -44,9 +60,9 @@ Trash; do not call that deletion or cleanup.
 - **Round 1 complete**: a human ran the workflow and recorded its failures.
 - **Repeat required**: fixes landed after that run, so it needs another human
   run against the current contract.
-- **Queued for v0.9.1**: the workflow is supported by the current eight tools
+- **Queued for v0.10.0**: the workflow is supported by the current eight tools
   but has no complete current human run.
-- **Deferred**: the workflow requires a capability outside the v0.9.1 public
+- **Deferred**: the workflow requires a capability outside the v0.10.0 public
   contract and must not be counted as a release failure.
 
 ## Historical first-round record
@@ -54,7 +70,7 @@ Trash; do not call that deletion or cleanup.
 These runs predate the bounded eight-tool v0.9 interface. They remain useful
 history, but they do not prove current-client activation.
 
-### Source-heavy Project capture — Round 1 complete
+### Source-heavy Project capture: round 1 complete
 
 The Mats Mode request in
 [`tests/fixtures/mats_mode_owner_prompt.txt`](../tests/fixtures/mats_mode_owner_prompt.txt)
@@ -68,7 +84,7 @@ preference-persistence gaps. Releases 0.4.6 through 0.5.0 repaired that path.
 Status: **Repeat required**, using only the parts supported by the current
 contract.
 
-### Full reorganization — Round 1 complete
+### Full reorganization: round 1 complete
 
 The request in
 [`tests/fixtures/full_reorg_owner_prompt.txt`](../tests/fixtures/full_reorg_owner_prompt.txt)
@@ -80,53 +96,53 @@ Project quality.
 Status: **Repeat required**, after unsupported broad reorganization actions are
 removed from the prompt.
 
-### Weekly review — Round 1 complete
+### Weekly review: round 1 complete
 
 A live run used the recorded natural prompt against version 0.5.2. It found
 overlapping reads, skipped an empty-head check, mixed cleanup with planning,
 invented priority judgments, converted next-week intent into Monday start dates,
 and asked approval for unnamed changes.
 
-Status: **Repeat required** against v0.9.1. Use the natural prompt in
+Status: **Repeat required** against v0.10.0. Use the natural prompt in
 [`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt)
 without tool or form instructions.
 
-## Supported v0.9.1 queue
+## Supported v0.10.0 queue
 
 Run these workflows with natural prompts and the evidence fields above:
 
-1. **First correct read — Queued for v0.9.1.** Ask a fresh client what needs
+1. **First correct read. Queued for v0.10.0.** Ask a fresh client what needs
    attention today. Verify that the answer reflects current Things state and
    performs no mutation.
-2. **Useful Inbox capture and refusal gate — Queued for v0.9.1.** Capture one
+2. **Useful Inbox capture and refusal gate. Queued for v0.10.0.** Capture one
    wanted Task. Then give one ambiguous mashed request; it must ask a concise
    question and write nothing.
-3. **Named home and tag capture — Queued for v0.9.1.** Add one Task to an exact
+3. **Named home and tag capture. Queued for v0.10.0.** Add one Task to an exact
    named Project or Area with one existing named tag. It must not invent a home
    or second tag.
-4. **Ordinary Project capture — Queued for v0.9.1.** Create a Project with known
+4. **Ordinary Project capture. Queued for v0.10.0.** Create a Project with known
    actions and useful context. Check the Project fields, nested Task fields,
    checklists, and notes.
-5. **Inbox processing — Queued for v0.9.1.** Process a bounded mixed Inbox
+5. **Inbox processing. Queued for v0.10.0.** Process a bounded mixed Inbox
    without duplicate creation or invented dates.
-6. **Daily focus — Queued for v0.9.1.** Review Today, postpone one exact item,
+6. **Daily focus. Queued for v0.10.0.** Review Today, postpone one exact item,
    move one item to Evening, and re-read the resulting view.
-7. **Exact changes and scheduling — Queued for v0.9.1.** Rename, complete, or
+7. **Exact changes and scheduling. Queued for v0.10.0.** Rename, complete, or
    trash exact items; set supported dates and reminders; move a Task between
    homes; verify unmentioned fields remain unchanged.
-8. **Recurrence lifecycle — Queued for v0.9.1.** Create and update a supported
+8. **Recurrence lifecycle. Queued for v0.10.0.** Create and update a supported
    recurrence, modify its current copy, complete it, and stop repetition.
-9. **Tags, checklist, and Waiting — Queued for v0.9.1.** Patch exact direct tags
+9. **Tags, checklist, and Waiting. Queued for v0.10.0.** Patch exact direct tags
    and checklist rows while preserving unmentioned and inherited state.
-10. **Recoverable Trash — Queued for v0.9.1.** Move one exact disposable item to
+10. **Recoverable Trash. Queued for v0.10.0.** Move one exact disposable item to
     recoverable Trash and verify its receipt and Cloud state.
-11. **Install, update, rollback, and recovery — Queued for v0.9.1.** Verify
+11. **Install, update, rollback, and recovery. Queued for v0.10.0.** Verify
     client setup, health checks, preference preservation, rollback, and a safe
     recovery path. Record host and client topology precisely.
 
 ## Deferred until a bounded public contract exists
 
-These are not queued for v0.9.1 and must not block its dogfood program:
+These are not queued for v0.10.0 and must not block its dogfood program:
 
 - native heading deletion or Project merge;
 - restore from Trash or permanent deletion;
@@ -140,7 +156,7 @@ and recovery behavior, move only its bounded workflow into the supported queue.
 
 ## Regression round
 
-After each supported v0.9.1 workflow has one human run, repeat the supported
+After each supported v0.10.0 workflow has one human run, repeat the supported
 set against the then-current release using changed owner data and natural
 paraphrases. A workflow passes only when the trace is concise, the result matches
 one accepted intent, and the result remains correct without the chat. Writes

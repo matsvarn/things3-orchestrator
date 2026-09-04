@@ -39,9 +39,9 @@ def test_skill_names_exactly_the_default_eight_tools() -> None:
     }
 
 
-def test_skill_discloses_the_three_judgment_references() -> None:
+def test_skill_discloses_judgment_and_routine_trust_references() -> None:
     links = set(re.findall(r"\(references/([^)]+)\)", SKILL.read_text()))
-    assert links == {"research.md", "form.md", "review.md"}
+    assert links == {"research.md", "form.md", "review.md", "routines.md"}
 
 
 def test_skill_requires_opaque_idempotency_and_exact_retry() -> None:

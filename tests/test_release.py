@@ -168,6 +168,7 @@ def test_secret_bearing_client_commands_require_show_secrets(tmp_path: Path) -> 
 
 things-orchestrator print-config --client codex
 things-orchestrator print-config --client hermes
+things-orchestrator print-config --client grok
 things-orchestrator print-config --client caddy
 things-orchestrator print-config --client cursor --show-secrets
 things-orchestrator print-config --url https://example.com --client claude-code
@@ -178,8 +179,9 @@ things-orchestrator print-config --client=cursor-cloud
     assert instruction_errors(tmp_path) == [
         "guide.md:3: usable client config needs --show-secrets",
         "guide.md:4: usable client config needs --show-secrets",
-        "guide.md:7: usable client config needs --show-secrets",
+        "guide.md:5: usable client config needs --show-secrets",
         "guide.md:8: usable client config needs --show-secrets",
+        "guide.md:9: usable client config needs --show-secrets",
     ]
 
 
@@ -213,7 +215,7 @@ things-orchestrator print-config \\
         (
             "README.md",
             'uv tool install "git+https://github.com/matsvarn/'
-            'things3-orchestrator.git@v0.9.1"',
+            'things3-orchestrator.git@v0.10.0"',
             'uv tool install "git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"',
             "v0.8.0",
@@ -221,7 +223,7 @@ things-orchestrator print-config \\
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.9.1",
+            "--ref v0.10.0",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref v0.8.0",
             "v0.8.0",
@@ -229,7 +231,7 @@ things-orchestrator print-config \\
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.9.1",
+            "--ref v0.10.0",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref=v0.8.0",
             "unsupported Codex marketplace install command",
@@ -328,7 +330,7 @@ def test_inline_code_client_commands_require_show_secrets(tmp_path: Path) -> Non
         (
             "README.md",
             'uv tool install "git+https://github.com/matsvarn/'
-            'things3-orchestrator.git@v0.9.1"',
+            'things3-orchestrator.git@v0.10.0"',
             "`uv tool install "
             '"git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"`',
@@ -336,7 +338,7 @@ def test_inline_code_client_commands_require_show_secrets(tmp_path: Path) -> Non
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.9.1",
+            "--ref v0.10.0",
             "`codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref v0.8.0`",
         ),

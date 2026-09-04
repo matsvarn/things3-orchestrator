@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -25,6 +26,7 @@ def _receiver(url: str, secret: str = "receiver-secret") -> HermesReceiver:
 @pytest.mark.parametrize(
     "status, body, expected_kind, expected_code",
     (
+        (200, b'{"status":"delivered"}', "delivered", "delivered"),
         (202, b'{"status":"accepted"}', "delivered", "accepted"),
         (200, b'{"status":"duplicate"}', "delivered", "duplicate"),
         (202, b'{"status":"duplicate"}', "retry", "ambiguous_2xx"),
@@ -134,6 +136,84 @@ def test_adapter_never_follows_redirect() -> None:
         "redirect",
         302,
     )
+
+
+def test_loopback_delivery_ignores_environment_proxy_and_proxy_cannot_forge_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver_requests: list[dict[str, str | bytes]] = []
+    proxy_requests: list[dict[str, str | bytes]] = []
+
+    class ReceiverHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            receiver_requests.append(
+                {
+                    "body": self.rfile.read(length),
+                    "request_id": self.headers["X-Request-ID"],
+                    "signature": self.headers["X-Webhook-Signature-V2"],
+                }
+            )
+            self.send_response(409)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            proxy_requests.append(
+                {
+                    "body": self.rfile.read(length),
+                    "request_id": self.headers.get("X-Request-ID", ""),
+                    "signature": self.headers.get("X-Webhook-Signature-V2", ""),
+                }
+            )
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"delivered"}')
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    receiver = HTTPServer(("127.0.0.1", 0), ReceiverHandler)
+    proxy = HTTPServer(("127.0.0.1", 0), ProxyHandler)
+    receiver_thread = threading.Thread(target=receiver.serve_forever)
+    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    receiver_thread.start()
+    proxy_thread.start()
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
+    try:
+        body = b'{"event_id":"private-event","task_id":"private-task"}'
+        event = StoredEvent(
+            "private-event", "routine", "private-task", 1, body, 0
+        )
+        result = HermesWebhook(
+            _receiver(
+                f"http://127.0.0.1:{receiver.server_port}/webhooks/task",
+                "private-secret",
+            )
+        ).deliver(event, timestamp=2)
+    finally:
+        receiver.shutdown()
+        proxy.shutdown()
+        receiver_thread.join()
+        proxy_thread.join()
+        receiver.server_close()
+        proxy.server_close()
+
+    assert (result.kind, result.code) == ("permanent", "client_error")
+    assert proxy_requests == []
+    assert receiver_requests == [
+        {
+            "body": body,
+            "request_id": "private-event",
+            "signature": hermes_signature(b"private-secret", 2, body),
+        }
+    ]
 
 
 def test_adapter_bounds_acknowledgement_body() -> None:

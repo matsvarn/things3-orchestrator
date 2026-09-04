@@ -8,10 +8,13 @@ import os
 import platform
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import Request
 
 from .cloud import CloudClient, CloudError, CloudLibrary
 from .config import (
@@ -32,6 +35,7 @@ from .deployment import (
 from .journal import journal_path, read_operation_state_counts
 from .library import Record
 from .routines_config import (
+    ROUTINE_TRIGGER,
     EnabledRoutineConfig,
     ReceiverKind,
     UnconfiguredRoutineConfig,
@@ -39,6 +43,7 @@ from .routines_config import (
     load_routines_config,
 )
 from .routines_store import read_routine_counts, routine_database_path
+from .routines_webhook import RoutineHTTPOpener, proxyless_no_redirect_opener
 from .service import service_status
 
 CloudStatus = Literal[
@@ -52,9 +57,17 @@ CloudStatus = Literal[
 ]
 EndpointClass = Literal["loopback", "tailnet", "public"]
 RoutineConfigState = Literal["unconfigured", "malformed", "disabled", "enabled"]
+RoutineAccountBinding = Literal["not_applicable", "unknown", "bound", "mismatch"]
+RoutineServiceState = Literal[
+    "active", "loaded", "inactive", "not-installed", "unknown", "unsupported"
+]
+RoutineWorkerLiveness = Literal[
+    "initializing", "running", "backing_off", "stopped", "unknown"
+]
 
 _TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+_ROUTINE_HEALTH_URL = "http://127.0.0.1:8787/health"
 
 
 class DiagnosticLibrary(Protocol):
@@ -78,21 +91,40 @@ class CloudCheck:
 
 @dataclass(frozen=True, slots=True)
 class RoutineDiagnostic:
-    state: RoutineConfigState
-    account_bound: bool
-    phase: str | None = None
+    configuration_state: RoutineConfigState
+    account_binding: RoutineAccountBinding
+    service_state: RoutineServiceState
+    worker_liveness: RoutineWorkerLiveness
+    history_phase: str = "unknown"
+    fixed_trigger: str = ROUTINE_TRIGGER
+    trigger_tag_discovered: bool | None = None
+    trigger_ready: bool | None = None
     counts: tuple[tuple[str, int], ...] | None = None
     receiver_kind: ReceiverKind | None = None
+    poll_interval_seconds: int | None = None
+    settlement_window_seconds: int | None = None
+    last_successful_poll_at: int | None = None
+    last_delivery_at: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
-            "state": self.state,
-            "account_bound": self.account_bound,
+            "configuration_state": self.configuration_state,
+            "account_binding": self.account_binding,
+            "service_state": self.service_state,
+            "worker_liveness": self.worker_liveness,
+            "history_phase": self.history_phase,
+            "fixed_trigger": self.fixed_trigger,
+            "trigger_tag_discovered": self.trigger_tag_discovered,
+            "trigger_ready": self.trigger_ready,
+            "last_successful_poll_at": self.last_successful_poll_at,
+            "last_delivery_at": self.last_delivery_at,
         }
         if self.receiver_kind is not None:
             result["receiver_kind"] = self.receiver_kind
-        if self.phase is not None:
-            result["phase"] = self.phase
+        if self.poll_interval_seconds is not None:
+            result["poll_interval_seconds"] = self.poll_interval_seconds
+        if self.settlement_window_seconds is not None:
+            result["settlement_window_seconds"] = self.settlement_window_seconds
         if self.counts is not None:
             result["counts"] = dict(self.counts)
         return result
@@ -224,50 +256,115 @@ def collect_cloud_check() -> CloudCheck:
     return _fresh_cloud_check(credentials)
 
 
+def collect_service_state() -> RoutineServiceState:
+    return _routine_service_state(_service_status())
+
+
+def probe_routine_runtime(
+    bearer: str | None,
+    *,
+    timeout_seconds: float = 1.0,
+    _opener: RoutineHTTPOpener | None = None,
+) -> Mapping[str, object] | None:
+    """Read the authenticated loopback runtime snapshot with fixed bounds."""
+
+    if not bearer or not 0 < timeout_seconds <= 5:
+        return None
+    request = Request(
+        _ROUTINE_HEALTH_URL,
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+    opener = _opener or proxyless_no_redirect_opener()
+    try:
+        with opener.open(request, timeout=timeout_seconds) as response:
+            body = response.read(65_537)
+    except (HTTPError, URLError, TimeoutError, OSError):
+        return None
+    if len(body) > 65_536:
+        return None
+    try:
+        payload: object = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None
+    routines = payload.get("routines")
+    return routines if isinstance(routines, dict) else None
+
+
 def collect_routines_diagnostic(
     credentials: Credentials | None,
     *,
     config_path: Path | None = None,
     database_path: Path | None = None,
+    service_state: str | None = None,
+    runtime: Mapping[str, object] | None = None,
 ) -> RoutineDiagnostic:
     """Read only value-free routine state without creating local resources."""
 
+    service = _routine_service_state(service_state)
+    liveness, last_poll, runtime_delivery = _runtime_status(service, runtime)
     try:
         config = load_routines_config(path=config_path)
     except ConfigError:
-        return RoutineDiagnostic(state="malformed", account_bound=False)
+        return RoutineDiagnostic("malformed", "unknown", service, liveness)
     if isinstance(config, UnconfiguredRoutineConfig):
-        return RoutineDiagnostic(state="unconfigured", account_bound=False)
+        return RoutineDiagnostic("unconfigured", "not_applicable", service, liveness)
     state: Literal["disabled", "enabled"] = (
         "enabled" if isinstance(config, EnabledRoutineConfig) else "disabled"
     )
-    receiver_kind = config.profile.receiver.kind
+    profile = config.profile
+    receiver_kind = profile.receiver.kind
     if credentials is None:
         return RoutineDiagnostic(
-            state=state,
-            account_bound=False,
+            state,
+            "unknown",
+            service,
+            liveness,
             receiver_kind=receiver_kind,
+            poll_interval_seconds=profile.poll_interval_seconds,
+            settlement_window_seconds=profile.settle_seconds,
+            last_successful_poll_at=last_poll,
+            last_delivery_at=runtime_delivery,
         )
     digest = account_digest(credentials.email)
-    if config.profile.account_digest != digest:
+    if profile.account_digest != digest:
         return RoutineDiagnostic(
-            state=state,
-            account_bound=False,
+            state,
+            "mismatch",
+            service,
+            liveness,
             receiver_kind=receiver_kind,
+            poll_interval_seconds=profile.poll_interval_seconds,
+            settlement_window_seconds=profile.settle_seconds,
+            last_successful_poll_at=last_poll,
+            last_delivery_at=runtime_delivery,
         )
     path = database_path or routine_database_path(digest)
     counts = read_routine_counts(path, digest)
     if counts is None:
         return RoutineDiagnostic(
-            state=state,
-            account_bound=True,
+            state,
+            "bound",
+            service,
+            liveness,
             receiver_kind=receiver_kind,
+            poll_interval_seconds=profile.poll_interval_seconds,
+            settlement_window_seconds=profile.settle_seconds,
+            last_successful_poll_at=last_poll,
+            last_delivery_at=runtime_delivery,
         )
     if counts.phase not in {"uninitialized", "seeding", "live"}:
         return RoutineDiagnostic(
-            state=state,
-            account_bound=True,
+            state,
+            "bound",
+            service,
+            liveness,
             receiver_kind=receiver_kind,
+            poll_interval_seconds=profile.poll_interval_seconds,
+            settlement_window_seconds=profile.settle_seconds,
+            last_successful_poll_at=last_poll,
+            last_delivery_at=runtime_delivery,
         )
     safe_counts = (
         ("candidates", counts.candidates),
@@ -275,12 +372,31 @@ def collect_routines_diagnostic(
         ("delivered", counts.delivered),
         ("pending", counts.pending),
     )
+    tag_discovered = counts.ai_tags > 0 if counts.phase == "live" else None
+    ready = (
+        state == "enabled"
+        and counts.phase == "live"
+        and tag_discovered
+        and liveness in {"running", "backing_off"}
+    )
     return RoutineDiagnostic(
-        state=state,
-        account_bound=True,
-        phase=counts.phase,
+        configuration_state=state,
+        account_binding="bound",
+        service_state=service,
+        worker_liveness=liveness,
+        history_phase=counts.phase,
+        trigger_tag_discovered=tag_discovered,
+        trigger_ready=ready,
         counts=safe_counts,
         receiver_kind=receiver_kind,
+        poll_interval_seconds=config.profile.poll_interval_seconds,
+        settlement_window_seconds=config.profile.settle_seconds,
+        last_successful_poll_at=last_poll,
+        last_delivery_at=(
+            counts.last_delivery_at
+            if counts.last_delivery_at is not None
+            else runtime_delivery
+        ),
     )
 
 
@@ -299,13 +415,14 @@ def collect_support_report() -> SupportReport:
         )
     endpoint = _endpoint_class(credentials_file)
     operations = _operation_counts(credentials)
+    service = _service_status()
     return build_support_report(
         identity=installed_identity(),
         platform_name=platform.system().casefold() or sys.platform,
         python_version=platform.python_version(),
         cloud=cloud,
-        routines=collect_routines_diagnostic(credentials),
-        service=_service_status(),
+        routines=collect_routines_diagnostic(credentials, service_state=service),
+        service=service,
         endpoint_class=endpoint,
         operation_states=operations,
     )
@@ -383,3 +500,52 @@ def _service_status() -> str | None:
         ).value
     except Exception:
         return None
+
+
+def _routine_service_state(value: str | None) -> RoutineServiceState:
+    if value == "active":
+        return "active"
+    if value == "loaded":
+        return "loaded"
+    if value == "inactive":
+        return "inactive"
+    if value == "not-installed":
+        return "not-installed"
+    if value == "unknown":
+        return "unknown"
+    return "unsupported" if value is None else "unknown"
+
+
+def _runtime_status(
+    service: RoutineServiceState,
+    runtime: Mapping[str, object] | None,
+) -> tuple[RoutineWorkerLiveness, int | None, int | None]:
+    if service in {"loaded", "inactive", "not-installed"}:
+        return "stopped", None, None
+    if service != "active" or runtime is None:
+        return "unknown", None, None
+    state = runtime.get("state")
+    liveness: RoutineWorkerLiveness
+    if state == "initializing":
+        liveness = "initializing"
+    elif state == "running":
+        liveness = "running"
+    elif state == "backing_off":
+        liveness = "backing_off"
+    elif state == "stopped":
+        liveness = "stopped"
+    elif state == "disabled":
+        liveness = "stopped"
+    else:
+        return "unknown", None, None
+    return (
+        liveness,
+        _safe_epoch(runtime.get("last_successful_poll_at")),
+        _safe_epoch(runtime.get("last_delivery_at")),
+    )
+
+
+def _safe_epoch(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None

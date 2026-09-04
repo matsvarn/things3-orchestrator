@@ -17,6 +17,7 @@ import pytest
 from things_orchestrator.cli import build_parser, main
 from things_orchestrator.config import ConfigError
 from things_orchestrator.routines_config import (
+    ROUTINE_RECEIVER_INSTRUCTION,
     DisabledRoutineConfig,
     EnabledRoutineConfig,
     GrokReceiver,
@@ -245,23 +246,15 @@ def test_cli_prompts_privately_for_grok_url_and_key(
         "cloud-secret",
     ):
         assert private not in output
-    instruction = (
-        "Treat event_id as the idempotency key and refuse to act if you have "
-        "already acted on that event_id."
-    )
-    assert output.count(instruction) == 1
-    assert output.endswith(
-        f"Add this sentence to the Grok routine instruction:\n{instruction}\n\n"
-        "Enable routines and restart the supervised service:\n"
-        "things-orchestrator routines enable\n"
-        "things-orchestrator service install\n"
-    )
+    assert output.count(ROUTINE_RECEIVER_INSTRUCTION) == 1
+    assert "things-orchestrator routines enable" in output
+    assert "things-orchestrator service install" in output
     main(["routines", "status"])
-    assert json.loads(capsys.readouterr().out) == {
-        "account_bound": True,
-        "receiver_kind": "grok",
-        "state": "disabled",
-    }
+    status = json.loads(capsys.readouterr().out)
+    assert status["configuration_state"] == "disabled"
+    assert status["account_binding"] == "bound"
+    assert status["receiver_kind"] == "grok"
+    assert status["worker_liveness"] in {"stopped", "unknown"}
 
 
 def test_routines_configure_help_explains_private_defaults_and_each_option(
@@ -278,7 +271,7 @@ def test_routines_configure_help_explains_private_defaults_and_each_option(
     assert "--receiver {hermes,grok}" in help_text
     assert "Hermes is the default" in help_text
     assert "--url URL" in help_text
-    assert "Omit it to enter the URL privately through /dev/tty" in help_text
+    assert "Omit it to enter the URL privately in a private terminal" in help_text
     assert "--interval INTERVAL" in help_text
     assert "polling interval in seconds (60-3600, default: 60)" in help_text
     assert "--settle SETTLE" in help_text
@@ -300,6 +293,103 @@ def test_routines_setup_help_is_portable_private_happy_path(
     assert "--interval INTERVAL" in help_text
     assert "--settle SETTLE" in help_text
     assert "--url" not in help_text
+
+
+@pytest.mark.parametrize(
+    ("action", "phrase"),
+    (
+        ("enable", "does not start a worker until the service restarts"),
+        ("disable", "without deleting configuration, candidates, or delivery history"),
+        ("status", "authenticated loopback health probe"),
+    ),
+)
+def test_routines_state_command_help_names_its_effect(
+    capsys: pytest.CaptureFixture[str], action: str, phrase: str
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["routines", action, "--help"])
+
+    assert caught.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert phrase in help_text
+    if action == "status":
+        assert "When an MCP bearer is configured" in help_text
+
+
+def test_routines_status_uses_one_authenticated_runtime_probe_without_leaking_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_credentials(tmp_path, monkeypatch)
+    configure_routines(
+        email="owner@example.com",
+        receiver_kind="grok",
+        receiver_url="https://api2.cursor.sh/automations/webhook/private-route",
+        receiver_secret=ReceiverSecret("private-grok-key"),
+        poll_interval_seconds=60,
+    )
+    set_routines_enabled(True, email="owner@example.com")
+    probes: list[str | None] = []
+    monkeypatch.setattr(
+        "things_orchestrator.cli.collect_service_state", lambda: "active"
+    )
+
+    def probe(bearer: str | None) -> dict[str, object]:
+        probes.append(bearer)
+        return {
+            "state": "running",
+            "last_successful_poll_at": 80,
+            "private": "must-not-render",
+        }
+
+    monkeypatch.setattr("things_orchestrator.cli.probe_routine_runtime", probe)
+
+    main(["routines", "status"])
+
+    assert probes == ["mcp-bearer"]
+    output = capsys.readouterr().out
+    status = json.loads(output)
+    assert status["service_state"] == "active"
+    assert status["worker_liveness"] == "running"
+    assert status["last_successful_poll_at"] == 80
+    for private in (
+        "must-not-render",
+        "mcp-bearer",
+        "private-route",
+        "private-grok-key",
+        "owner@example.com",
+    ):
+        assert private not in output
+
+
+def test_routines_status_without_mcp_bearer_attempts_no_runtime_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_credentials(tmp_path, monkeypatch)
+    credentials_path = (
+        tmp_path / "config/things-orchestrator/credentials.json"
+    )
+    credentials_path.write_text(
+        json.dumps({"email": "owner@example.com", "password": "cloud-secret"})
+    )
+    probes: list[str | None] = []
+    monkeypatch.setattr(
+        "things_orchestrator.cli.collect_service_state", lambda: "active"
+    )
+
+    def probe(bearer: str | None) -> None:
+        probes.append(bearer)
+
+    monkeypatch.setattr("things_orchestrator.cli.probe_routine_runtime", probe)
+
+    main(["routines", "status"])
+
+    assert probes == []
+    status = json.loads(capsys.readouterr().out)
+    assert status["worker_liveness"] == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -327,7 +417,7 @@ def test_routines_setup_rejects_url_argv_without_echoing_value(
     captured = capsys.readouterr()
     assert "private-route-value" not in captured.out
     assert "private-route-value" not in captured.err
-    assert "privately" in captured.err
+    assert "private terminal" in captured.err
 
 
 def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
@@ -417,11 +507,16 @@ def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
         "Confirm Grok Bot webhook key: ",
     ]
     guidance = terminal.getvalue()
+    assert "print-config --client grok --show-secrets" in guidance
+    assert "grok.com/connectors" in guidance
+    assert "New Connector" in guidance
+    assert "Custom" in guidance
+    assert "exactly eight tools, including things_get" in guidance
     assert 'choose "When a webhook fires"' in guidance
-    assert "copy the generated POST URL and key" in guidance
-    assert "Do not put either value in argv or chat" in guidance
-    assert "phase `live`" in guidance
-    assert "turn Active on" in guidance
+    assert "save it before copying the generated POST URL and key" in guidance
+    assert "Do not put the URL or key in argv or chat" in guidance
+    assert "trigger_ready=true" in guidance
+    assert ROUTINE_RECEIVER_INSTRUCTION in guidance
     output = capsys.readouterr().out
     for private in (
         "api2.cursor.sh",
@@ -431,15 +526,13 @@ def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
     ):
         assert private not in output
         assert private not in guidance
-    assert '"state": "enabled"' in output
-    assert "The worker may still be initializing" in output
-    assert (
-        "Treat event_id as the idempotency key and refuse to act if you have "
-        "already acted on that event_id."
-    ) in output
+    assert '"configuration_state": "enabled"' in output
+    assert "Next readiness check" in output
+    assert "Then turn the saved Grok Routine Active" in output
+    assert ROUTINE_RECEIVER_INSTRUCTION in output
 
 
-def test_routines_setup_service_failure_leaves_enabled_and_rerun_converges(
+def test_routines_setup_service_failure_leaves_enabled_for_direct_service_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -458,7 +551,6 @@ def test_routines_setup_service_failure_leaves_enabled_and_rerun_converges(
             "hermes-secret",
             "hermes-secret",
         )
-        * 2
     )
     prompts: list[str] = []
 
@@ -486,9 +578,11 @@ def test_routines_setup_service_failure_leaves_enabled_and_rerun_converges(
     assert load_routines_config().state == "enabled"
     failure = capsys.readouterr()
     assert "private service detail" not in failure.err
-    assert "rerun this setup command" in failure.err
+    assert "things-orchestrator service install" in failure.err
+    assert "saved receiver values do not need to be entered again" in failure.err
+    assert "rerun this setup command" not in failure.err
 
-    main(command)
+    main(["service", "install"])
     assert service_calls == 2
     assert load_routines_config().state == "enabled"
     assert "Grok" not in terminal.getvalue()
@@ -496,8 +590,16 @@ def test_routines_setup_service_failure_leaves_enabled_and_rerun_converges(
         "Hermes webhook URL: ",
         "Hermes webhook secret: ",
         "Confirm Hermes webhook secret: ",
-    ] * 2
-    assert "The worker may still be initializing" in capsys.readouterr().out
+    ]
+    assert "hermes gateway setup" in terminal.getvalue()
+    assert "hermes webhook subscribe things-ai-task-created" in terminal.getvalue()
+    assert "webhook_subscriptions.json" in terminal.getvalue()
+    assert '"toolsets": ["mcp-things"]' in terminal.getvalue()
+    assert "hermes webhook test" not in terminal.getvalue()
+    assert "positive selected-task smoke test" in terminal.getvalue()
+    assert "Anyone with the route's HMAC secret" in terminal.getvalue()
+    assert ROUTINE_RECEIVER_INSTRUCTION in terminal.getvalue()
+    assert "service: active" in capsys.readouterr().out
 
 
 def test_routines_setup_missing_credentials_precedes_prompt_and_service(
@@ -529,7 +631,9 @@ def test_routines_setup_missing_credentials_precedes_prompt_and_service(
     assert "webhook" not in captured.out
 
 
-@pytest.mark.parametrize("flag", ("--secret=private", "--key=private"))
+@pytest.mark.parametrize(
+    "flag", ("--secret=must-not-render", "--key=must-not-render")
+)
 def test_cli_rejects_receiver_credentials_in_argv_without_echoing_value(
     flag: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -546,9 +650,9 @@ def test_cli_rejects_receiver_credentials_in_argv_without_echoing_value(
             ]
         )
     captured = capsys.readouterr()
-    assert "private" not in captured.out
-    assert "private" not in captured.err
-    assert "/dev/tty" in captured.err
+    assert "must-not-render" not in captured.out
+    assert "must-not-render" not in captured.err
+    assert "private terminal" in captured.err
 
 
 def test_webhook_factory_selects_exact_adapter() -> None:

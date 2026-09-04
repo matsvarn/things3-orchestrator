@@ -3,26 +3,15 @@
 ## Caller contract
 
 ```text
-things-orchestrator routines configure \
-  --profile always_on \
-  --receiver hermes \
-  --url https://agent.example/webhooks/things-ai \
-  --interval 60
-# Hermes is the default. The command reads and confirms its webhook secret
-# through /dev/tty.
-
-things-orchestrator routines configure --profile always_on --receiver grok
-# With no --url, the command reads the Grok Bot webhook URL and key through
-# /dev/tty. It stores the profile disabled.
-
-things-orchestrator routines enable
-# Restart required: things-orchestrator service install
-
+things-orchestrator routines setup --profile always_on --receiver hermes
 things-orchestrator routines status
 things-orchestrator routines disable
 ```
 
-`configure` writes a complete, disabled profile. `enable` and `disable` are
+`setup` prints receiver-specific upstream instructions, prompts for the URL and
+credential in a private terminal, writes an account-bound profile, enables it,
+and converges the supervised service. `configure` writes a complete, disabled
+profile for recovery and scripted administration. `enable` and `disable` are
 idempotent. Enabling requires a profile bound to the current Things account and
 does not start routines until the supervised HTTP service restarts. A running
 worker observes disablement at least once per polling interval and then stops
@@ -31,8 +20,8 @@ same supervised restart.
 
 The CLI never accepts a receiver secret or key in arguments. `--url` remains
 available for both receiver kinds, but omitting it keeps the URL in the private
-terminal interaction. Status includes only the receiver kind and a redacted
-scheme. It never prints the URL or host.
+terminal interaction. Status includes the receiver kind. It never prints the
+URL or host.
 
 The service-generated launchd and systemd commands include a hidden
 `--service-managed` marker. Stdio and manually started HTTP processes never
@@ -87,17 +76,21 @@ the persisted random account event namespace, routine ID, and task ID. It never
 contains the history key, creation group, task content, or delivery attempt.
 Delivery is at least once, not exactly once.
 
-Runtime status is one of `disabled`, `initializing`, `running`, `backing_off`,
-or `stopped`. Authenticated diagnostics read only an in-memory value-free
-snapshot. Public health remains exactly `{"ok": true}`.
+Combined status keeps saved configuration, account binding, launchd or systemd
+state, authenticated worker liveness, durable history phase, fixed trigger,
+tag discovery, timing, and aggregate delivery counts separate. Worker liveness
+is `initializing`, `running`, `backing_off`, `stopped`, or `unknown`. Neither an
+enabled profile nor a live SQLite history phase proves a running worker. Public
+health remains exactly `{"ok": true}`.
 
 ## Interfaces and modules
 
-- `routines_config.py` owns the receiver union, validates each URL at the config
+- `routines_config.py` owns the receiver union, fixed trigger constants, complete
+  receiver instruction, validates each URL at the config
   boundary, parses and atomically stores private mode-0600 configuration, binds
-  it to the current account, and renders redacted status. Version-1 profiles
-  without `receiver_kind` load as Hermes. New profiles store the kind
-  explicitly.
+  it to the current account, and renders endpoint-free, value-free status with
+  the receiver kind only. Version-1 profiles without `receiver_kind` load as
+  Hermes. New profiles store the kind explicitly.
 - `cloud.py` adds strict grouped history reading without changing the public
   behavior of the existing flattened `items()` caller.
 - `routines_store.py` owns the account-scoped lock, five-table SQLite schema,
@@ -105,8 +98,8 @@ snapshot. Public health remains exactly `{"ok": true}`.
   read-only counts.
 - `routines_webhook.py` exposes one `Webhook.deliver` interface and
   `build_webhook(receiver)` factory. The Hermes adapter owns V2 signing. The
-  Grok adapter owns Bearer authentication. Both use redirect-free bounded HTTP,
-  but each keeps its acknowledgement classifier separate.
+  Grok adapter owns Bearer authentication. Both use proxyless, redirect-free,
+  bounded HTTP, but each keeps its acknowledgement classifier separate.
 - `routines.py` owns scheduling, independent Cloud and delivery backoff,
   stop/disable checks, and the single lifecycle entry point.
 - `cli.py` is the composition root. It reads one credential snapshot, builds the
@@ -116,8 +109,10 @@ snapshot. Public health remains exactly `{"ok": true}`.
 - `server.py` accepts the optional lifecycle factory and an HTTP-readiness gate.
   Disabled callers take the existing lifespan path and construct no worker,
   Cloud client, process lock, database, or task.
-- `diagnostics.py` exposes configuration state and read-only value-free counts;
-  it never creates a routines database.
+- `diagnostics.py` combines configuration, service status, one bounded
+  authenticated loopback health snapshot when an MCP bearer exists, and
+  read-only value-free counts. Its health request is proxyless and
+  redirect-free. It never creates a routines database.
 
 The lifecycle factory is the only interface between the HTTP host and the
 worker. The worker receives the one-method webhook interface, so the host,
@@ -154,8 +149,9 @@ removed.
 
 Delivery state is `pending -> delivered | dead`. Network failures, timeouts,
 408, 425, 429, 5xx, and ambiguous 2xx responses retry the same event ID with
-full-jitter exponential backoff. Hermes delivers only `202` with
-`status=accepted` or `200` with `status=duplicate`. Grok delivers only exact
+full-jitter exponential backoff. Hermes delivers on the documented exact `200`
+with `status=delivered` or `status=duplicate`. It also retains the earlier exact
+`202` with `status=accepted` as a compatibility case. Grok delivers only exact
 `200` with top-level `success=true` and a nonempty string `runUuid`. Redirects
 and other 4xx responses are permanent. Attempt and age bounds move retryable
 events to dead letter.
@@ -201,11 +197,12 @@ process lock.
   delivery disablement.
 - A crash after receiver acceptance but before delivery commit retries the same
   event ID. Hermes duplicate acknowledgement converges it to delivered. Grok
-  Bot may start a duplicate run. Add this sentence to its instruction: "Treat
-  event_id as the idempotency key and refuse to act if you have already acted on
-  that event_id."
-- Secrets, URLs, history keys, account email, task content, and response bodies
-  are absent from events, logs, diagnostics, support output, and exceptions.
+  Bot may start a duplicate run. The complete receiver instruction requires
+  deduplication by `event_id` before any action.
+- The event deliberately contains an opaque `event_id` and public `task_id`.
+  It excludes task content, secrets, private account and history data, and
+  receiver data. Logs, status, diagnostics, support output, and exceptions omit
+  event and task ID values as well as all private values and response bodies.
 - Things Cloud remains unsupported. History family versions and field meanings
   are verified by fixtures, not by a provider contract.
 
@@ -216,7 +213,20 @@ and local webhook servers. The owner must separately restart the supervised
 service, configure the intended receiver and MCP connection, and validate a
 fresh directly tagged task. No live account is used by the automated suite.
 
-On 2026-09-04, a safe synthetic request to the Grok Bot desktop beta webhook
-confirmed the request and acknowledgement shape in this ADR. No provider
-documentation says that this integration is supported. A desktop beta update
-may change the contract.
+PRs #60 through #63 and the original ADR text directly record why the worker is
+isolated, disabled by default, metadata-only, account-bound, no-backfill, and
+service-only. The v0.10.0 onboarding and trust changes are an inference from
+that design plus the owner-run acceptance. They do not change the durable
+worker contract.
+
+The current official Grok Bot guide documents routines, testing, history,
+approvals, and retries. It does not document the observed beta host
+`api2.cursor.sh`, `/automations/webhook/<route>` path, Bearer header, or exact
+`success` and `runUuid` acknowledgement. Those details remain observed beta
+compatibility and may change.
+
+The current official Hermes guide documents gateway setup, dynamic webhook
+subscriptions, V2 HMAC signing, one-hour `X-Request-ID` deduplication, and exact
+`200` `delivered` or `duplicate` acknowledgements. The adapter retains exact
+`202` `accepted` only as a legacy compatibility case. It does not accept a
+generic 2xx response.

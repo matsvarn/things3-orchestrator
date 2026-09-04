@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.0 - 2026-09-04
+
+### Added
+
+- Optional routines can send a metadata-only event when a fresh normal task
+  settles with the exact `AI` tag assigned directly. The worker runs only in
+  the supervised `always_on` HTTP profile, never backfills historical tasks,
+  and remains outside the eight-tool MCP contract.
+- `routines setup` provides private guided setup for Grok and Hermes, including
+  a complete receiver instruction, a safe configuration summary, a readiness
+  check, and negative and positive smoke tests.
+- `print-config --client grok` renders the HTTPS MCP URL and required Bearer
+  authentication for an xAI Custom connector without a private wrapper. It
+  rejects known local and private addresses but does not prove reachability.
+- `routines status` distinguishes saved configuration, account binding,
+  supervised-service state, worker liveness, durable history phase, trigger
+  readiness, safe aggregate counts, and last successful activity times.
+- The routines, trust, operations, recovery, and packaged-skill guides define a
+  narrow routine-selected-task trust exception and receiver-side event
+  deduplication.
+
+### Changed
+
+- Hermes delivery recognizes the documented exact `200 delivered` and `200
+  duplicate` responses. The older exact `202 accepted` response remains a
+  narrow compatibility case; other 2xx responses still retry.
+- Routines health probes and webhook deliveries ignore environment proxies and
+  never follow redirects. Hermes setup requires the `mcp-things` route toolset
+  and states the authority held by a valid HMAC sender.
+- Grok routines, testing, history, approvals, and retries are documented as
+  official concepts. Its exact inbound webhook route, Bearer header, and
+  acknowledgement remain observed beta compatibility.
+
 ## 0.9.1 - 2026-09-03
 
 ### Added
@@ -95,7 +128,8 @@
   cursor instead of consuming the read. Conflicting request IDs no longer
   inherit repeat effects from the earlier successful operation.
 - Owner-factor commands remain interactive under hardened `sudo -u` service
-  accounts that inherit a private terminal but cannot reopen `/dev/tty`.
+  accounts that inherit a private terminal but cannot reopen its terminal
+  device.
   Expected live-gate failures return one concise structured result instead of
   an asynchronous transport traceback.
 

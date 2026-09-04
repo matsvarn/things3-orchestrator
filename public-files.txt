@@ -1,6 +1,7 @@
 .agents/plugins/marketplace.json
 .audit/routines-feature.tsv
 .audit/routines-oracle-brief.md
+.audit/routines-v0.10.0.tsv
 .audit/v2-owner-safe-interface.tsv
 .github/workflows/ci.yml
 .gitignore
@@ -30,6 +31,7 @@ docs/recovery.md
 docs/research/comparison.md
 docs/research/things3-cloud.md
 docs/research/weekly-review-best-practice.md
+docs/routines.md
 docs/trust.md
 docs/workflows.md
 plugin/.codex-plugin/plugin.json
@@ -40,6 +42,7 @@ plugin/skills/things-orchestrator/agents/openai.yaml
 plugin/skills/things-orchestrator/references/form.md
 plugin/skills/things-orchestrator/references/research.md
 plugin/skills/things-orchestrator/references/review.md
+plugin/skills/things-orchestrator/references/routines.md
 public-files.txt
 pyproject.toml
 scripts/check_release.py
@@ -74,6 +77,7 @@ src/things_orchestrator/skills/things-orchestrator/agents/openai.yaml
 src/things_orchestrator/skills/things-orchestrator/references/form.md
 src/things_orchestrator/skills/things-orchestrator/references/research.md
 src/things_orchestrator/skills/things-orchestrator/references/review.md
+src/things_orchestrator/skills/things-orchestrator/references/routines.md
 src/things_orchestrator/source_document.py
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
@@ -103,6 +107,7 @@ tests/test_preferences.py
 tests/test_recurrence.py
 tests/test_release.py
 tests/test_routines_config.py
+tests/test_routines_docs.py
 tests/test_routines_grok.py
 tests/test_routines_history.py
 tests/test_routines_runtime.py

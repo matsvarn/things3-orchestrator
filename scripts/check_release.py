@@ -868,6 +868,7 @@ def _print_config_error(tokens: tuple[str, ...]) -> str | None:
         "codex",
         "cursor",
         "cursor-cloud",
+        "grok",
         "hermes",
     }
     if client not in supported:

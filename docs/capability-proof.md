@@ -1,6 +1,7 @@
 # Capability proof
 
-Date: 2026-08-16
+Created: 2026-08-16
+Last verified: 2026-09-04
 
 This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and
@@ -8,6 +9,24 @@ read-back behavior agree.
 
 Human workflow runs are tracked separately in
 [`dogfood.md`](dogfood.md). Automated proof does not mark a human run complete.
+
+## v0.10.0 routines gate
+
+The optional built-in routine is outside the eight-tool MCP surface. Automated
+tests prove the exact directly assigned `AI` trigger, tag-only baseline,
+settlement edge cases, metadata-only event, durable at-least-once outbox,
+receiver-specific acknowledgement rules, account fencing, disabled
+zero-resource path, safe status model, and receiver-instruction consistency.
+They use fake history pages, fake clocks, and local webhook receivers. They do
+not connect to Things Cloud, Grok, or Hermes.
+
+The content-free owner record in [dogfood.md](dogfood.md) reports one private
+VPS result: history reached `live`; an untagged negative control did not
+deliver; directly assigning exact `AI` to the fresh candidate delivered one
+event; and Grok read and updated that selected task through MCP. The record
+does not include the exact deployed commit SHA, Grok client version, installed
+skill state, or owner intervention details. It is not general Grok or Hermes
+compatibility proof.
 
 ## 2026-09-01 authenticated-write gate
 

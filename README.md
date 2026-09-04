@@ -21,7 +21,7 @@ HTTP service. A single Mac uses loopback. A remote host adds Tailscale Serve or
 Caddy for TLS.
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.0"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
@@ -32,6 +32,10 @@ See [Install](docs/install.md) for the Mac, private VPS, tailnet, and public
 HTTPS paths. Then use the compact [client table](docs/clients.md). The serving
 host keeps the Things Cloud password; clients receive only the MCP URL and
 bearer.
+
+To run the optional built-in `AI` task routine, follow
+[Run the built-in AI task routine](docs/routines.md). Routines are disabled by
+default and do not add MCP tools.
 
 For same-host Codex, the repository also contains a self-distributed plugin.
 It is not an official marketplace listing. For Hermes, `print-config` emits
