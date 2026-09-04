@@ -52,7 +52,9 @@ jobs:
       - name: Type-check routines tests
         run: >-
           MYPYPATH=src uv run mypy --strict
+          tests/test_diagnostics.py
           tests/test_routines_config.py
+          tests/test_routines_grok.py
           tests/test_routines_history.py
           tests/test_routines_runtime.py
           tests/test_routines_store.py

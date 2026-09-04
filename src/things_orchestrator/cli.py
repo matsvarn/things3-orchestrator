@@ -62,7 +62,7 @@ from .routines_config import (
     set_routines_enabled,
 )
 from .routines_store import RoutineStore
-from .routines_webhook import HermesWebhook
+from .routines_webhook import build_webhook
 from .server import RoutineHTTPComposition, ThingsMCPServer
 from .service import ServiceApplyError, resolve_console_script, service_action
 from .workspace import ThingsWorkspace
@@ -72,6 +72,10 @@ _LOGIN = (
     "Clone development may use `uv run things-orchestrator login`."
 )
 _LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
+_GROK_IDEMPOTENCY_INSTRUCTION = (
+    "Treat event_id as the idempotency key and refuse to act if you have "
+    "already acted on that event_id."
+)
 
 
 class _ExactArgumentParser(argparse.ArgumentParser):
@@ -156,11 +160,45 @@ def build_parser() -> argparse.ArgumentParser:
         "routines", help="configure the optional routines worker"
     )
     routines_commands = routines.add_subparsers(dest="routines_action", required=True)
-    routines_configure = routines_commands.add_parser("configure")
-    routines_configure.add_argument("--profile", choices=("always_on",), required=True)
-    routines_configure.add_argument("--url", required=True)
-    routines_configure.add_argument("--interval", type=int, default=60)
-    routines_configure.add_argument("--settle", type=int, default=120)
+    routines_configure = routines_commands.add_parser(
+        "configure",
+        help="store a disabled routines receiver profile",
+        description=(
+            "Store a disabled, account-bound routines receiver profile. "
+            "Hermes is the default receiver."
+        ),
+    )
+    routines_configure.add_argument(
+        "--profile",
+        choices=("always_on",),
+        required=True,
+        help="host profile for the supervised routines worker",
+    )
+    routines_configure.add_argument(
+        "--receiver",
+        choices=("hermes", "grok"),
+        default="hermes",
+        help="webhook receiver. Hermes is the default",
+    )
+    routines_configure.add_argument(
+        "--url",
+        help=(
+            "receiver webhook URL. Omit it to enter the URL privately "
+            "through /dev/tty"
+        ),
+    )
+    routines_configure.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Things Cloud polling interval in seconds (60-3600, default: 60)",
+    )
+    routines_configure.add_argument(
+        "--settle",
+        type=int,
+        default=120,
+        help="event settle window in seconds (1-3600, default: 120)",
+    )
     for routine_action in ("enable", "disable", "status"):
         routines_commands.add_parser(routine_action)
     show = commands.add_parser("print-config", help="render one client configuration")
@@ -237,10 +275,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     arguments = sys.argv[1:] if argv is None else argv
     if any(
-        argument == "--secret" or argument.startswith("--secret=")
+        argument in {"--secret", "--key"}
+        or argument.startswith(("--secret=", "--key="))
         for argument in arguments
     ):
-        parser.error("The receiver secret must be entered through /dev/tty.")
+        parser.error("The receiver credential must be entered through /dev/tty.")
     args = parser.parse_args(arguments)
     try:
         _dispatch(parser, args)
@@ -409,13 +448,25 @@ def _routines_command(
     action = args.routines_action
     if action == "configure":
         with _routine_secret_tty(parser) as terminal:
-            secret = getpass("Hermes webhook secret: ", stream=terminal)
-            confirm = getpass("Confirm webhook secret: ", stream=terminal)
+            receiver_url = args.url or getpass(
+                (
+                    "Grok webhook URL: "
+                    if args.receiver == "grok"
+                    else "Hermes webhook URL: "
+                ),
+                stream=terminal,
+            )
+            credential_label = (
+                "Grok webhook key" if args.receiver == "grok" else "Hermes webhook secret"
+            )
+            secret = getpass(f"{credential_label}: ", stream=terminal)
+            confirm = getpass(f"Confirm {credential_label}: ", stream=terminal)
         if secret != confirm:
-            parser.error("webhook secret confirmation did not match")
+            parser.error("webhook credential confirmation did not match")
         configured = configure_routines(
             email=credentials.email,
-            receiver_url=args.url,
+            receiver_kind=args.receiver,
+            receiver_url=receiver_url,
             receiver_secret=ReceiverSecret(secret),
             poll_interval_seconds=args.interval,
             settle_seconds=args.settle,
@@ -428,6 +479,14 @@ def _routines_command(
         print(
             f"Stored disabled routines profile in {routines_config_path()} (mode 0600)."
         )
+        if args.receiver == "grok":
+            print("Add this sentence to the Grok routine instruction:")
+            print(_GROK_IDEMPOTENCY_INSTRUCTION)
+            print()
+            print("Enable routines and restart the supervised service:")
+            print("things-orchestrator routines enable")
+            print("things-orchestrator service install")
+            return
         print("Enable it, then restart: things-orchestrator service install")
         return
     if action == "status":
@@ -736,7 +795,7 @@ def _routine_http_composition(
             profile=profile,
             cloud=CloudClient(credentials.email, credentials.password),
             store=RoutineStore(profile),
-            webhook=HermesWebhook(profile),
+            webhook=build_webhook(profile.receiver),
         )
 
     return RoutineHTTPComposition.enabled(create)

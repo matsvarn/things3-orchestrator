@@ -35,14 +35,16 @@ Keep one production server and one stable model Interface.
   raises a typed history-identity change instead of joining two histories.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
-- `routines_config.py` owns the account-bound private configuration union,
-  receiver URL validation, and redacted rendering.
+- `routines_config.py` owns the account-bound private configuration union, the
+  `HermesReceiver | GrokReceiver` union, receiver-specific URL validation, and
+  redacted rendering. Missing `receiver_kind` in version 1 means Hermes.
 - `routines_store.py` owns the process lock, tag-only seed, bounded live task
   projection, canonical metadata body, and durable event ledger. Cursor
   advancement and event insertion share one SQLite transaction. It never
   reuses the mutation journal.
-- `routines_webhook.py` signs and sends the stored body, bounds redirect-free
-  HTTP, and classifies acknowledgements.
+- `routines_webhook.py` builds the one-method adapter from `HermesReceiver` or
+  `GrokReceiver`, sends the exact stored body over bounded redirect-free HTTP,
+  and keeps the acknowledgement classifiers separate.
 - `routines.py` owns one polling and delivery loop, independent backoff, hot
   disablement, and the dedicated blocking-work limit.
 - `owner_authority.py` is retained only for signed legacy recovery. It is not
@@ -53,7 +55,7 @@ Keep one production server and one stable model Interface.
 - `live_acceptance.py` owns the restart-safe disposable write workflow used as
   a release gate. It persists request IDs before mutation and passes only after
   receipt and Trash read-back.
-- `cli.py` is the owner-facing seam: `login`, `configure`, `routines`,
+- `cli.py` defines the owner commands: `login`, `configure`, `routines`,
   `service`, `serve-http`, `print-config`, `cloud-check`, `support-bundle`, and
   `doctor`.
   Production installs use an exact
@@ -90,9 +92,11 @@ relevant fields fail the complete batch without cursor movement.
 
 The event key is the persisted account namespace, routine ID, and public task
 ID. Do not add a history position, history key, observation time, or attempt
-number. Webhook delivery is at-least-once. Only `202 accepted` and `200
-duplicate` are terminal success. Keep response bodies, receiver details, task
-content, account values, and history identity out of logs and diagnostics.
+number. Webhook delivery is at-least-once. Hermes accepts only `202 accepted`
+and `200 duplicate`. Grok accepts only `200` with top-level `success=true` and
+a nonempty string `runUuid`. Keep response bodies, receiver details, task
+content, account values, and history identity out of logs and diagnostics. Do
+not add a shared permissive 2xx classifier.
 
 The MCP server does not care which chat client you use. The canonical skill is
 packaged under `src/things_orchestrator/skills/`; CI requires the Codex plugin

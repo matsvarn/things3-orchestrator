@@ -12,6 +12,7 @@ import pytest
 
 from things_orchestrator.cloud import HistoryBatch, HistoryEvent, HistoryGroup
 from things_orchestrator.routines_config import (
+    HermesReceiver,
     ReceiverSecret,
     RetryPolicy,
     RoutineProfile,
@@ -34,8 +35,9 @@ def _profile() -> RoutineProfile:
     return RoutineProfile(
         account_digest="a" * 64,
         host_profile="always_on",
-        receiver_url="https://agent.example/webhooks/things-ai",
-        receiver_secret=ReceiverSecret("secret"),
+        receiver=HermesReceiver(
+            "https://agent.example/webhooks/things-ai", ReceiverSecret("secret")
+        ),
         poll_interval_seconds=60,
         settle_seconds=120,
         retry=RetryPolicy(),
@@ -867,9 +869,9 @@ def test_second_process_cannot_open_the_same_account_database(
     script = """
 import sys, time
 from pathlib import Path
-from things_orchestrator.routines_config import ReceiverSecret, RetryPolicy, RoutineProfile
+from things_orchestrator.routines_config import HermesReceiver, ReceiverSecret, RetryPolicy, RoutineProfile
 from things_orchestrator.routines_store import RoutineStore
-profile = RoutineProfile('a' * 64, 'always_on', 'https://agent.example/webhooks/task', ReceiverSecret('secret'), 60, 120, RetryPolicy())
+profile = RoutineProfile('a' * 64, 'always_on', HermesReceiver('https://agent.example/webhooks/task', ReceiverSecret('secret')), 60, 120, RetryPolicy())
 store = RoutineStore(profile, path=Path(sys.argv[1]))
 store.open()
 Path(sys.argv[2]).write_text('ready')

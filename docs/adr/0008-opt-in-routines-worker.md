@@ -5,9 +5,15 @@
 ```text
 things-orchestrator routines configure \
   --profile always_on \
+  --receiver hermes \
   --url https://agent.example/webhooks/things-ai \
   --interval 60
-# The command reads and confirms the webhook secret through /dev/tty.
+# Hermes is the default. The command reads and confirms its webhook secret
+# through /dev/tty.
+
+things-orchestrator routines configure --profile always_on --receiver grok
+# With no --url, the command reads the Grok Bot webhook URL and key through
+# /dev/tty. It stores the profile disabled.
 
 things-orchestrator routines enable
 # Restart required: things-orchestrator service install
@@ -22,6 +28,11 @@ does not start routines until the supervised HTTP service restarts. A running
 worker observes disablement at least once per polling interval and then stops
 polling and delivery. Configuration changes other than disablement require the
 same supervised restart.
+
+The CLI never accepts a receiver secret or key in arguments. `--url` remains
+available for both receiver kinds, but omitting it keeps the URL in the private
+terminal interaction. Status includes only the receiver kind and a redacted
+scheme. It never prints the URL or host.
 
 The service-generated launchd and systemd commands include a hidden
 `--service-managed` marker. Stdio and manually started HTTP processes never
@@ -53,8 +64,10 @@ Configuration is a versioned discriminated union:
 - `EnabledRoutineConfig(profile)`
 
 `RoutineProfile` contains the account binding, `always_on` host profile,
-polling and settlement policy, routine ID, receiver URL, redacted secret, and
-delivery retry policy. The only initial routine ID is stable and built in.
+polling and settlement policy, routine ID, delivery retry policy, and one
+receiver. The receiver is `HermesReceiver(url, secret)` or
+`GrokReceiver(url, key)`. Each variant validates and normalizes only its own URL
+contract. The only initial routine ID is stable and built in.
 
 History uses immutable `HistoryEvent`, `HistoryGroup`, and `HistoryBatch`
 values. A batch includes a private SHA-256 history fingerprint, requested start,
@@ -80,16 +93,20 @@ snapshot. Public health remains exactly `{"ok": true}`.
 
 ## Interfaces and modules
 
-- `routines_config.py` validates receiver URLs, parses and atomically stores
-  private mode-0600 configuration, binds it to the current account, and renders
-  redacted status.
+- `routines_config.py` owns the receiver union, validates each URL at the config
+  boundary, parses and atomically stores private mode-0600 configuration, binds
+  it to the current account, and renders redacted status. Version-1 profiles
+  without `receiver_kind` load as Hermes. New profiles store the kind
+  explicitly.
 - `cloud.py` adds strict grouped history reading without changing the public
   behavior of the existing flattened `items()` caller.
 - `routines_store.py` owns the account-scoped lock, five-table SQLite schema,
   seed/live reducer, cursor transaction, canonical event body, event ledger, and
   read-only counts.
-- `routines_webhook.py` owns Hermes V2 signing, redirect-free bounded HTTP, and
-  response classification for the stored event body.
+- `routines_webhook.py` exposes one `Webhook.deliver` interface and
+  `build_webhook(receiver)` factory. The Hermes adapter owns V2 signing. The
+  Grok adapter owns Bearer authentication. Both use redirect-free bounded HTTP,
+  but each keeps its acknowledgement classifier separate.
 - `routines.py` owns scheduling, independent Cloud and delivery backoff,
   stop/disable checks, and the single lifecycle entry point.
 - `cli.py` is the composition root. It reads one credential snapshot, builds the
@@ -103,8 +120,17 @@ snapshot. Public health remains exactly `{"ok": true}`.
   it never creates a routines database.
 
 The lifecycle factory is the only interface between the HTTP host and the
-worker. The host starts, stops, and inspects it without knowing about Cloud,
-SQLite, projection, or webhook details.
+worker. The worker receives the one-method webhook interface, so the host,
+store, and scheduler do not branch on receiver kind.
+
+`build_webhook(receiver)` selects one adapter before it constructs the worker.
+Each adapter has its own acknowledgement rules. A shared "any successful 2xx"
+classifier would accept responses that neither protocol defines as success.
+Putting the receiver branch in the worker would mix HTTP policy with retry and
+durability code. The config never infers the receiver kind from the URL. The
+existing version-1 keys can store either receiver, and `receiver_kind` removes
+the ambiguity. An older binary rejects the Grok path under the unchanged Hermes
+rules.
 
 ## State machines
 
@@ -128,9 +154,11 @@ removed.
 
 Delivery state is `pending -> delivered | dead`. Network failures, timeouts,
 408, 425, 429, 5xx, and ambiguous 2xx responses retry the same event ID with
-full-jitter exponential backoff. Only `202` with `status=accepted` and `200`
-with `status=duplicate` deliver. Redirects and other 4xx responses are
-permanent. Attempt and age bounds move retryable events to dead letter.
+full-jitter exponential backoff. Hermes delivers only `202` with
+`status=accepted` or `200` with `status=duplicate`. Grok delivers only exact
+`200` with top-level `success=true` and a nonempty string `runUuid`. Redirects
+and other 4xx responses are permanent. Attempt and age bounds move retryable
+events to dead letter.
 
 ## Durability and ownership
 
@@ -172,7 +200,10 @@ process lock.
 - Cloud failures change only the polling backoff; they do not block HTTP or
   delivery disablement.
 - A crash after receiver acceptance but before delivery commit retries the same
-  ID; Hermes duplicate acknowledgement converges it to delivered.
+  event ID. Hermes duplicate acknowledgement converges it to delivered. Grok
+  Bot may start a duplicate run. Add this sentence to its instruction: "Treat
+  event_id as the idempotency key and refuse to act if you have already acted on
+  that event_id."
 - Secrets, URLs, history keys, account email, task content, and response bodies
   are absent from events, logs, diagnostics, support output, and exceptions.
 - Things Cloud remains unsupported. History family versions and field meanings
@@ -180,8 +211,12 @@ process lock.
 
 ## Acceptance boundary
 
-Automated proof uses fake clocks, fake grouped Cloud pages, injected crashes,
+Automated tests use fake clocks, fake grouped Cloud pages, injected crashes,
 and local webhook servers. The owner must separately restart the supervised
-service, configure a real Hermes receiver and MCP connection, and validate a
-fresh directly tagged task. No live Things Cloud, Hermes, or Grok account is
-used by the automated suite.
+service, configure the intended receiver and MCP connection, and validate a
+fresh directly tagged task. No live account is used by the automated suite.
+
+On 2026-09-04, a safe synthetic request to the Grok Bot desktop beta webhook
+confirmed the request and acknowledgement shape in this ADR. No provider
+documentation says that this integration is supported. A desktop beta update
+may change the contract.

@@ -20,6 +20,7 @@ from things_orchestrator.routines import RoutineWorker
 from things_orchestrator.routines_config import (
     DisabledRoutineConfig,
     EnabledRoutineConfig,
+    HermesReceiver,
     ReceiverSecret,
     RetryPolicy,
     RoutineProfile,
@@ -39,8 +40,9 @@ def _profile(
     return RoutineProfile(
         account_digest=account,
         host_profile="always_on",
-        receiver_url="https://agent.example/webhooks/task",
-        receiver_secret=ReceiverSecret("secret"),
+        receiver=HermesReceiver(
+            "https://agent.example/webhooks/task", ReceiverSecret("secret")
+        ),
         poll_interval_seconds=60,
         settle_seconds=120,
         retry=retry or RetryPolicy(),
@@ -182,8 +184,7 @@ def test_missing_config_and_personal_profile_fail_closed_before_factory(
     personal = RoutineProfile(
         account_digest=_profile().account_digest,
         host_profile=cast(Any, "personal"),
-        receiver_url=_profile().receiver_url,
-        receiver_secret=_profile().receiver_secret,
+        receiver=_profile().receiver,
         poll_interval_seconds=60,
         settle_seconds=120,
         retry=RetryPolicy(),
@@ -273,6 +274,45 @@ def test_eligible_composition_returns_zero_resource_factory(
     assert composition.factory is not None
     with pytest.raises(pytest.fail.Exception, match="factory was invoked"):
         composition.factory()
+
+
+def test_eligible_composition_builds_webhook_from_typed_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from things_orchestrator.routines_config import account_digest
+
+    profile = _profile(account=account_digest("owner@example.com"))
+    captured: list[object] = []
+    webhook = _UnusedWebhook()
+
+    def capture_receiver(receiver: object) -> _UnusedWebhook:
+        captured.append(receiver)
+        return webhook
+
+    monkeypatch.setattr(
+        "things_orchestrator.cli.load_routines_config",
+        lambda: EnabledRoutineConfig(profile),
+    )
+    monkeypatch.setattr(
+        "things_orchestrator.cli.build_webhook",
+        capture_receiver,
+    )
+    monkeypatch.setattr("things_orchestrator.cli.CloudClient", lambda *_args: object())
+    monkeypatch.setattr("things_orchestrator.cli.RoutineStore", lambda _profile: object())
+    monkeypatch.setattr(
+        "things_orchestrator.cli.RoutineWorker", lambda **arguments: arguments
+    )
+
+    composition = _routine_http_composition(
+        Credentials("owner@example.com", "password", McpBearer("bearer")),
+        service_managed=True,
+    )
+    assert composition.factory is not None
+    worker = composition.factory()
+
+    assert captured == [profile.receiver]
+    assert isinstance(worker, dict)
+    assert worker["webhook"] is webhook
 
 
 class _Gate:
