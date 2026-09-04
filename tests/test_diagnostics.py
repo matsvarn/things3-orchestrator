@@ -18,14 +18,15 @@ from things_orchestrator.diagnostics import (
     classify_endpoint,
     run_cloud_check,
 )
-from things_orchestrator.library import MemoryLibrary, Record
+from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.routines_config import (
+    ReceiverKind,
     ReceiverSecret,
     configure_routines,
     set_routines_enabled,
 )
-from things_orchestrator.routines_store import RoutineStore
+from things_orchestrator.routines_store import RoutineStore, StoreCounts
 
 
 class _ReadOnlyLibrary(MemoryLibrary):
@@ -38,7 +39,8 @@ class _ReadOnlyLibrary(MemoryLibrary):
         assert force is True
         self.refreshed = True
 
-    def apply(self, writes: object) -> object:
+    def apply(self, writes: list[Write]) -> ApplyResult:
+        del writes
         raise AssertionError("cloud-check must not write")
 
 
@@ -272,6 +274,7 @@ def test_support_report_serialization_is_value_free_and_deterministic(
             True,
             "live",
             (("candidates", 1), ("dead", 0), ("delivered", 2), ("pending", 1)),
+            receiver_kind="grok",
         ),
         operation_states=(("v2.applied", 2), ("v2.pending", 1)),
     )
@@ -296,6 +299,7 @@ def test_support_report_serialization_is_value_free_and_deterministic(
                 "pending": 1,
             },
             "phase": "live",
+            "receiver_kind": "grok",
             "state": "enabled",
         },
         "service_status": "active",
@@ -371,6 +375,7 @@ def test_routines_diagnostic_reads_only_safe_aggregates_without_creating_databas
     assert diagnostic.as_dict() == {
         "state": "enabled",
         "account_bound": True,
+        "receiver_kind": "hermes",
         "phase": "live",
         "counts": {
             "candidates": 1,
@@ -426,4 +431,76 @@ def test_routines_diagnostic_mismatch_or_malformed_config_never_opens_database(
 
     assert diagnostic.account_bound is False
     assert diagnostic.state == ("malformed" if malformed else "disabled")
+    assert diagnostic.receiver_kind == (None if malformed else "hermes")
     assert not database_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("receiver_kind", "receiver_url"),
+    (
+        ("hermes", "https://private.example/webhooks/private-route"),
+        ("grok", "https://api2.cursor.sh/automations/webhook/private-route"),
+    ),
+)
+def test_configured_diagnostic_exposes_only_receiver_kind_without_database(
+    receiver_kind: ReceiverKind,
+    receiver_url: str,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    database_path = tmp_path / "missing.sqlite3"
+    configure_routines(
+        email="owner@example.com",
+        receiver_kind=receiver_kind,
+        receiver_url=receiver_url,
+        receiver_secret=ReceiverSecret("private-credential"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+
+    diagnostic = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "private-password", None),
+        config_path=config_path,
+        database_path=database_path,
+    )
+
+    assert diagnostic.as_dict() == {
+        "state": "disabled",
+        "account_bound": True,
+        "receiver_kind": receiver_kind,
+    }
+    serialized = json.dumps(diagnostic.as_dict())
+    for private in ("private-route", "private-credential", "private-password"):
+        assert private not in serialized
+    assert not database_path.exists()
+
+
+def test_configured_diagnostic_keeps_receiver_kind_for_unknown_store_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configure_routines(
+        email="owner@example.com",
+        receiver_url="https://private.example/webhooks/private-route",
+        receiver_secret=ReceiverSecret("private-secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts("future", 0, 0, 0, 0, 0, 0),
+    )
+
+    diagnostic = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "private-password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+    )
+
+    assert diagnostic.as_dict() == {
+        "state": "disabled",
+        "account_bound": True,
+        "receiver_kind": "hermes",
+    }

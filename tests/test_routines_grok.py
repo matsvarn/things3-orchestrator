@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Never, cast
 from urllib.error import URLError
 from urllib.request import Request, build_opener
 
@@ -18,6 +19,7 @@ from things_orchestrator.routines_config import (
     DisabledRoutineConfig,
     GrokReceiver,
     HermesReceiver,
+    ReceiverKind,
     ReceiverSecret,
     account_digest,
     configure_routines,
@@ -26,8 +28,10 @@ from things_orchestrator.routines_config import (
 )
 from things_orchestrator.routines_store import StoredEvent
 from things_orchestrator.routines_webhook import (
+    DeliveryResult,
     GrokWebhook,
     HermesWebhook,
+    _HTTPResponse,
     _NoRedirects,
     build_webhook,
 )
@@ -134,7 +138,7 @@ def test_grok_receiver_url_fails_closed(url: str, tmp_path: Path) -> None:
     ),
 )
 def test_receiver_kind_is_never_inferred_from_url(
-    receiver_kind: str, url: str, tmp_path: Path
+    receiver_kind: ReceiverKind, url: str, tmp_path: Path
 ) -> None:
     with pytest.raises(ConfigError):
         configure_routines(
@@ -165,6 +169,7 @@ def test_cli_prompts_privately_for_grok_url_and_key(
         )
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     terminal = object()
 
     @contextmanager
@@ -226,6 +231,12 @@ def test_cli_prompts_privately_for_grok_url_and_key(
         "things-orchestrator routines enable\n"
         "things-orchestrator service install\n"
     )
+    main(["routines", "status"])
+    assert json.loads(capsys.readouterr().out) == {
+        "account_bound": True,
+        "receiver_kind": "grok",
+        "state": "disabled",
+    }
 
 
 def test_routines_configure_help_explains_private_defaults_and_each_option(
@@ -288,14 +299,14 @@ class _RewritingOpener:
         self._url = url
         self._opener = build_opener(_NoRedirects())
 
-    def open(self, request: Request, *, timeout: float) -> object:
+    def open(self, request: Request, *, timeout: float) -> _HTTPResponse:
         local = Request(
             self._url,
             data=request.data,
             method=request.method,
             headers=dict(request.header_items()),
         )
-        return self._opener.open(local, timeout=timeout)
+        return cast(_HTTPResponse, self._opener.open(local, timeout=timeout))
 
 
 @contextmanager
@@ -330,7 +341,7 @@ def _grok_server(*, status: int, body: bytes) -> Iterator[tuple[str, dict[str, o
 
 def _deliver_to_local_grok(
     *, status: int, response_body: bytes, max_response_bytes: int = 65_536
-) -> tuple[object, dict[str, object], bytes]:
+) -> tuple[DeliveryResult, dict[str, object], bytes]:
     event_body = b'{"event_id":"evt_test","event_type":"task.created"}'
     event = StoredEvent("evt_test", "routine", "task", 1, event_body, 0)
     receiver = GrokReceiver(
@@ -410,7 +421,7 @@ def test_grok_response_bound_and_network_failure_are_value_free() -> None:
     )
 
     class FailingOpener:
-        def open(self, request: Request, *, timeout: float) -> object:
+        def open(self, request: Request, *, timeout: float) -> Never:
             del request, timeout
             raise URLError(socket.timeout("private network detail"))
 
@@ -433,7 +444,7 @@ def test_grok_transport_uses_ten_second_default_and_thirty_second_maximum() -> N
     observed_timeouts: list[float] = []
 
     class TimeoutOpener:
-        def open(self, request: Request, *, timeout: float) -> object:
+        def open(self, request: Request, *, timeout: float) -> Never:
             del request
             observed_timeouts.append(timeout)
             raise URLError("offline")

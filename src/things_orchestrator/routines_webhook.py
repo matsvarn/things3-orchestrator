@@ -1,5 +1,3 @@
-"""Bounded receiver transports with value-free outcomes."""
-
 from __future__ import annotations
 
 import hashlib

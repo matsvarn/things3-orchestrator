@@ -33,6 +33,7 @@ from .journal import journal_path, read_operation_state_counts
 from .library import Record
 from .routines_config import (
     EnabledRoutineConfig,
+    ReceiverKind,
     UnconfiguredRoutineConfig,
     account_digest,
     load_routines_config,
@@ -81,12 +82,15 @@ class RoutineDiagnostic:
     account_bound: bool
     phase: str | None = None
     counts: tuple[tuple[str, int], ...] | None = None
+    receiver_kind: ReceiverKind | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
             "state": self.state,
             "account_bound": self.account_bound,
         }
+        if self.receiver_kind is not None:
+            result["receiver_kind"] = self.receiver_kind
         if self.phase is not None:
             result["phase"] = self.phase
         if self.counts is not None:
@@ -231,30 +235,53 @@ def collect_routines_diagnostic(
     try:
         config = load_routines_config(path=config_path)
     except ConfigError:
-        return RoutineDiagnostic("malformed", False)
+        return RoutineDiagnostic(state="malformed", account_bound=False)
     if isinstance(config, UnconfiguredRoutineConfig):
-        return RoutineDiagnostic("unconfigured", False)
+        return RoutineDiagnostic(state="unconfigured", account_bound=False)
     state: Literal["disabled", "enabled"] = (
         "enabled" if isinstance(config, EnabledRoutineConfig) else "disabled"
     )
+    receiver_kind = config.profile.receiver.kind
     if credentials is None:
-        return RoutineDiagnostic(state, False)
+        return RoutineDiagnostic(
+            state=state,
+            account_bound=False,
+            receiver_kind=receiver_kind,
+        )
     digest = account_digest(credentials.email)
     if config.profile.account_digest != digest:
-        return RoutineDiagnostic(state, False)
+        return RoutineDiagnostic(
+            state=state,
+            account_bound=False,
+            receiver_kind=receiver_kind,
+        )
     path = database_path or routine_database_path(digest)
     counts = read_routine_counts(path, digest)
     if counts is None:
-        return RoutineDiagnostic(state, True)
+        return RoutineDiagnostic(
+            state=state,
+            account_bound=True,
+            receiver_kind=receiver_kind,
+        )
     if counts.phase not in {"uninitialized", "seeding", "live"}:
-        return RoutineDiagnostic(state, True)
+        return RoutineDiagnostic(
+            state=state,
+            account_bound=True,
+            receiver_kind=receiver_kind,
+        )
     safe_counts = (
         ("candidates", counts.candidates),
         ("dead", counts.dead),
         ("delivered", counts.delivered),
         ("pending", counts.pending),
     )
-    return RoutineDiagnostic(state, True, counts.phase, safe_counts)
+    return RoutineDiagnostic(
+        state=state,
+        account_bound=True,
+        phase=counts.phase,
+        counts=safe_counts,
+        receiver_kind=receiver_kind,
+    )
 
 
 def collect_support_report() -> SupportReport:

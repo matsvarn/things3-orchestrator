@@ -357,6 +357,7 @@ def test_cli_reads_secret_only_from_private_tty_and_reports_restart(
             "pending": 0,
         },
         "phase": "uninitialized",
+        "receiver_kind": "hermes",
         "state": "enabled",
     }
     assert (owner_dir / "routines.json").stat().st_mode & 0o777 == 0o600

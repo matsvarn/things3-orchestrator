@@ -284,13 +284,18 @@ def test_eligible_composition_builds_webhook_from_typed_receiver(
     profile = _profile(account=account_digest("owner@example.com"))
     captured: list[object] = []
     webhook = _UnusedWebhook()
+
+    def capture_receiver(receiver: object) -> _UnusedWebhook:
+        captured.append(receiver)
+        return webhook
+
     monkeypatch.setattr(
         "things_orchestrator.cli.load_routines_config",
         lambda: EnabledRoutineConfig(profile),
     )
     monkeypatch.setattr(
         "things_orchestrator.cli.build_webhook",
-        lambda receiver: captured.append(receiver) or webhook,
+        capture_receiver,
     )
     monkeypatch.setattr("things_orchestrator.cli.CloudClient", lambda *_args: object())
     monkeypatch.setattr("things_orchestrator.cli.RoutineStore", lambda _profile: object())
