@@ -179,8 +179,10 @@ equivalents:
 - `~/.local/state/things-orchestrator/launcher`
 - `~/.local/state/things-orchestrator/state.json`
 - `~/.local/state/things-orchestrator/journal-*.sqlite3`
-- `~/.local/state/things-orchestrator/contexts-*.sqlite3`
 - `~/.local/state/things-orchestrator/routines/*.sqlite3`
+
+Older installations may also have `contexts-*.sqlite3` files. The current service
+does not create or use them.
 
 Credentials contain the plaintext Things Cloud password. `routines.json`
 contains the Hermes webhook secret or Grok webhook key and its private URL.

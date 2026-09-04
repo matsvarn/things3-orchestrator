@@ -7294,8 +7294,8 @@ def test_area_and_project_ids_expand_to_children_on_review() -> None:
 
     assert {item.id for item in by_id.items} == {area.id, project.id, loose.id}
     assert {item.id for item in by_view.items} == {area.id, project.id, loose.id}
-    assert by_id.context is not None
-    assert by_id.items[0].ref is not None
+    assert by_id.context is None
+    assert all(item.ref is None for item in by_id.items)
 
     project_read = module.read(ReadCall(id=project.id))
     assert {item.id for item in project_read.items} == {
@@ -7308,91 +7308,24 @@ def test_area_and_project_ids_expand_to_children_on_review() -> None:
     assert project_read.layouts[0].complete
 
 
-def test_inbox_review_is_a_batch_commit_token() -> None:
-    first = Record(uuid="one", kind="task", title="File this", inbox=True)
-    second = Record(uuid="two", kind="task", title="Drop this", inbox=True)
-    area = Record(uuid="home", kind="area", title="Home")
-    module = workspace([first, second, area])
-
-    inbox = module.read(ReadCall(view="inbox"))
-    assert inbox.context is not None
-    refs = {item.title: item.ref for item in inbox.items}
-    assert refs["File this"] and refs["Drop this"]
-    assert all(item.revision is None for item in inbox.items)
-
-    result = module.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "inbox-walk-001",
-                "context_id": inbox.context.id,
-                "change": [
-                    {"ref": refs["File this"], "into": area.id},
-                    {"ref": refs["Drop this"], "start": "someday"},
-                ],
-            }
-        )
-    )
-
-    assert result.status == "applied"
-    assert first.area_uuid == area.uuid
-    assert first.inbox is False
-    assert second.someday is True
-
-
-def test_truncated_audit_keeps_one_context_and_marks_it_incomplete() -> None:
+def test_truncated_audit_pages_without_accumulating_write_context() -> None:
     records = [
         Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
         for index in range(25)
     ]
     module = workspace(records)
-
-    first = module.read(ReadCall(view="audit", limit=10))
-    assert first.truncated is True
-    assert first.cursor is not None
-    assert first.context is not None
-    assert first.context.complete is False
-    first_wire = dump_result(first)
-    assert first_wire["truncated"] is True
-    assert first_wire["context"]["complete"] is False
-    first_refs = {item.id: item.ref for item in first.items}
-    assert len(first_refs) == 10
-
-    second = module.read(ReadCall(cursor=first.cursor, limit=10))
-    assert second.context is not None
-    assert second.context.id == first.context.id
-    assert second.context.complete is False
-    assert dump_result(second)["context"]["complete"] is False
-    second_refs = {item.id: item.ref for item in second.items}
-    assert len(second_refs) == 10
-    assert set(first_refs).isdisjoint(second_refs)
-
-    third = module.read(ReadCall(cursor=second.cursor, limit=10))
-    assert third.context is not None
-    assert third.context.id == first.context.id
-    assert third.context.complete is True
-    assert third.truncated is False
-    third_wire = dump_result(third)
-    assert third_wire["context"]["complete"] is True
-    assert "truncated" not in third_wire
-
-    filed = module.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "audit-batch-001",
-                "context_id": first.context.id,
-                "change": [
-                    {"ref": first_refs["task:item-00"], "start": "someday"},
-                    {"ref": second_refs["task:item-10"], "start": "someday"},
-                ],
-            }
-        )
-    )
-    assert filed.status == "applied"
-    assert (
-        ". Continue the cursor to add the rest to this same context."
-        in first.instruction
-    )
-    assert "commit Continue" not in first.instruction
+    page = module.read(ReadCall(view="audit", limit=10))
+    seen = []
+    while True:
+        assert page.status == "ok"
+        assert page.context is None
+        assert all(item.ref is None for item in page.items)
+        assert page.truncated == (page.cursor is not None)
+        seen.extend(item.id for item in page.items)
+        if page.cursor is None:
+            break
+        page = module.read(ReadCall(cursor=page.cursor, limit=10))
+    assert seen == [record.id for record in records]
 
 
 def test_truncated_audit_cursor_stales_after_area_registry_changes() -> None:
@@ -7476,10 +7409,10 @@ def test_truncated_filtered_audit_continues_without_changes() -> None:
 
     assert final.status == "ok"
     assert final.cursor is None
-    assert final.context is not None and final.context.complete
+    assert final.context is None
     assert final.layouts == []
-    assert "completes the selected filter" in final.instruction
-    assert "completes the active list" not in final.instruction
+    assert len(first.items) + len(continued.items) + len(final.items) == 25
+    assert all("someday" in item.signals for item in final.items)
 
 
 def test_audit_cursor_accepts_the_repeated_view() -> None:
@@ -7522,53 +7455,6 @@ def test_audit_cursor_rejects_a_different_view() -> None:
     assert continued.status == "needs_input"
     assert continued.next == "ask"
     assert continued.items == []
-
-
-def test_truncated_audit_with_include_still_extends_the_same_context() -> None:
-    records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
-    ]
-    destination = Record(uuid="home", kind="area", title="Home")
-    module = workspace([*records, destination])
-
-    first = module.read(
-        ReadCall(view="audit", limit=10, include=[{"id": destination.id}])
-    )
-    assert first.context is not None
-    assert first.context.complete is False
-    assert {item.id: item.ref for item in first.items}["area:home"]
-
-    second = module.read(ReadCall(cursor=first.cursor, limit=10))
-    assert second.context is not None
-    assert second.context.id == first.context.id
-    assert second.context.complete is False
-
-
-def test_review_include_overflow_recovers_instead_of_dropping_ids() -> None:
-    inbox = Record(uuid="box", kind="task", title="File this", inbox=True)
-    project = Record(uuid="fat", kind="project", title="Fat")
-    headings = [
-        Record(
-            uuid=f"head-{index:03d}",
-            kind="task",
-            title=f"Section {index:03d}",
-            parent_uuid=project.uuid,
-            heading=True,
-        )
-        for index in range(119)
-    ]
-    module = workspace([inbox, project, *headings])
-
-    result = module.read(
-        ReadCall(view="inbox", include=[{"id": project.id}])
-    )
-
-    assert result.status == "needs_input"
-    assert result.recovery is not None
-    assert result.recovery.code == "context_incomplete"
-    assert result.context is None
-    assert inbox.inbox is True
 
 
 def test_applied_receipt_names_every_purged_id() -> None:
@@ -7654,33 +7540,6 @@ def test_audit_view_lists_each_active_item_once() -> None:
     assert [item.id for item in result.items] == [area.id, project.id, task.id]
     assert "has_notes" in result.items[2].signals
     assert result.items[2].direct_tag_ids == ["tag:errand"]
-
-
-def test_complete_audit_scope_can_authorize_area_registry_changes() -> None:
-    area = Record(uuid="work", kind="area", title="Work")
-    task = Record(uuid="report", kind="task", title="Write report", area_uuid=area.uuid)
-    inbox = Record(uuid="inbox", kind="task", title="Triage", inbox=True)
-    module = workspace([area, task, inbox])
-
-    audit = module.read(ReadCall(view="audit", limit=40))
-    result = module.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "audit-area-scope-001",
-                "context_id": audit.context.id,
-                "scope_revision": audit.scope_revision,
-                "change": [
-                    {
-                        "ref": audit.items[0].ref,
-                        "title": "Job",
-                    }
-                ],
-            }
-        )
-    )
-
-    assert result.status == "needs_approval"
-    assert result.next == "approve"
 
 
 def test_diagnostics_view_exposes_inbox_hybrids() -> None:
@@ -8826,7 +8685,7 @@ def test_empty_week_does_not_use_find_copy() -> None:
     assert "find" not in result.instruction.casefold()
 
 
-def test_weekly_review_returns_one_exception_first_context() -> None:
+def test_weekly_review_returns_exception_first_facts() -> None:
     healthy = Record(uuid="healthy", kind="project", title="Submit tax return")
     healthy_action = Record(
         uuid="healthy-action",
@@ -8926,7 +8785,7 @@ def test_weekly_review_returns_one_exception_first_context() -> None:
     result = module.read(ReadCall(view="weekly_review", limit=40))
 
     assert result.status == "ok"
-    assert result.context is not None and result.context.complete
+    assert result.context is None
     assert [section.key for section in result.sections] == [
         "get_clear",
         "get_current",
@@ -9034,7 +8893,7 @@ def test_weekly_review_default_is_bounded_and_summarized() -> None:
 
     assert len(result.items) == 40
     assert result.cursor is None
-    assert result.context is not None and result.context.complete
+    assert result.context is None
     assert "weekly_review_summarized" in result.signals
     assert "do not repeat the default read" in result.instruction
     returned_ids = {item.id for item in result.items}

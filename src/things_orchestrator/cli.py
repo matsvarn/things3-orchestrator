@@ -42,7 +42,6 @@ from .config import (
     save_preferences,
     select_login_mcp_url,
 )
-from .context import SQLiteContextStore
 from .deployment import skill_path
 from .diagnostics import (
     collect_cloud_check,
@@ -615,6 +614,11 @@ def _receiver_url_prompt(receiver: str, *, guided: bool) -> str:
 
 
 def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
+    terminal.write(
+        f"In Things, create a tag titled exactly {ROUTINE_TRIGGER_TAG} if it does not "
+        "already exist, then let Things sync. Leave it unassigned until the smoke "
+        "test. Readiness waits for this tag to be discovered.\n\n"
+    )
     if receiver == "grok":
         terminal.write(
             "First connect Grok to Things MCP. In a private terminal, run "
@@ -916,9 +920,6 @@ def _workspace(
         return datetime.now(timezone)
 
     account_journal = journal_path(email)
-    context_path = account_journal.with_name(
-        account_journal.name.replace("journal", "contexts", 1)
-    )
     journal = SQLiteJournal(account_journal)
     journal.cutover_v1()
     journal.prune_v2(now=clock().isoformat(), retention_days=7)
@@ -926,11 +927,6 @@ def _workspace(
         library,
         journal=journal,
         clock=clock,
-        context_store=SQLiteContextStore(
-            context_path,
-            clock=clock,
-            token_factory=lambda: token_urlsafe(24),
-        ),
         account_id=email,
         preferences=load_preferences,
     )

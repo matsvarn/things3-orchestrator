@@ -64,7 +64,6 @@ src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
 src/things_orchestrator/live_acceptance.py
 src/things_orchestrator/owner_authority.py
-src/things_orchestrator/owner_text.py
 src/things_orchestrator/recurrence.py
 src/things_orchestrator/routines.py
 src/things_orchestrator/routines_config.py
@@ -101,7 +100,6 @@ tests/test_interface.py
 tests/test_journal.py
 tests/test_live_acceptance.py
 tests/test_live_acceptance_cli.py
-tests/test_owner_text.py
 tests/test_plugin_secret_scan.py
 tests/test_preferences.py
 tests/test_recurrence.py

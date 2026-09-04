@@ -31,7 +31,7 @@ def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
     )
 
     for workflow in supported:
-        assert f"**{workflow}. Queued for v0.10.0.**" in text
+        assert f"**{workflow}. Queued for v0.10.1.**" in text
     for workflow in deferred:
         assert workflow in text
 

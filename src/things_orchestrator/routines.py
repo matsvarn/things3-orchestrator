@@ -22,7 +22,7 @@ from .routines_store import (
     RoutineHistoryIdentityChanged,
     StoredEvent,
 )
-from .routines_webhook import DeliveryResult
+from .routines_webhook import DeliveryResult, Webhook
 
 RuntimeState = Literal["disabled", "initializing", "running", "backing_off", "stopped"]
 T = TypeVar("T")
@@ -65,12 +65,6 @@ class RoutineStoreProtocol(Protocol):
     ) -> None: ...
 
 
-class RoutineWebhookProtocol(Protocol):
-    def deliver(
-        self, event: StoredEvent, *, timestamp: int
-    ) -> DeliveryResult: ...
-
-
 class _RoutineDisabled(Exception):
     pass
 
@@ -96,25 +90,6 @@ class RuntimeSnapshot:
         return result
 
 
-def _active_snapshot(
-    cloud_failures: int,
-    delivery_failures: int,
-    *,
-    last_successful_poll_at: int | None = None,
-    last_delivery_at: int | None = None,
-) -> RuntimeSnapshot:
-    state: Literal["running", "backing_off"] = (
-        "backing_off" if cloud_failures or delivery_failures else "running"
-    )
-    return RuntimeSnapshot(
-        state,
-        cloud_failures,
-        delivery_failures,
-        last_successful_poll_at,
-        last_delivery_at,
-    )
-
-
 class RoutineWorker:
     def __init__(
         self,
@@ -123,7 +98,7 @@ class RoutineWorker:
         profile: RoutineProfile,
         cloud: GroupedHistoryClient,
         store: RoutineStoreProtocol,
-        webhook: RoutineWebhookProtocol,
+        webhook: Webhook,
         epoch: Callable[[], int] = lambda: int(time.time()),
         monotonic: Callable[[], float] = time.monotonic,
         jitter: Callable[[float], float] = lambda upper: random.uniform(0, upper),
@@ -362,9 +337,8 @@ class RoutineWorker:
     def _active_snapshot(
         self, cloud_failures: int, delivery_failures: int
     ) -> RuntimeSnapshot:
-        return _active_snapshot(
+        return self._snapshot_for(
+            "backing_off" if cloud_failures or delivery_failures else "running",
             cloud_failures,
             delivery_failures,
-            last_successful_poll_at=self._last_successful_poll_at,
-            last_delivery_at=self._last_delivery_at,
         )

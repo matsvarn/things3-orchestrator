@@ -12,6 +12,9 @@ Keep one production server and one stable model Interface.
 - `workspace.py` remains the one transaction engine. V2 shares private
   preparation, application, read-back, and reconciliation primitives. It never
   constructs the v1 `CommitCall` language.
+- List and search pagination keeps read cursors only. It does not build legacy
+  short-reference write contexts or persist a context database. The remaining
+  explicit v1 context paths are internal and are not exposed by the eight tools.
 - `consistency.py` owns native-state conflict detection for diagnostics
   and review signals.
 - `config.py` owns credentials, owner preferences, normalized MCP endpoints,

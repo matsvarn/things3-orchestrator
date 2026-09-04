@@ -1,51 +1,18 @@
 from __future__ import annotations
 
-import json
-
 import pytest
-from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from things_orchestrator.interface import (
-    APPROVE_DESC,
-    APPROVE_IN,
-    APPROVE_OUT,
-    COMMIT_DESC,
-    COMMIT_IN,
-    COMMIT_OUT,
-    READ_DESC,
-    READ_IN,
-    READ_OUT,
-    RESULT_OUT,
     ApproveCall,
     ChangeEntry,
-    ChangeTag,
-    ChecklistAdd,
-    ChecklistChange,
-    ChecklistFact,
     CommitCall,
     ContextFact,
     CreateEntry,
-    DiagnosticFact,
-    DiagnosticRepair,
-    EnsureTag,
-    ItemFact,
-    LayoutFact,
-    LayoutSectionFact,
-    OrganizeDraft,
-    OrganizeSection,
-    PlanFact,
     ProjectTask,
     ReadCall,
-    ReadInclude,
-    RecoveryFact,
-    RecurrenceFact,
-    RepeatCreate,
-    RepeatEdit,
     Result,
-    ReviewSection,
     SourceRef,
-    TagFact,
     dump_result,
 )
 
@@ -202,56 +169,6 @@ def test_change_include_is_compact_and_bounded() -> None:
         )
 
 
-def test_manual_include_schema_matches_runtime_selector_rules() -> None:
-    include_schema = READ_IN["properties"]["include"]["items"]
-    assert include_schema["type"] == "object"
-    assert include_schema["additionalProperties"] is False
-    assert include_schema["minProperties"] == 1
-    assert include_schema["not"] == {
-        "required": ["id"],
-        "minProperties": 2,
-    }
-
-    runtime = ReadInclude.model_json_schema()
-    assert set(include_schema["properties"]) == set(runtime["properties"])
-    for name in include_schema["properties"]:
-        runtime_property = runtime["properties"][name]
-        if "anyOf" in runtime_property:
-            runtime_property = next(
-                branch
-                for branch in runtime_property["anyOf"]
-                if branch.get("type") != "null"
-            )
-        for key in ("type", "pattern", "minLength", "maxLength"):
-            if key == "maxLength":
-                # The model enforces the bound. Omit repeated lengths from the
-                # compact discovery schema.
-                continue
-            if key in runtime_property:
-                assert include_schema["properties"][name][key] == runtime_property[key]
-
-    validator = Draft202012Validator(include_schema)
-    valid = (
-        {"id": "task:anchor"},
-        {"find": "Anchor"},
-        {"find": "Anchor", "within": "project:work"},
-    )
-    invalid = (
-        {},
-        {"id": "task:anchor", "find": "Anchor"},
-        {"id": "task:anchor", "within": "project:work"},
-        {"find": ""},
-        {"find": "Anchor", "unknown": True},
-    )
-    for payload in valid:
-        validator.validate(payload)
-        ReadInclude.model_validate(payload)
-    for payload in invalid:
-        assert not validator.is_valid(payload)
-        with pytest.raises(ValidationError):
-            ReadInclude.model_validate(payload)
-
-
 def test_context_capacity_does_not_raise_normal_read_limit() -> None:
     assert ReadCall(limit=40).limit == 40
     with pytest.raises(ValidationError):
@@ -274,9 +191,6 @@ def test_context_capacity_does_not_raise_normal_read_limit() -> None:
     assert len(Result.model_validate(result).items) == 120
     with pytest.raises(ValidationError):
         Result.model_validate({**result, "items": [fact] * 121})
-
-    assert RESULT_OUT["properties"]["items"]["maxItems"] == 120
-    assert READ_OUT["properties"]["items"]["maxItems"] == 120
 
 
 def test_commit_accepts_one_related_graph_with_local_keys() -> None:
@@ -582,9 +496,6 @@ def test_trash_is_explicit_and_cannot_combine_with_other_changes() -> None:
         }
     )
     assert call.change[0].trash is True
-    assert COMMIT_IN["properties"]["change"]["items"]["properties"]["trash"] == {
-        "const": True
-    }
 
     with pytest.raises(ValidationError, match="Trash cannot combine"):
         CommitCall.model_validate(
@@ -699,14 +610,6 @@ def test_existing_task_can_use_a_heading_created_in_the_same_commit() -> None:
     )
 
     assert call.change[0].heading_id == "$later"
-    assert (
-        COMMIT_IN["properties"]["change"]["items"]["properties"]["heading_id"][
-            "pattern"
-        ]
-        == COMMIT_IN["properties"]["create"]["items"]["properties"]["heading_id"][
-            "pattern"
-        ]
-    )
 
     with pytest.raises(ValidationError, match="created heading"):
         CommitCall.model_validate(
@@ -1603,7 +1506,7 @@ def test_result_carries_compact_context_layout_and_recovery_facts() -> None:
         )
 
 
-def test_tag_schema_matches_runtime_local_reference_rules() -> None:
+def test_tag_mutations_accept_local_references() -> None:
     payload = {
         "intent_id": "tag-schema-parity-001",
         "ensure_tags": [{"key": "$focus", "title": "Focus"}],
@@ -1620,23 +1523,7 @@ def test_tag_schema_matches_runtime_local_reference_rules() -> None:
 
     call = CommitCall.model_validate(payload)
 
-    ensure_schema = COMMIT_IN["properties"]["ensure_tags"]["items"]
-    create_tag_pattern = COMMIT_IN["properties"]["create"]["items"]["properties"][
-        "tag_ids"
-    ]["items"]["pattern"]
-    change = COMMIT_IN["properties"]["change"]["items"]["properties"]
-    assert ensure_schema["required"] == ["key", "title"]
-    assert create_tag_pattern == change["tags_add"]["items"]["pattern"]
-    assert change["tags_remove"]["items"]["pattern"].startswith("^tag:")
     assert call.ensure_tags[0].key == "$focus"
-    assert "tags" in READ_OUT["properties"]
-    assert "recovery" in READ_OUT["properties"]
-    assert "tags" in COMMIT_OUT["properties"]
-    assert "tags" in APPROVE_OUT["properties"]
-    commit_item = COMMIT_OUT["properties"]["items"]["items"]
-    assert "into_id" in commit_item["properties"]
-    assert "start" in commit_item["properties"]
-    assert "signals" in commit_item["properties"]
 
 
 def test_advanced_mutations_stay_in_one_commit_shape() -> None:
@@ -1678,12 +1565,6 @@ def test_advanced_mutations_stay_in_one_commit_shape() -> None:
     assert call.change_tags[0].title == "Archive"
     assert call.change[0].repeat is not None
     assert call.change[1].model_fields_set == {"id", "if_revision", "after"}
-    change_schema = COMMIT_IN["properties"]["change"]["items"]["properties"]
-    assert change_schema["lifecycle"]["enum"] == [
-        "trash",
-        "restore",
-        "delete_permanently",
-    ]
 
 
 def test_irreversible_mutations_cannot_hide_other_edits() -> None:
@@ -1718,140 +1599,6 @@ def test_irreversible_mutations_cannot_hide_other_edits() -> None:
         )
 
 
-def test_manual_schemas_are_flat_and_compact() -> None:
-    schemas = (READ_IN, COMMIT_IN, APPROVE_IN, RESULT_OUT)
-    for schema in schemas:
-        text = str(schema)
-        assert "oneOf" not in text
-        assert "anyOf" not in text
-        assert "$ref" not in text
-        assert "$defs" not in text
-        assert schema["additionalProperties"] is False
-
-    assert COMMIT_IN["required"] == ["intent_id"]
-    assert COMMIT_IN["properties"]["require_approval"] == {"const": True}
-    assert APPROVE_IN["required"] == ["plan_id"]
-    assert RESULT_OUT["required"] == ["next", "status", "instruction"]
-    assert RESULT_OUT["properties"]["sections"]["items"]["properties"][
-        "item_ids"
-    ]["items"]["pattern"]
-    discovery_chars = sum(
-        len(json.dumps(schema, separators=(",", ":"))) for schema in schemas
-    )
-    # Review completeness, DiagnosticFact, named homes, and compact Project
-    # headings and native checklists. Keep the contract compact, but allow that
-    # justified expansion.
-    # Semantic notes, exact no-op receipts, weekly category vocabulary, and the
-    # lossless recurrence projection and native generated-copy bookkeeping add
-    # explicit fields.
-    assert discovery_chars < 21_300
-    assert discovery_chars - 13_406 < 7_900
-    wire_schemas = (READ_IN, COMMIT_IN, APPROVE_IN, READ_OUT, COMMIT_OUT, APPROVE_OUT)
-    wire_chars = sum(
-        len(json.dumps(schema, separators=(",", ":"))) for schema in wire_schemas
-    )
-    assert wire_chars < 23_100
-    assert READ_DESC and COMMIT_DESC and APPROVE_DESC
-    assert len(READ_DESC) < 700
-    assert len(COMMIT_DESC) < 550
-    assert len(APPROVE_DESC) < 220
-    assert "natural confirmation" in COMMIT_DESC
-    assert "require_approval=true" in COMMIT_DESC
-    assert "private" in COMMIT_DESC
-    assert "retry the same intent_id" in COMMIT_DESC
-    assert "lifecycle=trash" in COMMIT_DESC
-    assert "local neighborhood" in READ_DESC
-    assert "include affected projects in one read" in READ_DESC.casefold()
-    assert "limit=40" in READ_DESC
-    assert "private" in APPROVE_DESC
-
-
-def test_tool_descriptions_teach_low_turn_selector_and_dependency_order() -> None:
-    read_lower = READ_DESC.lower()
-    commit_lower = COMMIT_DESC.lower()
-
-    for instruction in (
-        "select exactly one view",
-        "purpose=change is one item",
-        "organize is the draft",
-        "recurrence is one task or project",
-        "local neighborhood",
-        "include a destination",
-        "within=trash searches trash",
-        "writable neighborhood",
-    ):
-        assert instruction in read_lower
-    for instruction in (
-        "project tasks keep order",
-        "accept checklists",
-        "use heading_title on all tasks or none",
-        "local create keys may appear in any order",
-        "parent tags before children",
-        "natural confirmation",
-        "control fields private",
-    ):
-        assert instruction in commit_lower
-
-    assert READ_IN["properties"]["view"]["enum"]
-    assert READ_IN["properties"]["within"]["pattern"].startswith("^(trash|(project|area):")
-    assert COMMIT_IN["properties"]["organize"]["items"]["properties"][
-        "delete_headings"
-    ]["items"]["pattern"].startswith("^[a-z]")
-    assert COMMIT_IN["properties"]["create"]["items"]["properties"]["start"][
-        "maxLength"
-    ] >= len("evening")
-    project_task = COMMIT_IN["properties"]["create"]["items"]["properties"][
-        "tasks"
-    ]["items"]
-    assert "heading_title" in project_task["properties"]
-    assert "checklist" in project_task["properties"]
-    assert "finish" in project_task["properties"]
-    assert project_task["properties"]["finish"]["maxLength"] == 400
-    assert project_task["properties"]["start_here"]["maxItems"] == 4
-    assert project_task["properties"]["approach"]["maxItems"] == 4
-    assert project_task["properties"]["sources"]["maxItems"] == 12
-    source_ref = project_task["properties"]["sources"]["items"]
-    assert source_ref["required"] == ["label", "location"]
-    assert source_ref["additionalProperties"] is False
-    assert COMMIT_IN["properties"]["create"]["items"]["properties"]["document"] == {
-        "const": "source"
-    }
-    project_properties = COMMIT_IN["properties"]["create"]["items"]["properties"]
-    assert project_properties["note_style"]["enum"] == ["natural", "visual"]
-    assert project_properties["outcome"]["maxLength"] == 400
-    assert project_properties["finished_when"]["maxItems"] == 6
-    assert project_properties["keep_in_mind"]["maxItems"] == 6
-    assert "revise" in RESULT_OUT["properties"]["next"]["enum"]
-    assert COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
-        "maxLength"
-    ] >= len("evening")
-    start_pattern = COMMIT_IN["properties"]["change"]["items"]["properties"]["start"][
-        "pattern"
-    ]
-    assert "today" in start_pattern
-    assert "tomorrow" in start_pattern
-    assert "someday" in start_pattern
-    assert READ_IN["properties"]["ids"]["maxItems"] == 10
-    assert READ_IN["properties"]["ids"]["minItems"] == 1
-    assert READ_IN["properties"]["include"]["maxItems"] == 40
-    assert READ_IN["properties"]["include"]["uniqueItems"] is True
-    assert "area" in READ_IN["properties"]["view"]["enum"]
-    assert "audit" in READ_IN["properties"]["view"]["enum"]
-    assert "diagnostics" in READ_IN["properties"]["view"]["enum"]
-    read_item = READ_OUT["properties"]["items"]["items"]
-    assert read_item["additionalProperties"] is True
-    assert "truncated_fields" in read_item["properties"]
-    assert "signals" in read_item["properties"]
-    assert "direct_tag_ids" in read_item["properties"]
-    assert READ_IN["properties"]["fields"]["items"]["enum"] == [
-        "notes",
-        "checklist",
-        "tags",
-        "recurrence",
-    ]
-    assert RESULT_OUT["properties"]["tags"]["maxItems"] == 400
-
-
 def test_dump_result_keeps_complete_false() -> None:
     result = Result(
         next="read",
@@ -1868,132 +1615,3 @@ def test_dump_result_keeps_complete_false() -> None:
     payload = dump_result(result)
     assert payload["context"]["complete"] is False
     assert payload["truncated"] is True
-
-
-def test_manual_schema_contracts_match_the_runtime_models() -> None:
-    pairs = (
-        (ReadCall, READ_IN),
-        (CommitCall, COMMIT_IN),
-        (ApproveCall, APPROVE_IN),
-        (CreateEntry, COMMIT_IN["properties"]["create"]["items"]),
-        (
-            ProjectTask,
-            COMMIT_IN["properties"]["create"]["items"]["properties"][
-                "tasks"
-            ]["items"],
-        ),
-        (ChangeEntry, COMMIT_IN["properties"]["change"]["items"]),
-        (EnsureTag, COMMIT_IN["properties"]["ensure_tags"]["items"]),
-        (ChangeTag, COMMIT_IN["properties"]["change_tags"]["items"]),
-        (OrganizeDraft, COMMIT_IN["properties"]["organize"]["items"]),
-        (
-            OrganizeSection,
-            COMMIT_IN["properties"]["organize"]["items"]["properties"][
-                "sections"
-            ]["items"],
-        ),
-        (
-            RepeatCreate,
-            COMMIT_IN["properties"]["create"]["items"]["properties"]["repeat"],
-        ),
-        (
-            RepeatEdit,
-            COMMIT_IN["properties"]["change"]["items"]["properties"]["repeat"],
-        ),
-        (
-            ChecklistAdd,
-            COMMIT_IN["properties"]["change"]["items"]["properties"][
-                "checklist_add"
-            ]["items"],
-        ),
-        (
-            ChecklistChange,
-            COMMIT_IN["properties"]["change"]["items"]["properties"][
-                "checklist_change"
-            ]["items"],
-        ),
-        (Result, RESULT_OUT),
-        (ItemFact, RESULT_OUT["properties"]["items"]["items"]),
-        (ContextFact, RESULT_OUT["properties"]["context"]),
-        (LayoutFact, RESULT_OUT["properties"]["layouts"]["items"]),
-        (
-            LayoutSectionFact,
-            RESULT_OUT["properties"]["layouts"]["items"]["properties"][
-                "sections"
-            ]["items"],
-        ),
-        (RecoveryFact, RESULT_OUT["properties"]["recovery"]),
-        (TagFact, RESULT_OUT["properties"]["tags"]["items"]),
-        (
-            ReviewSection,
-            RESULT_OUT["properties"]["sections"]["items"],
-        ),
-        (
-            DiagnosticFact,
-            RESULT_OUT["properties"]["diagnostics"]["items"],
-        ),
-        (
-            DiagnosticRepair,
-            RESULT_OUT["properties"]["diagnostics"]["items"]["properties"][
-                "repairs"
-            ]["items"],
-        ),
-        (PlanFact, RESULT_OUT["properties"]["plan"]),
-        (
-            ChecklistFact,
-            RESULT_OUT["properties"]["items"]["items"]["properties"][
-                "checklist"
-            ]["items"],
-        ),
-        (
-            RecurrenceFact,
-            RESULT_OUT["properties"]["items"]["items"]["properties"][
-                "recurrence"
-            ],
-        ),
-    )
-    constraints = {
-        "const",
-        "default",
-        "enum",
-        "format",
-        "maxItems",
-        "maxLength",
-        "maximum",
-        "minItems",
-        "minLength",
-        "minimum",
-        "pattern",
-    }
-
-    for model, manual in pairs:
-        runtime = model.model_json_schema(by_alias=True)
-        assert set(manual.get("properties", {})) == set(runtime.get("properties", {}))
-        assert set(manual.get("required", [])) == set(runtime.get("required", []))
-        for name, runtime_property in runtime.get("properties", {}).items():
-            while "$ref" in runtime_property:
-                target = runtime
-                for part in runtime_property["$ref"].removeprefix("#/").split("/"):
-                    target = target[part]
-                runtime_property = target
-            if "anyOf" in runtime_property:
-                non_null = [
-                    branch
-                    for branch in runtime_property["anyOf"]
-                    if branch.get("type") != "null"
-                ]
-                if len(non_null) == 1:
-                    runtime_property = non_null[0]
-            manual_property = manual["properties"][name]
-            for key in constraints & runtime_property.keys():
-                if key == "maxLength" and model in {ReadInclude, ContextFact}:
-                    # Keep repeated context metadata out of the compact wire
-                    # schema. Pydantic still enforces these bounds at runtime.
-                    continue
-                if key == "default" and runtime_property[key] is None:
-                    continue
-                assert manual_property.get(key) == runtime_property[key], (
-                    model.__name__,
-                    name,
-                    key,
-                )
