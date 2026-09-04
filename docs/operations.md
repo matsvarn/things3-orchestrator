@@ -27,13 +27,18 @@ things-orchestrator support-bundle
 See [Run the built-in AI task routine](routines.md) for setup, trigger
 semantics, receiver instructions, and the two-part smoke test.
 
-These commands report saved configuration, account binding, service state,
-authenticated worker liveness, durable history phase, trigger readiness,
-timing, and aggregate delivery counts. They do not print the account, receiver
-URL, secret, task IDs, event IDs, or history identity. Public health remains
-`{"ok":true}`. The authenticated health response retains the installed version,
-tool hash, commit, and capabilities. It also adds value-free worker state,
-failure counts, and safe poll and delivery times.
+`routines status` reports saved configuration, account binding, service state,
+durable history phase, trigger readiness, timing, and aggregate delivery
+counts. When an MCP bearer is configured, it also makes one bounded
+authenticated runtime probe for worker liveness. It does not print the account,
+receiver URL, secret, task IDs, event IDs, or history identity. Public health
+remains `{"ok":true}`. The authenticated health response retains the installed
+version, tool hash, commit, and capabilities. It also adds value-free worker
+state, failure counts, and safe poll and delivery times.
+
+For routines, `support-bundle` reads configuration, the durable projection, and
+service evidence. It does not make the authenticated runtime probe. Worker
+liveness remains `unknown` when that evidence does not prove it.
 
 `doctor` automatically checks the TLS origin saved by `login`. Use `--url` to
 add a one-time endpoint that is not saved:
@@ -81,7 +86,8 @@ version, tool hashes, Cloud status and counts, endpoint class, service status,
 operation-state counts, and value-free routine state when available. It omits
 account values, network locations, Things content and IDs, credentials, raw
 errors, receiver URL, receiver host, receiver credential, and database rows. It
-does include the receiver kind. Inspect the report before sharing it.
+does include the receiver kind. Its routine section is not a live readiness
+probe. Inspect the report before sharing it.
 
 ## Operate routines
 

@@ -1,6 +1,7 @@
 # Capability proof
 
-Date: 2026-08-16
+Created: 2026-08-16
+Last verified: 2026-09-04
 
 This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and

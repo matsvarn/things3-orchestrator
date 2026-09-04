@@ -38,7 +38,8 @@ Keep one production server and one stable model Interface.
 - `routines_config.py` owns the account-bound private configuration union, the
   fixed trigger and event constants, the complete receiver instruction, the
   `HermesReceiver | GrokReceiver` union, receiver-specific URL validation, and
-  redacted rendering. Missing `receiver_kind` in version 1 means Hermes.
+  endpoint-free, value-free status rendering with the receiver kind only.
+  Missing `receiver_kind` in version 1 means Hermes.
 - `routines_store.py` owns the process lock, tag-only seed, bounded live task
   projection, canonical metadata body, and durable event ledger. Cursor
   advancement and event insertion share one SQLite transaction. It never

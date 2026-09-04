@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import shlex
+import socket
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
@@ -200,14 +201,17 @@ def _is_https_without_known_local_host(url: McpUrl) -> bool:
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return not (
-            "." not in hostname
-            or hostname == "localhost"
-            or hostname.endswith(
-                (".localhost", ".local", ".lan", ".home", ".internal")
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(hostname))
+        except OSError:
+            return not (
+                "." not in hostname
+                or hostname == "localhost"
+                or hostname.endswith(
+                    (".localhost", ".local", ".lan", ".home", ".internal")
+                )
+                or hostname.endswith(".ts.net")
             )
-            or hostname.endswith(".ts.net")
-        )
     shared = ipaddress.ip_network("100.64.0.0/10")
     return not (
         address.is_private

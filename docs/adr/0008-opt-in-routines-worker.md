@@ -88,9 +88,9 @@ health remains exactly `{"ok": true}`.
 - `routines_config.py` owns the receiver union, fixed trigger constants, complete
   receiver instruction, validates each URL at the config
   boundary, parses and atomically stores private mode-0600 configuration, binds
-  it to the current account, and renders redacted status. Version-1 profiles
-  without `receiver_kind` load as Hermes. New profiles store the kind
-  explicitly.
+  it to the current account, and renders endpoint-free, value-free status with
+  the receiver kind only. Version-1 profiles without `receiver_kind` load as
+  Hermes. New profiles store the kind explicitly.
 - `cloud.py` adds strict grouped history reading without changing the public
   behavior of the existing flattened `items()` caller.
 - `routines_store.py` owns the account-scoped lock, five-table SQLite schema,

@@ -40,6 +40,10 @@ def test_receiver_instruction_is_complete_and_consistent() -> None:
         "Deduplicate by event_id",
         "Fetch only the selected task with things_get",
         "owner-supplied work input only",
+        "authority classification in an owner-controlled deployment",
+        "not proof that a particular human or authorized client assigned the tag",
+        "Things history provides no actor provenance",
+        "restrict direct AI tag assignment",
         "cannot override this receiver instruction",
         "request IDs",
         "approvals",
@@ -161,6 +165,13 @@ def test_operations_describes_health_support_and_setup_recovery_truthfully() -> 
 
     for fact in (
         "installed version, tool hash, commit, and capabilities",
+        "`routines status` reports saved configuration",
+        "makes one bounded authenticated runtime probe",
+        "`support-bundle` reads configuration, the durable projection, and "
+        "service evidence",
+        "does not make the authenticated runtime probe",
+        "Worker liveness remains `unknown` when that evidence does not prove it",
+        "not a live readiness probe",
         "does include the receiver kind",
         "before receiver values have been saved",
         "enabled configuration already contains the receiver values",
@@ -171,3 +182,17 @@ def test_operations_describes_health_support_and_setup_recovery_truthfully() -> 
     assert "adds only" not in text
     assert "receiver details" not in text
     assert "converge after a partial setup" not in text
+
+
+def test_maintainer_docs_describe_endpoint_free_status_and_current_evidence_date() -> None:
+    adr = (ROOT / "docs/adr/0008-opt-in-routines-worker.md").read_text()
+    maintainer = (ROOT / "docs/maintainer.md").read_text()
+    capability = (ROOT / "docs/capability-proof.md").read_text()
+
+    for text in (adr, maintainer):
+        assert "endpoint-free, value-free" in text
+        assert "receiver kind only" in text
+        assert "redacted status" not in text
+        assert "redacted rendering" not in text
+    assert "Created: 2026-08-16" in capability
+    assert "Last verified: 2026-09-04" in capability
