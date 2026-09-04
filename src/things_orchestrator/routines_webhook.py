@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Literal, Protocol, assert_never
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .routines_config import GrokReceiver, HermesReceiver, Receiver
 from .routines_store import StoredEvent
@@ -45,7 +45,7 @@ class _HTTPResponse(Protocol):
     ) -> None: ...
 
 
-class _Opener(Protocol):
+class RoutineHTTPOpener(Protocol):
     def open(
         self, request: Request, *, timeout: float
     ) -> _HTTPResponse: ...
@@ -72,6 +72,10 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
+def proxyless_no_redirect_opener() -> RoutineHTTPOpener:
+    return build_opener(ProxyHandler({}), _NoRedirects())
+
+
 def hermes_signature(secret: bytes, timestamp: int, body: bytes) -> str:
     message = str(timestamp).encode("ascii") + b"." + body
     return hmac.new(secret, message, hashlib.sha256).hexdigest()
@@ -84,13 +88,13 @@ class HermesWebhook:
         *,
         timeout_seconds: float = 10.0,
         max_response_bytes: int = 65_536,
-        _opener: _Opener | None = None,
+        _opener: RoutineHTTPOpener | None = None,
     ) -> None:
         _validate_transport_bounds(timeout_seconds, max_response_bytes)
         self._receiver = receiver
         self._timeout_seconds = timeout_seconds
         self._max_response_bytes = max_response_bytes
-        self._opener = _opener or build_opener(_NoRedirects())
+        self._opener = _opener or proxyless_no_redirect_opener()
 
     def deliver(self, event: StoredEvent, *, timestamp: int) -> DeliveryResult:
         secret = self._receiver.secret.reveal().encode("utf-8")
@@ -125,13 +129,13 @@ class GrokWebhook:
         *,
         timeout_seconds: float = 10.0,
         max_response_bytes: int = 65_536,
-        _opener: _Opener | None = None,
+        _opener: RoutineHTTPOpener | None = None,
     ) -> None:
         _validate_transport_bounds(timeout_seconds, max_response_bytes)
         self._receiver = receiver
         self._timeout_seconds = timeout_seconds
         self._max_response_bytes = max_response_bytes
-        self._opener = _opener or build_opener(_NoRedirects())
+        self._opener = _opener or proxyless_no_redirect_opener()
 
     def deliver(self, event: StoredEvent, *, timestamp: int) -> DeliveryResult:
         del timestamp
@@ -175,7 +179,7 @@ def _validate_transport_bounds(
 
 
 def _send_bounded(
-    opener: _Opener,
+    opener: RoutineHTTPOpener,
     request: Request,
     *,
     timeout_seconds: float,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from .cloud import CloudClient, CloudError, CloudLibrary
 from .config import (
@@ -43,6 +43,7 @@ from .routines_config import (
     load_routines_config,
 )
 from .routines_store import read_routine_counts, routine_database_path
+from .routines_webhook import RoutineHTTPOpener, proxyless_no_redirect_opener
 from .service import service_status
 
 CloudStatus = Literal[
@@ -66,6 +67,7 @@ RoutineWorkerLiveness = Literal[
 
 _TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+_ROUTINE_HEALTH_URL = "http://127.0.0.1:8787/health"
 
 
 class DiagnosticLibrary(Protocol):
@@ -259,18 +261,22 @@ def collect_service_state() -> RoutineServiceState:
 
 
 def probe_routine_runtime(
-    bearer: str | None, *, timeout_seconds: float = 1.0
+    bearer: str | None,
+    *,
+    timeout_seconds: float = 1.0,
+    _opener: RoutineHTTPOpener | None = None,
 ) -> Mapping[str, object] | None:
     """Read the authenticated loopback runtime snapshot with fixed bounds."""
 
     if not bearer or not 0 < timeout_seconds <= 5:
         return None
     request = Request(
-        "http://127.0.0.1:8787/health",
+        _ROUTINE_HEALTH_URL,
         headers={"Authorization": f"Bearer {bearer}"},
     )
+    opener = _opener or proxyless_no_redirect_opener()
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             body = response.read(65_537)
     except (HTTPError, URLError, TimeoutError, OSError):
         return None

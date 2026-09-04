@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -325,6 +328,113 @@ def test_support_report_serialization_is_value_free_and_deterministic(
     assert str(tmp_path) not in first
     assert "http" not in first
     assert isinstance(report, SupportReport)
+
+
+def test_runtime_probe_ignores_environment_proxy_and_keeps_bearer_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_requests: list[str | None] = []
+    proxy_requests: list[str | None] = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            target_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"routines":{"state":"running"}}')
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            proxy_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(
+                b'{"ok":true,"routines":{"state":"backing_off"}}'
+            )
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    target = HTTPServer(("127.0.0.1", 0), TargetHandler)
+    proxy = HTTPServer(("127.0.0.1", 0), ProxyHandler)
+    target_thread = threading.Thread(target=target.serve_forever)
+    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    target_thread.start()
+    proxy_thread.start()
+    monkeypatch.setattr(
+        diagnostics,
+        "_ROUTINE_HEALTH_URL",
+        f"http://127.0.0.1:{target.server_port}/health",
+    )
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
+    try:
+        result = diagnostics.probe_routine_runtime("private-bearer")
+    finally:
+        target.shutdown()
+        proxy.shutdown()
+        target_thread.join()
+        proxy_thread.join()
+        target.server_close()
+        proxy.server_close()
+
+    assert result == {"state": "running"}
+    assert target_requests == ["Bearer private-bearer"]
+    assert proxy_requests == []
+
+
+def test_runtime_probe_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            if self.path == "/health":
+                self.send_response(302)
+                self.send_header("Location", "/forged")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"routines":{"state":"running"}}')
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    monkeypatch.setattr(
+        diagnostics,
+        "_ROUTINE_HEALTH_URL",
+        f"http://127.0.0.1:{server.server_port}/health",
+    )
+    try:
+        result = diagnostics.probe_routine_runtime("private-bearer")
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result is None
+    assert paths == ["/health"]
+
+
+def test_runtime_probe_without_bearer_attempts_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_opener() -> None:
+        raise AssertionError("probe must not construct a transport without a bearer")
+
+    monkeypatch.setattr(diagnostics, "proxyless_no_redirect_opener", fail_opener)
+
+    assert diagnostics.probe_routine_runtime(None) is None
 
 
 def test_routines_diagnostic_reads_only_safe_aggregates_without_creating_database(
