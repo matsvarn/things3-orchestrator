@@ -157,9 +157,42 @@ def build_parser() -> argparse.ArgumentParser:
     http.add_argument("--port", type=int, default=8787)
     http.add_argument("--service-managed", action="store_true", help=argparse.SUPPRESS)
     routines = commands.add_parser(
-        "routines", help="configure the optional routines worker"
+        "routines", help="set up or operate the optional routines worker"
     )
     routines_commands = routines.add_subparsers(dest="routines_action", required=True)
+    routines_setup = routines_commands.add_parser(
+        "setup",
+        help="configure, enable, and install the supervised routines service",
+        description=(
+            "Configure, enable, and install the supervised routines service. "
+            "Receiver values are entered privately through /dev/tty. "
+            "Hermes is the default receiver."
+        ),
+    )
+    routines_setup.add_argument(
+        "--profile",
+        choices=("always_on",),
+        required=True,
+        help="host profile for the supervised routines worker",
+    )
+    routines_setup.add_argument(
+        "--receiver",
+        choices=("hermes", "grok"),
+        default="hermes",
+        help="webhook receiver. Hermes is the default",
+    )
+    routines_setup.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Things Cloud polling interval in seconds (60-3600, default: 60)",
+    )
+    routines_setup.add_argument(
+        "--settle",
+        type=int,
+        default=120,
+        help="event settle window in seconds (1-3600, default: 120)",
+    )
     routines_configure = routines_commands.add_parser(
         "configure",
         help="store a disabled routines receiver profile",
@@ -280,6 +313,11 @@ def main(argv: list[str] | None = None) -> None:
         for argument in arguments
     ):
         parser.error("The receiver credential must be entered through /dev/tty.")
+    if arguments[:2] == ["routines", "setup"] and any(
+        argument == "--url" or argument.startswith("--url=")
+        for argument in arguments[2:]
+    ):
+        parser.error("Routines setup reads the receiver URL privately through /dev/tty.")
     args = parser.parse_args(arguments)
     try:
         _dispatch(parser, args)
@@ -446,18 +484,22 @@ def _routines_command(
         parser.error(_LOGIN)
         return
     action = args.routines_action
-    if action == "configure":
+    if action in {"configure", "setup"}:
         with _routine_secret_tty(parser) as terminal:
-            receiver_url = args.url or getpass(
-                (
-                    "Grok webhook URL: "
-                    if args.receiver == "grok"
-                    else "Hermes webhook URL: "
-                ),
+            if action == "setup":
+                _write_routines_setup_guidance(terminal, receiver=args.receiver)
+            receiver_url = getattr(args, "url", None) or getpass(
+                _receiver_url_prompt(args.receiver, guided=action == "setup"),
                 stream=terminal,
             )
             credential_label = (
-                "Grok webhook key" if args.receiver == "grok" else "Hermes webhook secret"
+                "Grok Bot webhook key"
+                if args.receiver == "grok" and action == "setup"
+                else (
+                    "Grok webhook key"
+                    if args.receiver == "grok"
+                    else "Hermes webhook secret"
+                )
             )
             secret = getpass(f"{credential_label}: ", stream=terminal)
             confirm = getpass(f"Confirm {credential_label}: ", stream=terminal)
@@ -471,6 +513,30 @@ def _routines_command(
             poll_interval_seconds=args.interval,
             settle_seconds=args.settle,
         )
+        if action == "setup":
+            enabled = set_routines_enabled(True, email=credentials.email)
+            try:
+                service = service_action("install", dry_run=False)
+            except (ConfigError, OSError, ServiceApplyError):
+                parser.error(
+                    "Routines are enabled, but the supervised service install failed. "
+                    "Fix the service problem, then rerun this setup command."
+                )
+                return
+            print(
+                json.dumps(
+                    routines_status(enabled, email=credentials.email), sort_keys=True
+                )
+            )
+            print(f"supervised service: {service.status.value}")
+            print(
+                "The worker may still be initializing. Check: "
+                "things-orchestrator routines status"
+            )
+            if args.receiver == "grok":
+                print("Add this sentence to the Grok routine instruction:")
+                print(_GROK_IDEMPOTENCY_INSTRUCTION)
+            return
         print(
             json.dumps(
                 routines_status(configured, email=credentials.email), sort_keys=True
@@ -504,6 +570,28 @@ def _routines_command(
         print("Restart required: things-orchestrator service install")
     else:
         print("A running worker will stop within one polling interval.")
+
+
+def _receiver_url_prompt(receiver: str, *, guided: bool) -> str:
+    if receiver == "grok":
+        return "Grok Bot webhook POST URL: " if guided else "Grok webhook URL: "
+    return "Hermes webhook URL: "
+
+
+def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
+    if receiver == "grok":
+        terminal.write(
+            "In Grok Bot, create or edit a Routine, choose \"When a webhook fires\", "
+            "save it, then copy the generated POST URL and key.\n"
+            "Do not put either value in argv or chat. Keep the Grok Routine inactive "
+            "until `things-orchestrator routines status` reports phase `live`, then "
+            "turn Active on.\n"
+        )
+        return
+    terminal.write(
+        "Have the Hermes webhook URL and secret ready. "
+        "Do not put either value in argv or chat.\n"
+    )
 
 
 def _login(

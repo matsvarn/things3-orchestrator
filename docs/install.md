@@ -62,34 +62,30 @@ systemd `serve-http` service and only with the explicit `always_on` profile. It
 does not run in stdio, a manually started HTTP process, or an unconfigured
 installation.
 
-Configure the receiver in a private terminal:
+For Hermes, run the guided setup in a private terminal:
 
 ```console
-things-orchestrator routines configure \
-  --profile always_on \
-  --receiver hermes \
-  --url https://agent.example/webhooks/things-ai \
-  --interval 60
-things-orchestrator routines enable
-things-orchestrator service install
+things-orchestrator routines setup --profile always_on --receiver hermes
 things-orchestrator routines status
 ```
 
-Hermes is the default receiver, so existing commands without `--receiver` keep
-working. `configure` prompts for the Hermes webhook secret through `/dev/tty`.
-It does not accept the secret as an argument. The receiver URL must use HTTPS.
-Loopback HTTP is allowed for a Hermes receiver on the same host.
+`setup` privately prompts for the receiver URL and secret, saves an
+account-bound profile, enables it, and installs or restarts the supervised
+service. It does not put either value in shell history. Hermes is the default,
+so `--receiver hermes` is optional. The receiver URL must use HTTPS. Loopback
+HTTP is allowed for a Hermes receiver on the same host.
 
-For a Grok Bot desktop beta webhook, keep the URL and key out of shell history:
+For Grok Bot, first create or edit a Routine. Choose "When a webhook fires",
+save the Routine, and leave it inactive. Then run this command in a private
+terminal:
 
 ```console
-things-orchestrator routines configure --profile always_on --receiver grok
+things-orchestrator routines setup --profile always_on --receiver grok
 ```
 
-The command privately prompts for the Grok webhook URL, the key, and key
-confirmation. Copy the URL and key from the Bot setup screen. The URL must use
-HTTPS on `api2.cursor.sh` with an `/automations/webhook/<route>` path. The
-command stores the profile disabled.
+The command explains where to copy the generated POST URL and key, then prompts
+for both through `/dev/tty`. Do not put either value in argv or chat. The URL
+must use HTTPS on `api2.cursor.sh` with an `/automations/webhook/<route>` path.
 
 Copy this sentence into the Grok routine instruction:
 
@@ -97,13 +93,18 @@ Copy this sentence into the Grok routine instruction:
 Treat event_id as the idempotency key and refuse to act if you have already acted on that event_id.
 ```
 
-Then enable routines and restart the supervised service:
+Check startup without assuming that the worker is immediately live:
 
 ```console
-things-orchestrator routines enable
-things-orchestrator service install
 things-orchestrator routines status
 ```
+
+Keep the Grok Routine inactive until the command reports phase `live`. Then
+turn Active on.
+
+Use `routines configure`, `routines enable`, and `service install` separately
+only for recovery or scripted administration. `configure` remains compatible
+with `--url`, but receiver credentials are always entered through `/dev/tty`.
 
 The polling interval is 60 to 3600 seconds.
 
