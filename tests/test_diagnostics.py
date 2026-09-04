@@ -642,3 +642,36 @@ def test_trigger_readiness_requires_an_exact_current_ai_tag(
 
     assert result.trigger_tag_discovered is bool(ai_tags)
     assert result.trigger_ready is ready
+
+
+@pytest.mark.parametrize("phase", ("uninitialized", "seeding"))
+def test_trigger_discovery_is_unknown_until_the_tag_baseline_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configure_routines(
+        email="owner@example.com",
+        receiver_url="https://agent.example/webhooks/route",
+        receiver_secret=ReceiverSecret("secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    set_routines_enabled(True, email="owner@example.com", path=config_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts(phase, 4, 0, 0, 0, 0, 0),
+    )
+
+    result = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+        service_state="active",
+        runtime={"state": "initializing"},
+    )
+
+    assert result.trigger_tag_discovered is None
+    assert result.trigger_ready is False

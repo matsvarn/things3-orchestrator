@@ -76,9 +76,10 @@ Pending deliveries retry with the same event ID. A receiver acknowledgement
 can be lost after the receiver acted, so recovery depends on receiver-side
 deduplication. Hermes sends that ID as `X-Request-ID`. Grok sends it as
 `event_id` in the body. Grok may start a duplicate Bot run after
-accept-before-commit. The Bot instruction must say: "Treat event_id as the
-idempotency key and refuse to act if you have already acted on that event_id."
-Delivered rows remain as compact tombstones.
+accept-before-commit. Use the complete receiver instruction printed by
+`routines setup`; it requires deduplication by `event_id` before any action and
+defines the narrow selected-task trust boundary. Delivered rows remain as
+compact tombstones.
 Dead rows retain only the metadata body and attempt result. This first slice has
 no automatic dead-letter replay command.
 

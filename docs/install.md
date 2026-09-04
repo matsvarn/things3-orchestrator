@@ -13,7 +13,7 @@ disable an account. Read [Security](../SECURITY.md) before login.
 Install an exact Git tag:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.9.1"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.0"
 ```
 
 Run the next commands in a private terminal. `login` verifies the Things Cloud
@@ -56,6 +56,9 @@ secret.
 
 ## Optional routines worker
 
+Use [Run the built-in AI task routine](routines.md) for the complete setup,
+trust contract, timing model, and smoke test.
+
 Routines are off by default. Enable them only on a host that should poll Things
 Cloud continuously. The worker runs only inside the generated launchd or
 systemd `serve-http` service and only with the explicit `always_on` profile. It
@@ -69,11 +72,18 @@ things-orchestrator routines setup --profile always_on --receiver hermes
 things-orchestrator routines status
 ```
 
-`setup` privately prompts for the receiver URL and secret, saves an
+Before the prompt, setup prints the portable upstream `hermes gateway setup`
+and `hermes webhook subscribe` commands. The subscribe command returns the URL
+and HMAC secret. `setup` prompts for those values, saves an
 account-bound profile, enables it, and installs or restarts the supervised
 service. It does not put either value in shell history. Hermes is the default,
 so `--receiver hermes` is optional. The receiver URL must use HTTPS. Loopback
 HTTP is allowed for a Hermes receiver on the same host.
+
+The official Hermes guide verifies this transport setup, not the availability
+of a configured MCP server inside every webhook-triggered Hermes session. Run
+the positive smoke test in the routines guide before relying on Hermes-to-Things
+actions. No owner-run Hermes acceptance is recorded for v0.10.0.
 
 For Grok Bot, first create or edit a Routine. Choose "When a webhook fires",
 save the Routine, and leave it inactive. Then run this command in a private
@@ -84,14 +94,10 @@ things-orchestrator routines setup --profile always_on --receiver grok
 ```
 
 The command explains where to copy the generated POST URL and key, then prompts
-for both through `/dev/tty`. Do not put either value in argv or chat. The URL
+for both in the private terminal. Do not put either value in argv or chat. The URL
 must use HTTPS on `api2.cursor.sh` with an `/automations/webhook/<route>` path.
 
-Copy this sentence into the Grok routine instruction:
-
-```text
-Treat event_id as the idempotency key and refuse to act if you have already acted on that event_id.
-```
+Copy the complete receiver instruction printed by setup into the Grok Routine.
 
 Check startup without assuming that the worker is immediately live:
 
@@ -99,12 +105,14 @@ Check startup without assuming that the worker is immediately live:
 things-orchestrator routines status
 ```
 
-Keep the Grok Routine inactive until the command reports phase `live`. Then
+Keep the Grok Routine inactive until the command reports
+`trigger_ready=true`. Then
 turn Active on.
 
 Use `routines configure`, `routines enable`, and `service install` separately
 only for recovery or scripted administration. `configure` remains compatible
-with `--url`, but receiver credentials are always entered through `/dev/tty`.
+with `--url`, but receiver credentials are always entered in a private
+terminal.
 
 The polling interval is 60 to 3600 seconds.
 
@@ -116,12 +124,18 @@ schema, opaque event ID, event type, routine ID, public task ID, and observation
 time. It never changes Things. The receiver uses its separately configured MCP
 connection to read or change the task.
 
+The default 120-second settlement window and separate 60-second polling
+interval normally deliver two to three minutes after the final edit. See the
+canonical routines guide for the direct-tag and no-backfill edge cases.
+
 Enabling routines increases Things Cloud read traffic and sends event metadata
 to the configured receiver. Local HTTP tests exercise both transport contracts
-without a live account. On 2026-09-04, a safe synthetic request confirmed the
-Grok Bot desktop beta request and acknowledgement shape. No provider
-documentation says that this integration is supported. Complete the owner-run
-check in [operations.md](operations.md) before relying on either receiver.
+without a live account. The official Grok Bot guide documents routines,
+testing, history, approvals, and retries. It does not document the observed
+beta webhook host, route, Bearer header, or acknowledgement body. On
+2026-09-04, a safe synthetic request confirmed that exact observed shape. Treat
+it as beta compatibility, and complete the owner-run check in
+[operations.md](operations.md) before relying on it.
 
 ## Private tailnet client
 

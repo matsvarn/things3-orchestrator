@@ -16,7 +16,12 @@ from secrets import token_bytes
 from typing import cast
 
 from .cloud import HistoryBatch, HistoryEvent
-from .routines_config import RoutineProfile, routines_state_dir
+from .routines_config import (
+    ROUTINE_EVENT_TYPE,
+    ROUTINE_TRIGGER_TAG,
+    RoutineProfile,
+    routines_state_dir,
+)
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -330,7 +335,7 @@ class RoutineStore:
             return
         if "tt" not in event.payload and event.action == 1:
             return
-        if event.payload.get("tt") == "AI":
+        if event.payload.get("tt") == ROUTINE_TRIGGER_TAG:
             connection.execute(
                 "INSERT OR IGNORE INTO ai_tags VALUES (?)", (event.uuid,)
             )
@@ -509,7 +514,7 @@ def canonical_event_body(
     return json.dumps(
         {
             "event_id": event_id,
-            "event_type": "task.created",
+            "event_type": ROUTINE_EVENT_TYPE,
             "observed_at": observed_at,
             "routine_id": routine_id,
             "schema_version": 1,

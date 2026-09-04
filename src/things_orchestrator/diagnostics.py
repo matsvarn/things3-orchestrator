@@ -366,7 +366,7 @@ def collect_routines_diagnostic(
         ("delivered", counts.delivered),
         ("pending", counts.pending),
     )
-    tag_discovered = counts.ai_tags > 0
+    tag_discovered = counts.ai_tags > 0 if counts.phase == "live" else None
     ready = (
         state == "enabled"
         and counts.phase == "live"

@@ -19,7 +19,8 @@ ROUTINE_ID = "things-ai-task-created-v1"
 ROUTINE_EVENT_TYPE = "task.created"
 ROUTINE_TRIGGER_TAG = "AI"
 ROUTINE_TRIGGER = (
-    "new normal open untrashed task with the exact directly assigned AI tag"
+    "new normal open untrashed task with the exact directly assigned "
+    f"{ROUTINE_TRIGGER_TAG} tag"
 )
 ROUTINE_RECEIVER_INSTRUCTION = """You receive authenticated metadata events from Things Orchestrator's built-in AI task routine.
 

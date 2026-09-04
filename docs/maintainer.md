@@ -36,6 +36,7 @@ Keep one production server and one stable model Interface.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
 - `routines_config.py` owns the account-bound private configuration union, the
+  fixed trigger and event constants, the complete receiver instruction, the
   `HermesReceiver | GrokReceiver` union, receiver-specific URL validation, and
   redacted rendering. Missing `receiver_kind` in version 1 means Hermes.
 - `routines_store.py` owns the process lock, tag-only seed, bounded live task
@@ -92,8 +93,9 @@ relevant fields fail the complete batch without cursor movement.
 
 The event key is the persisted account namespace, routine ID, and public task
 ID. Do not add a history position, history key, observation time, or attempt
-number. Webhook delivery is at-least-once. Hermes accepts only `202 accepted`
-and `200 duplicate`. Grok accepts only `200` with top-level `success=true` and
+number. Webhook delivery is at-least-once. Hermes accepts the documented exact
+`200 delivered` and `200 duplicate`, plus the earlier exact `202 accepted` as a
+narrow compatibility case. Grok accepts only `200` with top-level `success=true` and
 a nonempty string `runUuid`. Keep response bodies, receiver details, task
 content, account values, and history identity out of logs and diagnostics. Do
 not add a shared permissive 2xx classifier.

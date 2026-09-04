@@ -621,7 +621,10 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
     prompt = ROUTINE_RECEIVER_INSTRUCTION + "\n\nAuthenticated event metadata:\n{__raw__}"
     terminal.write(
         "On the Hermes host, run `hermes gateway setup` and enable webhooks. "
-        "Use this receiver instruction:\n\n"
+        "The official guide verifies route creation, signing, deduplication, and "
+        "acknowledgements. It does not verify that every Hermes version exposes a "
+        "configured MCP server to a webhook-triggered session. Test Things access "
+        "before relying on the receiver. Use this receiver instruction:\n\n"
         f"{ROUTINE_RECEIVER_INSTRUCTION}\n\n"
         "Then create the route with this command:\n\n"
         "hermes webhook subscribe things-ai-task-created "
