@@ -3,117 +3,147 @@
 This register tracks human runs against released Things Orchestrator versions.
 Automated tests and isolated model replays do not count as human dogfood.
 
-The pre-release live acceptance runner in `scripts/run_live_acceptance.py` is
-also not human dogfood. It is the deterministic release gate for the public MCP
-transport, move/Anytime, atomic validation, exact tags and checklist rows,
-within-only paging, receipts, and owner-cleaned disposable state. Human runs in
-this register remain necessary for natural-prompt quality and client behavior.
+The pre-release runner in `scripts/run_live_acceptance.py` is also not human
+dogfood. It creates several disposable records to exercise transport, mutation,
+receipt, paging, and recovery contracts. It is a release gate, not an onboarding
+flow or evidence that a person can get value from a real client.
 
-Use a fresh client session for each run. Keep the natural owner prompt, the
-visible trace, the exact Things result, and any recovery path. Record a pass
-only when the result remains useful without the chat.
+## What a current run must record
 
-## Status
+Use a fresh client session and a natural owner prompt. Do not teach the agent
+tool names, schemas, or expected calls before the run. Record:
+
+- release version and commit;
+- host topology and client version;
+- whether the Things skill was installed or the client saw only MCP schemas;
+- elapsed time to the first correct read and, separately, the first useful
+  write;
+- the stopping point and every owner intervention;
+- whether any Things Cloud password or MCP bearer entered chat or shell history;
+- the visible trace and exact Things result;
+- result correctness after the chat is gone; and
+- for writes, the operation ID, receipt result, Cloud read-back, and any
+  recovery path.
+
+Do not aggregate skill-installed and schema-only clients into one success rate.
+The skill contains retry and trust guidance that bare MCP schemas do not.
+
+## v0.9.1 activation events
+
+The primary event is one correct current read from a natural prompt in a fresh
+real client, without a mutation. Service health, `doctor`, `cloud-check`, and an
+eight-tool listing are prerequisites, not this event.
+
+The optional second event is one useful capture that the owner genuinely wants.
+It passes only when Cloud read-back and the immutable receipt agree. If a test
+item is moved to `things_trash`, record that it remains recoverable in Things
+Trash; do not call that deletion or cleanup.
+
+## Status vocabulary
 
 - **Round 1 complete**: a human ran the workflow and recorded its failures.
-- **Repeat required**: fixes landed after that run. Run the workflow again
-  after all first-round fixes ship.
-- **Queued**: no complete human run is recorded.
+- **Repeat required**: fixes landed after that run, so it needs another human
+  run against the current contract.
+- **Queued for v0.9.1**: the workflow is supported by the current eight tools
+  but has no complete current human run.
+- **Deferred**: the workflow requires a capability outside the v0.9.1 public
+  contract and must not be counted as a release failure.
 
-## First-round record
+## Historical first-round record
+
+These runs predate the bounded eight-tool v0.9 interface. They remain useful
+history, but they do not prove current-client activation.
 
 ### Source-heavy Project capture — Round 1 complete
 
 The Mats Mode request in
 [`tests/fixtures/mats_mode_owner_prompt.txt`](../tests/fixtures/mats_mode_owner_prompt.txt)
-ran several times. It covered source research, reply coverage, a finite Project,
-later Tasks, native headings, checklists, Task-local sources, and both note
-styles.
+ran several times. It covered source research, a finite Project, later Tasks,
+native headings, checklists, Task-local sources, and both note styles.
 
-It found wrong scope, empty Tasks, pasted briefs, fake Read work, omitted later
-Tasks, continual work inside a finite Project, weak notes, a second note pass,
-excess trace narration, incomplete source coverage, unsafe native order, and
+It exposed wrong scope, empty Tasks, pasted briefs, fake Read work, omitted later
+Tasks, weak notes, incomplete source coverage, unsafe native order, and
 preference-persistence gaps. Releases 0.4.6 through 0.5.0 repaired that path.
 
-Status: **Repeat required** after the first-round fix program is complete.
+Status: **Repeat required**, using only the parts supported by the current
+contract.
 
 ### Full reorganization — Round 1 complete
 
 The request in
 [`tests/fixtures/full_reorg_owner_prompt.txt`](../tests/fixtures/full_reorg_owner_prompt.txt)
-ran against the owner's live system. The owner then answered the material Area,
-tag, language, and home questions.
+ran against the owner's live system. It exposed excess reads and narration,
+incomplete write context, stale retries, unstable references, incompatible
+cursor syntax, wrong heading homes, missing native Project order, and unresolved
+Project quality.
 
-It found excess reads and narration, incomplete write context, stale retries,
-unstable short refs, incompatible cursor syntax, a false rich-note rejection,
-two confirmations for one manifest, wrong heading homes, missing native Project
-order, a reorder retry, and unresolved Project quality.
-
-Status: **Repeat required** after the first-round fix program is complete.
+Status: **Repeat required**, after unsupported broad reorganization actions are
+removed from the prompt.
 
 ### Weekly review — Round 1 complete
 
 A live run used the recorded natural prompt against version 0.5.2. It found
-overlapping diagnostics, audit, Inbox, Today, Logbook, and week reads. The trace
-narrated each step before it reached a decision.
+overlapping reads, skipped an empty-head check, mixed cleanup with planning,
+invented priority judgments, converted next-week intent into Monday start dates,
+and asked approval for unnamed changes.
 
-The run skipped the empty-head check, mixed cleanup with weekly planning, and
-recommended personal priorities without owner criteria. It converted "active
-next week" into Monday start dates. It also asked approval for six unnamed date
-changes and reported unchanged Areas and tags.
+Status: **Repeat required** against v0.9.1. Use the natural prompt in
+[`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt)
+without tool or form instructions.
 
-Status: **Repeat required** after the exception-first Weekly Review ships. The
-next first-round workflow is Routine capture and refusal gate.
+## Supported v0.9.1 queue
 
-Use the recorded natural prompt in
-[`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt).
-Do not add tool or form instructions before the run.
+Run these workflows with natural prompts and the evidence fields above:
 
-## First-round queue
+1. **First correct read — Queued for v0.9.1.** Ask a fresh client what needs
+   attention today. Verify that the answer reflects current Things state and
+   performs no mutation.
+2. **Useful Inbox capture and refusal gate — Queued for v0.9.1.** Capture one
+   wanted Task. Then give one ambiguous mashed request; it must ask a concise
+   question and write nothing.
+3. **Named home and tag capture — Queued for v0.9.1.** Add one Task to an exact
+   named Project or Area with one existing named tag. It must not invent a home
+   or second tag.
+4. **Ordinary Project capture — Queued for v0.9.1.** Create a Project with known
+   actions and useful context. Check the Project fields, nested Task fields,
+   checklists, and notes.
+5. **Inbox processing — Queued for v0.9.1.** Process a bounded mixed Inbox
+   without duplicate creation or invented dates.
+6. **Daily focus — Queued for v0.9.1.** Review Today, postpone one exact item,
+   move one item to Evening, and re-read the resulting view.
+7. **Exact changes and scheduling — Queued for v0.9.1.** Rename, complete, or
+   trash exact items; set supported dates and reminders; move a Task between
+   homes; verify unmentioned fields remain unchanged.
+8. **Recurrence lifecycle — Queued for v0.9.1.** Create and update a supported
+   recurrence, modify its current copy, complete it, and stop repetition.
+9. **Tags, checklist, and Waiting — Queued for v0.9.1.** Patch exact direct tags
+   and checklist rows while preserving unmentioned and inherited state.
+10. **Recoverable Trash — Queued for v0.9.1.** Move one exact disposable item to
+    recoverable Trash and verify its receipt and Cloud state.
+11. **Install, update, rollback, and recovery — Queued for v0.9.1.** Verify
+    client setup, health checks, preference preservation, rollback, and a safe
+    recovery path. Record host and client topology precisely.
 
-Run these workflows once before the regression round. Keep each prompt natural.
-Do not teach the agent its expected tool calls.
+## Deferred until a bounded public contract exists
 
-1. **Routine capture and refusal gate — Queued.** Capture `Renew passport`, two
-   independent Inbox actions, and one mashed dump. Valid capture must stay fast.
-   An invalid form must ask and write nothing.
-2. **Named home and tag capture — Queued.** Add one Task to a named Project or
-   Area with one named reusable tag. It must not invent a home or second tag.
-3. **Ordinary Project form — Queued.** Use `Replace kitchen tap` with three known
-   actions and useful context. Check the Task, checklist, heading, and note split.
-4. **Inbox processing — Queued.** Process a mixed real Inbox to zero without
-   duplicate creation or invented dates.
-5. **Daily focus — Queued.** Review Today, postpone work, move one item to
-   Evening, and reorder the remainder.
-6. **Exact change and scheduling — Queued.** Rename, complete, and cancel exact
-   items. Set Today, Evening, Anytime in Inbox and inside a Project, a start, a
-   deadline, and a timed reminder. Move the same Task between homes and confirm
-   its ID, note, tags, checklist, recurrence, and reminder are preserved.
-7. **Recurrence lifecycle — Queued.** Create a repeat, edit its rule, change the
-   current copy, complete it, and stop repetition. Check that generated copies
-   lose their repeat links and that the template becomes one fresh ordinary
-   next-date item or Project graph before its hidden graph is removed.
-8. **Tags and Waiting — Queued.** Add and remove exact direct tags through
-   `things_update`; preserve unmentioned direct and every inherited tag. Patch
-   one exact checklist row, remove one, and append one without reordering the
-   survivors. Registry mutation remains outside the default eight.
-9. **Project organization and merge — Queued.** Add, reorder, and delete native
-   headings. Merge two Projects without losing hidden occupants.
-10. **Trash, restore, permanent delete, and rich-note replacement — Queued.**
-    Verify exact targets, recoverability, approval, and full replacement scope.
-11. **Focused Area redesign — Queued.** Change a small Area map without forcing
-    tag minimalism or removing a named responsibility.
-12. **New-system setup — Queued.** Use an empty or nearly empty account. Create a
-    small provisional basis from named responsibilities and workflows.
-13. **Install, update, rollback, and recovery — Queued.** Verify client setup,
-    preference preservation, health checks, rollback, and safe recovery.
+These are not queued for v0.9.1 and must not block its dogfood program:
+
+- native heading deletion or Project merge;
+- restore from Trash or permanent deletion;
+- arbitrary rich-note replacement;
+- tag or other registry mutation;
+- focused Area redesign or other advanced scope editing; and
+- empty-account or full-system setup.
+
+When one of these capabilities ships with a public schema, tests, documentation,
+and recovery behavior, move only its bounded workflow into the supported queue.
 
 ## Regression round
 
-After every queued workflow has one human run, repeat all workflows in this
-register against the then-current release. Use changed owner data and natural
-paraphrases. A workflow passes only when its trace is concise, its writes match
-one accepted intent, and the result works without the chat. When the workflow
-writes Things, Cloud read-back must prove the result. Operational workflows
-instead need true health and configuration checks, preserved preferences, a
-working rollback, and a verified recovery path.
+After each supported v0.9.1 workflow has one human run, repeat the supported
+set against the then-current release using changed owner data and natural
+paraphrases. A workflow passes only when the trace is concise, the result matches
+one accepted intent, and the result remains correct without the chat. Writes
+need Cloud read-back and receipt evidence. Operational workflows need true
+health and configuration checks, preserved preferences, a working rollback, and
+a verified recovery path.
