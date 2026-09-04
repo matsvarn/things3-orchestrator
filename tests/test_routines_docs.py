@@ -85,7 +85,9 @@ def test_canonical_guide_has_negative_and_positive_smoke_tests() -> None:
     text = ROUTINES.read_text()
 
     assert "negative control" in text
+    assert "record the delivered count" in text
     assert "fresh normal task without `AI`" in text
+    assert "delivered count did not change" in text
     assert "positive check" in text
     assert "Confirm one new delivered event" in text
     assert "fetched the selected task through `things_get`" in text
@@ -113,3 +115,29 @@ def test_provider_claims_keep_official_and_observed_contracts_separate() -> None
     assert "`200` with `status=delivered` or `status=duplicate`" in text
     assert "older exact `202` with `status=accepted`" in text
     assert "does not accept an arbitrary 2xx response" in text
+
+
+def test_portable_receiver_setup_includes_mcp_readiness_and_authority() -> None:
+    text = " ".join(ROUTINES.read_text().split())
+
+    for grok_fact in (
+        "print-config --client grok --show-secrets",
+        "grok.com/connectors",
+        "New Connector",
+        "Custom",
+        "public internet",
+        "exactly eight tools, including `things_get`",
+        "does not prove that a webhook-triggered Grok Bot execution receives",
+    ):
+        assert grok_fact in text
+    for hermes_fact in (
+        "`things` creates the `mcp-things` toolset",
+        "Webhook runs use a restricted default",
+        "~/.hermes/webhook_subscriptions.json",
+        '"toolsets": ["mcp-things"]',
+        "subscribe` cannot set route toolsets",
+        "hermes webhook test things-ai-task-created",
+        "valid HMAC request",
+        "gains the eight bounded Things tools",
+    ):
+        assert hermes_fact in text

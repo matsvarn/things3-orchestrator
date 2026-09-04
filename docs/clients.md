@@ -11,6 +11,7 @@ self-distributed stdio plugin below.
 | Client | Selector | Put the output here |
 |---|---|---|
 | Codex | `codex` | Merge the TOML block into `~/.codex/config.toml`. |
+| Grok | `grok` | Add a Custom connector at `grok.com/connectors` with the public HTTPS URL and required authentication. |
 | Hermes | `hermes` | Run the two native Hermes commands. Hermes prompts for the bearer and tests the connection. |
 | Claude Code | `claude-code` | Run the printed command. For the alternative block, run `claude mcp add-json things '<JSON>'` with the printed JSON as the argument. |
 | Cursor desktop | `cursor` | Merge the `things` entry into `~/.cursor/mcp.json`. |
@@ -30,12 +31,30 @@ For Hermes, the secret form prints the bearer separately from the two native
 commands and warns not to paste it into a shell. Paste only that bearer at the
 private Hermes prompt.
 
+For Grok, use a public HTTPS endpoint. Run this command in a private terminal:
+
+```console
+things-orchestrator print-config --client grok --show-secrets
+```
+
+The [official xAI connector guide](https://docs.x.ai/grok/connectors) says to
+open `grok.com/connectors`, choose **New Connector**, then choose **Custom**.
+Provide the URL and required authentication from the command output. The guide
+does not document exact form-field names. Before routine activation, confirm
+that Grok discovers exactly these eight tools: `things_view`, `things_find`,
+`things_get`, `things_capture`, `things_update`, `things_complete`,
+`things_trash`, and `things_receipt`.
+
 Do not paste the Things Cloud password into any client. Possession of the MCP
 bearer authorizes every bounded v2 mutation, including recoverable Trash and
 repeat Stop. There is no per-client identity.
 
 ## Client-specific facts
 
+- Grok Custom connectors require an MCP server that the public internet can
+  reach over HTTPS. The official connector guide documents connector discovery
+  in Grok conversations. It does not prove that every webhook-triggered Grok Bot
+  execution receives that connector. Complete the positive routine smoke test.
 - Hermes stores the MCP configuration in its active profile. Run
   `things-orchestrator print-config --client hermes --show-secrets` in a private
   terminal, then run the two printed commands one at a time on the Hermes host.

@@ -252,8 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="show safe configuration, service, worker, history, and delivery state",
         description=(
-            "Read value-free routines status. The command makes one bounded, "
-            "authenticated loopback health probe and never creates the routines database."
+            "Read value-free routines status. When an MCP bearer is configured, "
+            "the command attempts one bounded, authenticated loopback health probe. "
+            "It never creates the routines database."
         ),
     )
     show = commands.add_parser("print-config", help="render one client configuration")
@@ -542,7 +543,9 @@ def _routines_command(
             except (ConfigError, OSError, ServiceApplyError):
                 parser.error(
                     "Routines are enabled, but the supervised service install failed. "
-                    "Fix the service problem, then rerun this setup command."
+                    "Fix the service problem, then run "
+                    "`things-orchestrator service install`. The saved receiver "
+                    "values do not need to be entered again."
                 )
                 return
             print(
@@ -580,8 +583,10 @@ def _routines_command(
     if action == "status":
         routine_service_state = collect_service_state()
         bearer = credentials.bearer
-        runtime = probe_routine_runtime(
-            bearer.reveal() if bearer is not None else None
+        runtime = (
+            probe_routine_runtime(bearer.reveal())
+            if bearer is not None
+            else None
         )
         print(
             json.dumps(
@@ -612,6 +617,12 @@ def _receiver_url_prompt(receiver: str, *, guided: bool) -> str:
 def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
     if receiver == "grok":
         terminal.write(
+            "First connect Grok to Things MCP. In a private terminal, run "
+            "`things-orchestrator print-config --client grok --show-secrets`. "
+            "At grok.com/connectors, choose New Connector, then Custom. Provide "
+            "the public HTTPS MCP URL and required authentication from the output. "
+            "Confirm that the connector exposes exactly eight tools, including "
+            "things_get.\n\n"
             "In Grok Bot, create or edit a Routine, choose \"When a webhook fires\", "
             "paste the receiver instruction below, and save it before copying the "
             "generated POST URL and key.\n"
@@ -623,31 +634,37 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
     prompt = ROUTINE_RECEIVER_INSTRUCTION + "\n\nAuthenticated event metadata:\n{__raw__}"
     terminal.write(
         "On the Hermes host, run `hermes gateway setup` and enable webhooks. "
-        "The official guide verifies route creation, signing, deduplication, and "
-        "acknowledgements. It does not verify that every Hermes version exposes a "
-        "configured MCP server to a webhook-triggered session. Test Things access "
-        "before relying on the receiver. Use this receiver instruction:\n\n"
+        "Connect Things first with `things-orchestrator print-config --client "
+        "hermes --show-secrets`. The configured server named things creates the "
+        "mcp-things toolset. Use this receiver instruction:\n\n"
         f"{ROUTINE_RECEIVER_INSTRUCTION}\n\n"
         "Then create the route with this command:\n\n"
         "hermes webhook subscribe things-ai-task-created "
         f"--events {ROUTINE_EVENT_TYPE} "
         f"--prompt {shlex.quote(prompt)} "
         "--description 'Run the built-in Things AI task routine'\n\n"
-        "The subscribe command prints the webhook URL and HMAC secret. Enter both "
-        "below. Do not put either value in argv or chat.\n"
+        "The subscribe command prints the webhook URL and HMAC secret. Before you "
+        "return to this prompt, edit ~/.hermes/webhook_subscriptions.json. In the "
+        "things-ai-task-created entry, add \"toolsets\": [\"mcp-things\"]. The "
+        "subscribe command cannot set route toolsets, and webhook runs otherwise "
+        "use a restricted default. Run `hermes webhook test things-ai-task-created` "
+        "and confirm that the route can use things_get. Anyone with the route's HMAC "
+        "secret then gains the eight bounded Things tools, so keep it private. Enter "
+        "the URL and secret below. Do not put either value in argv or chat.\n"
     )
 
 
 def _print_routines_smoke_test() -> None:
     print("Smoke test:")
-    print("1. Create a fresh untagged task. Stop editing it and confirm no delivery.")
+    print("1. Record the current delivered count in routines status.")
+    print("2. Create a fresh untagged task. Stop editing it and confirm no new delivery.")
     print(
-        "2. Create another fresh task and assign the exact "
+        "3. Create another fresh task and assign the exact "
         f"{ROUTINE_TRIGGER_TAG} tag directly."
     )
-    print("3. Stop editing it, wait for settlement and polling, then run:")
+    print("4. Stop editing it, wait for settlement and polling, then run:")
     print("things-orchestrator routines status")
-    print("Confirm one delivery and the receiver action on only the selected task.")
+    print("Confirm exactly one new delivery and the receiver action on only that task.")
 
 
 def _login(

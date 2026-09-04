@@ -74,20 +74,37 @@ things-orchestrator routines status
 
 Before the prompt, setup prints the portable upstream `hermes gateway setup`
 and `hermes webhook subscribe` commands. The subscribe command returns the URL
-and HMAC secret. `setup` prompts for those values, saves an
-account-bound profile, enables it, and installs or restarts the supervised
-service. It does not put either value in shell history. Hermes is the default,
-so `--receiver hermes` is optional. The receiver URL must use HTTPS. Loopback
-HTTP is allowed for a Hermes receiver on the same host.
+and HMAC secret. Before you enter those values, edit
+`~/.hermes/webhook_subscriptions.json`. Add
+`"toolsets": ["mcp-things"]` to the `things-ai-task-created` entry, then run
+`hermes webhook test things-ai-task-created`. Dynamic subscription commands
+cannot set route toolsets. Without the manual grant, webhook runs use a
+restricted default and cannot call Things.
 
-The official Hermes guide verifies this transport setup, not the availability
-of a configured MCP server inside every webhook-triggered Hermes session. Run
-the positive smoke test in the routines guide before relying on Hermes-to-Things
-actions. No owner-run Hermes acceptance is recorded for v0.10.0.
+The configured MCP server named `things` creates `mcp-things`. Anyone who can
+send a valid HMAC request to this route gains its eight bounded Things tools.
+Keep the URL and HMAC secret private. `setup` saves the values, enables the
+account-bound profile, and installs or restarts the supervised service. Hermes
+is the default, so `--receiver hermes` is optional. Use the positive smoke test
+before relying on the route. No owner-run Hermes acceptance is recorded for
+v0.10.0.
 
-For Grok Bot, first create or edit a Routine. Choose "When a webhook fires",
-save the Routine, and leave it inactive. Then run this command in a private
+For Grok Bot, first connect the MCP server. Run this command in a private
 terminal:
+
+```console
+things-orchestrator print-config --client grok --show-secrets
+```
+
+At `grok.com/connectors`, choose **New Connector**, then choose **Custom**.
+Provide the public HTTPS MCP URL and required authentication from the output.
+Grok requires a server that the public internet can reach. Confirm that the
+connector exposes exactly eight tools, including `things_get`.
+The [official xAI connector guide](https://docs.x.ai/grok/connectors) documents
+this path.
+
+Create or edit a Routine. Choose **When a webhook fires**, save the Routine,
+and leave it inactive. Then run:
 
 ```console
 things-orchestrator routines setup --profile always_on --receiver grok
@@ -106,8 +123,9 @@ things-orchestrator routines status
 ```
 
 Keep the Grok Routine inactive until the command reports
-`trigger_ready=true`. Then
-turn Active on.
+`trigger_ready=true`. Then turn Active on and complete the positive smoke test.
+Official xAI documentation establishes Custom MCP connectors, but not that the
+observed webhook-triggered Grok Bot execution always receives that connector.
 
 Use `routines configure`, `routines enable`, and `service install` separately
 only for recovery or scripted administration. `configure` remains compatible

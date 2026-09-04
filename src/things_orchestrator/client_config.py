@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import shlex
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
+from urllib.parse import urlsplit
 
 from .config import ConfigError, McpBearer, McpUrl
 
 
 class ClientKind(str, Enum):
     CODEX = "codex"
+    GROK = "grok"
     HERMES = "hermes"
     CLAUDE_CODE = "claude-code"
     CURSOR = "cursor"
@@ -80,6 +83,24 @@ def render_client_config(
 
     token = endpoint.bearer.reveal() if show_secrets else "<mcp_token>"
     authorization = f"Bearer {token}"
+    if client is ClientKind.GROK:
+        if not _is_public_https(endpoint.url):
+            raise ConfigError("Grok configuration needs a public HTTPS MCP URL")
+        body = json.dumps(
+            {
+                "url": str(endpoint.url),
+                "headers": {"Authorization": authorization},
+            },
+            indent=2,
+        ) + "\n"
+        return RenderedClientConfig(
+            client,
+            body,
+            "At grok.com/connectors, choose New Connector, then Custom. "
+            "Provide the public HTTPS MCP URL and required authentication from "
+            "this output. Confirm that Grok discovers exactly eight tools before "
+            "you activate a routine.",
+        )
     if client is ClientKind.CODEX:
         body = (
             "[mcp_servers.things]\n"
@@ -160,3 +181,24 @@ def render_client_config(
             "Install this as /etc/caddy/Caddyfile, then reload Caddy through systemd.",
         )
     raise AssertionError(f"Unhandled client: {client}")
+
+
+def _is_public_https(url: McpUrl) -> bool:
+    if not url.origin.startswith("https://"):
+        return False
+    hostname = urlsplit(str(url)).hostname
+    if hostname is None or hostname.casefold() == "localhost":
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True
+    shared = ipaddress.ip_network("100.64.0.0/10")
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or isinstance(address, ipaddress.IPv4Address) and address in shared
+    )

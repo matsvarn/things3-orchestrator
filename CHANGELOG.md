@@ -11,6 +11,8 @@
 - `routines setup` provides private guided setup for Grok and Hermes, including
   a complete receiver instruction, a safe configuration summary, a readiness
   check, and negative and positive smoke tests.
+- `print-config --client grok` renders the public HTTPS MCP URL and required
+  Bearer authentication for an xAI Custom connector without a private wrapper.
 - `routines status` distinguishes saved configuration, account binding,
   supervised-service state, worker liveness, durable history phase, trigger
   readiness, safe aggregate counts, and last successful activity times.
@@ -23,6 +25,9 @@
 - Hermes delivery recognizes the documented exact `200 delivered` and `200
   duplicate` responses. The older exact `202 accepted` response remains a
   narrow compatibility case; other 2xx responses still retry.
+- Routines health probes and webhook deliveries ignore environment proxies and
+  never follow redirects. Hermes setup requires the `mcp-things` route toolset
+  and states the authority held by a valid HMAC sender.
 - Grok routines, testing, history, approvals, and retries are documented as
   official concepts. Its exact inbound webhook route, Bearer header, and
   acknowledgement remain observed beta compatibility.

@@ -45,7 +45,8 @@ Keep one production server and one stable model Interface.
   reuses the mutation journal.
 - `routines_webhook.py` builds the one-method adapter from `HermesReceiver` or
   `GrokReceiver`, sends the exact stored body over bounded redirect-free HTTP,
-  and keeps the acknowledgement classifiers separate.
+  ignores environment proxies, and keeps the acknowledgement classifiers
+  separate.
 - `routines.py` owns one polling and delivery loop, independent backoff, hot
   disablement, and the dedicated blocking-work limit.
 - `owner_authority.py` is retained only for signed legacy recovery. It is not

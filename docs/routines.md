@@ -39,17 +39,28 @@ work.
 
 ## Set up Grok Bot
 
+The [official xAI connector guide](https://docs.x.ai/grok/connectors) documents
+Custom MCP connectors. Grok requires a server that the public internet can
+reach. Use an HTTPS MCP URL and required authentication.
+
 The [official Grok Bot routines guide](https://docs.x.ai/grok-bot/skills-routines-and-automations)
 documents routines, testing, history, approvals, and retries. It does not
 document the exact inbound webhook host, path, Bearer header, or acknowledgement
 body used by the current beta.
 
-1. In Grok Bot, create or edit a Routine.
-2. Choose **When a webhook fires**.
-3. Paste the complete receiver instruction printed by setup.
-4. Save the Routine before you copy its generated POST URL and key.
-5. Keep the Routine inactive.
-6. In a private terminal on the Things Orchestrator host, run:
+1. In a private terminal on the Things Orchestrator host, run
+   `things-orchestrator print-config --client grok --show-secrets`.
+2. Open `grok.com/connectors`. Choose **New Connector**, then choose **Custom**.
+3. Provide the public HTTPS URL and required authentication from the command
+   output. The official guide does not document exact form-field names.
+4. Confirm that the connector exposes exactly eight tools, including
+   `things_get`.
+5. In Grok Bot, create or edit a Routine.
+6. Choose **When a webhook fires**.
+7. Paste the complete receiver instruction printed by setup.
+8. Save the Routine before you copy its generated POST URL and key.
+9. Keep the Routine inactive.
+10. In a private terminal on the Things Orchestrator host, run:
 
 ```console
 things-orchestrator routines setup --profile always_on --receiver grok
@@ -62,17 +73,21 @@ Bearer credential. It marks delivery complete only after the observed exact
 `200` response with `success=true` and a nonempty `runUuid`. Treat these details
 as observed beta compatibility, not an official xAI webhook contract.
 
+Official connector documentation does not prove that a webhook-triggered Grok
+Bot execution receives the configured Custom connector. Keep the Routine
+inactive until status is ready, then use the positive smoke test to prove that
+exact execution path.
+
 Run the readiness check printed by setup. Turn the Grok Routine Active only
 when `trigger_ready` is `true`.
 
 ## Set up Hermes
 
 The [official Hermes webhook guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks)
-documents the portable transport path: gateway setup, dynamic subscription,
-signing, deduplication, and acknowledgements. It does not establish that every
-Hermes version exposes a configured MCP server to a webhook-triggered session.
-The steps below fully configure transport, but Hermes-to-Things access remains
-an acceptance check rather than a general compatibility claim.
+documents gateway setup, dynamic subscriptions, route toolsets, signing,
+deduplication, testing, and acknowledgements. A configured MCP server named
+`things` creates the `mcp-things` toolset. Webhook runs use a restricted default
+unless you grant a route toolset manually.
 
 1. Connect Hermes to Things with the generated configuration from
    `things-orchestrator print-config --client hermes --show-secrets`.
@@ -85,10 +100,17 @@ things-orchestrator routines setup --profile always_on --receiver hermes
 
 4. Setup prints a complete `hermes webhook subscribe` command. Run that command
    on the Hermes host.
-5. The Hermes command prints the webhook URL and an HMAC secret. Enter them at
-   the waiting Things Orchestrator prompts.
-6. Before relying on the routine, use the positive smoke test below to confirm
-   that the webhook-triggered Hermes session can call the configured Things MCP.
+5. Edit `~/.hermes/webhook_subscriptions.json`. In the
+   `things-ai-task-created` entry, add `"toolsets": ["mcp-things"]`.
+   `hermes webhook subscribe` cannot set route toolsets.
+6. Run `hermes webhook test things-ai-task-created`. Confirm that the route can
+   use `things_get` through the configured Things MCP.
+7. Return to the waiting Things Orchestrator prompts. Enter the webhook URL and
+   HMAC secret printed by the subscribe command.
+
+Anyone who can send a valid HMAC request to this route gains the eight bounded
+Things tools through `mcp-things`. Keep the route URL and HMAC secret private.
+The positive smoke test must still prove the real selected-task flow.
 
 Things Orchestrator signs the exact request body with
 `X-Webhook-Signature-V2` over `<timestamp>.<body>`. It sends the timestamp in
@@ -130,9 +152,10 @@ Run:
 things-orchestrator routines status
 ```
 
-The command makes one bounded authenticated request to the local `/health`
-endpoint. It reports these facts without account data, URLs, hosts, secrets,
-Things IDs, event IDs, history identity, response bodies, or task content:
+When an MCP bearer is configured, the command attempts one bounded authenticated
+request to the local `/health` endpoint. It reports these facts without account
+data, URLs, hosts, secrets, Things IDs, event IDs, history identity, response
+bodies, or task content:
 
 - `configuration_state` is the saved state.
 - `account_binding` says whether the saved profile matches the current account.
@@ -181,11 +204,13 @@ polling interval both contribute to that delay.
 
 First, run the negative control:
 
-1. Create a fresh normal task without `AI`.
-2. Stop editing the task.
-3. Wait through settlement and one poll.
-4. Run `things-orchestrator routines status`.
-5. Confirm that the receiver saw no event and performed no action.
+1. Run `things-orchestrator routines status` and record the delivered count.
+2. Create a fresh normal task without `AI`.
+3. Stop editing the task.
+4. Wait through settlement and one poll.
+5. Run `things-orchestrator routines status` again.
+6. Confirm that the delivered count did not change and the receiver performed
+   no action.
 
 Then run the positive check:
 

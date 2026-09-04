@@ -94,12 +94,27 @@ For Grok Bot, create or edit a Routine, choose "When a webhook fires", save it,
 and leave it inactive before running setup. The command prompts for the
 generated POST URL and key in a private terminal. Do not put either value in
 argv or chat. Paste the complete receiver instruction printed by setup into
-the Routine.
+the Routine. Before setup, run this command and configure a Custom connector at
+`grok.com/connectors`:
+
+```console
+things-orchestrator print-config --client grok --show-secrets
+```
+
+Confirm that it exposes exactly eight tools, including `things_get`.
+
+For Hermes, setup prints the subscription command. Before you enter the
+returned URL and secret, add `"toolsets": ["mcp-things"]` to the
+`things-ai-task-created` entry in `~/.hermes/webhook_subscriptions.json`. Run
+`hermes webhook test things-ai-task-created`. Keep the HMAC secret private
+because a valid sender gains the eight bounded Things tools on that route.
 
 Run `things-orchestrator routines status`. Turn Active on only after the status
-reports `trigger_ready=true`. Setup enables the profile before it installs the service.
-If service installation fails, fix the reported service problem and rerun the
-same setup command. The rerun converges.
+reports `trigger_ready=true`. Setup enables the profile before it installs the
+service.
+If service installation fails, the enabled configuration already contains the
+receiver values. Fix the service problem, then run
+`things-orchestrator service install`. Do not re-enter one-time receiver values.
 
 The commands below are low-level recovery and automation controls.
 
@@ -174,13 +189,15 @@ a real installation, the owner must:
 
 1. Configure the receiver's MCP connection through the matching client setup in
    a private terminal. Hermes can use `print-config --client hermes
-   --show-secrets`.
+   --show-secrets`. Grok can use `print-config --client grok --show-secrets`.
 2. Configure and enable routines, then restart the supervised service.
-3. Create a fresh normal task and assign the exact `AI` tag directly.
-4. Confirm one metadata-only webhook reaches the receiver.
-5. Confirm the receiver can call `things_get` for the public task ID through
+3. Record the delivered count. Create a fresh untagged task, stop editing it,
+   and wait through settlement and one poll. Confirm no new delivery.
+4. Create another fresh normal task and assign the exact `AI` tag directly.
+5. Confirm exactly one new metadata-only webhook reaches the receiver.
+6. Confirm the receiver can call `things_get` for the public task ID through
    MCP, then perform any intended change through the existing bounded tools.
-6. Remove or trash the disposable task through the normal owner workflow.
+7. Remove or trash the disposable tasks through the normal owner workflow.
 
 Do not use an existing task for this check; baseline startup intentionally does
 not replay historical tasks. The official Grok Bot guide documents routines,

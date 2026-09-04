@@ -24,6 +24,11 @@ Delivery is at least once. The receiver must deduplicate `event_id` before it
 acts. A crash after receiver acceptance but before the local delivery commit can
 cause a retry.
 
+The Hermes route needs the `mcp-things` toolset to perform the selected-task
+flow. Anyone who can send a valid HMAC request to that route gains the eight
+bounded Things tools. Keep the route URL and HMAC secret private. The selected
+task content remains subject to the receiver instruction below.
+
 The generated service marker records that the owner started the supervised
 path. It is not a security attestation against a local process owner. Unknown
 history versions and malformed fields stop cursor advancement.

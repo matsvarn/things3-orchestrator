@@ -600,6 +600,35 @@ def test_print_config_show_secrets_prints_bearer(
     assert "mcp_servers.things" in out
 
 
+def test_grok_print_config_uses_saved_public_endpoint_and_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {"email": "user@example.com", "password": "secret", "mcp_token": "keep-me"}
+        )
+        + "\n"
+    )
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text(
+        '{"version":2,"note_style":"natural","mcp_url":"https://tasks.example.com/mcp"}\n'
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+
+    main(["print-config", "--client", "grok", "--show-secrets"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer keep-me"},
+    }
+    assert "grok.com/connectors" in captured.err
+    assert "exactly eight tools" in captured.err
+
+
 @pytest.mark.parametrize("show_secrets", [False, True])
 def test_hermes_print_config_keeps_the_bearer_out_of_commands(
     monkeypatch: pytest.MonkeyPatch,

@@ -20,8 +20,8 @@ same supervised restart.
 
 The CLI never accepts a receiver secret or key in arguments. `--url` remains
 available for both receiver kinds, but omitting it keeps the URL in the private
-terminal interaction. Status includes only the receiver kind and a redacted
-scheme. It never prints the URL or host.
+terminal interaction. Status includes the receiver kind. It never prints the
+URL or host.
 
 The service-generated launchd and systemd commands include a hidden
 `--service-managed` marker. Stdio and manually started HTTP processes never
@@ -98,8 +98,8 @@ health remains exactly `{"ok": true}`.
   read-only counts.
 - `routines_webhook.py` exposes one `Webhook.deliver` interface and
   `build_webhook(receiver)` factory. The Hermes adapter owns V2 signing. The
-  Grok adapter owns Bearer authentication. Both use redirect-free bounded HTTP,
-  but each keeps its acknowledgement classifier separate.
+  Grok adapter owns Bearer authentication. Both use proxyless, redirect-free,
+  bounded HTTP, but each keeps its acknowledgement classifier separate.
 - `routines.py` owns scheduling, independent Cloud and delivery backoff,
   stop/disable checks, and the single lifecycle entry point.
 - `cli.py` is the composition root. It reads one credential snapshot, builds the
@@ -110,8 +110,9 @@ health remains exactly `{"ok": true}`.
   Disabled callers take the existing lifespan path and construct no worker,
   Cloud client, process lock, database, or task.
 - `diagnostics.py` combines configuration, service status, one bounded
-  authenticated loopback health snapshot, and read-only value-free counts. It
-  never creates a routines database.
+  authenticated loopback health snapshot when an MCP bearer exists, and
+  read-only value-free counts. Its health request is proxyless and
+  redirect-free. It never creates a routines database.
 
 The lifecycle factory is the only interface between the HTTP host and the
 worker. The worker receives the one-method webhook interface, so the host,
@@ -198,9 +199,10 @@ process lock.
   event ID. Hermes duplicate acknowledgement converges it to delivered. Grok
   Bot may start a duplicate run. The complete receiver instruction requires
   deduplication by `event_id` before any action.
-- Secrets, URLs, hosts, history keys, account email, task content, task IDs,
-  event IDs, and response bodies
-  are absent from events, logs, diagnostics, support output, and exceptions.
+- The event deliberately contains an opaque `event_id` and public `task_id`.
+  It excludes task content, secrets, private account and history data, and
+  receiver data. Logs, status, diagnostics, support output, and exceptions omit
+  event and task ID values as well as all private values and response bodies.
 - Things Cloud remains unsupported. History family versions and field meanings
   are verified by fixtures, not by a provider contract.
 

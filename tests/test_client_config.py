@@ -7,7 +7,7 @@ import tomllib
 import pytest
 
 from things_orchestrator.client_config import ClientKind, Endpoint, render_client_config
-from things_orchestrator.config import McpBearer, normalize_mcp_url
+from things_orchestrator.config import ConfigError, McpBearer, normalize_mcp_url
 
 
 @pytest.fixture
@@ -68,6 +68,46 @@ def test_hermes_renderer_never_puts_the_secret_in_commands(endpoint: Endpoint) -
     rendered = render_client_config(ClientKind.HERMES, endpoint, show_secrets=True)
 
     assert "secret-bearer" not in rendered.body
+
+
+def test_grok_config_exposes_public_mcp_url_and_required_bearer(
+    endpoint: Endpoint,
+) -> None:
+    redacted = render_client_config(ClientKind.GROK, endpoint, show_secrets=False)
+    revealed = render_client_config(ClientKind.GROK, endpoint, show_secrets=True)
+
+    assert json.loads(redacted.body) == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer <mcp_token>"},
+    }
+    assert json.loads(revealed.body) == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer secret-bearer"},
+    }
+    assert "grok.com/connectors" in revealed.guidance
+    assert "New Connector" in revealed.guidance
+    assert "Custom" in revealed.guidance
+    assert "exactly eight tools" in revealed.guidance
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://127.0.0.1:8787",
+        "https://127.0.0.1:8787",
+        "https://localhost:8787",
+        "https://192.168.1.2",
+        "https://100.64.0.2",
+    ),
+)
+def test_grok_config_rejects_a_non_public_endpoint(url: str) -> None:
+    endpoint = Endpoint(
+        url=normalize_mcp_url(url),
+        bearer=McpBearer("secret-bearer"),
+    )
+
+    with pytest.raises(ConfigError, match="public HTTPS"):
+        render_client_config(ClientKind.GROK, endpoint, show_secrets=True)
 
 
 def test_cursor_configs_are_parseable_and_cloud_guidance_is_explicit(

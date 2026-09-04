@@ -168,6 +168,7 @@ def test_secret_bearing_client_commands_require_show_secrets(tmp_path: Path) -> 
 
 things-orchestrator print-config --client codex
 things-orchestrator print-config --client hermes
+things-orchestrator print-config --client grok
 things-orchestrator print-config --client caddy
 things-orchestrator print-config --client cursor --show-secrets
 things-orchestrator print-config --url https://example.com --client claude-code
@@ -178,8 +179,9 @@ things-orchestrator print-config --client=cursor-cloud
     assert instruction_errors(tmp_path) == [
         "guide.md:3: usable client config needs --show-secrets",
         "guide.md:4: usable client config needs --show-secrets",
-        "guide.md:7: usable client config needs --show-secrets",
+        "guide.md:5: usable client config needs --show-secrets",
         "guide.md:8: usable client config needs --show-secrets",
+        "guide.md:9: usable client config needs --show-secrets",
     ]
 
 
