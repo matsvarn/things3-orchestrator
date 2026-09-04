@@ -14,6 +14,7 @@ import pytest
 from things_orchestrator.cli import (
     _legacy_resolution_command,
     _private_tty,
+    _routine_secret_tty,
     _server,
     build_parser,
     main,
@@ -67,6 +68,63 @@ def test_private_tty_rejects_redirected_inherited_streams(
 
     with pytest.raises(SystemExit) as caught:
         with _private_tty(build_parser()):
+            pass
+
+    assert caught.value.code == 2
+
+
+def test_routine_secret_tty_prefers_inherited_terminal_when_dev_tty_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdin = _TTYBuffer()
+    stderr = _TTYBuffer()
+
+    def denied(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("service account cannot reopen the terminal")
+
+    monkeypatch.setattr("things_orchestrator.cli.open", denied, raising=False)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", stdin)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", stderr)
+
+    with _routine_secret_tty(build_parser()) as terminal:
+        assert terminal is stderr
+        terminal.write("private prompt")
+
+    assert stderr.getvalue() == "private prompt"
+    assert not stdin.closed
+    assert not stderr.closed
+
+
+def test_routine_secret_tty_opens_dev_tty_when_stdin_is_redirected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = _TTYBuffer()
+
+    def available(*_args: object, **_kwargs: object) -> _TTYBuffer:
+        return terminal
+
+    monkeypatch.setattr("things_orchestrator.cli.open", available, raising=False)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", StringIO())
+    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", _TTYBuffer())
+
+    with _routine_secret_tty(build_parser()) as selected:
+        assert selected is terminal
+
+    assert terminal.closed
+
+
+def test_routine_secret_tty_rejects_process_without_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no controlling terminal")
+
+    monkeypatch.setattr("things_orchestrator.cli.open", unavailable, raising=False)
+    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", StringIO())
+    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", StringIO())
+
+    with pytest.raises(SystemExit) as caught:
+        with _routine_secret_tty(build_parser()):
             pass
 
     assert caught.value.code == 2
