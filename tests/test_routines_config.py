@@ -14,6 +14,7 @@ from things_orchestrator.config import ConfigError
 from things_orchestrator.routines_config import (
     DisabledRoutineConfig,
     EnabledRoutineConfig,
+    ReceiverKind,
     ReceiverSecret,
     account_digest,
     configure_routines,
@@ -135,6 +136,35 @@ def test_receiver_url_fails_closed(url: str, tmp_path: Path) -> None:
             poll_interval_seconds=60,
             path=tmp_path / "routines.json",
         )
+
+
+@pytest.mark.parametrize(
+    ("receiver_kind", "path"),
+    (
+        ("hermes", "/webhooks/task"),
+        ("grok", "/automations/webhook/route"),
+    ),
+)
+def test_malformed_receiver_authority_is_a_value_free_config_error(
+    receiver_kind: ReceiverKind,
+    path: str,
+    tmp_path: Path,
+) -> None:
+    private_url = f"https://[private-{receiver_kind}{path}"
+
+    with pytest.raises(ConfigError, match="receiver URL is invalid") as caught:
+        configure_routines(
+            email="owner@example.com",
+            receiver_kind=receiver_kind,
+            receiver_url=private_url,
+            receiver_secret=ReceiverSecret("private-secret"),
+            poll_interval_seconds=60,
+            path=tmp_path / "routines.json",
+        )
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert private_url not in rendered
+    assert "Invalid IPv6 URL" not in rendered
 
 
 def test_config_rejects_unknown_version_and_profile(tmp_path: Path) -> None:
@@ -382,3 +412,53 @@ def test_cli_rejects_secret_argv_without_echoing_its_value(
     assert "must-not-render" not in captured.out
     assert "must-not-render" not in captured.err
     assert "/dev/tty" in captured.err
+
+
+def test_cli_renders_malformed_private_receiver_url_without_traceback_or_value(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_root = tmp_path / "config"
+    owner_dir = config_root / "things-orchestrator"
+    owner_dir.mkdir(parents=True)
+    (owner_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "email": "owner@example.com",
+                "password": "cloud-secret",
+                "mcp_token": "mcp-bearer",
+            }
+        )
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    private_url = "https://[private-malformed/automations/webhook/route"
+
+    @contextmanager
+    def tty(_parser: object) -> Iterator[StringIO]:
+        yield StringIO()
+
+    answers = iter((private_url, "private-key", "private-key"))
+    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.getpass",
+        lambda _prompt, stream=None: next(answers),
+    )
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "routines",
+                "configure",
+                "--profile",
+                "always_on",
+                "--receiver",
+                "grok",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert "receiver URL is invalid" in rendered
+    for private in (private_url, "private-key", "Invalid IPv6 URL", "Traceback"):
+        assert private not in rendered
