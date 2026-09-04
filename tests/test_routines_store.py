@@ -778,6 +778,24 @@ def test_new_fingerprint_at_old_cursor_is_a_typed_reset_signal(
         store.close()
 
 
+def test_regressed_head_during_seed_is_a_typed_reset_signal(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.apply_batch(
+            _batch(0, 5, [[_event("ai", 0, "Tag4", {"tt": "AI"})]], caught_up=False),
+            observed_at=0,
+        )
+        assert (store.counts().phase, store.cursor()) == ("seeding", 1)
+
+        with pytest.raises(RoutineHistoryIdentityChanged):
+            store.apply_batch(_batch(1, 3, [[]], caught_up=False), observed_at=1)
+
+        counts = store.counts()
+        assert (counts.phase, counts.cursor, counts.ai_tags) == ("seeding", 1, 1)
+    finally:
+        store.close()
+
+
 def test_only_one_process_owner_and_diagnostics_never_create(tmp_path: Path) -> None:
     profile = _profile()
     path = tmp_path / "routines.sqlite3"

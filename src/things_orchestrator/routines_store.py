@@ -223,6 +223,10 @@ class RoutineStore:
                     "Things Cloud history identity changed"
                 )
             assert isinstance(baseline_head, int)
+            if phase == "seeding" and batch.current_head < baseline_head:
+                raise RoutineHistoryIdentityChanged(
+                    "Things Cloud history head regressed during seeding"
+                )
             for group in batch.groups:
                 live = phase == "live" or group.index >= baseline_head
                 if live and phase != "live":
