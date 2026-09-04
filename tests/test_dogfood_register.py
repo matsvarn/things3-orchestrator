@@ -31,7 +31,7 @@ def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
     )
 
     for workflow in supported:
-        assert f"**{workflow} — Queued for v0.9.1.**" in text
+        assert f"**{workflow}. Queued for v0.10.0.**" in text
     for workflow in deferred:
         assert workflow in text
 
@@ -53,11 +53,31 @@ def test_dogfood_register_keeps_human_and_automated_proof_separate() -> None:
     text = DOGFOOD.read_text()
 
     assert "Automated tests and isolated model replays do not count" in text
-    assert "Weekly review — Round 1 complete" in text
+    assert "Weekly review: round 1 complete" in text
     assert "primary event is one correct current read" in text
     assert "receipt and Cloud" in text
     assert "whether the Things skill was installed" in text
     assert "Repeat required" in text
+
+
+def test_dogfood_records_bounded_routines_owner_acceptance() -> None:
+    text = " ".join(DOGFOOD.read_text().split())
+
+    for evidence in (
+        "private VPS",
+        "history phase reached `live`",
+        "fresh untagged task",
+        "exact `AI` tag directly",
+        "one event",
+        "fetched the selected task through MCP",
+        "updated that task's notes",
+        "zero candidates",
+        "zero pending events",
+        "one delivered event",
+        "zero dead letters",
+        "topology only",
+    ):
+        assert evidence in text
 
 
 def test_next_dogfood_prompt_stays_natural() -> None:

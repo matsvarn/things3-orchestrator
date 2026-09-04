@@ -1,6 +1,6 @@
 # Product contract
 
-Release contract: v0.9.1
+Release contract: v0.10.0
 
 This file is the concise product reference for the current release. Public
 claims must also remain consistent with the executable tool schemas, tests,
@@ -48,6 +48,10 @@ reconciles the frozen operation instead of posting it again.
 - A repository-distributed Codex plugin and a release-pinned Hermes skill.
 - Exact-tag installation and version-, commit-, schema-, contract-, and
   tool-list verification through `doctor`.
+- One optional, disabled-by-default routine for a new normal, open, untrashed
+  task with an exact directly assigned tag titled `AI`. The routine runs only
+  in the supervised `always_on` HTTP service, sends metadata only, and adds no
+  MCP tool. See [Run the built-in AI task routine](docs/routines.md).
 
 Client configuration support means the project can render and document the
 connection. It does not imply endorsement, marketplace acceptance, or official
@@ -59,7 +63,7 @@ The serving host stores the Things Cloud password in a mode-0600 file. Never
 paste that password into chat. HTTP clients receive an MCP URL and one shared
 bearer; possession of that bearer, or access to the stdio server, grants all
 eight tools and therefore every bounded write. There is no read-only bearer or
-per-client authorization in v0.9.1.
+per-client authorization in v0.10.0.
 
 Task data returned to a client can reach its configured model provider. Owners
 must trust the serving host, client, and model provider. TLS termination and

@@ -1,5 +1,8 @@
 # Connect a client
 
+If this client will receive routine events, finish the MCP connection first,
+then follow [Run the built-in AI task routine](routines.md).
+
 HTTP clients use the same MCP URL and bearer. The serving host keeps the Things
 Cloud email and password. Run `print-config` there in a private terminal, then
 transfer only its output to the client. Same-host Codex can instead use the
@@ -52,7 +55,7 @@ on one host. Install and log in to Things Orchestrator first. Then add this Git
 repository as a marketplace and install its plugin:
 
 ```console
-codex plugin marketplace add matsvarn/things3-orchestrator --ref v0.9.1
+codex plugin marketplace add matsvarn/things3-orchestrator --ref v0.10.0
 codex plugin add things-orchestrator@things-orchestrator
 ```
 
