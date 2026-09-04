@@ -85,7 +85,7 @@ def render_systemd_unit(
         "Type=simple\n"
         f"User={user}\n"
         f"{environment_lines}"
-        f"ExecStart={_systemd_quote(executable)} serve-http --port 8787\n"
+        f"ExecStart={_systemd_quote(executable)} serve-http --port 8787 --service-managed\n"
         "Restart=on-failure\n"
         "RestartSec=2\n"
         "\n"
@@ -106,6 +106,7 @@ def render_launchd_plist(
             "serve-http",
             "--port",
             "8787",
+            "--service-managed",
         ],
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},

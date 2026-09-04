@@ -1,0 +1,352 @@
+"""Private, account-bound configuration for the optional routines worker."""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, TypeAlias
+from urllib.parse import urlsplit, urlunsplit
+
+from .config import ConfigError
+
+ROUTINE_ID = "things-ai-task-created-v1"
+_VERSION = 1
+_LOOPBACK = frozenset(("127.0.0.1", "localhost", "::1"))
+_WEBHOOK_PATH = re.compile(r"^/webhooks/[A-Za-z0-9][A-Za-z0-9._~-]*$")
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class ReceiverSecret:
+    value: str
+
+    def __post_init__(self) -> None:
+        if not self.value:
+            raise ConfigError("The receiver secret is empty")
+
+    def __str__(self) -> str:
+        return "<receiver_secret>"
+
+    def reveal(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    initial_delay_seconds: int = 5
+    max_delay_seconds: int = 900
+    max_attempts: int = 10
+    max_age_seconds: int = 604_800
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class RoutineProfile:
+    account_digest: str
+    host_profile: Literal["always_on"]
+    receiver_url: str
+    receiver_secret: ReceiverSecret
+    poll_interval_seconds: int
+    settle_seconds: int
+    retry: RetryPolicy
+    routine_id: str = ROUTINE_ID
+
+
+@dataclass(frozen=True, slots=True)
+class UnconfiguredRoutineConfig:
+    state: Literal["unconfigured"] = "unconfigured"
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledRoutineConfig:
+    profile: RoutineProfile
+    state: Literal["disabled"] = "disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class EnabledRoutineConfig:
+    profile: RoutineProfile
+    state: Literal["enabled"] = "enabled"
+
+
+RoutineConfig: TypeAlias = (
+    UnconfiguredRoutineConfig | DisabledRoutineConfig | EnabledRoutineConfig
+)
+
+
+def account_digest(email: str) -> str:
+    normalized = email.strip().casefold().encode("utf-8")
+    return hashlib.sha256(b"things-orchestrator/account/v1\0" + normalized).hexdigest()
+
+
+def routines_config_path() -> Path:
+    root = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(root) if root else Path.home() / ".config"
+    return base / "things-orchestrator" / "routines.json"
+
+
+def routines_state_dir() -> Path:
+    root = os.environ.get("XDG_STATE_HOME")
+    base = Path(root) if root else Path.home() / ".local" / "state"
+    return base / "things-orchestrator" / "routines"
+
+
+def configure_routines(
+    *,
+    email: str,
+    receiver_url: str,
+    receiver_secret: ReceiverSecret,
+    poll_interval_seconds: int,
+    settle_seconds: int = 120,
+    path: Path | None = None,
+) -> DisabledRoutineConfig:
+    profile = RoutineProfile(
+        account_digest=account_digest(email),
+        host_profile="always_on",
+        receiver_url=_normalize_receiver_url(receiver_url),
+        receiver_secret=receiver_secret,
+        poll_interval_seconds=_bounded_int(
+            poll_interval_seconds, 60, 3600, "Polling interval"
+        ),
+        settle_seconds=_bounded_int(settle_seconds, 1, 3600, "Settle window"),
+        retry=RetryPolicy(),
+    )
+    result = DisabledRoutineConfig(profile)
+    save_routines_config(result, path=path)
+    return result
+
+
+def load_routines_config(*, path: Path | None = None) -> RoutineConfig:
+    target = path or routines_config_path()
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return UnconfiguredRoutineConfig()
+    except (OSError, UnicodeError) as error:
+        raise ConfigError("Routines configuration is unreadable") from error
+    try:
+        raw: object = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ConfigError("Routines configuration is unreadable") from error
+    return _parse_config(raw)
+
+
+def save_routines_config(
+    config: DisabledRoutineConfig | EnabledRoutineConfig,
+    *,
+    path: Path | None = None,
+) -> Path:
+    target = path or routines_config_path()
+    profile = config.profile
+    payload = {
+        "version": _VERSION,
+        "state": config.state,
+        "profile": {
+            "account_digest": profile.account_digest,
+            "host_profile": profile.host_profile,
+            "receiver_url": profile.receiver_url,
+            "receiver_secret": profile.receiver_secret.reveal(),
+            "poll_interval_seconds": profile.poll_interval_seconds,
+            "settle_seconds": profile.settle_seconds,
+            "routine_id": profile.routine_id,
+            "retry": {
+                "initial_delay_seconds": profile.retry.initial_delay_seconds,
+                "max_delay_seconds": profile.retry.max_delay_seconds,
+                "max_attempts": profile.retry.max_attempts,
+                "max_age_seconds": profile.retry.max_age_seconds,
+            },
+        },
+    }
+    _atomic_private_write(target, json.dumps(payload, indent=2) + "\n")
+    return target
+
+
+def set_routines_enabled(
+    enabled: bool,
+    *,
+    email: str,
+    path: Path | None = None,
+) -> DisabledRoutineConfig | EnabledRoutineConfig:
+    current = load_routines_config(path=path)
+    if isinstance(current, UnconfiguredRoutineConfig):
+        raise ConfigError("Configure routines before enabling or disabling them")
+    if current.profile.account_digest != account_digest(email):
+        raise ConfigError(
+            "Routines configuration belongs to a different Things account"
+        )
+    result: DisabledRoutineConfig | EnabledRoutineConfig
+    result = (
+        EnabledRoutineConfig(current.profile)
+        if enabled
+        else DisabledRoutineConfig(current.profile)
+    )
+    if result.state != current.state:
+        save_routines_config(result, path=path)
+    return result
+
+
+def routines_status(
+    config: RoutineConfig, *, email: str | None = None
+) -> dict[str, object]:
+    if isinstance(config, UnconfiguredRoutineConfig):
+        return {"state": "unconfigured"}
+    profile = config.profile
+    bound = email is not None and profile.account_digest == account_digest(email)
+    parsed = urlsplit(profile.receiver_url)
+    return {
+        "state": config.state,
+        "account_bound": bound,
+        "host_profile": profile.host_profile,
+        "receiver": f"{parsed.scheme}://<redacted>",
+        "poll_interval_seconds": profile.poll_interval_seconds,
+        "settle_seconds": profile.settle_seconds,
+        "routine_id": profile.routine_id,
+    }
+
+
+def _parse_config(raw: object) -> RoutineConfig:
+    if not isinstance(raw, dict) or raw.get("version") != _VERSION:
+        raise ConfigError("Routines configuration has an unsupported version")
+    state = raw.get("state")
+    profile_raw = raw.get("profile")
+    if state not in {"disabled", "enabled"} or not isinstance(profile_raw, dict):
+        raise ConfigError("Routines configuration has an invalid state")
+    try:
+        digest = _hex_digest(profile_raw["account_digest"])
+        host_profile = profile_raw["host_profile"]
+        if host_profile != "always_on":
+            raise ConfigError("Routines require the always_on host profile")
+        routine_id = profile_raw["routine_id"]
+        if routine_id != ROUTINE_ID:
+            raise ConfigError("Routines configuration names an unknown routine")
+        retry_raw = profile_raw["retry"]
+        if not isinstance(retry_raw, dict):
+            raise ConfigError("Routines retry policy is invalid")
+        retry = RetryPolicy(
+            initial_delay_seconds=_bounded_int(
+                retry_raw["initial_delay_seconds"], 1, 3600, "Initial retry delay"
+            ),
+            max_delay_seconds=_bounded_int(
+                retry_raw["max_delay_seconds"], 1, 3600, "Maximum retry delay"
+            ),
+            max_attempts=_bounded_int(
+                retry_raw["max_attempts"], 1, 100, "Maximum attempts"
+            ),
+            max_age_seconds=_bounded_int(
+                retry_raw["max_age_seconds"], 60, 31_536_000, "Maximum event age"
+            ),
+        )
+        if retry.max_delay_seconds < retry.initial_delay_seconds:
+            raise ConfigError("Maximum retry delay is below the initial retry delay")
+        url = profile_raw["receiver_url"]
+        secret = profile_raw["receiver_secret"]
+        if not isinstance(url, str) or not isinstance(secret, str):
+            raise ConfigError("Routines receiver configuration is invalid")
+        profile = RoutineProfile(
+            account_digest=digest,
+            host_profile="always_on",
+            receiver_url=_normalize_receiver_url(url),
+            receiver_secret=ReceiverSecret(secret),
+            poll_interval_seconds=_bounded_int(
+                profile_raw["poll_interval_seconds"], 60, 3600, "Polling interval"
+            ),
+            settle_seconds=_bounded_int(
+                profile_raw["settle_seconds"], 1, 3600, "Settle window"
+            ),
+            retry=retry,
+            routine_id=ROUTINE_ID,
+        )
+    except KeyError as error:
+        raise ConfigError("Routines configuration is incomplete") from error
+    return (
+        EnabledRoutineConfig(profile)
+        if state == "enabled"
+        else DisabledRoutineConfig(profile)
+    )
+
+
+def _normalize_receiver_url(raw: str) -> str:
+    value = raw.strip()
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError("The receiver URL must not contain credentials")
+    host = parsed.hostname
+    if host is None or not _valid_host(host):
+        raise ConfigError("The receiver URL needs a valid host")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ConfigError("The receiver URL port is invalid") from error
+    if parsed.scheme == "https":
+        pass
+    elif parsed.scheme == "http" and host.casefold().removesuffix(".") in _LOOPBACK:
+        pass
+    else:
+        raise ConfigError("The receiver URL needs HTTPS or loopback HTTP")
+    if (
+        _WEBHOOK_PATH.fullmatch(parsed.path) is None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigError(
+            "The receiver URL path must be /webhooks/<route> with no query or fragment"
+        )
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _valid_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.removesuffix(".").split(".")
+        return bool(labels) and all(
+            label
+            and label.isascii()
+            and len(label) <= 63
+            and label[0].isalnum()
+            and label[-1].isalnum()
+            and all(char.isalnum() or char == "-" for char in label)
+            for label in labels
+        )
+    return True
+
+
+def _hex_digest(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        raise ConfigError("Routines account binding is invalid")
+    try:
+        bytes.fromhex(value)
+    except ValueError as error:
+        raise ConfigError("Routines account binding is invalid") from error
+    return value
+
+
+def _bounded_int(value: object, lower: int, upper: int, label: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not lower <= value <= upper
+    ):
+        raise ConfigError(f"{label} must be between {lower} and {upper} seconds")
+    return value
+
+
+def _atomic_private_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(raw_temp)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise

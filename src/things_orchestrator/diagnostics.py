@@ -31,6 +31,13 @@ from .deployment import (
 )
 from .journal import journal_path, read_operation_state_counts
 from .library import Record
+from .routines_config import (
+    EnabledRoutineConfig,
+    UnconfiguredRoutineConfig,
+    account_digest,
+    load_routines_config,
+)
+from .routines_store import read_routine_counts, routine_database_path
 from .service import service_status
 
 CloudStatus = Literal[
@@ -43,6 +50,7 @@ CloudStatus = Literal[
     "not_configured",
 ]
 EndpointClass = Literal["loopback", "tailnet", "public"]
+RoutineConfigState = Literal["unconfigured", "malformed", "disabled", "enabled"]
 
 _TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
@@ -68,6 +76,25 @@ class CloudCheck:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutineDiagnostic:
+    state: RoutineConfigState
+    account_bound: bool
+    phase: str | None = None
+    counts: tuple[tuple[str, int], ...] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "state": self.state,
+            "account_bound": self.account_bound,
+        }
+        if self.phase is not None:
+            result["phase"] = self.phase
+        if self.counts is not None:
+            result["counts"] = dict(self.counts)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class SupportReport:
     version: str
     commit: str | None
@@ -76,6 +103,7 @@ class SupportReport:
     tool_schema_hash: str
     tool_contract_hash: str
     cloud_check: CloudCheck
+    routines: RoutineDiagnostic
     service_status: str | None = None
     endpoint_class: EndpointClass | None = None
     operation_states: tuple[tuple[str, int], ...] | None = None
@@ -89,6 +117,7 @@ class SupportReport:
             "tool_schema_hash": self.tool_schema_hash,
             "tool_contract_hash": self.tool_contract_hash,
             "cloud_check": self.cloud_check.as_dict(),
+            "routines": self.routines.as_dict(),
         }
         if self.service_status is not None:
             result["service_status"] = self.service_status
@@ -159,6 +188,7 @@ def build_support_report(
     platform_name: str,
     python_version: str,
     cloud: CloudCheck,
+    routines: RoutineDiagnostic,
     service: str | None,
     endpoint_class: EndpointClass | None,
     operation_states: tuple[tuple[str, int], ...] | None,
@@ -171,6 +201,7 @@ def build_support_report(
         tool_schema_hash=tool_schema_hash(),
         tool_contract_hash=tool_contract_hash(),
         cloud_check=cloud,
+        routines=routines,
         service_status=service,
         endpoint_class=endpoint_class,
         operation_states=(
@@ -187,6 +218,43 @@ def collect_cloud_check() -> CloudCheck:
     if credentials is None:
         return CloudCheck("not_configured")
     return _fresh_cloud_check(credentials)
+
+
+def collect_routines_diagnostic(
+    credentials: Credentials | None,
+    *,
+    config_path: Path | None = None,
+    database_path: Path | None = None,
+) -> RoutineDiagnostic:
+    """Read only value-free routine state without creating local resources."""
+
+    try:
+        config = load_routines_config(path=config_path)
+    except ConfigError:
+        return RoutineDiagnostic("malformed", False)
+    if isinstance(config, UnconfiguredRoutineConfig):
+        return RoutineDiagnostic("unconfigured", False)
+    state: Literal["disabled", "enabled"] = (
+        "enabled" if isinstance(config, EnabledRoutineConfig) else "disabled"
+    )
+    if credentials is None:
+        return RoutineDiagnostic(state, False)
+    digest = account_digest(credentials.email)
+    if config.profile.account_digest != digest:
+        return RoutineDiagnostic(state, False)
+    path = database_path or routine_database_path(digest)
+    counts = read_routine_counts(path, digest)
+    if counts is None:
+        return RoutineDiagnostic(state, True)
+    if counts.phase not in {"uninitialized", "seeding", "live"}:
+        return RoutineDiagnostic(state, True)
+    safe_counts = (
+        ("candidates", counts.candidates),
+        ("dead", counts.dead),
+        ("delivered", counts.delivered),
+        ("pending", counts.pending),
+    )
+    return RoutineDiagnostic(state, True, counts.phase, safe_counts)
 
 
 def collect_support_report() -> SupportReport:
@@ -209,6 +277,7 @@ def collect_support_report() -> SupportReport:
         platform_name=platform.system().casefold() or sys.platform,
         python_version=platform.python_version(),
         cloud=cloud,
+        routines=collect_routines_diagnostic(credentials),
         service=_service_status(),
         endpoint_class=endpoint,
         operation_states=operations,

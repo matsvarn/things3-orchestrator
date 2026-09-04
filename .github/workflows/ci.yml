@@ -49,6 +49,14 @@ jobs:
         run: uv sync --locked --group dev --python 3.12
       - name: Run strict type checks
         run: uv run mypy --strict src
+      - name: Type-check routines tests
+        run: >-
+          MYPYPATH=src uv run mypy --strict
+          tests/test_routines_config.py
+          tests/test_routines_history.py
+          tests/test_routines_runtime.py
+          tests/test_routines_store.py
+          tests/test_routines_webhook.py
       - name: Run Ruff
         run: uv run ruff check .
       - name: Validate skill and release metadata

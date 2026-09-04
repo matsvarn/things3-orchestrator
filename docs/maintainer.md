@@ -30,17 +30,32 @@ Keep one production server and one stable model Interface.
   Retained v1 rows stay private for recovery only.
 - `library.py` is the in-memory Things graph used by tests and Cloud.
 - `cloud.py` syncs and commits through the unofficial Things Cloud API.
-  It coalesces one envelope per UUID and verifies a forced Cloud pull.
+  It coalesces one envelope per UUID and verifies a forced Cloud pull. Its
+  strict grouped-history interface preserves group positions for routines and
+  raises a typed history-identity change instead of joining two histories.
   Maintainer protocol notes: `docs/research/things3-cloud.md` (not a user
   guide; account/ToS risk).
+- `routines_config.py` owns the account-bound private configuration union,
+  receiver URL validation, and redacted rendering.
+- `routines_store.py` owns the process lock, tag-only seed, bounded live task
+  projection, canonical metadata body, and durable event ledger. Cursor
+  advancement and event insertion share one SQLite transaction. It never
+  reuses the mutation journal.
+- `routines_webhook.py` signs and sends the stored body, bounds redirect-free
+  HTTP, and classifies acknowledgements.
+- `routines.py` owns one polling and delivery loop, independent backoff, hot
+  disablement, and the dedicated blocking-work limit.
 - `owner_authority.py` is retained only for signed legacy recovery. It is not
   part of the normal v2 mutation path. `server.py` is the v2 MCP adapter.
-- `server.py` exposes stdio and Streamable HTTP.
+- `server.py` exposes stdio and Streamable HTTP. The optional routine lifecycle
+  is created only after the HTTP socket is ready and never receives the MCP
+  request lock or request-path state.
 - `live_acceptance.py` owns the restart-safe disposable write workflow used as
   a release gate. It persists request IDs before mutation and passes only after
   receipt and Trash read-back.
-- `cli.py` is the owner-facing seam: `login`, `configure`, `service`,
-  `serve-http`, `print-config`, `cloud-check`, `support-bundle`, and `doctor`.
+- `cli.py` is the owner-facing seam: `login`, `configure`, `routines`,
+  `service`, `serve-http`, `print-config`, `cloud-check`, `support-bundle`, and
+  `doctor`.
   Production installs use an exact
   Git tag through `uv tool install`; clone development uses the same commands
   through `uv run`. `login` keeps the existing bearer unless
@@ -65,6 +80,19 @@ Debounce normal reads with the history cursor. Treat a write HTTP 409 as
 definitive rejection without a commit. Do not replay the old write after a
 pull. Use the configured owner
 timezone for Today, Logbook, and reminder dates.
+
+Keep routines outside the MCP tool contract. Disabled or ineligible HTTP paths
+must not construct a routine client, store, lock, or background task. A cold
+baseline validates all history but reduces only exact-`AI` tag UUIDs before the
+fixed baseline head. Live candidates retain only kind, lifecycle, trash state,
+direct tags, and settlement times. Unknown entity versions or malformed
+relevant fields fail the complete batch without cursor movement.
+
+The event key is the persisted account namespace, routine ID, and public task
+ID. Do not add a history position, history key, observation time, or attempt
+number. Webhook delivery is at-least-once. Only `202 accepted` and `200
+duplicate` are terminal success. Keep response bodies, receiver details, task
+content, account values, and history identity out of logs and diagnostics.
 
 The MCP server does not care which chat client you use. The canonical skill is
 packaged under `src/things_orchestrator/skills/`; CI requires the Codex plugin

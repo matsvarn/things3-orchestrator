@@ -1,4 +1,6 @@
 .agents/plugins/marketplace.json
+.audit/routines-feature.tsv
+.audit/routines-oracle-brief.md
 .audit/v2-owner-safe-interface.tsv
 .github/workflows/ci.yml
 .gitignore
@@ -16,6 +18,7 @@ docs/adr/0004-review-token-and-native-heading-delete.md
 docs/adr/0005-one-project-read.md
 docs/adr/0006-common-caller-owner-safe-v2.md
 docs/adr/0007-authenticated-bounded-v2-writes.md
+docs/adr/0008-opt-in-routines-worker.md
 docs/capability-proof.md
 docs/clients.md
 docs/dogfood.md
@@ -60,6 +63,10 @@ src/things_orchestrator/live_acceptance.py
 src/things_orchestrator/owner_authority.py
 src/things_orchestrator/owner_text.py
 src/things_orchestrator/recurrence.py
+src/things_orchestrator/routines.py
+src/things_orchestrator/routines_config.py
+src/things_orchestrator/routines_store.py
+src/things_orchestrator/routines_webhook.py
 src/things_orchestrator/server.py
 src/things_orchestrator/service.py
 src/things_orchestrator/skills/things-orchestrator/SKILL.md
@@ -95,6 +102,11 @@ tests/test_plugin_secret_scan.py
 tests/test_preferences.py
 tests/test_recurrence.py
 tests/test_release.py
+tests/test_routines_config.py
+tests/test_routines_history.py
+tests/test_routines_runtime.py
+tests/test_routines_store.py
+tests/test_routines_webhook.py
 tests/test_server.py
 tests/test_service.py
 tests/test_source_document.py

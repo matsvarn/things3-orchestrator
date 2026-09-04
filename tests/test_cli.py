@@ -1031,7 +1031,8 @@ def test_server_binds_a_persistent_context_store_to_the_cloud_account(
     monkeypatch.setattr("things_orchestrator.cli.SQLiteContextStore", FakeContextStore)
     monkeypatch.setattr("things_orchestrator.cli.ThingsWorkspace", FakeWorkspace)
     monkeypatch.setattr(
-        "things_orchestrator.cli.ThingsMCPServer", lambda workspace: workspace
+        "things_orchestrator.cli.ThingsMCPServer",
+        lambda workspace, *, routines: workspace,
     )
     monkeypatch.setattr(
         "things_orchestrator.cli.token_urlsafe",
@@ -1355,7 +1356,10 @@ def test_serve_http_without_token(
         "things_orchestrator.cli.load_credentials",
         lambda: Credentials("user@example.com", "secret", None),
     )
-    monkeypatch.setattr("things_orchestrator.cli._server", lambda _parser: object())
+    monkeypatch.setattr(
+        "things_orchestrator.cli._server",
+        lambda _parser, *, credentials, routines: object(),
+    )
 
     with pytest.raises(SystemExit) as caught:
         main(["serve-http"])
@@ -1373,7 +1377,10 @@ def test_serve_http_uses_only_the_stored_bearer(
         def run_http(self, *, port: int, token: str) -> None:
             seen.update(port=port, token=token)
 
-    monkeypatch.setattr("things_orchestrator.cli._server", lambda _parser: Server())
+    monkeypatch.setattr(
+        "things_orchestrator.cli._server",
+        lambda _parser, *, credentials, routines: Server(),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
         lambda: Credentials("user@example.com", "secret", McpBearer("stored-bearer")),

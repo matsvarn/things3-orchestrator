@@ -25,6 +25,7 @@ from .cloud import (
 )
 from .config import (
     ConfigError,
+    Credentials,
     McpBearer,
     credentials_path,
     launcher_path,
@@ -42,10 +43,27 @@ from .config import (
 )
 from .context import SQLiteContextStore
 from .deployment import skill_path
-from .diagnostics import collect_cloud_check, collect_support_report
+from .diagnostics import (
+    collect_cloud_check,
+    collect_routines_diagnostic,
+    collect_support_report,
+)
 from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
-from .server import ThingsMCPServer
+from .routines import RoutineWorker
+from .routines_config import (
+    EnabledRoutineConfig,
+    ReceiverSecret,
+    account_digest,
+    configure_routines,
+    load_routines_config,
+    routines_config_path,
+    routines_status,
+    set_routines_enabled,
+)
+from .routines_store import RoutineStore
+from .routines_webhook import HermesWebhook
+from .server import RoutineHTTPComposition, ThingsMCPServer
 from .service import ServiceApplyError, resolve_console_script, service_action
 from .workspace import ThingsWorkspace
 
@@ -133,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
             )
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP")
     http.add_argument("--port", type=int, default=8787)
+    http.add_argument("--service-managed", action="store_true", help=argparse.SUPPRESS)
+    routines = commands.add_parser(
+        "routines", help="configure the optional routines worker"
+    )
+    routines_commands = routines.add_subparsers(dest="routines_action", required=True)
+    routines_configure = routines_commands.add_parser("configure")
+    routines_configure.add_argument("--profile", choices=("always_on",), required=True)
+    routines_configure.add_argument("--url", required=True)
+    routines_configure.add_argument("--interval", type=int, default=60)
+    routines_configure.add_argument("--settle", type=int, default=120)
+    for routine_action in ("enable", "disable", "status"):
+        routines_commands.add_parser(routine_action)
     show = commands.add_parser("print-config", help="render one client configuration")
     show.add_argument(
         "--client",
@@ -205,7 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    if any(
+        argument == "--secret" or argument.startswith("--secret=")
+        for argument in arguments
+    ):
+        parser.error("The receiver secret must be entered through /dev/tty.")
+    args = parser.parse_args(arguments)
     try:
         _dispatch(parser, args)
     except ConfigError as error:
@@ -314,6 +350,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             else:
                 print("Next: things-orchestrator doctor --wait")
         return
+    if args.action == "routines":
+        _routines_command(parser, args)
+        return
     if args.action == "owner-factor":
         _owner_factor(parser)
         return
@@ -338,17 +377,74 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             operation_id=args.operation_id,
         )
         return
-    server = _server(parser)
-    if args.action == "serve":
-        server.run()
-        return
     try:
-        bearer = load_credentials().bearer
+        credentials = load_credentials()
     except ConfigError:
-        bearer = None
+        parser.error(_LOGIN)
+        return
+    if args.action == "serve":
+        _compose_server(
+            parser, credentials, RoutineHTTPComposition.disabled()
+        ).run()
+        return
+    bearer = credentials.bearer
     if bearer is None:
         parser.error("serve-http needs mcp_token from login")
-    server.run_http(port=args.port, token=bearer.reveal())
+    routines = _routine_http_composition(
+        credentials, service_managed=bool(args.service_managed)
+    )
+    _compose_server(parser, credentials, routines).run_http(
+        port=args.port, token=bearer.reveal()
+    )
+
+
+def _routines_command(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    try:
+        credentials = load_credentials()
+    except ConfigError:
+        parser.error(_LOGIN)
+        return
+    action = args.routines_action
+    if action == "configure":
+        with _routine_secret_tty(parser) as terminal:
+            secret = getpass("Hermes webhook secret: ", stream=terminal)
+            confirm = getpass("Confirm webhook secret: ", stream=terminal)
+        if secret != confirm:
+            parser.error("webhook secret confirmation did not match")
+        configured = configure_routines(
+            email=credentials.email,
+            receiver_url=args.url,
+            receiver_secret=ReceiverSecret(secret),
+            poll_interval_seconds=args.interval,
+            settle_seconds=args.settle,
+        )
+        print(
+            json.dumps(
+                routines_status(configured, email=credentials.email), sort_keys=True
+            )
+        )
+        print(
+            f"Stored disabled routines profile in {routines_config_path()} (mode 0600)."
+        )
+        print("Enable it, then restart: things-orchestrator service install")
+        return
+    if action == "status":
+        print(
+            json.dumps(
+                collect_routines_diagnostic(credentials).as_dict(),
+                sort_keys=True,
+            )
+        )
+        return
+    enabled = action == "enable"
+    config = set_routines_enabled(enabled, email=credentials.email)
+    print(json.dumps(routines_status(config, email=credentials.email), sort_keys=True))
+    if enabled:
+        print("Restart required: things-orchestrator service install")
+    else:
+        print("A running worker will stop within one polling interval.")
 
 
 def _login(
@@ -555,15 +651,32 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
     print(curl_tool_count_command(client_target))
 
 
-def _server(parser: argparse.ArgumentParser) -> ThingsMCPServer:
-    return ThingsMCPServer(_workspace(parser))
+def _server(
+    parser: argparse.ArgumentParser,
+    *,
+    credentials: Credentials | None = None,
+    routines: RoutineHTTPComposition | None = None,
+) -> ThingsMCPServer:
+    workspace = _workspace(parser, credentials=credentials)
+    return ThingsMCPServer(workspace, routines=routines)
 
 
-def _workspace(parser: argparse.ArgumentParser) -> ThingsWorkspace:
-    try:
-        credentials = load_credentials()
-    except ConfigError:
-        parser.error(_LOGIN)
+def _compose_server(
+    parser: argparse.ArgumentParser,
+    credentials: Credentials,
+    routines: RoutineHTTPComposition,
+) -> ThingsMCPServer:
+    return _server(parser, credentials=credentials, routines=routines)
+
+
+def _workspace(
+    parser: argparse.ArgumentParser, *, credentials: Credentials | None = None
+) -> ThingsWorkspace:
+    if credentials is None:
+        try:
+            credentials = load_credentials()
+        except ConfigError:
+            parser.error(_LOGIN)
     email = credentials.email
     library = CloudLibrary(CloudClient(email, credentials.password))
     timezone_name = load_timezone()
@@ -600,6 +713,35 @@ def _workspace(parser: argparse.ArgumentParser) -> ThingsWorkspace:
     )
 
 
+def _routine_http_composition(
+    credentials: Credentials, *, service_managed: bool
+) -> RoutineHTTPComposition:
+    if credentials.bearer is None or not service_managed:
+        return RoutineHTTPComposition.disabled()
+    try:
+        config = load_routines_config()
+    except ConfigError:
+        return RoutineHTTPComposition.disabled()
+    if (
+        not isinstance(config, EnabledRoutineConfig)
+        or config.profile.host_profile != "always_on"
+        or config.profile.account_digest != account_digest(credentials.email)
+    ):
+        return RoutineHTTPComposition.disabled()
+    profile = config.profile
+
+    def create() -> RoutineWorker:
+        return RoutineWorker(
+            email=credentials.email,
+            profile=profile,
+            cloud=CloudClient(credentials.email, credentials.password),
+            store=RoutineStore(profile),
+            webhook=HermesWebhook(profile),
+        )
+
+    return RoutineHTTPComposition.enabled(create)
+
+
 def _migration_report(parser: argparse.ArgumentParser) -> None:
     try:
         email = load_credentials().email
@@ -619,6 +761,18 @@ def _private_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
             yield sys.stderr
             return
         parser.error("This host command needs a private local or SSH terminal.")
+    try:
+        yield terminal
+    finally:
+        terminal.close()
+
+
+@contextmanager
+def _routine_secret_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
+    try:
+        terminal = open("/dev/tty", "r+", encoding="utf-8")
+    except OSError:
+        parser.error("Routines configuration needs a controlling /dev/tty.")
     try:
         yield terminal
     finally:

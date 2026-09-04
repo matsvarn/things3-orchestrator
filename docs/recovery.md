@@ -53,3 +53,33 @@ legacy fence. The CLI renders the complete retained plan with terminal-control
 escaping before it asks for the passphrase. Resolution atomically verifies the
 signed fingerprint and full-plan digest, then scrubs the legacy plan into a
 content-minimized tombstone.
+
+## Recover routines
+
+Routine failure does not hold the MCP mutation fence. Public health and MCP
+requests remain available if Cloud polling, SQLite, or webhook delivery stops.
+
+Start by stopping new polls and deliveries:
+
+```console
+things-orchestrator routines disable
+things-orchestrator service install
+things-orchestrator routines status
+things-orchestrator support-bundle
+```
+
+A changed Things history identity automatically clears the tag projection and
+unsettled candidates, then performs a new tag-only baseline. It preserves
+pending, delivered, and dead event rows and does not replay historical tasks.
+
+Pending deliveries retry with the same event ID. A receiver acknowledgement
+can be lost after the receiver acted, so recovery depends on receiver-side
+deduplication. Delivered rows remain as compact tombstones. Dead rows retain
+only the metadata body and attempt result; this first slice has no automatic
+dead-letter replay command.
+
+If the routines database is damaged or ownership cannot be acquired, keep
+routines disabled and restore the matching `routines.json` and account-scoped
+database from a private backup. Do not delete the database to force a retry:
+that removes deduplication tombstones and creates a new account event namespace.
+Inspect receiver records before deciding how to handle a dead event.
