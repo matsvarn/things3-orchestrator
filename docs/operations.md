@@ -100,7 +100,10 @@ Cloud failures and delivery failures back off independently. Routine polling
 does not take the MCP request lock. Delivery uses a stable event ID and is
 at-least-once: a receiver can see a retry after it accepted an earlier request
 whose local acknowledgement was interrupted. Hermes-compatible receivers must
-deduplicate `X-Request-ID`.
+deduplicate `X-Request-ID`. Grok receives the same identity as `event_id` in the
+JSON body. An accept-before-commit failure may start duplicate Bot runs. The Bot
+instruction must say: "Treat event_id as the idempotency key and refuse to act
+if you have already acted on that event_id."
 
 ## Rotate the MCP bearer
 
@@ -132,7 +135,8 @@ equivalents:
 - `~/.local/state/things-orchestrator/routines/*.sqlite3`
 
 Credentials contain the plaintext Things Cloud password. `routines.json`
-contains the webhook secret. Store the backup as a secret.
+contains the Hermes webhook secret or Grok webhook key and its private URL.
+Store the backup as a secret.
 
 Do not copy an active routines database while its WAL may contain committed
 rows. Disable routines, run `service install` to restart without the worker,
@@ -145,8 +149,9 @@ and changes the event namespace; it is not a safe retry procedure.
 Automated tests use fake Things history and a local webhook server. To validate
 a real installation, the owner must:
 
-1. Configure the receiver's MCP connection through `print-config --client
-   hermes --show-secrets` in a private terminal.
+1. Configure the receiver's MCP connection through the matching client setup in
+   a private terminal. Hermes can use `print-config --client hermes
+   --show-secrets`.
 2. Configure and enable routines, then restart the supervised service.
 3. Create a fresh normal task and assign the exact `AI` tag directly.
 4. Confirm one metadata-only webhook reaches the receiver.
@@ -155,8 +160,10 @@ a real installation, the owner must:
 6. Remove or trash the disposable task through the normal owner workflow.
 
 Do not use an existing task for this check; baseline startup intentionally does
-not replay historical tasks. Do not claim live Hermes or Grok compatibility
-until this check passes on the intended installation.
+not replay historical tasks. On 2026-09-04, a safe synthetic request confirmed
+the Grok Bot desktop beta request and acknowledgement shape. No provider
+documentation says that this integration is supported. Do not claim live
+compatibility until this check passes on the intended installation.
 
 ## Configure owner preferences
 

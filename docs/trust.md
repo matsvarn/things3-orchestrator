@@ -12,9 +12,15 @@ unsupported Things Cloud history feed and sends a metadata-only event to the
 configured receiver. That event contains a public task ID but no title, notes,
 checklist, project content, account email, or private history key. The receiver
 can learn task content only through its separately authorized MCP connection.
-The webhook secret and MCP bearer are different credentials.
+The Hermes webhook secret or Grok webhook key and the MCP bearer are different
+credentials. Receiver status and errors expose only the value-free receiver
+kind, never its URL, host, credential, or response body.
 
 Delivery is at-least-once. The receiver must deduplicate the opaque event ID.
+After receiver acceptance and before the local delivery commit, a crash can
+cause a retry. Grok Bot may start another run. Its instruction must say: "Treat
+event_id as the idempotency key and refuse to act if you have already acted on
+that event_id."
 The generated service marker records that the owner started the supervised
 path; it is not a security attestation against a local process owner. Unknown
 history versions and malformed relevant fields stop cursor advancement instead

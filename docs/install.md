@@ -67,6 +67,7 @@ Configure the receiver in a private terminal:
 ```console
 things-orchestrator routines configure \
   --profile always_on \
+  --receiver hermes \
   --url https://agent.example/webhooks/things-ai \
   --interval 60
 things-orchestrator routines enable
@@ -74,10 +75,37 @@ things-orchestrator service install
 things-orchestrator routines status
 ```
 
-`configure` prompts for the webhook secret through `/dev/tty`; it does not
-accept the secret as an argument. The receiver URL must use HTTPS. Loopback HTTP
-is allowed for a receiver on the same host. The polling interval is 60 to 3600
-seconds.
+Hermes is the default receiver, so existing commands without `--receiver` keep
+working. `configure` prompts for the Hermes webhook secret through `/dev/tty`.
+It does not accept the secret as an argument. The receiver URL must use HTTPS.
+Loopback HTTP is allowed for a Hermes receiver on the same host.
+
+For a Grok Bot desktop beta webhook, keep the URL and key out of shell history:
+
+```console
+things-orchestrator routines configure --profile always_on --receiver grok
+```
+
+The command privately prompts for the Grok webhook URL, the key, and key
+confirmation. Copy the URL and key from the Bot setup screen. The URL must use
+HTTPS on `api2.cursor.sh` with an `/automations/webhook/<route>` path. The
+command stores the profile disabled.
+
+Copy this sentence into the Grok routine instruction:
+
+```text
+Treat event_id as the idempotency key and refuse to act if you have already acted on that event_id.
+```
+
+Then enable routines and restart the supervised service:
+
+```console
+things-orchestrator routines enable
+things-orchestrator service install
+things-orchestrator routines status
+```
+
+The polling interval is 60 to 3600 seconds.
 
 The first startup scans historical tag changes to learn every current tag named
 exactly `AI`. It does not emit events for historical tasks. A new, open task
@@ -88,10 +116,11 @@ time. It never changes Things. The receiver uses its separately configured MCP
 connection to read or change the task.
 
 Enabling routines increases Things Cloud read traffic and sends event metadata
-to the configured receiver. The automated suite proves the documented Hermes
-webhook contract with a local receiver. It does not prove a live Hermes account.
-Complete the owner-run check in [operations.md](operations.md) before relying on
-the integration.
+to the configured receiver. Local HTTP tests exercise both transport contracts
+without a live account. On 2026-09-04, a safe synthetic request confirmed the
+Grok Bot desktop beta request and acknowledgement shape. No provider
+documentation says that this integration is supported. Complete the owner-run
+check in [operations.md](operations.md) before relying on either receiver.
 
 ## Private tailnet client
 
