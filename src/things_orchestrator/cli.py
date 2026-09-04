@@ -55,7 +55,9 @@ from .doctor import DoctorFailure, curl_tool_count_command, run_doctor
 from .journal import SQLiteJournal, journal_path
 from .routines import RoutineWorker
 from .routines_config import (
+    ROUTINE_EVENT_TYPE,
     ROUTINE_RECEIVER_INSTRUCTION,
+    ROUTINE_TRIGGER_TAG,
     EnabledRoutineConfig,
     ReceiverSecret,
     account_digest,
@@ -628,7 +630,7 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
         f"{ROUTINE_RECEIVER_INSTRUCTION}\n\n"
         "Then create the route with this command:\n\n"
         "hermes webhook subscribe things-ai-task-created "
-        "--events task.created "
+        f"--events {ROUTINE_EVENT_TYPE} "
         f"--prompt {shlex.quote(prompt)} "
         "--description 'Run the built-in Things AI task routine'\n\n"
         "The subscribe command prints the webhook URL and HMAC secret. Enter both "
@@ -639,7 +641,10 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
 def _print_routines_smoke_test() -> None:
     print("Smoke test:")
     print("1. Create a fresh untagged task. Stop editing it and confirm no delivery.")
-    print("2. Create another fresh task and assign the exact AI tag directly.")
+    print(
+        "2. Create another fresh task and assign the exact "
+        f"{ROUTINE_TRIGGER_TAG} tag directly."
+    )
     print("3. Stop editing it, wait for settlement and polling, then run:")
     print("things-orchestrator routines status")
     print("Confirm one delivery and the receiver action on only the selected task.")
