@@ -103,6 +103,7 @@ tests/test_preferences.py
 tests/test_recurrence.py
 tests/test_release.py
 tests/test_routines_config.py
+tests/test_routines_grok.py
 tests/test_routines_history.py
 tests/test_routines_runtime.py
 tests/test_routines_store.py

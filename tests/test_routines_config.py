@@ -302,12 +302,16 @@ def test_cli_reads_secret_only_from_private_tty_and_reports_restart(
     def tty(_parser: object) -> Iterator[StringIO]:
         yield StringIO()
 
+    prompts: list[str] = []
     answers = iter(("webhook-secret", "webhook-secret"))
     monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
-    monkeypatch.setattr(
-        "things_orchestrator.cli.getpass",
-        lambda _prompt, stream=None: next(answers),
-    )
+
+    def get_private_value(prompt: str, stream: object = None) -> str:
+        del stream
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("things_orchestrator.cli.getpass", get_private_value)
 
     main(
         [
@@ -334,6 +338,10 @@ def test_cli_reads_secret_only_from_private_tty_and_reports_restart(
     assert "webhook-secret" not in output
     assert "cloud-secret" not in output
     assert "agent.example" not in output
+    assert prompts == [
+        "Hermes webhook secret: ",
+        "Confirm Hermes webhook secret: ",
+    ]
     assert "Restart required: things-orchestrator service install" in output
     status = next(
         json.loads(line)

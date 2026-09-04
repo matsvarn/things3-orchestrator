@@ -10,7 +10,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, assert_never
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import ConfigError
@@ -19,6 +19,10 @@ ROUTINE_ID = "things-ai-task-created-v1"
 _VERSION = 1
 _LOOPBACK = frozenset(("127.0.0.1", "localhost", "::1"))
 _WEBHOOK_PATH = re.compile(r"^/webhooks/[A-Za-z0-9][A-Za-z0-9._~-]*$")
+_GROK_WEBHOOK_PATH = re.compile(
+    r"^/automations/webhook/[A-Za-z0-9][A-Za-z0-9._~-]*$"
+)
+ReceiverKind: TypeAlias = Literal["hermes", "grok"]
 
 
 @dataclass(frozen=True, repr=False, slots=True)
@@ -36,6 +40,29 @@ class ReceiverSecret:
         return self.value
 
 
+@dataclass(frozen=True, repr=False, slots=True)
+class HermesReceiver:
+    url: str
+    secret: ReceiverSecret
+    kind: Literal["hermes"] = "hermes"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "url", _normalize_hermes_url(self.url))
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class GrokReceiver:
+    url: str
+    key: ReceiverSecret
+    kind: Literal["grok"] = "grok"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "url", _normalize_grok_url(self.url))
+
+
+Receiver: TypeAlias = HermesReceiver | GrokReceiver
+
+
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
     initial_delay_seconds: int = 5
@@ -48,8 +75,7 @@ class RetryPolicy:
 class RoutineProfile:
     account_digest: str
     host_profile: Literal["always_on"]
-    receiver_url: str
-    receiver_secret: ReceiverSecret
+    receiver: Receiver
     poll_interval_seconds: int
     settle_seconds: int
     retry: RetryPolicy
@@ -98,6 +124,7 @@ def routines_state_dir() -> Path:
 def configure_routines(
     *,
     email: str,
+    receiver_kind: ReceiverKind = "hermes",
     receiver_url: str,
     receiver_secret: ReceiverSecret,
     poll_interval_seconds: int,
@@ -107,8 +134,7 @@ def configure_routines(
     profile = RoutineProfile(
         account_digest=account_digest(email),
         host_profile="always_on",
-        receiver_url=_normalize_receiver_url(receiver_url),
-        receiver_secret=receiver_secret,
+        receiver=_build_receiver(receiver_kind, receiver_url, receiver_secret),
         poll_interval_seconds=_bounded_int(
             poll_interval_seconds, 60, 3600, "Polling interval"
         ),
@@ -142,14 +168,16 @@ def save_routines_config(
 ) -> Path:
     target = path or routines_config_path()
     profile = config.profile
+    receiver = profile.receiver
     payload = {
         "version": _VERSION,
         "state": config.state,
         "profile": {
             "account_digest": profile.account_digest,
             "host_profile": profile.host_profile,
-            "receiver_url": profile.receiver_url,
-            "receiver_secret": profile.receiver_secret.reveal(),
+            "receiver_kind": receiver.kind,
+            "receiver_url": receiver.url,
+            "receiver_secret": _receiver_secret(receiver).reveal(),
             "poll_interval_seconds": profile.poll_interval_seconds,
             "settle_seconds": profile.settle_seconds,
             "routine_id": profile.routine_id,
@@ -196,11 +224,13 @@ def routines_status(
         return {"state": "unconfigured"}
     profile = config.profile
     bound = email is not None and profile.account_digest == account_digest(email)
-    parsed = urlsplit(profile.receiver_url)
+    receiver = profile.receiver
+    parsed = urlsplit(receiver.url)
     return {
         "state": config.state,
         "account_bound": bound,
         "host_profile": profile.host_profile,
+        "receiver_kind": receiver.kind,
         "receiver": f"{parsed.scheme}://<redacted>",
         "poll_interval_seconds": profile.poll_interval_seconds,
         "settle_seconds": profile.settle_seconds,
@@ -246,11 +276,11 @@ def _parse_config(raw: object) -> RoutineConfig:
         secret = profile_raw["receiver_secret"]
         if not isinstance(url, str) or not isinstance(secret, str):
             raise ConfigError("Routines receiver configuration is invalid")
+        receiver_kind = profile_raw.get("receiver_kind", "hermes")
         profile = RoutineProfile(
             account_digest=digest,
             host_profile="always_on",
-            receiver_url=_normalize_receiver_url(url),
-            receiver_secret=ReceiverSecret(secret),
+            receiver=_build_receiver(receiver_kind, url, ReceiverSecret(secret)),
             poll_interval_seconds=_bounded_int(
                 profile_raw["poll_interval_seconds"], 60, 3600, "Polling interval"
             ),
@@ -269,7 +299,25 @@ def _parse_config(raw: object) -> RoutineConfig:
     )
 
 
-def _normalize_receiver_url(raw: str) -> str:
+def _build_receiver(
+    kind: object, url: str, secret: ReceiverSecret
+) -> Receiver:
+    if kind == "hermes":
+        return HermesReceiver(url, secret)
+    if kind == "grok":
+        return GrokReceiver(url, secret)
+    raise ConfigError("Routines receiver kind is invalid")
+
+
+def _receiver_secret(receiver: Receiver) -> ReceiverSecret:
+    if isinstance(receiver, HermesReceiver):
+        return receiver.secret
+    if isinstance(receiver, GrokReceiver):
+        return receiver.key
+    assert_never(receiver)
+
+
+def _normalize_hermes_url(raw: str) -> str:
     value = raw.strip()
     parsed = urlsplit(value)
     if parsed.username is not None or parsed.password is not None:
@@ -296,6 +344,32 @@ def _normalize_receiver_url(raw: str) -> str:
             "The receiver URL path must be /webhooks/<route> with no query or fragment"
         )
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _normalize_grok_url(raw: str) -> str:
+    value = raw.strip()
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError("The receiver URL must not contain credentials")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ConfigError("The receiver URL port is invalid") from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.hostname.casefold() != "api2.cursor.sh"
+        or parsed.netloc.casefold() != "api2.cursor.sh"
+        or port is not None
+    ):
+        raise ConfigError("The Grok receiver URL needs the approved HTTPS host")
+    if (
+        _GROK_WEBHOOK_PATH.fullmatch(parsed.path) is None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigError("The Grok receiver URL path is invalid")
+    return urlunsplit(("https", "api2.cursor.sh", parsed.path, "", ""))
 
 
 def _valid_host(host: str) -> bool:

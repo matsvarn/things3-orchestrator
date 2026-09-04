@@ -7,9 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from things_orchestrator.routines_config import (
+    HermesReceiver,
     ReceiverSecret,
-    RetryPolicy,
-    RoutineProfile,
 )
 from things_orchestrator.routines_store import StoredEvent
 from things_orchestrator.routines_webhook import (
@@ -19,16 +18,8 @@ from things_orchestrator.routines_webhook import (
 )
 
 
-def _profile(url: str, secret: str = "receiver-secret") -> RoutineProfile:
-    return RoutineProfile(
-        account_digest="a" * 64,
-        host_profile="always_on",
-        receiver_url=url,
-        receiver_secret=ReceiverSecret(secret),
-        poll_interval_seconds=60,
-        settle_seconds=120,
-        retry=RetryPolicy(),
-    )
+def _receiver(url: str, secret: str = "receiver-secret") -> HermesReceiver:
+    return HermesReceiver(url, ReceiverSecret(secret))
 
 
 @pytest.mark.parametrize(
@@ -86,7 +77,7 @@ def test_adapter_posts_exact_stored_body_with_fresh_v2_signature() -> None:
         ).encode()
         event = StoredEvent("evt_test", "routine", "task", 123, body, attempt_count=0)
         result = HermesWebhook(
-            _profile(f"http://127.0.0.1:{server.server_port}/webhooks/task")
+            _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task")
         ).deliver(event, timestamp=456)
     finally:
         server.shutdown()
@@ -130,7 +121,7 @@ def test_adapter_never_follows_redirect() -> None:
     try:
         event = StoredEvent("evt", "routine", "task", 1, b"{}", 0)
         result = HermesWebhook(
-            _profile(f"http://127.0.0.1:{server.server_port}/webhooks/task")
+            _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task")
         ).deliver(event, timestamp=2)
     finally:
         server.shutdown()
@@ -161,7 +152,7 @@ def test_adapter_bounds_acknowledgement_body() -> None:
     try:
         event = StoredEvent("evt", "routine", "task", 1, b"{}", 0)
         result = HermesWebhook(
-            _profile(f"http://127.0.0.1:{server.server_port}/webhooks/task"),
+            _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task"),
             max_response_bytes=16,
         ).deliver(event, timestamp=2)
     finally:
