@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import socket
 import threading
@@ -7,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Never, cast
+from typing import Literal, Never, cast
 from urllib.error import URLError
 from urllib.request import Request, build_opener
 
@@ -17,6 +18,7 @@ from things_orchestrator.cli import build_parser, main
 from things_orchestrator.config import ConfigError
 from things_orchestrator.routines_config import (
     DisabledRoutineConfig,
+    EnabledRoutineConfig,
     GrokReceiver,
     HermesReceiver,
     ReceiverKind,
@@ -25,6 +27,7 @@ from things_orchestrator.routines_config import (
     configure_routines,
     load_routines_config,
     routines_status,
+    set_routines_enabled,
 )
 from things_orchestrator.routines_store import StoredEvent
 from things_orchestrator.routines_webhook import (
@@ -35,6 +38,28 @@ from things_orchestrator.routines_webhook import (
     _NoRedirects,
     build_webhook,
 )
+from things_orchestrator.service import (
+    ServiceApplyError,
+    ServiceOperationResult,
+    ServiceStatus,
+)
+
+
+def _write_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_root = tmp_path / "config"
+    owner_dir = config_root / "things-orchestrator"
+    owner_dir.mkdir(parents=True)
+    (owner_dir / "credentials.json").write_text(
+        json.dumps(
+            {
+                "email": "owner@example.com",
+                "password": "cloud-secret",
+                "mcp_token": "mcp-bearer",
+            }
+        )
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 def _v1_payload() -> dict[str, object]:
@@ -258,6 +283,250 @@ def test_routines_configure_help_explains_private_defaults_and_each_option(
     assert "polling interval in seconds (60-3600, default: 60)" in help_text
     assert "--settle SETTLE" in help_text
     assert "settle window in seconds (1-3600, default: 120)" in help_text
+
+
+def test_routines_setup_help_is_portable_private_happy_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["routines", "setup", "--help"])
+
+    assert caught.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Configure, enable, and install the supervised routines service" in help_text
+    assert "--profile {always_on}" in help_text
+    assert "--receiver {hermes,grok}" in help_text
+    assert "Hermes is the default" in help_text
+    assert "--interval INTERVAL" in help_text
+    assert "--settle SETTLE" in help_text
+    assert "--url" not in help_text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ["--url", "private-route-value"],
+        ["--url=private-route-value"],
+    ),
+)
+def test_routines_setup_rejects_url_argv_without_echoing_value(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "routines",
+                "setup",
+                "--profile",
+                "always_on",
+                *arguments,
+            ]
+        )
+
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert "private-route-value" not in captured.out
+    assert "private-route-value" not in captured.err
+    assert "privately" in captured.err
+
+
+def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_credentials(tmp_path, monkeypatch)
+    terminal = io.StringIO()
+
+    @contextmanager
+    def tty(_parser: object) -> Iterator[io.StringIO]:
+        yield terminal
+
+    prompts: list[str] = []
+    answers = iter(
+        (
+            "https://api2.cursor.sh/automations/webhook/private-route",
+            "private-grok-key",
+            "private-grok-key",
+        )
+    )
+    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+
+    def get_private_value(prompt: str, stream: object = None) -> str:
+        prompts.append(prompt)
+        assert stream is terminal
+        return next(answers)
+
+    monkeypatch.setattr("things_orchestrator.cli.getpass", get_private_value)
+    calls: list[str] = []
+    original_configure = configure_routines
+
+    def ordered_configure(
+        *,
+        email: str,
+        receiver_kind: ReceiverKind = "hermes",
+        receiver_url: str,
+        receiver_secret: ReceiverSecret,
+        poll_interval_seconds: int,
+        settle_seconds: int = 120,
+        path: Path | None = None,
+    ) -> DisabledRoutineConfig:
+        calls.append("configure")
+        return original_configure(
+            email=email,
+            receiver_kind=receiver_kind,
+            receiver_url=receiver_url,
+            receiver_secret=receiver_secret,
+            poll_interval_seconds=poll_interval_seconds,
+            settle_seconds=settle_seconds,
+            path=path,
+        )
+
+    original_enable = set_routines_enabled
+
+    def ordered_enable(
+        enabled: bool, *, email: str, path: Path | None = None
+    ) -> DisabledRoutineConfig | EnabledRoutineConfig:
+        calls.append("enable")
+        return original_enable(enabled, email=email, path=path)
+
+    def ordered_service(action: str, *, dry_run: bool) -> ServiceOperationResult:
+        calls.append("service")
+        assert (action, dry_run) == ("install", False)
+        return ServiceOperationResult("install", ServiceStatus.ACTIVE, (), True)
+
+    monkeypatch.setattr("things_orchestrator.cli.configure_routines", ordered_configure)
+    monkeypatch.setattr("things_orchestrator.cli.set_routines_enabled", ordered_enable)
+    monkeypatch.setattr("things_orchestrator.cli.service_action", ordered_service)
+
+    main(
+        [
+            "routines",
+            "setup",
+            "--profile",
+            "always_on",
+            "--receiver",
+            "grok",
+        ]
+    )
+
+    assert calls == ["configure", "enable", "service"]
+    assert prompts == [
+        "Grok Bot webhook POST URL: ",
+        "Grok Bot webhook key: ",
+        "Confirm Grok Bot webhook key: ",
+    ]
+    guidance = terminal.getvalue()
+    assert 'choose "When a webhook fires"' in guidance
+    assert "copy the generated POST URL and key" in guidance
+    assert "Do not put either value in argv or chat" in guidance
+    assert "phase `live`" in guidance
+    assert "turn Active on" in guidance
+    output = capsys.readouterr().out
+    for private in (
+        "api2.cursor.sh",
+        "private-route",
+        "private-grok-key",
+        "cloud-secret",
+    ):
+        assert private not in output
+        assert private not in guidance
+    assert '"state": "enabled"' in output
+    assert "The worker may still be initializing" in output
+    assert (
+        "Treat event_id as the idempotency key and refuse to act if you have "
+        "already acted on that event_id."
+    ) in output
+
+
+def test_routines_setup_service_failure_leaves_enabled_and_rerun_converges(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_credentials(tmp_path, monkeypatch)
+    terminal = io.StringIO()
+
+    @contextmanager
+    def tty(_parser: object) -> Iterator[io.StringIO]:
+        yield terminal
+
+    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    answers = iter(
+        (
+            "https://agent.example/webhooks/task",
+            "hermes-secret",
+            "hermes-secret",
+        )
+        * 2
+    )
+    prompts: list[str] = []
+
+    def get_private_value(prompt: str, stream: object = None) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("things_orchestrator.cli.getpass", get_private_value)
+    service_calls = 0
+
+    def flaky_service(action: str, *, dry_run: bool) -> ServiceOperationResult:
+        nonlocal service_calls
+        service_calls += 1
+        if service_calls == 1:
+            raise ServiceApplyError("private service detail")
+        return ServiceOperationResult("install", ServiceStatus.ACTIVE, (), True)
+
+    monkeypatch.setattr("things_orchestrator.cli.service_action", flaky_service)
+    command = ["routines", "setup", "--profile", "always_on"]
+
+    with pytest.raises(SystemExit) as caught:
+        main(command)
+
+    assert caught.value.code == 2
+    assert load_routines_config().state == "enabled"
+    failure = capsys.readouterr()
+    assert "private service detail" not in failure.err
+    assert "rerun this setup command" in failure.err
+
+    main(command)
+    assert service_calls == 2
+    assert load_routines_config().state == "enabled"
+    assert "Grok" not in terminal.getvalue()
+    assert prompts == [
+        "Hermes webhook URL: ",
+        "Hermes webhook secret: ",
+        "Confirm Hermes webhook secret: ",
+    ] * 2
+    assert "The worker may still be initializing" in capsys.readouterr().out
+
+
+def test_routines_setup_missing_credentials_precedes_prompt_and_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    def forbidden_tty(_parser: object) -> Never:
+        pytest.fail("prompted before credentials")
+
+    def forbidden_service(
+        action: Literal["install", "uninstall", "status"], *, dry_run: bool
+    ) -> Never:
+        del action, dry_run
+        pytest.fail("service called before credentials")
+
+    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", forbidden_tty)
+    monkeypatch.setattr("things_orchestrator.cli.service_action", forbidden_service)
+
+    with pytest.raises(SystemExit) as caught:
+        main(["routines", "setup", "--profile", "always_on"])
+
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert "Run `things-orchestrator login`" in captured.err
+    assert "webhook" not in captured.out
 
 
 @pytest.mark.parametrize("flag", ("--secret=private", "--key=private"))

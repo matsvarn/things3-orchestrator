@@ -79,6 +79,28 @@ it.
 
 ## Operate routines
 
+Use guided setup for a new installation or to converge after a partial setup:
+
+```console
+things-orchestrator routines setup --profile always_on --receiver grok
+```
+
+For Grok Bot, create or edit a Routine, choose "When a webhook fires", save it,
+and leave it inactive before running setup. The command privately prompts for
+the generated POST URL and key. Do not put either value in argv or chat. Add
+this sentence to the Routine instruction:
+
+```text
+Treat event_id as the idempotency key and refuse to act if you have already acted on that event_id.
+```
+
+Run `things-orchestrator routines status`. Turn Active on only after the status
+reports phase `live`. Setup enables the profile before it installs the service.
+If service installation fails, fix the reported service problem and rerun the
+same setup command. The rerun converges.
+
+The commands below are low-level recovery and automation controls.
+
 Disable delivery and polling without deleting configuration or state:
 
 ```console
