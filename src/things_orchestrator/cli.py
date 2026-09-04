@@ -916,6 +916,9 @@ def _private_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
 
 @contextmanager
 def _routine_secret_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
+    if sys.stdin.isatty() and sys.stderr.isatty() and sys.stderr.writable():
+        yield sys.stderr
+        return
     try:
         terminal = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
