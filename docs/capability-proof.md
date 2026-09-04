@@ -19,11 +19,13 @@ zero-resource path, safe status model, and receiver-instruction consistency.
 They use fake history pages, fake clocks, and local webhook receivers. They do
 not connect to Things Cloud, Grok, or Hermes.
 
-The content-free owner record in [dogfood.md](dogfood.md) proves one private VPS
-topology: history reached `live`; an untagged negative control did not deliver;
-directly assigning exact `AI` to the fresh candidate delivered one event; and
-Grok read and updated that selected task through MCP. This is not general Grok
-or Hermes compatibility proof.
+The content-free owner record in [dogfood.md](dogfood.md) reports one private
+VPS result: history reached `live`; an untagged negative control did not
+deliver; directly assigning exact `AI` to the fresh candidate delivered one
+event; and Grok read and updated that selected task through MCP. The record
+does not include the exact deployed commit SHA, Grok client version, installed
+skill state, or owner intervention details. It is not general Grok or Hermes
+compatibility proof.
 
 ## 2026-09-01 authenticated-write gate
 

@@ -76,8 +76,13 @@ def test_dogfood_records_bounded_routines_owner_acceptance() -> None:
         "one delivered event",
         "zero dead letters",
         "topology only",
+        "does not include the exact deployed commit SHA",
+        "Grok client version",
+        "installed skill state",
+        "owner intervention details",
     ):
         assert evidence in text
+    assert "record proves owner" not in text
 
 
 def test_next_dogfood_prompt_stays_natural() -> None:

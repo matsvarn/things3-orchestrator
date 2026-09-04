@@ -76,10 +76,11 @@ Before the prompt, setup prints the portable upstream `hermes gateway setup`
 and `hermes webhook subscribe` commands. The subscribe command returns the URL
 and HMAC secret. Before you enter those values, edit
 `~/.hermes/webhook_subscriptions.json`. Add
-`"toolsets": ["mcp-things"]` to the `things-ai-task-created` entry, then run
-`hermes webhook test things-ai-task-created`. Dynamic subscription commands
-cannot set route toolsets. Without the manual grant, webhook runs use a
-restricted default and cannot call Things.
+`"toolsets": ["mcp-things"]` to the `things-ai-task-created` entry. Inspect
+that entry and verify the exact value. Dynamic subscription commands cannot set
+route toolsets. Without the manual grant, webhook runs use a restricted default
+and cannot call Things. This file check does not prove MCP access. The positive
+selected-task smoke test proves whether the real route can use `things_get`.
 
 The configured MCP server named `things` creates `mcp-things`. Anyone who can
 send a valid HMAC request to this route gains its eight bounded Things tools.
@@ -97,9 +98,11 @@ things-orchestrator print-config --client grok --show-secrets
 ```
 
 At `grok.com/connectors`, choose **New Connector**, then choose **Custom**.
-Provide the public HTTPS MCP URL and required authentication from the output.
-Grok requires a server that the public internet can reach. Confirm that the
-connector exposes exactly eight tools, including `things_get`.
+Provide the HTTPS MCP URL and required authentication from the output. Grok
+requires a server that the public internet can reach. The command rejects known
+local and private addresses but cannot verify DNS or public reachability.
+Verify reachability, then confirm that the connector exposes exactly eight
+tools, including `things_get`.
 The [official xAI connector guide](https://docs.x.ai/grok/connectors) documents
 this path.
 

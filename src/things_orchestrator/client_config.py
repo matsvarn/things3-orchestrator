@@ -84,8 +84,11 @@ def render_client_config(
     token = endpoint.bearer.reveal() if show_secrets else "<mcp_token>"
     authorization = f"Bearer {token}"
     if client is ClientKind.GROK:
-        if not _is_public_https(endpoint.url):
-            raise ConfigError("Grok configuration needs a public HTTPS MCP URL")
+        if not _is_https_without_known_local_host(endpoint.url):
+            raise ConfigError(
+                "Grok configuration rejects HTTP and known local or private MCP "
+                "endpoints. Verify that the HTTPS endpoint is publicly reachable"
+            )
         body = json.dumps(
             {
                 "url": str(endpoint.url),
@@ -97,9 +100,11 @@ def render_client_config(
             client,
             body,
             "At grok.com/connectors, choose New Connector, then Custom. "
-            "Provide the public HTTPS MCP URL and required authentication from "
-            "this output. Confirm that Grok discovers exactly eight tools before "
-            "you activate a routine.",
+            "xAI requires an HTTPS MCP URL that the public internet can reach. "
+            "This command rejects known local or private addresses, but it cannot "
+            "verify DNS or reachability. Provide the URL and required authentication "
+            "from this output. Confirm that Grok discovers exactly eight tools "
+            "before you activate a routine.",
         )
     if client is ClientKind.CODEX:
         body = (
@@ -183,21 +188,32 @@ def render_client_config(
     raise AssertionError(f"Unhandled client: {client}")
 
 
-def _is_public_https(url: McpUrl) -> bool:
+def _is_https_without_known_local_host(url: McpUrl) -> bool:
     if not url.origin.startswith("https://"):
         return False
-    hostname = urlsplit(str(url)).hostname
-    if hostname is None or hostname.casefold() == "localhost":
+    raw_hostname = urlsplit(str(url)).hostname
+    if raw_hostname is None:
+        return False
+    hostname = raw_hostname.casefold().rstrip(".")
+    if not hostname:
         return False
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return True
+        return not (
+            "." not in hostname
+            or hostname == "localhost"
+            or hostname.endswith(
+                (".localhost", ".local", ".lan", ".home", ".internal")
+            )
+            or hostname.endswith(".ts.net")
+        )
     shared = ipaddress.ip_network("100.64.0.0/10")
     return not (
         address.is_private
         or address.is_loopback
         or address.is_link_local
+        or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
         or isinstance(address, ipaddress.IPv4Address) and address in shared

@@ -620,7 +620,9 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
             "First connect Grok to Things MCP. In a private terminal, run "
             "`things-orchestrator print-config --client grok --show-secrets`. "
             "At grok.com/connectors, choose New Connector, then Custom. Provide "
-            "the public HTTPS MCP URL and required authentication from the output. "
+            "the HTTPS MCP URL and required authentication from the output. xAI "
+            "requires the URL to be reachable from the public internet. The command "
+            "rejects known local or private addresses but cannot verify reachability. "
             "Confirm that the connector exposes exactly eight tools, including "
             "things_get.\n\n"
             "In Grok Bot, create or edit a Routine, choose \"When a webhook fires\", "
@@ -647,10 +649,11 @@ def _write_routines_setup_guidance(terminal: TextIO, *, receiver: str) -> None:
         "return to this prompt, edit ~/.hermes/webhook_subscriptions.json. In the "
         "things-ai-task-created entry, add \"toolsets\": [\"mcp-things\"]. The "
         "subscribe command cannot set route toolsets, and webhook runs otherwise "
-        "use a restricted default. Run `hermes webhook test things-ai-task-created` "
-        "and confirm that the route can use things_get. Anyone with the route's HMAC "
-        "secret then gains the eight bounded Things tools, so keep it private. Enter "
-        "the URL and secret below. Do not put either value in argv or chat.\n"
+        "use a restricted default. Inspect that entry and verify its exact "
+        "\"toolsets\": [\"mcp-things\"] value. This file check does not prove MCP "
+        "access. The positive selected-task smoke test does. Anyone with the route's "
+        "HMAC secret then gains the eight bounded Things tools, so keep it private. "
+        "Enter the URL and secret below. Do not put either value in argv or chat.\n"
     )
 
 

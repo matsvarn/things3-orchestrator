@@ -11,8 +11,9 @@
 - `routines setup` provides private guided setup for Grok and Hermes, including
   a complete receiver instruction, a safe configuration summary, a readiness
   check, and negative and positive smoke tests.
-- `print-config --client grok` renders the public HTTPS MCP URL and required
-  Bearer authentication for an xAI Custom connector without a private wrapper.
+- `print-config --client grok` renders the HTTPS MCP URL and required Bearer
+  authentication for an xAI Custom connector without a private wrapper. It
+  rejects known local and private addresses but does not prove reachability.
 - `routines status` distinguishes saved configuration, account binding,
   supervised-service state, worker liveness, durable history phase, trigger
   readiness, safe aggregate counts, and last successful activity times.

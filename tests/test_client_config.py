@@ -88,6 +88,7 @@ def test_grok_config_exposes_public_mcp_url_and_required_bearer(
     assert "New Connector" in revealed.guidance
     assert "Custom" in revealed.guidance
     assert "exactly eight tools" in revealed.guidance
+    assert "cannot verify DNS or reachability" in revealed.guidance
 
 
 @pytest.mark.parametrize(
@@ -96,18 +97,39 @@ def test_grok_config_exposes_public_mcp_url_and_required_bearer(
         "http://127.0.0.1:8787",
         "https://127.0.0.1:8787",
         "https://localhost:8787",
+        "https://LOCALHOST.:8787",
+        "https://printer",
+        "https://nas.local",
+        "https://service.internal",
+        "https://machine.tailnet.TS.NET.",
         "https://192.168.1.2",
         "https://100.64.0.2",
+        "https://224.0.0.1",
+        "https://[ff02::1]",
     ),
 )
-def test_grok_config_rejects_a_non_public_endpoint(url: str) -> None:
+def test_grok_config_rejects_http_and_known_local_or_private_endpoints(
+    url: str,
+) -> None:
     endpoint = Endpoint(
         url=normalize_mcp_url(url),
         bearer=McpBearer("secret-bearer"),
     )
 
-    with pytest.raises(ConfigError, match="public HTTPS"):
+    with pytest.raises(ConfigError, match="known local or private"):
         render_client_config(ClientKind.GROK, endpoint, show_secrets=True)
+
+
+def test_grok_config_accepts_public_ipv6_without_claiming_reachability() -> None:
+    endpoint = Endpoint(
+        url=normalize_mcp_url("https://[2606:4700:4700::1111]"),
+        bearer=McpBearer("secret-bearer"),
+    )
+
+    rendered = render_client_config(ClientKind.GROK, endpoint, show_secrets=False)
+
+    assert "https://[2606:4700:4700::1111]/mcp" in rendered.body
+    assert "cannot verify DNS or reachability" in rendered.guidance
 
 
 def test_cursor_configs_are_parseable_and_cloud_guidance_is_explicit(

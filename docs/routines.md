@@ -41,7 +41,9 @@ work.
 
 The [official xAI connector guide](https://docs.x.ai/grok/connectors) documents
 Custom MCP connectors. Grok requires a server that the public internet can
-reach. Use an HTTPS MCP URL and required authentication.
+reach. Use an HTTPS MCP URL and required authentication. The generated client
+configuration rejects known local and private addresses. It cannot verify DNS
+or public reachability, so verify that the endpoint is reachable before setup.
 
 The [official Grok Bot routines guide](https://docs.x.ai/grok-bot/skills-routines-and-automations)
 documents routines, testing, history, approvals, and retries. It does not
@@ -51,8 +53,8 @@ body used by the current beta.
 1. In a private terminal on the Things Orchestrator host, run
    `things-orchestrator print-config --client grok --show-secrets`.
 2. Open `grok.com/connectors`. Choose **New Connector**, then choose **Custom**.
-3. Provide the public HTTPS URL and required authentication from the command
-   output. The official guide does not document exact form-field names.
+3. Provide the HTTPS URL and required authentication from the command output.
+   The official guide does not document exact form-field names.
 4. Confirm that the connector exposes exactly eight tools, including
    `things_get`.
 5. In Grok Bot, create or edit a Routine.
@@ -103,8 +105,10 @@ things-orchestrator routines setup --profile always_on --receiver hermes
 5. Edit `~/.hermes/webhook_subscriptions.json`. In the
    `things-ai-task-created` entry, add `"toolsets": ["mcp-things"]`.
    `hermes webhook subscribe` cannot set route toolsets.
-6. Run `hermes webhook test things-ai-task-created`. Confirm that the route can
-   use `things_get` through the configured Things MCP.
+6. Inspect the `things-ai-task-created` entry and verify that its exact
+   `toolsets` value is `["mcp-things"]`. This file check does not prove that a
+   webhook run can use `things_get`. The positive selected-task smoke test
+   proves the real MCP path.
 7. Return to the waiting Things Orchestrator prompts. Enter the webhook URL and
    HMAC secret printed by the subscribe command.
 

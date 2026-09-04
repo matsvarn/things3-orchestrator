@@ -29,10 +29,11 @@ semantics, receiver instructions, and the two-part smoke test.
 
 These commands report saved configuration, account binding, service state,
 authenticated worker liveness, durable history phase, trigger readiness,
-timing, and aggregate delivery counts. They
-do not print the account, receiver URL, secret, task IDs, event IDs, or history
-identity. Public health remains `{"ok":true}`. Authenticated health adds only
-value-free worker state, failure counts, and safe poll and delivery times.
+timing, and aggregate delivery counts. They do not print the account, receiver
+URL, secret, task IDs, event IDs, or history identity. Public health remains
+`{"ok":true}`. The authenticated health response retains the installed version,
+tool hash, commit, and capabilities. It also adds value-free worker state,
+failure counts, and safe poll and delivery times.
 
 `doctor` automatically checks the TLS origin saved by `login`. Use `--url` to
 add a one-time endpoint that is not saved:
@@ -79,12 +80,13 @@ The JSON contains the installed version and commit, platform name, Python
 version, tool hashes, Cloud status and counts, endpoint class, service status,
 operation-state counts, and value-free routine state when available. It omits
 account values, network locations, Things content and IDs, credentials, raw
-errors, receiver details, and database rows. Inspect the report before sharing
-it.
+errors, receiver URL, receiver host, receiver credential, and database rows. It
+does include the receiver kind. Inspect the report before sharing it.
 
 ## Operate routines
 
-Use guided setup for a new installation or to converge after a partial setup:
+Use guided setup for a new installation or before receiver values have been
+saved:
 
 ```console
 things-orchestrator routines setup --profile always_on --receiver grok
@@ -105,9 +107,11 @@ Confirm that it exposes exactly eight tools, including `things_get`.
 
 For Hermes, setup prints the subscription command. Before you enter the
 returned URL and secret, add `"toolsets": ["mcp-things"]` to the
-`things-ai-task-created` entry in `~/.hermes/webhook_subscriptions.json`. Run
-`hermes webhook test things-ai-task-created`. Keep the HMAC secret private
-because a valid sender gains the eight bounded Things tools on that route.
+`things-ai-task-created` entry in `~/.hermes/webhook_subscriptions.json`.
+Inspect that entry and verify the exact value. This check does not prove MCP
+access. The positive selected-task smoke test does. Keep the HMAC secret
+private because a valid sender gains the eight bounded Things tools on that
+route.
 
 Run `things-orchestrator routines status`. Turn Active on only after the status
 reports `trigger_ready=true`. Setup enables the profile before it installs the

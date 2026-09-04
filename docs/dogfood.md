@@ -37,10 +37,12 @@ fresh candidate during its settlement window produced one event. Grok fetched
 the selected task through MCP and updated that task's notes.
 
 The final routine counts were zero candidates, zero pending events, one
-delivered event, and zero dead letters. This content-free record proves owner
+delivered event, and zero dead letters. This content-free record reports owner
 acceptance for that topology only. It does not prove general Grok or Hermes
-compatibility. The record excludes task content, account identity, task and
-event IDs, receiver credentials, webhook details, and host identity.
+compatibility. The record does not include the exact deployed commit SHA, Grok
+client version, installed skill state, or owner intervention details. It also
+excludes task content, account identity, task and event IDs, receiver
+credentials, webhook details, and host identity.
 
 ## v0.9.1 activation events
 

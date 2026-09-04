@@ -19,6 +19,8 @@ PLUGIN_REFERENCE = (
 PACKAGED_REFERENCE = (
     ROOT / "src/things_orchestrator/skills/things-orchestrator/references/routines.md"
 )
+INSTALL = ROOT / "docs/install.md"
+OPERATIONS = ROOT / "docs/operations.md"
 
 
 def _instruction(path: Path) -> str:
@@ -126,6 +128,7 @@ def test_portable_receiver_setup_includes_mcp_readiness_and_authority() -> None:
         "New Connector",
         "Custom",
         "public internet",
+        "cannot verify DNS or public reachability",
         "exactly eight tools, including `things_get`",
         "does not prove that a webhook-triggered Grok Bot execution receives",
     ):
@@ -136,8 +139,35 @@ def test_portable_receiver_setup_includes_mcp_readiness_and_authority() -> None:
         "~/.hermes/webhook_subscriptions.json",
         '"toolsets": ["mcp-things"]',
         "subscribe` cannot set route toolsets",
-        "hermes webhook test things-ai-task-created",
+        "This file check does not prove",
+        "positive selected-task smoke test",
         "valid HMAC request",
         "gains the eight bounded Things tools",
     ):
         assert hermes_fact in text
+    assert "hermes webhook test" not in text
+
+
+def test_install_and_operations_do_not_use_the_hermes_test_event_as_mcp_proof() -> None:
+    for path in (INSTALL, OPERATIONS):
+        text = " ".join(path.read_text().split())
+        assert '"toolsets": ["mcp-things"]' in text
+        assert "positive selected-task smoke test" in text
+        assert "hermes webhook test" not in text
+
+
+def test_operations_describes_health_support_and_setup_recovery_truthfully() -> None:
+    text = " ".join(OPERATIONS.read_text().split())
+
+    for fact in (
+        "installed version, tool hash, commit, and capabilities",
+        "does include the receiver kind",
+        "before receiver values have been saved",
+        "enabled configuration already contains the receiver values",
+        "things-orchestrator service install",
+        "Do not re-enter one-time receiver values",
+    ):
+        assert fact in text
+    assert "adds only" not in text
+    assert "receiver details" not in text
+    assert "converge after a partial setup" not in text

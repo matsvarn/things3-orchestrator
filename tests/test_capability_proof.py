@@ -26,6 +26,19 @@ def test_capability_proof_names_the_v2_safety_gate() -> None:
     assert "advanced project scopes" in document
 
 
+def test_routines_owner_record_does_not_overstate_live_evidence() -> None:
+    document = " ".join(
+        (ROOT / "docs/capability-proof.md").read_text().casefold().split()
+    )
+
+    assert "reports one private vps result" in document
+    assert "exact deployed commit sha" in document
+    assert "grok client version" in document
+    assert "installed skill state" in document
+    assert "owner intervention details" in document
+    assert "proves one private vps" not in document
+
+
 def test_live_probe_is_read_only_v2_and_has_no_legacy_approval_path() -> None:
     source = (ROOT / "scripts/probe_cloud_capabilities.py").read_text()
     assert "--read-only-live-probe" in source

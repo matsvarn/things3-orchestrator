@@ -595,7 +595,8 @@ def test_routines_setup_service_failure_leaves_enabled_for_direct_service_recove
     assert "hermes webhook subscribe things-ai-task-created" in terminal.getvalue()
     assert "webhook_subscriptions.json" in terminal.getvalue()
     assert '"toolsets": ["mcp-things"]' in terminal.getvalue()
-    assert "hermes webhook test things-ai-task-created" in terminal.getvalue()
+    assert "hermes webhook test" not in terminal.getvalue()
+    assert "positive selected-task smoke test" in terminal.getvalue()
     assert "Anyone with the route's HMAC secret" in terminal.getvalue()
     assert ROUTINE_RECEIVER_INSTRUCTION in terminal.getvalue()
     assert "service: active" in capsys.readouterr().out
