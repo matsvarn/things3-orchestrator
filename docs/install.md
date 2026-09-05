@@ -13,7 +13,7 @@ disable an account. Read [Security](../SECURITY.md) before login.
 Install an exact Git tag:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.4"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.5"
 ```
 
 Run the next commands in a private terminal. `login` verifies the Things Cloud
@@ -88,7 +88,7 @@ Keep the URL and HMAC secret private. `setup` saves the values, enables the
 account-bound profile, and installs or restarts the supervised service. Hermes
 is the default, so `--receiver hermes` is optional. Use the positive smoke test
 before relying on the route. No owner-run Hermes acceptance is recorded for
-v0.10.4.
+v0.10.5.
 
 For Grok Bot, first connect the MCP server. Run this command in a private
 terminal:

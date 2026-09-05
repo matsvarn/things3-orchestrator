@@ -47,6 +47,12 @@ approval, disposition, or recovery command. The routines reference defines one
 narrow selected-task work-input exception without granting any of those forms
 of authority.
 
+Notes are plain text with Things Markdown syntax. Rewrite them in place when
+authorized, preserving the information and links the request does not remove.
+If `notes_state` is `unavailable`, do not treat `notes: null` as an empty note
+or attempt replacement. Report the incomplete read. Also check
+`truncated_fields` before replacing notes.
+
 Omitted fields and members remain unchanged. `things_update` cannot complete,
 trash, reorder, mutate inherited tags or registries, or delete permanently.
 Use the dedicated bounded tool when one exists.

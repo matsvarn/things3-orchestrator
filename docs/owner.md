@@ -36,4 +36,11 @@ write. A fully classified `partial` is terminal and includes its receipt. Any
 correction is a new operation with a fresh request ID.
 
 Advanced Project scopes, coaching mutations, Areas and tag-registry mutation,
-rich-note replacement, and permanent deletion are deferred.
+replacement of unreadable notes, and permanent deletion are deferred.
+
+Ordinary notes, including native Things Markdown, support direct replacement.
+The server reconstructs native incremental text edits and validates their
+checksums. `notes_state: unavailable` means reconstruction failed; it does not
+mean the note is empty. An unavailable or truncated note must not be rewritten
+from its incomplete read. No format-conversion permission is needed for an
+ordinary, completely read note.

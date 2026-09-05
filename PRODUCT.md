@@ -1,6 +1,6 @@
 # Product contract
 
-Release contract: v0.10.4
+Release contract: v0.10.5
 
 This file is the concise product reference for the current release. Public
 claims must also remain consistent with the executable tool schemas, tests,
@@ -64,7 +64,7 @@ The serving host stores the Things Cloud password in a mode-0600 file. Never
 paste that password into chat. HTTP clients receive an MCP URL and one shared
 bearer; possession of that bearer, or access to the stdio server, grants all
 eight tools and therefore every bounded write. There is no read-only bearer or
-per-client authorization in v0.10.4.
+per-client authorization in v0.10.5.
 
 Task data returned to a client can reach its configured model provider. Owners
 must trust the serving host, client, and model provider. TLS termination and
@@ -74,7 +74,7 @@ remote-host security remain owner responsibilities.
 
 The current interface does not provide advanced scope redesign, heading
 deletion, Project merge, restore from Trash, permanent deletion, arbitrary
-rich-note replacement, registry mutation, RT2 recurrence writes, or full-system
+replacement of unreadable notes, registry mutation, RT2 recurrence writes, or full-system
 setup. It also does not provide mutation coaching through a staged approval
 workflow.
 

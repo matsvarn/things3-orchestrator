@@ -220,3 +220,31 @@ one accepted intent, and the result remains correct without the chat. Writes
 need Cloud read-back and receipt evidence. Operational workflows need true
 health and configuration checks, preserved preferences, a working rollback, and
 a verified recovery path.
+
+## 2026-09-05 native note reconstruction acceptance
+
+A disposable task was created in native Things on macOS with paragraphs,
+blank lines, a heading, bold and italic Markdown, list text, two web links,
+an emoji, and an accented word. A native edit from `café` to `coffee` emitted
+an incremental Cloud note patch: UTF-8 byte position 141, removal length 4,
+replacement `offee`, and CRC32 of the complete resulting text. This disproves
+the previous interpretation of type-2 notes as rich-text paragraph arrays.
+
+The corrected reader reconstructed the exact note. The public `things_update`
+path then rewrote the first paragraph and added a short test sentence. It
+returned `applied`; exact Cloud read-back matched all characters and blank
+lines. Native Things displayed the rewritten text, Markdown styling, and
+clickable URLs. A subsequent edit in native Things was reconstructed exactly
+by another cold Cloud history replay.
+
+Automated coverage checks failed checksums, malformed patch metadata, invalid
+positions, missing bases, recovery through a new snapshot, sequential edits,
+and a native note edit observed between planning and commit. The latter
+rejects the stale agent replacement and preserves the newer native text.
+The old cache version is invalidated so fragments are replayed from history.
+
+This proves the note transport and public mutation path for the tested text.
+It does not prove Grok or Hermes routine execution, file or email link behavior,
+or atomic protection against edits arriving after the final precondition
+refresh. Unknown or unverified note data remains unavailable and cannot be
+replaced through this path.

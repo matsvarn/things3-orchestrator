@@ -2580,12 +2580,12 @@ class ThingsWorkspace:
                             "next_action": "correct_request",
                             "instruction": "This item uses the newer Things repeater engine; only title and note edits are currently lossless.",
                         }
-                    if "notes" in fields and target.notes_format == "rich":
+                    if "notes" in fields and target.notes_format == "unavailable":
                         return {
                             "state": "rejected",
                             "code": "validation_error",
                             "next_action": "correct_request",
-                            "instruction": "The bounded v2 update cannot replace a rich-text note.",
+                            "instruction": "The current note could not be reconstructed completely from Things Cloud. Preserve it and retry after a fresh read; do not replace it from partial text.",
                         }
                     start_set = "start" in fields
                     start_value = cast(str | None, fields.get("start"))

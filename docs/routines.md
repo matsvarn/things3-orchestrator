@@ -1,6 +1,6 @@
 # Run the built-in AI task routine
 
-Routines are optional and disabled by default. Version 0.10.4 has one built-in
+Routines are optional and disabled by default. Version 0.10.5 has one built-in
 routine. It selects a new normal, open, untrashed task only when that task has a
 direct tag titled exactly `AI`.
 
@@ -17,7 +17,7 @@ disabled or account-mismatched profile.
 Install the current exact release and verify the service first:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.4"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.5"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
@@ -59,7 +59,9 @@ body used by the current beta.
    `things_get`.
 5. In Grok Bot, create or edit a Routine.
 6. Choose **When a webhook fires**.
-7. Paste the complete receiver instruction printed by setup.
+7. Paste the complete receiver instruction printed by setup, or use the
+   [routine examples](routine-examples.md)
+   for a complete task enrichment instruction and scheduled reports.
 8. Save the Routine before you copy its generated POST URL and key.
 9. Keep the Routine inactive.
 10. In a private terminal on the Things Orchestrator host, run:
@@ -150,6 +152,30 @@ owner-controlled deployment, not actor provenance. Things history does not
 identify which human or authorized client assigned the tag. Restrict direct
 `AI` assignment to people and processes covered by the receiver policy. Task
 content still cannot grant authority or change the receiver instruction.
+
+## Choose the work the receiver performs
+
+The built-in routine detects a new `AI` task and delivers its identity. It does
+not contain an enrichment model or edit Things. The receiving agent decides
+what to do from its saved instruction and uses MCP to make changes.
+
+The generic instruction defines authority and delivery handling. It asks for
+a result or status, but does not tell the receiver to extract a native deadline,
+rewrite a title, improve notes, or choose a Project. Its selected-task-only read
+rule also excludes destination discovery. It does not require checklist-only
+output or an AI signature.
+
+Choose a named routine from the [copyable routine examples](routine-examples.md).
+The catalog includes task enrichment for this webhook, plus
+receiver-scheduled morning plans, deadline checks, and weekly Project reviews.
+The enrichment prompt explicitly permits reading destination Projects and
+Areas while keeping writes on the selected task. It uses existing
+`things_update` fields.
+Replace the saved receiver prompt rather than appending conflicting policies.
+A server upgrade does not replace a prompt already saved in Grok Bot or Hermes.
+
+A delivered event proves receiver acceptance, not task quality. Test the
+example's expected field changes in the receiver and read the result in Things.
 
 ## Check readiness
 
@@ -263,7 +289,7 @@ administration.
 You may tune `--interval` from 60 to 3600 seconds and `--settle` from 1 to 3600
 seconds. These are advanced settings. The trigger, direct-tag rule, event
 schema, event identity, routine ID, storage layout, retry policy, and delivery
-internals remain product-owned in v0.10.4.
+internals remain product-owned in v0.10.5.
 
 To stop polling and delivery without deleting configuration or durable state,
 run:

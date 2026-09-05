@@ -324,6 +324,7 @@ class PublicItem(StrictModel):
     title: TaintedText
     status: Literal["open", "completed", "canceled"]
     notes: TaintedText | None = None
+    notes_state: Literal["available", "unavailable"] = "available"
     into_id: str | None = None
     start: str | None = None
     deadline: str | None = None
@@ -1268,8 +1269,9 @@ class ThingsV2:
             title=TaintedText(value=item.title),
             status=item.status,
             notes=TaintedText(value=item.notes_markdown)
-            if item.notes_markdown
+            if item.notes_markdown and (record is None or record.notes_format != "unavailable")
             else None,
+            notes_state="unavailable" if record is not None and record.notes_format == "unavailable" else "available",
             into_id=item.into_id,
             start=start,
             deadline=item.deadline,

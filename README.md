@@ -21,7 +21,7 @@ HTTP service. A single Mac uses loopback. A remote host adds Tailscale Serve or
 Caddy for TLS.
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.4"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.5"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
@@ -35,7 +35,9 @@ bearer.
 
 To run the optional built-in `AI` task routine, follow
 [Run the built-in AI task routine](docs/routines.md). Routines are disabled by
-default and do not add MCP tools.
+default and do not add MCP tools. Choose from the
+[named routines and copyable prompts](docs/routine-examples.md), including
+task enrichment and scheduled planning reports.
 
 For same-host Codex, the repository also contains a self-distributed plugin.
 It is not an official marketplace listing. For Hermes, `print-config` emits

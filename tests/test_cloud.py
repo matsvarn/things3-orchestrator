@@ -2461,11 +2461,50 @@ def test_empty_incremental_does_not_rewrite_cache(tmp_path: Path) -> None:
     assert cache.stat().st_mode & 0o777 == 0o600
 
 
-def test_rich_notes_join_paragraphs() -> None:
-    from things_orchestrator.cloud import _note_text
+def test_native_note_patches_reconstruct_text_and_allow_normal_update() -> None:
+    import zlib
 
-    text = _note_text({"t": 2, "ps": [{"r": "one"}, {"r": "two"}]})
-    assert text == "one\ntwo"
+    original = "First paragraph.\n\n**Bold** 🐝 café.\n[Label](https://example.org)\n"
+    expected = original.replace("café", "coffee")
+    position = len(original[:original.index("afé")].encode())
+    library = MemoryLibrary()
+    fold_events([
+        {"uuid": "note", "e": "Task6", "t": 0, "p": {
+            "tt": "Native note", "nt": {"t": 1, "v": original,
+            "ch": zlib.crc32(original.encode()) & 0xFFFFFFFF}}},
+        {"uuid": "note", "e": "Task6", "t": 1, "p": {"nt": {
+            "t": 2, "ps": [{"p": position, "l": 4, "r": "offee",
+            "ch": zlib.crc32(expected.encode()) & 0xFFFFFFFF}]}}},
+    ], library=library)
+    assert library.records["note"].notes == expected
+    interface = ThingsV2(ThingsWorkspace(library, journal=MemoryJournal()))
+    result = interface.dispatch("things_update", {
+        "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        "items": [{"id": "task:note", "set": {"notes": expected + "Updated."}}],
+    })
+    assert result.state == "applied"
+    assert library.records["note"].notes == expected + "Updated."
+
+
+@pytest.mark.parametrize("note", [
+    {"t": 0, "diag": "unknown"},
+    {"t": 2, "ps": [{"p": 0, "l": 0, "r": "fragment", "ch": 1}]},
+    {"t": 2, "ps": [{"r": "missing patch metadata"}]},
+    {"t": 1, "v": "text", "ch": 1},
+    {"t": 2, "ps": [{"p": -1, "l": 0, "r": "", "ch": 0}]},
+])
+def test_unreconstructable_notes_are_not_exposed_as_complete_or_editable(note: object) -> None:
+    library = MemoryLibrary([Record(uuid="note", kind="task", title="N", notes="Before")])
+    fold_events([{"uuid": "note", "e": "Task6", "t": 1, "p": {"nt": note}}], library=library)
+    interface = ThingsV2(ThingsWorkspace(library, journal=MemoryJournal()))
+    read = interface.dispatch("things_get", {"ids": ["task:note"]})
+    assert read.items[0].notes is None
+    assert read.items[0].notes_state == "unavailable"
+    result = interface.dispatch("things_update", {
+        "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        "items": [{"id": "task:note", "set": {"notes": "Replacement"}}],
+    })
+    assert result.state == "rejected"
 
 
 def test_fold_create_replaces_task_fields() -> None:
@@ -3693,7 +3732,7 @@ def test_fold_retains_cloud_quality_and_safety_facts() -> None:
     instance = library.records["instance"]
     assert instance.completed_at is not None
     assert instance.notes_source == "structured"
-    assert instance.notes_format == "rich"
+    assert instance.notes_format == "unavailable"
     assert instance.recurrence.role == "instance"
     assert instance.recurrence.template_uuid == "template"
     assert instance.recurrence.repeat_type == "after_completion"
@@ -3826,3 +3865,41 @@ def test_commit_rejects_duplicate_wire_ids() -> None:
                 Envelope("same", 1, "Task6", {"tt": "Two"}),
             ]
         )
+
+
+def test_note_patches_preserve_blank_lines_and_recover_only_from_snapshot() -> None:
+    import zlib
+    library = MemoryLibrary([Record(uuid="note", kind="task", title="N", notes="abc")])
+    def note(value: dict[str, object]) -> None:
+        fold_events([{"uuid": "note", "e": "Task6", "t": 1, "p": {"nt": value}}], library=library)
+    note({"t": 2, "ps": [
+        {"p": 1, "l": 1, "r": "\n\n", "ch": zlib.crc32(b"a\n\nc")},
+        {"p": 3, "l": 1, "r": "", "ch": zlib.crc32(b"a\n\n")},
+    ]})
+    assert library.records["note"].notes == "a\n\n"
+    note({"t": 0})
+    note({"t": 2, "ps": [{"p": 0, "l": 0, "r": "x", "ch": zlib.crc32(b"x")}]})
+    assert library.records["note"].notes_format == "unavailable"
+    note({"t": 1, "v": "Recovered", "ch": zlib.crc32(b"Recovered")})
+    assert library.records["note"].notes == "Recovered"
+    assert library.records["note"].notes_format == "markdown"
+
+
+def test_native_note_edit_between_planning_and_commit_prevents_overwrite() -> None:
+    import zlib
+    class RacingNotes(MemoryLibrary):
+        refreshes = 0
+        def refresh(self, *, force: bool = False) -> None:
+            self.refreshes += 1
+            if self.refreshes == 2:
+                fold_events([{"uuid": "note", "e": "Task6", "t": 1, "p": {"nt": {
+                    "t": 2, "ps": [{"p": 6, "l": 0, "r": " newer", "ch": zlib.crc32(b"Before newer")}]}
+                }}], library=self)
+    library = RacingNotes([Record(uuid="note", kind="task", title="N", notes="Before")])
+    result = ThingsV2(ThingsWorkspace(library, journal=MemoryJournal())).dispatch("things_update", {
+        "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        "items": [{"id": "task:note", "set": {"notes": "Agent rewrite"}}],
+    })
+    assert result.state == "not_applied"
+    assert result.code == "not_applied_precondition"
+    assert library.records["note"].notes == "Before newer"
