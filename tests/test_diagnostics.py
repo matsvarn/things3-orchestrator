@@ -687,6 +687,40 @@ def test_routines_diagnostic_uses_runtime_only_as_live_liveness_evidence(
     assert result.last_delivery_at == 70
 
 
+def test_authenticated_runtime_proves_worker_liveness_independently_of_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "routines.json"
+    configure_routines(
+        email="owner@example.com",
+        receiver_url="https://agent.example/webhooks/route",
+        receiver_secret=ReceiverSecret("secret"),
+        poll_interval_seconds=60,
+        path=config_path,
+    )
+    set_routines_enabled(True, email="owner@example.com", path=config_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "read_routine_counts",
+        lambda *_args: StoreCounts("live", 4, 1, 0, 0, 1, 0, 70),
+    )
+
+    result = diagnostics.collect_routines_diagnostic(
+        Credentials("owner@example.com", "password", None),
+        config_path=config_path,
+        database_path=tmp_path / "unused.sqlite3",
+        service_state="not-installed",
+        runtime={"state": "running", "last_successful_poll_at": 80},
+    )
+
+    assert result.history_phase == "live"
+    assert result.service_state == "not-installed"
+    assert result.worker_liveness == "running"
+    assert result.last_successful_poll_at == 80
+    assert result.trigger_tag_discovered is True
+    assert result.trigger_ready is True
+
+
 def test_live_database_does_not_imply_a_running_worker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -710,7 +744,7 @@ def test_live_database_does_not_imply_a_running_worker(
         config_path=config_path,
         database_path=tmp_path / "unused.sqlite3",
         service_state="inactive",
-        runtime={"state": "running", "last_successful_poll_at": 80},
+        runtime=None,
     )
 
     assert result.history_phase == "live"
@@ -718,6 +752,31 @@ def test_live_database_does_not_imply_a_running_worker(
     assert result.worker_liveness == "stopped"
     assert result.trigger_tag_discovered is True
     assert result.trigger_ready is False
+
+
+@pytest.mark.parametrize(
+    ("service_state", "runtime", "expected_liveness"),
+    (
+        ("active", None, "unknown"),
+        ("not-installed", None, "stopped"),
+        ("inactive", {}, "unknown"),
+    ),
+)
+def test_service_and_runtime_evidence_remain_separate(
+    tmp_path: Path,
+    service_state: str,
+    runtime: dict[str, object] | None,
+    expected_liveness: str,
+) -> None:
+    result = diagnostics.collect_routines_diagnostic(
+        None,
+        config_path=tmp_path / "missing-routines.json",
+        service_state=service_state,
+        runtime=runtime,
+    )
+
+    assert result.service_state == service_state
+    assert result.worker_liveness == expected_liveness
 
 
 @pytest.mark.parametrize(("ai_tags", "ready"), ((0, False), (1, True)))

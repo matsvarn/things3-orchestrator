@@ -21,6 +21,8 @@ from .config import ConfigError
 _LABEL = "com.matsvarnskuhler.things-orchestrator-http"
 _UNIT = "things-orchestrator-http.service"
 _SYSTEMD_PATH = Path("/etc/systemd/system") / _UNIT
+_DEPLOYMENT_UNIT = "things-orchestrator.service"
+_DEPLOYMENT_SYSTEMD_PATH = Path("/etc/systemd/system") / _DEPLOYMENT_UNIT
 _SETTLE_TIMEOUT = 5.0
 
 
@@ -200,9 +202,25 @@ def service_status(
             )
             else ServiceStatus.LOADED
         )
+    return _systemd_status(_UNIT, path)
+
+
+def diagnostic_service_status(
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+) -> ServiceStatus:
+    managed = service_status(platform=platform, uid=uid, home=home)
+    if platform != "linux" or managed is not ServiceStatus.NOT_INSTALLED:
+        return managed
+    return _systemd_status(_DEPLOYMENT_UNIT, _DEPLOYMENT_SYSTEMD_PATH)
+
+
+def _systemd_status(unit: str, path: Path) -> ServiceStatus:
     try:
         active_result = subprocess.run(
-            ("systemctl", "is-active", "--quiet", _UNIT),
+            ("systemctl", "is-active", "--quiet", unit),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -221,7 +239,7 @@ def service_status(
         return ServiceStatus.UNKNOWN
     try:
         load_result = subprocess.run(
-            ("systemctl", "show", "--property=LoadState", "--value", _UNIT),
+            ("systemctl", "show", "--property=LoadState", "--value", unit),
             check=False,
             capture_output=True,
             text=True,

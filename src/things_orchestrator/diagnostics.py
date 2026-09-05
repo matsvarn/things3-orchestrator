@@ -44,7 +44,7 @@ from .routines_config import (
 )
 from .routines_store import read_routine_counts, routine_database_path
 from .routines_webhook import RoutineHTTPOpener, proxyless_no_redirect_opener
-from .service import service_status
+from .service import diagnostic_service_status
 
 CloudStatus = Literal[
     "ok",
@@ -493,7 +493,7 @@ def _service_status() -> str | None:
     else:
         return None
     try:
-        return service_status(
+        return diagnostic_service_status(
             platform=service_platform,
             uid=os.getuid(),
             home=Path.home(),
@@ -520,9 +520,9 @@ def _runtime_status(
     service: RoutineServiceState,
     runtime: Mapping[str, object] | None,
 ) -> tuple[RoutineWorkerLiveness, int | None, int | None]:
-    if service in {"loaded", "inactive", "not-installed"}:
-        return "stopped", None, None
-    if service != "active" or runtime is None:
+    if runtime is None:
+        if service in {"loaded", "inactive", "not-installed"}:
+            return "stopped", None, None
         return "unknown", None, None
     state = runtime.get("state")
     liveness: RoutineWorkerLiveness

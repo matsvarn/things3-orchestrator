@@ -1,6 +1,6 @@
 # Run the built-in AI task routine
 
-Routines are optional and disabled by default. Version 0.10.1 has one built-in
+Routines are optional and disabled by default. Version 0.10.2 has one built-in
 routine. It selects a new normal, open, untrashed task only when that task has a
 direct tag titled exactly `AI`.
 
@@ -17,7 +17,7 @@ disabled or account-mismatched profile.
 Install the current exact release and verify the service first:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.1"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.2"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
@@ -166,7 +166,10 @@ bodies, or task content:
 
 - `configuration_state` is the saved state.
 - `account_binding` says whether the saved profile matches the current account.
-- `service_state` is the launchd or systemd state.
+- `service_state` is the launchd or systemd state. On Linux, diagnostics checks
+  the externally managed `things-orchestrator.service` only when the standard
+  `things-orchestrator-http.service` is absent. Service install and uninstall
+  still manage only the standard unit.
 - `worker_liveness` is `initializing`, `running`, `backing_off`, `stopped`, or
   `unknown`. Configuration and SQLite history never imply a running worker.
 - `history_phase` is the durable projection phase.
@@ -180,7 +183,9 @@ bodies, or task content:
 - `last_successful_poll_at` and `last_delivery_at` are Unix timestamps when the
   corresponding evidence exists.
 
-An active service with a failed or malformed health probe reports
+Authenticated runtime evidence determines worker liveness independently of
+service installation evidence. An active service with a failed or malformed
+health probe reports
 `worker_liveness=unknown`. A stopped service can coexist with
 `history_phase=live`; durable history does not prove liveness. Status reads the
 routines database only if it already exists and belongs to the current account.
@@ -258,7 +263,7 @@ administration.
 You may tune `--interval` from 60 to 3600 seconds and `--settle` from 1 to 3600
 seconds. These are advanced settings. The trigger, direct-tag rule, event
 schema, event identity, routine ID, storage layout, retry policy, and delivery
-internals remain product-owned in v0.10.1.
+internals remain product-owned in v0.10.2.
 
 To stop polling and delivery without deleting configuration or durable state,
 run:

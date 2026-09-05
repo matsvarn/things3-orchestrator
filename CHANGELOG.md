@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.2 - 2026-09-05
+
+- Recognize the externally managed Linux service in diagnostics when the
+  standard service is absent. Standard service lifecycle commands retain their
+  existing unit.
+- Report authenticated routine worker liveness independently of service
+  installation evidence. Durable history alone still does not prove liveness.
+
 ## 0.10.1 - 2026-09-05
 
 - Remove automatic legacy write contexts from list and search reads. Public
