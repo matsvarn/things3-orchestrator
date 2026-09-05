@@ -1,6 +1,6 @@
 # Product contract
 
-Release contract: v0.10.2
+Release contract: v0.10.3
 
 This file is the concise product reference for the current release. Public
 claims must also remain consistent with the executable tool schemas, tests,
@@ -64,7 +64,7 @@ The serving host stores the Things Cloud password in a mode-0600 file. Never
 paste that password into chat. HTTP clients receive an MCP URL and one shared
 bearer; possession of that bearer, or access to the stdio server, grants all
 eight tools and therefore every bounded write. There is no read-only bearer or
-per-client authorization in v0.10.2.
+per-client authorization in v0.10.3.
 
 Task data returned to a client can reach its configured model provider. Owners
 must trust the serving host, client, and model provider. TLS termination and

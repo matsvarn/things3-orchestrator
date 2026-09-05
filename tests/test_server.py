@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from jsonschema import validate
-from mcp.types import ToolAnnotations
+from mcp.types import TextContent, ToolAnnotations
 from starlette.testclient import TestClient
 
 from things_orchestrator.library import MemoryLibrary, Record
@@ -91,6 +92,9 @@ def test_each_tool_result_matches_the_v2_output_schema() -> None:
         result = asyncio.run(server.call_tool(name, arguments))
         assert result.structured_content is not None
         validate(result.structured_content, tools[name].output_schema)
+        assert len(result.content) == 1
+        assert isinstance(result.content[0], TextContent)
+        assert json.loads(result.content[0].text) == result.structured_content
 
 
 def test_mcp_server_version_matches_package() -> None:
@@ -98,6 +102,20 @@ def test_mcp_server_version_matches_package() -> None:
 
     server = _server()
     assert server._tools_only_server.version == package_version()  # noqa: SLF001
+
+
+def test_text_only_client_receives_task_details_and_trust_labels() -> None:
+    result = asyncio.run(
+        _server(Record(uuid="task", kind="task", title="Büro planen", inbox=True))
+        .call_tool("things_view", {"view": "inbox"})
+    )
+    assert isinstance(result.content[0], TextContent)
+    payload = json.loads(result.content[0].text)
+    assert payload["state"] == "ok"
+    assert payload["items"][0]["id"] == "task:task"
+    assert payload["items"][0]["title"] == {
+        "value": "Büro planen", "source": "things_cloud", "trust": "untrusted",
+    }
 
 
 def test_bearer_comparison_requires_exact_token() -> None:

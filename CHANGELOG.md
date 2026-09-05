@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.3 - 2026-09-05
+
+- Return the complete bounded JSON result in MCP text content as well as
+  structured content. Clients that consume text content now receive Things
+  items, continuation cursors, trust labels, and receipt details instead of
+  only a generic instruction.
+
 ## 0.10.2 - 2026-09-05
 
 - Recognize the externally managed Linux service in diagnostics when the

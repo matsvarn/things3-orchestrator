@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -394,7 +395,7 @@ def _public_issues(
 def _domain_result(result: PublicResult, *, is_error: bool = False) -> CallToolResult:
     structured = result.model_dump(mode="json", exclude_none=True)
     return CallToolResult(
-        content=[TextContent(type="text", text=result.instruction)],
+        content=[TextContent(type="text", text=json.dumps(structured, ensure_ascii=False))],
         structured_content=structured,
         is_error=is_error,
     )
