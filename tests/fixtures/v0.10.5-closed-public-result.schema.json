@@ -1,0 +1,741 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "blocking_operation_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Blocking Operation Ids",
+      "type": "array"
+    },
+    "code": {
+      "enum": [
+        "ok",
+        "validation_error",
+        "unknown_tool",
+        "request_conflict",
+        "write_fenced",
+        "missing_target",
+        "invalid_destination",
+        "inactive_destination",
+        "expanded_write_limit",
+        "pending_unknown",
+        "applied",
+        "unchanged",
+        "not_applied_precondition",
+        "partial",
+        "partial_resolved",
+        "stale",
+        "declined",
+        "receipt_missing",
+        "cursor_invalid",
+        "read_unavailable",
+        "internal_error"
+      ],
+      "title": "Code",
+      "type": "string"
+    },
+    "cursor": {
+      "default": null,
+      "title": "Cursor",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "effects": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "explanation": {
+            "maxLength": 500,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "instance_id": {
+            "default": null,
+            "maxLength": 512,
+            "pattern": "^(task|project|area|heading):[^\\s:]+$",
+            "title": "Instance Id",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "repeat_started",
+            "title": "Kind",
+            "type": "string"
+          },
+          "template_id": {
+            "default": null,
+            "maxLength": 512,
+            "pattern": "^(task|project|area|heading):[^\\s:]+$",
+            "title": "Template Id",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "explanation"
+        ],
+        "title": "PublicEffect",
+        "type": "object"
+      },
+      "maxItems": 40,
+      "title": "Effects",
+      "type": "array"
+    },
+    "instruction": {
+      "title": "Instruction",
+      "type": "string"
+    },
+    "issues": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 120,
+            "title": "Code",
+            "type": "string"
+          },
+          "hint": {
+            "maxLength": 1000,
+            "title": "Hint",
+            "type": "string"
+          },
+          "item_id": {
+            "default": null,
+            "maxLength": 512,
+            "pattern": "^(task|project|area|heading):[^\\s:]+$",
+            "title": "Item Id",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "item_index": {
+            "default": null,
+            "title": "Item Index",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "maxLength": 512,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "hint"
+        ],
+        "title": "PublicIssue",
+        "type": "object"
+      },
+      "maxItems": 20,
+      "title": "Issues",
+      "type": "array"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "checklist": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "title": "Id",
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "canceled"
+                  ],
+                  "title": "Status",
+                  "type": "string"
+                },
+                "title": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "things_cloud",
+                      "default": "things_cloud",
+                      "title": "Source",
+                      "type": "string"
+                    },
+                    "trust": {
+                      "const": "untrusted",
+                      "default": "untrusted",
+                      "title": "Trust",
+                      "type": "string"
+                    },
+                    "value": {
+                      "title": "Value",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ],
+                  "title": "TaintedText",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "status"
+              ],
+              "title": "PublicChecklistRow",
+              "type": "object"
+            },
+            "maxItems": 100,
+            "title": "Checklist",
+            "type": "array"
+          },
+          "deadline": {
+            "default": null,
+            "title": "Deadline",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "direct_tag_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 40,
+            "title": "Direct Tag Ids",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "inherited_tag_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 40,
+            "title": "Inherited Tag Ids",
+            "type": "array"
+          },
+          "into_id": {
+            "default": null,
+            "title": "Into Id",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "task",
+              "project",
+              "area",
+              "heading"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "notes": {
+            "additionalProperties": false,
+            "default": null,
+            "properties": {
+              "source": {
+                "const": "things_cloud",
+                "default": "things_cloud",
+                "title": "Source",
+                "type": "string"
+              },
+              "trust": {
+                "const": "untrusted",
+                "default": "untrusted",
+                "title": "Trust",
+                "type": "string"
+              },
+              "value": {
+                "title": "Value",
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "title": "TaintedText",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "notes_state": {
+            "default": "available",
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Notes State",
+            "type": "string"
+          },
+          "recurrence": {
+            "additionalProperties": false,
+            "default": null,
+            "description": "Semantic recurrence fact projected from an existing ItemFact.",
+            "properties": {
+              "adds_deadline": {
+                "default": false,
+                "title": "Adds Deadline",
+                "type": "boolean"
+              },
+              "completed_on": {
+                "default": null,
+                "title": "Completed On",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_through": {
+                "default": null,
+                "title": "Created Through",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "engine": {
+                "default": "rt1",
+                "enum": [
+                  "rt1",
+                  "rt2"
+                ],
+                "title": "Engine",
+                "type": "string"
+              },
+              "generated_count": {
+                "default": null,
+                "minimum": 0,
+                "title": "Generated Count",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "interval": {
+                "default": null,
+                "maximum": 366,
+                "minimum": 1,
+                "title": "Interval",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "none",
+                  "fixed_instance",
+                  "after_completion_instance",
+                  "template",
+                  "unknown"
+                ],
+                "title": "Kind",
+                "type": "string"
+              },
+              "linked_item_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 40,
+                "title": "Linked Item Ids",
+                "type": "array"
+              },
+              "mode": {
+                "default": null,
+                "enum": [
+                  "fixed",
+                  "after_completion"
+                ],
+                "title": "Mode",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "next_on": {
+                "default": null,
+                "title": "Next On",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "on": {
+                "items": {
+                  "additionalProperties": false,
+                  "description": "One semantic selected date in a regular repeat pattern.",
+                  "properties": {
+                    "day": {
+                      "default": null,
+                      "title": "Day",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "month": {
+                      "default": null,
+                      "maximum": 12,
+                      "minimum": 1,
+                      "title": "Month",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "ordinal": {
+                      "default": null,
+                      "title": "Ordinal",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "weekday": {
+                      "default": null,
+                      "enum": [
+                        "monday",
+                        "tuesday",
+                        "wednesday",
+                        "thursday",
+                        "friday",
+                        "saturday",
+                        "sunday"
+                      ],
+                      "title": "Weekday",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "title": "RepeatOn",
+                  "type": "object"
+                },
+                "maxItems": 64,
+                "title": "On",
+                "type": "array"
+              },
+              "paused": {
+                "default": null,
+                "title": "Paused",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "reminder_time": {
+                "default": null,
+                "title": "Reminder Time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_early_days": {
+                "default": null,
+                "maximum": 366,
+                "minimum": 0,
+                "title": "Start Early Days",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "template_id": {
+                "default": null,
+                "maxLength": 512,
+                "pattern": "^(task|project|area|heading):[^\\s:]+$",
+                "title": "Template Id",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unit": {
+                "default": null,
+                "enum": [
+                  "day",
+                  "week",
+                  "month",
+                  "year"
+                ],
+                "title": "Unit",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "until": {
+                "default": null,
+                "title": "Until",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "weekdays": {
+                "items": {
+                  "enum": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 7,
+                "title": "Weekdays",
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "title": "PublicRecurrence",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "start": {
+            "default": null,
+            "title": "Start",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "open",
+              "completed",
+              "canceled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "source": {
+                  "const": "things_cloud",
+                  "default": "things_cloud",
+                  "title": "Source",
+                  "type": "string"
+                },
+                "trust": {
+                  "const": "untrusted",
+                  "default": "untrusted",
+                  "title": "Trust",
+                  "type": "string"
+                },
+                "value": {
+                  "title": "Value",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "title": "TaintedText",
+              "type": "object"
+            },
+            "maxItems": 80,
+            "title": "Tags",
+            "type": "array"
+          },
+          "title": {
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "const": "things_cloud",
+                "default": "things_cloud",
+                "title": "Source",
+                "type": "string"
+              },
+              "trust": {
+                "const": "untrusted",
+                "default": "untrusted",
+                "title": "Trust",
+                "type": "string"
+              },
+              "value": {
+                "title": "Value",
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "title": "TaintedText",
+            "type": "object"
+          },
+          "truncated_fields": {
+            "items": {
+              "enum": [
+                "notes",
+                "checklist",
+                "tags",
+                "recurrence"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Truncated Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "status"
+        ],
+        "title": "PublicItem",
+        "type": "object"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "missing_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Missing Ids",
+      "type": "array"
+    },
+    "next_action": {
+      "enum": [
+        "none",
+        "correct_request",
+        "retry_same",
+        "read_fresh",
+        "read_receipt",
+        "wait",
+        "contact_operator",
+        "continue_read"
+      ],
+      "title": "Next Action",
+      "type": "string"
+    },
+    "operation_id": {
+      "default": null,
+      "title": "Operation Id",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_hash": {
+      "default": null,
+      "title": "Receipt Hash",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "state": {
+      "enum": [
+        "ok",
+        "pending",
+        "applied",
+        "unchanged",
+        "not_applied",
+        "partial",
+        "partial_resolved",
+        "stale",
+        "declined",
+        "rejected"
+      ],
+      "title": "State",
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "const": "things_cloud",
+                "default": "things_cloud",
+                "title": "Source",
+                "type": "string"
+              },
+              "trust": {
+                "const": "untrusted",
+                "default": "untrusted",
+                "title": "Trust",
+                "type": "string"
+              },
+              "value": {
+                "title": "Value",
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "title": "TaintedText",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "PublicTag",
+        "type": "object"
+      },
+      "title": "Tags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "state",
+    "instruction",
+    "code",
+    "next_action"
+  ],
+  "title": "PublicResult",
+  "type": "object"
+}

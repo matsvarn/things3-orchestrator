@@ -15,6 +15,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from .interface import ReadCall, TruncatedField
 from .journal import AmbiguousV2Request, same_account_id
+from .tools import ITEM_ID as ITEM_ID
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -24,7 +25,6 @@ SAFETY_POLICY_DIGEST = "sha256:v1:" + sha256(
     b"pre-post-recheck;read-back-receipt;never-replay-stored-operation"
 ).hexdigest()
 REQUEST_ID = r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[0-9A-HJKMNP-TV-Z]{26})$"
-ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 
 
 def _canonical(value: object) -> str:

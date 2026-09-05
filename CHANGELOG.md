@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.0 - 2026-09-05
+
+- Advertise additive-tolerant tool output schemas so extra properties on
+  documented result objects no longer fail a current catalog. Input validation,
+  constructed results, unknown outcome enums, and incomplete-note write
+  protection stay strict. Clients that cached the closed v0.10.5 output schema
+  need one `tools/list` refresh.
+- Bind health and doctor hashes to the exact advertised tools, including
+  discovery inputs, descriptions, and annotations.
+- Serve a deterministic client instruction bundle at authenticated
+  `/client/bundle`. `client-bundle --output` writes the same bytes without
+  login. `client-sync` updates the managed skill tree from the running host
+  without Things Cloud credentials. Catalog metadata names policy
+  `additive_output_v1`. Closed output snapshots need one required refresh.
+  Description-only drift is a recommendation. Named routine templates are
+  reported separately from the generic skill.
+
 ## 0.10.5 - 2026-09-05
 
 - Reconstruct native Things note edits as UTF-8 byte patches with checksum

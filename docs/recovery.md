@@ -88,3 +88,30 @@ routines disabled and restore the matching `routines.json` and account-scoped
 database from a private backup. Do not delete the database to force a retry:
 that removes deduplication tombstones and creates a new account event namespace.
 Inspect receiver records before deciding how to handle a dead event.
+
+## Recover a cached tool catalog
+
+Public health cannot repair a client. Reconnect the HTTP session so the client
+repeats `tools/list`. From v0.11.0, `client-sync` can compare an exported catalog snapshot and
+refresh instruction files.
+
+If a client still validates the older closed output schema, it rejects new
+fields such as `notes_state`. Reconnect once after the host advertises additive
+output. Same-host stdio `serve` is a different process. Restart that server if
+that is the connection in use. A hosted Grok connector needs the provider's
+reconnect step. Do not treat a successful temporary HTTP probe as proof that a
+stdio bridge refreshed.
+
+`doctor` checks the host. It does not prove that an existing client refreshed
+its catalog or saved prompt.
+
+## Recover an in-flight write after a schema error
+
+A schema validation failure after a write does not prove that the write failed.
+Do not send the mutation again with a new request ID. Retry the exact same
+tool, request ID, and arguments. That retry force-refreshes and classifies
+current Cloud state. It never reposts the frozen writes. Then use
+`things_receipt` or `operation-reconcile` as in the operation recovery steps
+above.
+
+Report authentication and reachability failures separately from schema drift.

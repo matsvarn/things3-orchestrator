@@ -215,7 +215,7 @@ things-orchestrator print-config \\
         (
             "README.md",
             'uv tool install "git+https://github.com/matsvarn/'
-            'things3-orchestrator.git@v0.10.5"',
+            'things3-orchestrator.git@v0.11.0"',
             'uv tool install "git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"',
             "v0.8.0",
@@ -223,7 +223,7 @@ things-orchestrator print-config \\
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.10.5",
+            "--ref v0.11.0",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref v0.8.0",
             "v0.8.0",
@@ -231,7 +231,7 @@ things-orchestrator print-config \\
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.10.5",
+            "--ref v0.11.0",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref=v0.8.0",
             "unsupported Codex marketplace install command",
@@ -330,7 +330,7 @@ def test_inline_code_client_commands_require_show_secrets(tmp_path: Path) -> Non
         (
             "README.md",
             'uv tool install "git+https://github.com/matsvarn/'
-            'things3-orchestrator.git@v0.10.5"',
+            'things3-orchestrator.git@v0.11.0"',
             "`uv tool install "
             '"git+https://github.com/matsvarn/'
             'things3-orchestrator.git@v0.8.0"`',
@@ -338,7 +338,7 @@ def test_inline_code_client_commands_require_show_secrets(tmp_path: Path) -> Non
         (
             "docs/clients.md",
             "codex plugin marketplace add matsvarn/things3-orchestrator "
-            "--ref v0.10.5",
+            "--ref v0.11.0",
             "`codex plugin marketplace add matsvarn/things3-orchestrator "
             "--ref v0.8.0`",
         ),

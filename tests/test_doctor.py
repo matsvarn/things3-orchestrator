@@ -6,16 +6,18 @@ import pytest
 from mcp.types import Implementation
 
 from things_orchestrator.config import McpUrl, normalize_mcp_url
-from things_orchestrator.deployment import (
-    DeploymentIdentity,
-    tool_contract_hash,
-    tool_schema_hash,
-)
+from things_orchestrator.deployment import DeploymentIdentity
 from things_orchestrator.doctor import (
     DoctorFailure,
     TargetReceipt,
     curl_tool_count_command,
     validate_target,
+)
+from things_orchestrator.tools import (
+    advertised_tools,
+    tool_contract_hash,
+    tool_discovery_hash,
+    tool_schema_hash,
 )
 from things_orchestrator.v2 import MODELS
 
@@ -30,9 +32,12 @@ def _receipt() -> TargetReceipt:
             "commit": "a" * 40,
             "tool_schema_hash": tool_schema_hash(),
             "tool_contract_hash": tool_contract_hash(),
+            "tool_discovery_hash": tool_discovery_hash(),
+            "client_bundle": {"format_version": 1, "path": "/client/bundle"},
         },
         server_info=Implementation(name="things", version="0.8.0"),
         tool_names=tuple(MODELS),
+        tools=advertised_tools(),
     )
 
 
@@ -79,6 +84,25 @@ def test_validate_target_accepts_exact_public_health_identity_and_tools() -> Non
                 _receipt(),
                 detailed_health={
                     **_receipt().detailed_health,
+                    "tool_discovery_hash": "sha256:wrong",
+                },
+            ),
+            "discovery hash",
+        ),
+        (
+            replace(
+                _receipt(),
+                detailed_health={
+                    **{key: value for key, value in _receipt().detailed_health.items() if key != "client_bundle"},
+                },
+            ),
+            "client bundle",
+        ),
+        (
+            replace(
+                _receipt(),
+                detailed_health={
+                    **_receipt().detailed_health,
                     "commit": "b" * 40,
                 },
             ),
@@ -90,6 +114,21 @@ def test_validate_target_rejects_protocol_and_deployment_drift(
     receipt: TargetReceipt, message: str
 ) -> None:
     with pytest.raises(DoctorFailure, match=message):
+        validate_target(receipt, _identity())
+
+
+def test_validate_target_rejects_tools_list_fingerprint_drift() -> None:
+    advertised = advertised_tools()
+    drifted = (
+        advertised[0].model_copy(update={"description": "drifted catalog"}),
+        *advertised[1:],
+    )
+    receipt = replace(
+        _receipt(),
+        tools=drifted,
+        tool_names=tuple(tool.name for tool in drifted),
+    )
+    with pytest.raises(DoctorFailure, match="fingerprint"):
         validate_target(receipt, _identity())
 
 

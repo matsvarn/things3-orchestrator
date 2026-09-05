@@ -11,13 +11,17 @@ import anyio
 import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import Implementation
+from mcp.types import Implementation, Tool
 
 from .config import McpBearer, McpUrl
 from .deployment import (
     DeploymentIdentity,
     installed_identity,
+)
+from .tools import (
+    CLIENT_BUNDLE_PATH,
     tool_contract_hash,
+    tool_discovery_hash,
     tool_schema_hash,
 )
 from .v2 import MODELS
@@ -38,6 +42,7 @@ class TargetReceipt:
     detailed_health: dict[str, object]
     server_info: Implementation
     tool_names: tuple[str, ...]
+    tools: tuple[Tool, ...]
 
 
 @dataclass(frozen=True)
@@ -63,10 +68,21 @@ def validate_target(
         raise DoctorFailure("health version differs from the installed version")
     if receipt.tool_names != tuple(MODELS):
         raise DoctorFailure("MCP tools/list did not return the exact eight tools")
+    if tool_discovery_hash(receipt.tools) != tool_discovery_hash():
+        raise DoctorFailure(
+            "MCP tools/list fingerprint differs from the local discovery hash"
+        )
     if receipt.detailed_health.get("tool_schema_hash") != tool_schema_hash():
         raise DoctorFailure("health schema hash differs from the local schema hash")
     if receipt.detailed_health.get("tool_contract_hash") != tool_contract_hash():
         raise DoctorFailure("health contract hash differs from the local contract hash")
+    if receipt.detailed_health.get("tool_discovery_hash") != tool_discovery_hash():
+        raise DoctorFailure(
+            "health discovery hash differs from the local discovery hash"
+        )
+    bundle = receipt.detailed_health.get("client_bundle")
+    if not isinstance(bundle, dict) or bundle.get("path") != CLIENT_BUNDLE_PATH:
+        raise DoctorFailure("authenticated /health did not advertise the client bundle")
     if identity.commit is None:
         raise DoctorFailure("installed commit is unknown; reinstall from an exact Git tag")
     if receipt.detailed_health.get("commit") != identity.commit:
@@ -105,6 +121,7 @@ async def probe_target(url: McpUrl, bearer: McpBearer) -> TargetReceipt:
         detailed_health=dict(detailed_payload),
         server_info=initialized.server_info,
         tool_names=tuple(tool.name for tool in tools.tools),
+        tools=tuple(tools.tools),
     )
 
 

@@ -1162,6 +1162,8 @@ def test_readme_is_safe_to_publish() -> None:
 
 def test_parser_names_the_owner_commands() -> None:
     help_text = build_parser().format_help()
+    assert "client-bundle" in help_text
+    assert "client-sync" in help_text
     assert "login" in help_text
     assert "serve" in help_text
     assert "serve-http" in help_text

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "things-orchestrator"
-version = "0.10.5"
+version = "0.11.0"
 description = "Unofficial self-hosted Things 3 Cloud MCP with eight bounded agent-ready tools"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
-things-orchestrator = "things_orchestrator.cli:main"
+things-orchestrator = "things_orchestrator.entrypoint:main"
 
 [dependency-groups]
 dev = [

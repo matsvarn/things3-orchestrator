@@ -6,9 +6,13 @@ Keep one production server and one stable model Interface.
 
 - `v2.py` owns the eight bounded public contracts, immutable operation drafts
   and manifests, and taint-preserving output. Schemas stay flat. Do not add
-  `oneOf` or `anyOf` to discovery schemas. Discovery output schemas expose
-  control flow and compact item summaries. Runtime facts stay strict through
-  the `Result` model.
+  `oneOf` or `anyOf` to discovery schemas. Advertised output schemas tolerate
+  extra properties on documented result objects. Runtime construction stays
+  strict through `PublicResult`.
+- `tools.py` is the canonical advertised tool list. Server discovery and
+  deployment hashes use that module. Catalog compatibility uses an explicit
+  policy and epoch plus bounded schema checks. A discovery hash change is not
+  a required migration by itself.
 - `workspace.py` remains the one transaction engine. V2 owns preparation,
   application, read-back, and reconciliation. The retired v1 commit and approval
   language is absent; only its durable journal recovery remains.
@@ -20,10 +24,15 @@ Keep one production server and one stable model Interface.
   and the exact plugin launcher binding.
 - `client_config.py` renders one client artifact from one endpoint and bearer.
 - `deployment.py` owns package resources, version, installed Git identity,
-  cache version, authenticated health detail, `tool_schema_hash`, and
-  `tool_contract_hash`.
+  cache version, authenticated health detail, `tool_schema_hash`,
+  `tool_contract_hash`, `tool_discovery_hash`, and the client-bundle path.
+- `client_bundle.py` generates the deterministic instruction packet from the
+  installed skill tree and `ROUTINE_RECEIVER_INSTRUCTION`.
+- `client_sync.py` is the client-only fetch, checksum, and staged-file sync.
+  It does not read Cloud credentials.
 - `doctor.py` proves public health privacy, authenticated health, MCP
-  initialization, the exact tool list, hashes, version, and commit.
+  initialization, the exact tool list, hashes, version, commit, and the client
+  bundle path.
 - `service.py` owns launchd and systemd lifecycle planning and execution.
 - `journal.py` creates immutable v2 operations, performs legal compare-and-set
   transitions, claims the account fence, and appends exact receipt rows. The
@@ -62,7 +71,8 @@ Keep one production server and one stable model Interface.
   receipt and Trash read-back.
 - `cli.py` defines the owner commands: `login`, `configure`, `routines`,
   `service`, `serve-http`, `print-config`, `cloud-check`, `support-bundle`, and
-  `doctor`.
+  `doctor`. `client-bundle` and `client-sync` are client-packet commands and do
+  not require host login.
   Production installs use an exact
   Git tag through `uv tool install`; clone development uses the same commands
   through `uv run`. `login` keeps the existing bearer unless

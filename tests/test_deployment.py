@@ -8,14 +8,18 @@ import pytest
 from things_orchestrator.deployment import (
     installed_identity,
     skill_path,
+)
+from things_orchestrator.tools import (
     tool_contract_hash,
+    tool_discovery_hash,
     tool_schema_hash,
 )
 from things_orchestrator.v2 import MODELS
 
 ROOT = Path(__file__).parents[1]
-EXPECTED_TOOL_SCHEMA_HASH = "sha256:df6df1c07dc83e7698baf177"
-EXPECTED_TOOL_CONTRACT_HASH = "sha256:fb364f86c8d4b27279f72837"
+EXPECTED_TOOL_SCHEMA_HASH = "sha256:f4b0cfe8bf55b2183a6db867"
+EXPECTED_TOOL_CONTRACT_HASH = "sha256:46be6e77b1dabc9a0162c48e"
+EXPECTED_TOOL_DISCOVERY_HASH = "sha256:3aa075ee21669febc480672a"
 EXPECTED_TOOLS = (
     "things_view",
     "things_find",
@@ -32,6 +36,7 @@ def test_deployment_identity_matches_current_tool_contract() -> None:
     assert tuple(MODELS) == EXPECTED_TOOLS
     assert tool_schema_hash() == EXPECTED_TOOL_SCHEMA_HASH
     assert tool_contract_hash() == EXPECTED_TOOL_CONTRACT_HASH
+    assert tool_discovery_hash() == EXPECTED_TOOL_DISCOVERY_HASH
 
 
 def test_skill_path_is_packaged_and_matches_the_codex_plugin() -> None:
