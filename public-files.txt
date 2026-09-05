@@ -31,6 +31,7 @@ docs/recovery.md
 docs/research/comparison.md
 docs/research/things3-cloud.md
 docs/research/weekly-review-best-practice.md
+docs/routine-examples.md
 docs/routines.md
 docs/trust.md
 docs/workflows.md
@@ -42,6 +43,10 @@ plugin/skills/things-orchestrator/agents/openai.yaml
 plugin/skills/things-orchestrator/references/form.md
 plugin/skills/things-orchestrator/references/research.md
 plugin/skills/things-orchestrator/references/review.md
+plugin/skills/things-orchestrator/references/routine-deadline-check.md
+plugin/skills/things-orchestrator/references/routine-enrichment.md
+plugin/skills/things-orchestrator/references/routine-morning-plan.md
+plugin/skills/things-orchestrator/references/routine-weekly-review.md
 plugin/skills/things-orchestrator/references/routines.md
 public-files.txt
 pyproject.toml
@@ -75,6 +80,10 @@ src/things_orchestrator/skills/things-orchestrator/agents/openai.yaml
 src/things_orchestrator/skills/things-orchestrator/references/form.md
 src/things_orchestrator/skills/things-orchestrator/references/research.md
 src/things_orchestrator/skills/things-orchestrator/references/review.md
+src/things_orchestrator/skills/things-orchestrator/references/routine-deadline-check.md
+src/things_orchestrator/skills/things-orchestrator/references/routine-enrichment.md
+src/things_orchestrator/skills/things-orchestrator/references/routine-morning-plan.md
+src/things_orchestrator/skills/things-orchestrator/references/routine-weekly-review.md
 src/things_orchestrator/skills/things-orchestrator/references/routines.md
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
