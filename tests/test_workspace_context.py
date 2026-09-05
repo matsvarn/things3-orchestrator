@@ -618,3 +618,230 @@ def test_organize_layout_names_hidden_heading_occupants() -> None:
     hidden_fact = next(item for item in read.items if item.id == hidden.id)
     assert hidden_fact.ref is not None
     assert "trashed" in hidden_fact.signals
+
+
+def test_living_project_change_is_the_writable_neighborhood() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch", kind="project", title="Launch", area_uuid=area.uuid
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+    )
+    hidden = Record(
+        uuid="gone",
+        kind="task",
+        title="Gone",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [area, project, heading, task, hidden]
+    )
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        hidden.id,
+    }
+    assert result.layouts
+    assert result.layouts[0].complete
+    section = next(
+        row for row in result.layouts[0].sections if row.heading_ref is not None
+    )
+    assert section.hidden_count == 1
+    assert "contained records" not in result.instruction
+
+
+def test_trashed_project_change_lists_contained_records() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch",
+        kind="project",
+        title="Launch",
+        area_uuid=area.uuid,
+        trashed=True,
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    task = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    nested = Record(
+        uuid="nested",
+        kind="project",
+        title="Nested",
+        parent_uuid=project.uuid,
+        trashed=True,
+    )
+    leaf = Record(
+        uuid="leaf",
+        kind="task",
+        title="Leaf",
+        parent_uuid=nested.uuid,
+        trashed=True,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [area, project, heading, task, nested, leaf]
+    )
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        nested.id,
+        leaf.id,
+    }
+    assert result.items[0].id == project.id
+    assert all(item.revision is None for item in result.items)
+    assert all(item.ref for item in result.items)
+    assert "trashed" in result.items[0].signals
+    assert "4 contained records" in result.instruction
+    assert heading.id.startswith("heading:")
+    assert result.layouts
+    assert [layout.complete for layout in result.layouts] == [True, True]
+    facts = {item.id: item.ref for item in result.items}
+    root_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[project.id]
+    )
+    assert [section.heading_ref for section in root_layout.sections] == [
+        facts[heading.id]
+    ]
+    assert root_layout.sections[0].task_refs == [facts[task.id]]
+    assert root_layout.sections[0].hidden_count == 0
+    nested_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[nested.id]
+    )
+    assert nested_layout.sections[0].heading_ref is None
+    assert nested_layout.sections[0].task_refs == [facts[leaf.id]]
+
+
+def test_task_change_include_exposes_destination_project_headings() -> None:
+    source = Record(uuid="source", kind="project", title="Source")
+    destination = Record(uuid="destination", kind="project", title="Destination")
+    source_heading = Record(
+        uuid="source-heading",
+        kind="task",
+        title="Source heading",
+        parent_uuid=source.uuid,
+        heading=True,
+    )
+    destination_heading = Record(
+        uuid="destination-heading",
+        kind="task",
+        title="Destination heading",
+        parent_uuid=destination.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="move-me",
+        kind="task",
+        title="Move me",
+        parent_uuid=source.uuid,
+        heading_uuid=source_heading.uuid,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [source, destination, source_heading, destination_heading, task]
+    )
+
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=task.id,
+            include=[{"id": destination.id}],
+        )
+    )
+
+    assert read.status == "ok"
+    assert read.context and read.context.complete
+    refs = {item.id: item.ref for item in read.items}
+    assert refs[destination.id] is not None
+    assert refs[destination_heading.id] is not None
+    assert all(item.revision is None for item in read.items)
+
+
+def test_task_change_include_resolves_named_cross_project_anchor() -> None:
+    source = Record(uuid="source", kind="project", title="Source")
+    destination = Record(uuid="destination", kind="project", title="Destination")
+    target = Record(
+        uuid="target", kind="task", title="Target", parent_uuid=source.uuid
+    )
+    anchor = Record(
+        uuid="anchor", kind="task", title="Named anchor", parent_uuid=destination.uuid
+    )
+    workspace, _library, _store = contextual_workspace(
+        [source, destination, target, anchor]
+    )
+
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=target.id,
+            include=[{"find": "Named anchor", "within": destination.id}],
+        )
+    )
+
+    assert read.status == "ok"
+    assert read.context
+    refs = {item.id: item.ref for item in read.items}
+    assert refs[anchor.id]
+
+
+def test_organize_include_adds_a_second_complete_project_scope() -> None:
+    first = Record(uuid="alpha", kind="project", title="Alpha")
+    second = Record(uuid="beta", kind="project", title="Beta")
+    first_task = Record(
+        uuid="one", kind="task", title="Alpha next", parent_uuid=first.uuid
+    )
+    second_task = Record(
+        uuid="two", kind="task", title="Beta next", parent_uuid=second.uuid
+    )
+    workspace, _library, _store = contextual_workspace(
+        [first, second, first_task, second_task]
+    )
+    read = workspace.read(
+        ReadCall(
+            purpose="organize",
+            id=first.id,
+            include=[{"id": second.id}],
+        )
+    )
+    assert read.context is not None
+    assert len(read.layouts) == 2
+    assert all(item.revision is None for item in read.items)
