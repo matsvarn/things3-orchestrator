@@ -16,6 +16,7 @@ from things_orchestrator.service import (
     ServiceStatus,
     _apply,
     _plan_service,
+    diagnostic_service_status,
     render_launchd_plist,
     render_systemd_unit,
     service_action,
@@ -514,6 +515,86 @@ def test_systemd_status_queries_an_orphaned_unit_without_a_file(
     monkeypatch.setattr("things_orchestrator.service.subprocess.run", run)
 
     assert service_status(platform="linux", uid=1000, home=tmp_path) is expected
+
+
+@pytest.mark.parametrize(
+    ("active_code", "load_state", "unit_file", "expected"),
+    (
+        (0, "loaded", True, ServiceStatus.ACTIVE),
+        (3, "loaded", True, ServiceStatus.INACTIVE),
+        (3, "not-found", False, ServiceStatus.NOT_INSTALLED),
+        (1, "loaded", True, ServiceStatus.UNKNOWN),
+    ),
+)
+def test_linux_diagnostics_recognize_external_deployment_unit_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_code: int,
+    load_state: str,
+    unit_file: bool,
+    expected: ServiceStatus,
+) -> None:
+    managed_path = tmp_path / "things-orchestrator-http.service"
+    deployment_path = tmp_path / "things-orchestrator.service"
+    if unit_file:
+        deployment_path.write_text("unit")
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> object:
+        commands.append(command)
+        if command[-1] == "things-orchestrator-http.service":
+            if "is-active" in command:
+                return SimpleNamespace(returncode=3, stdout="")
+            return SimpleNamespace(returncode=0, stdout="not-found\n")
+        if "is-active" in command:
+            return SimpleNamespace(returncode=active_code, stdout="")
+        if "show" in command:
+            return SimpleNamespace(returncode=0, stdout=f"{load_state}\n")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("things_orchestrator.service.subprocess.run", run)
+    monkeypatch.setattr("things_orchestrator.service._SYSTEMD_PATH", managed_path)
+    monkeypatch.setattr(
+        "things_orchestrator.service._DEPLOYMENT_SYSTEMD_PATH", deployment_path
+    )
+
+    assert (
+        diagnostic_service_status(platform="linux", uid=1000, home=tmp_path) is expected
+    )
+    assert any(command[-1] == "things-orchestrator.service" for command in commands)
+
+
+def test_linux_diagnostics_do_not_replace_managed_unit_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    managed_path = tmp_path / "things-orchestrator-http.service"
+    deployment_path = tmp_path / "things-orchestrator.service"
+    managed_path.write_text("unit")
+    deployment_path.write_text("unit")
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> object:
+        commands.append(command)
+        return SimpleNamespace(returncode=3, stdout="")
+
+    monkeypatch.setattr("things_orchestrator.service.subprocess.run", run)
+    monkeypatch.setattr("things_orchestrator.service._SYSTEMD_PATH", managed_path)
+    monkeypatch.setattr(
+        "things_orchestrator.service._DEPLOYMENT_SYSTEMD_PATH", deployment_path
+    )
+
+    assert (
+        diagnostic_service_status(platform="linux", uid=1000, home=tmp_path)
+        is ServiceStatus.INACTIVE
+    )
+    assert commands == [
+        (
+            "systemctl",
+            "is-active",
+            "--quiet",
+            "things-orchestrator-http.service",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
