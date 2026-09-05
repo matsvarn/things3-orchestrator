@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1 - 2026-09-05
+
+- Remove automatic legacy write contexts from list and search reads. Public
+  pagination now continues past 120 items, and the service no longer creates a
+  separate context database for data the eight-tool API does not use.
+- Remove unused three-tool discovery schemas and the retired owner-text
+  renderer. Current tool discovery remains generated from the v2 models.
+- Reuse the webhook interface and runtime snapshot builder in routines.
+- Guided routines setup now explains that the exact `AI` tag must exist and
+  sync before the readiness check can succeed.
+
 ## 0.10.0 - 2026-09-04
 
 ### Added

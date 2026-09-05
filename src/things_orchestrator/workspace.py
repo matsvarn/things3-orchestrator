@@ -1,4 +1,4 @@
-"""One deep workspace Module behind the three model tools."""
+"""Things reads, bounded v2 mutations, and retained legacy recovery."""
 
 from __future__ import annotations
 
@@ -127,18 +127,6 @@ _ORDER_MAX = 2**63 - 1
 _PLAN_MINUTES = 30
 _PENDING_RETRY_LIMIT = 3
 _LOGBOOK_DAYS = 14
-_REVIEW_CONTEXT_VIEWS = {
-    "today",
-    "inbox",
-    "week",
-    "weekly_review",
-    "area",
-    "project",
-    "audit",
-    "logbook",
-    "trash",
-    "diagnostics",
-}
 _WEEKDAY_CODES = {
     "sunday": 0,
     "monday": 1,
@@ -592,13 +580,8 @@ class _ItemCursor:
     view: View | None
     detail: tuple[str, ...]
     expires_at: datetime
-    within: str | None = None
-    item_id: str | None = None
-    from_date: str | None = None
-    to_date: str | None = None
     signals_any: tuple[str, ...] = ()
     membership_revision: str | None = None
-    context_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -778,7 +761,7 @@ class ThingsWorkspace:
             return self._tag_page(rows, offset=0, limit=call.limit)
 
         if view == "diagnostics":
-            return self._diagnostics_page(call.limit, call=call)
+            return self._diagnostics_page(call.limit)
         if view == "weekly_review":
             return self._weekly_review_page(call)
         if view == "project":
@@ -860,8 +843,6 @@ class ThingsWorkspace:
         offset: int = 0,
         expected_ids: list[str] | None = None,
         expected_digest: str | None = None,
-        call: ReadCall | None = None,
-        existing_context_id: str | None = None,
     ) -> Result:
         conflicts = diagnose(self._library)
         ids = [row.item_id for row in conflicts]
@@ -903,12 +884,7 @@ class ThingsWorkspace:
                 truncated=cursor is not None,
             )
         )
-        return self._bind_review_context(
-            result,
-            call,
-            records,
-            existing_context_id=existing_context_id,
-        )
+        return result
 
     def _weekly_review_page(
         self,
@@ -918,7 +894,6 @@ class ThingsWorkspace:
         expected_ids: list[str] | None = None,
         expected_snapshot: str | None = None,
         expected_membership: str | None = None,
-        existing_context_id: str | None = None,
     ) -> Result:
         categories = [call.category] if call.category is not None else []
         review = self._weekly_review_snapshot(categories)
@@ -1003,14 +978,7 @@ class ThingsWorkspace:
                 truncated=cursor is not None,
             )
         )
-        if call.category is not None:
-            return result
-        return self._bind_review_context(
-            result,
-            call,
-            page_records,
-            existing_context_id=existing_context_id,
-        )
+        return result
 
     def _weekly_review_snapshot(
         self, signals_any: Sequence[str] = ()
@@ -2037,193 +2005,6 @@ class ThingsWorkspace:
             return date.fromisoformat(call.from_date), date.fromisoformat(call.to_date)
         end = self._clock().date()
         return end - timedelta(days=_LOGBOOK_DAYS - 1), end
-
-    def _call_from_cursor(self, saved: _ItemCursor, limit: int) -> ReadCall:
-        payload: dict[str, object] = {"limit": limit}
-        if saved.view is not None:
-            payload["view"] = saved.view
-        if saved.within is not None:
-            payload["within"] = saved.within
-        elif saved.item_id is not None:
-            payload["id"] = saved.item_id
-        if saved.from_date is not None:
-            payload["from"] = saved.from_date
-        if saved.to_date is not None:
-            payload["to"] = saved.to_date
-        if saved.signals_any:
-            payload["signals_any"] = list(saved.signals_any)
-        return ReadCall.model_validate(payload)
-
-    def _bind_review_context(
-        self,
-        result: Result,
-        call: ReadCall | None,
-        records: list[Record],
-        *,
-        existing_context_id: str | None = None,
-    ) -> Result:
-        if (
-            call is None
-            or call.purpose != "review"
-            or call.ids
-            or not records
-            or result.context is not None
-        ):
-            return result
-        view = call.view or (
-            "today"
-            if call.id is None and call.find is None
-            else None
-        )
-        if view is not None and view not in _REVIEW_CONTEXT_VIEWS:
-            return result
-        if view is None and call.find is None and call.id is None:
-            view = "today"
-        extra: list[Record] = []
-        if call.include:
-            neighborhood = _Neighborhood()
-            self._neighborhood_include(neighborhood, call)
-            extra.extend(neighborhood.records)
-        bound: list[Record] = []
-        seen: set[str] = set()
-        for record in [*records, *extra]:
-            if record.uuid in seen:
-                continue
-            seen.add(record.uuid)
-            bound.append(record)
-        existing: tuple[ContextRef, ...] = ()
-        if existing_context_id is not None:
-            try:
-                existing = self._context_store.get(
-                    existing_context_id, account_id=self._account_id
-                ).refs
-            except (ContextNotFound, ContextExpired, ContextCorrupt):
-                existing = ()
-        if len(existing) + len(bound) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(existing) + len(bound))
-        new_refs, by_id = self._context_refs(bound, existing=existing)
-        scope = f"review:{call.within or call.id or view or call.find or 'page'}"
-        seen_count = len(existing) + len(new_refs)
-        finished = result.cursor is None
-        layouts = result.layouts
-        if existing_context_id is not None and existing:
-            try:
-                context = self._context_store.extend(
-                    existing_context_id,
-                    account_id=self._account_id,
-                    refs=new_refs,
-                    completeness=(
-                        CompletenessFact(
-                            scope=scope,
-                            seen=seen_count,
-                            complete=finished,
-                            next_cursor=None if finished else result.cursor,
-                        ),
-                    ),
-                )
-            except (ContextNotFound, ContextExpired, ContextCorrupt, ContextConflict):
-                context = self._create_context(
-                    call,
-                    [*existing, *new_refs],
-                    scopes=[scope],
-                    complete=finished,
-                    seen=seen_count,
-                    next_cursor=result.cursor,
-                )
-        else:
-            context = self._create_context(
-                call,
-                new_refs,
-                scopes=[scope],
-                complete=finished,
-                seen=seen_count,
-                next_cursor=result.cursor,
-            )
-        if view == "audit" and finished and not call.signals_any:
-            projects = self._complete_audit_projects(context)
-            context = self._context_store.extend(
-                context.id,
-                account_id=self._account_id,
-                completeness=self._audit_project_completeness(projects),
-            )
-            layouts = self._audit_project_layouts(projects, context)
-        if result.cursor is not None:
-            saved = self._cursors.get(result.cursor)
-            if saved is not None:
-                self._cursors[result.cursor] = replace(saved, context_id=context.id)
-        items = [
-            item.model_copy(update={"ref": by_id[item.id], "revision": None})
-            if item.id in by_id
-            else item
-            for item in result.items
-        ]
-        instruction = result.instruction
-        if view == "audit" and finished:
-            if call.signals_any:
-                instruction = "This final audit page completes the selected filter."
-            else:
-                instruction = (
-                    "This final audit page completes the active list and includes "
-                    "each complete Project layout in native order."
-                )
-        if items and "short ref" not in instruction.casefold():
-            instruction = (
-                instruction.rstrip(".")
-                + ". Use this context and short refs to change listed work in one commit."
-            )
-        if result.truncated and not finished:
-            instruction = (
-                instruction.rstrip(".")
-                + ". Continue the cursor to add the rest to this same context."
-            )
-        return result.model_copy(
-            update={
-                "items": items,
-                "layouts": layouts,
-                "context": self._public_context(context),
-                "instruction": instruction,
-            }
-        )
-
-    def _complete_audit_projects(
-        self, context: ReadContext
-    ) -> list[tuple[Record, list[Record]]]:
-        exact_ids = {entry.exact_id for entry in context.refs}
-        projects: list[tuple[Record, list[Record]]] = []
-        for entry in context.refs:
-            project = self._exact_item(entry.exact_id)
-            if project is None or project.kind != "project" or project.heading:
-                continue
-            members = self._library.project(project.id)
-            if any(member.id not in exact_ids for member in members):
-                continue
-            projects.append((project, members))
-        return projects
-
-    @staticmethod
-    def _audit_project_completeness(
-        projects: Sequence[tuple[Record, list[Record]]],
-    ) -> tuple[CompletenessFact, ...]:
-        return tuple(
-            CompletenessFact(
-                scope=project.id,
-                seen=len(members),
-                total=len(members),
-                complete=True,
-            )
-            for project, members in projects
-        )
-
-    def _audit_project_layouts(
-        self,
-        projects: Sequence[tuple[Record, list[Record]]],
-        context: ReadContext,
-    ) -> list[LayoutFact]:
-        by_id = {entry.exact_id: entry.ref for entry in context.refs}
-        return [
-            self._project_layout(project, members, by_id)
-            for project, members in projects
-        ]
 
     @staticmethod
     def _public_context(context: ReadContext) -> ContextFact:
@@ -4944,10 +4725,6 @@ class ThingsWorkspace:
                 full,
                 view,
                 detail,
-                within=call.within if call is not None else None,
-                item_id=call.id if call is not None else None,
-                from_date=call.from_date if call is not None else None,
-                to_date=call.to_date if call is not None else None,
                 signals_any=call.signals_any if call is not None else (),
                 membership_revision=membership_revision,
             )
@@ -4991,8 +4768,7 @@ class ThingsWorkspace:
                 view=view,
                 detail=detail,
             )
-        result = self._follow_cursor(result)
-        return self._bind_review_context(result, call, page_records)
+        return self._follow_cursor(result)
 
     def _continue(self, cursor: str, limit: int, *, view: View | None = None) -> Result:
         detail_saved = self._detail_cursors.get(cursor)
@@ -5031,16 +4807,11 @@ class ThingsWorkspace:
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
         if saved.view == "diagnostics":
-            continued = ReadCall.model_validate(
-                {"view": "diagnostics", "limit": limit}
-            )
             return self._diagnostics_page(
                 limit,
                 offset=saved.offset,
                 expected_ids=saved.ids,
                 expected_digest=saved.snapshot_revision,
-                call=continued,
-                existing_context_id=saved.context_id,
             )
         if saved.view == "weekly_review":
             continued = ReadCall.model_validate(
@@ -5056,7 +4827,6 @@ class ThingsWorkspace:
                 expected_ids=saved.ids,
                 expected_snapshot=saved.snapshot_revision,
                 expected_membership=saved.membership_revision,
-                existing_context_id=saved.context_id,
             )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
@@ -5086,10 +4856,6 @@ class ThingsWorkspace:
                 saved.full,
                 saved.view,
                 saved.detail,
-                within=saved.within,
-                item_id=saved.item_id,
-                from_date=saved.from_date,
-                to_date=saved.to_date,
                 signals_any=saved.signals_any,
                 membership_revision=saved.membership_revision,
             )
@@ -5124,14 +4890,7 @@ class ThingsWorkspace:
                 view=saved.view,
                 detail=saved.detail,
             )
-        result = self._follow_cursor(result)
-        continued = self._call_from_cursor(saved, limit)
-        return self._bind_review_context(
-            result,
-            continued,
-            page_items,
-            existing_context_id=saved.context_id,
-        )
+        return self._follow_cursor(result)
 
     @staticmethod
     def _cursor_view_error(
@@ -5156,10 +4915,6 @@ class ThingsWorkspace:
         view: View | None,
         detail: tuple[str, ...] = (),
         *,
-        within: str | None = None,
-        item_id: str | None = None,
-        from_date: str | None = None,
-        to_date: str | None = None,
         signals_any: Sequence[str] = (),
         membership_revision: str | None = None,
     ) -> str:
@@ -5174,10 +4929,6 @@ class ThingsWorkspace:
             view=view,
             detail=detail,
             expires_at=self._clock() + timedelta(minutes=10),
-            within=within,
-            item_id=item_id,
-            from_date=from_date,
-            to_date=to_date,
             signals_any=tuple(signals_any),
             membership_revision=membership_revision,
         )

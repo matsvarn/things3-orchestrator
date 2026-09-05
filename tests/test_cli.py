@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import tomllib
@@ -22,6 +23,7 @@ from things_orchestrator.cli import (
 from things_orchestrator.config import ConfigError, Credentials, McpBearer
 from things_orchestrator.doctor import DoctorFailure
 from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
+from things_orchestrator.library import MemoryLibrary, Record
 
 ROOT = Path(__file__).parents[1]
 
@@ -1063,83 +1065,30 @@ def test_support_bundle_prints_only_the_diagnostics_report(
     }
 
 
-def test_server_binds_a_persistent_context_store_to_the_cloud_account(
+def test_server_reads_without_creating_a_legacy_context_database(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     account_journal = tmp_path / "journal-accountdigest.sqlite3"
-    captured: dict[str, object] = {}
-
-    class FakeJournal:
-        def cutover_v1(self) -> dict[str, object]:
-            return {"unresolved": []}
-
-        def prune_v2(self, *, now: str, retention_days: int) -> int:
-            assert now
-            assert retention_days == 7
-            return 0
-
-    journal = FakeJournal()
-
-    class FakeClient:
-        def __init__(self, email: str, password: str) -> None:
-            assert (email, password) == ("owner@example.com", "cloud-secret")
-
-    class FakeWorkspace:
-        def __init__(self, library: object, **kwargs: object) -> None:
-            captured["library"] = library
-            captured.update(kwargs)
-
-    class FakeContextStore:
-        def __init__(
-            self,
-            path: Path,
-            *,
-            clock: object,
-            token_factory: object,
-        ) -> None:
-            captured["context_path"] = path
-            captured["context_clock"] = clock
-            captured["token_factory"] = token_factory
-            captured["context_store_instance"] = self
-
-    monkeypatch.setattr(
-        "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("owner@example.com", "cloud-secret", None),
-    )
-    monkeypatch.setattr(
-        "things_orchestrator.cli.load_timezone", lambda: "Europe/Berlin"
-    )
-    monkeypatch.setattr("things_orchestrator.cli.CloudClient", FakeClient)
-    monkeypatch.setattr("things_orchestrator.cli.CloudLibrary", lambda client: client)
     monkeypatch.setattr(
         "things_orchestrator.cli.journal_path", lambda email: account_journal
     )
-    monkeypatch.setattr("things_orchestrator.cli.SQLiteJournal", lambda path: journal)
-    monkeypatch.setattr("things_orchestrator.cli.SQLiteContextStore", FakeContextStore)
-    monkeypatch.setattr("things_orchestrator.cli.ThingsWorkspace", FakeWorkspace)
     monkeypatch.setattr(
-        "things_orchestrator.cli.ThingsMCPServer",
-        lambda workspace, *, routines: workspace,
+        "things_orchestrator.cli.CloudLibrary",
+        lambda client: MemoryLibrary([
+            Record(uuid="inbox-task", kind="task", title="File invoice", inbox=True)
+        ]),
     )
-    monkeypatch.setattr(
-        "things_orchestrator.cli.token_urlsafe",
-        lambda size: "secure-context-token" if size == 24 else "wrong-size",
+    server = _server(
+        build_parser(), credentials=Credentials("owner@example.com", "secret", None)
     )
-
-    workspace = _server(build_parser())
-
-    assert workspace is not None
-    assert captured["journal"] is journal
-    assert captured["account_id"] == "owner@example.com"
-    assert callable(captured["preferences"])
-    assert captured["context_store"] is captured["context_store_instance"]
-    assert captured["context_path"] == tmp_path / "contexts-accountdigest.sqlite3"
-    context_clock = captured["context_clock"]
-    assert callable(context_clock)
-    assert context_clock().utcoffset() is not None  # type: ignore[operator]
-    token_factory = captured["token_factory"]
-    assert callable(token_factory)
-    assert token_factory() == "secure-context-token"  # type: ignore[operator]
+    result = asyncio.run(server.call_tool("things_view", {"view": "inbox"}))
+    assert result.structured_content is not None
+    assert result.structured_content["state"] == "ok"
+    assert result.structured_content["items"][0]["id"] == "task:inbox-task"
+    assert account_journal.is_file()
+    assert not list(tmp_path.rglob("contexts*"))
 
 
 def test_obsolete_setup_and_hand_edited_service_template_are_removed() -> None:

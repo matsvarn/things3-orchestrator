@@ -76,6 +76,45 @@ def test_default_discovery_is_exactly_the_bounded_eight() -> None:
         assert forbidden not in update
 
 
+@pytest.mark.parametrize("tool", ["things_find", "things_view"])
+def test_public_reads_page_past_the_retired_review_context_limit(tool: str) -> None:
+    records = [
+        Record(
+            uuid=f"task-{index:03d}", kind="task",
+            title=f"Pagination sample {index:03d}", inbox=True,
+        )
+        for index in range(161)
+    ]
+    server = _server(*records)
+
+    async def read_all() -> list[str]:
+        arguments = (
+            {"text": "Pagination sample", "limit": 40}
+            if tool == "things_find"
+            else {"view": "inbox", "limit": 40}
+        )
+        seen: list[str] = []
+        for expected_size in (40, 40, 40, 40, 1):
+            wire = await server.call_tool(tool, arguments)
+            assert wire.structured_content is not None
+            result = PublicResult.model_validate(wire.structured_content)
+            assert result.state == "ok"
+            assert len(result.items) == expected_size
+            seen.extend(item.id for item in result.items)
+            if expected_size == 1:
+                assert result.cursor is None
+                assert result.next_action == "none"
+            else:
+                assert result.cursor is not None
+                assert result.next_action == "continue_read"
+                arguments = {"cursor": result.cursor, "limit": 40}
+        return seen
+
+    seen = asyncio.run(read_all())
+    assert len(seen) == len(set(seen)) == len(records)
+    assert set(seen) == {record.id for record in records}
+
+
 def test_repeat_contract_is_semantic_and_bounded() -> None:
     capture = TaskCapture.model_validate(
         {
