@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.5 - 2026-09-05
+
+- Reconstruct native Things note edits as UTF-8 byte patches with checksum
+  verification instead of treating replacement fragments as rich-text notes.
+  Ordinary notes can now be rewritten through `things_update` while preserving
+  Markdown, links, Unicode, and blank lines in the supplied text.
+- Add `notes_state` to returned items so an unreadable note is distinguishable
+  from an empty note. Unsupported or invalid note data remains protected.
+  Invalidate older caches to rebuild note text from Cloud history.
+- Provide four named, copyable routine examples for Grok and Hermes: task
+  enrichment, morning planning, deadline checks, and weekly Project review.
+  Explain receiver approval blocks and incomplete enrichment explicitly.
+- Verify native Things to MCP to native Things note round trips on a disposable
+  task. Routine-prompt acceptance is separate and remains unverified.
+
 ## 0.10.4 - 2026-09-05
 
 - Remove retired v1 commit and approval compilation, their exclusive models,

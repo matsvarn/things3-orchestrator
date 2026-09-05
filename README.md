@@ -21,7 +21,7 @@ HTTP service. A single Mac uses loopback. A remote host adds Tailscale Serve or
 Caddy for TLS.
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.4"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.5"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait

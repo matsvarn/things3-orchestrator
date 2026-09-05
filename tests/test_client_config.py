@@ -56,7 +56,7 @@ def test_hermes_config_uses_native_cli_without_putting_the_bearer_in_history(
         "skills",
         "install",
         "https://raw.githubusercontent.com/matsvarn/things3-orchestrator/"
-        "v0.10.4/plugin/skills/things-orchestrator/SKILL.md",
+        "v0.10.5/plugin/skills/things-orchestrator/SKILL.md",
         "--yes",
     ]
     assert "secret-bearer" not in rendered.body
