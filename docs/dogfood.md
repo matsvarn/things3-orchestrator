@@ -47,10 +47,43 @@ contained only the instruction. v0.10.3 returns the same complete bounded JSON
 in both fields. This preserves trust labels and control-flow fields for clients
 that consume text. The public tool count remains eight.
 
-Status: **Repeat required**. The installed skill state, exact elapsed time,
-full tool trace, and credential handling have not yet been audited. This is an
-observed human failure, not a completed acceptance run. Private screenshots and
-session identifiers remain outside the public repository.
+Status: **Repeated successfully** below. The failed run made 18 tool calls
+over approximately 115 seconds, including seven terminal calls. It loaded the
+Things skill. Private screenshots and session identifiers remain outside the
+public repository.
+
+## 2026-09-05 daily-planning acceptance
+
+The owner sent "Help me plan today using Things" in a fresh Hermes Desktop
+0.17.0 session using `openai-codex: gpt-5.6-sol`. The private VPS backend was
+Hermes Agent v0.21.0, upstream `f159e581`, local `63279301`, with the Things
+skill installed. Things Orchestrator was released v0.10.3 at
+`3943c18b58051926149b0c32d43f42913e58e0f6`.
+
+The client read the 15-item Today list and related Things state, proposed a
+smaller plan, and asked for available time and the main focus. The owner chose
+two to three focused hours and an AI coding setup focus. The client then moved
+ten tasks to Anytime in one update, fetched the immutable receipt, and read
+Today again. It left five tasks in Today and reported leaving Inbox untouched.
+The owner confirmed being comfortable with the changes and that the selection
+generally made sense. No task names, dates, or mutation payloads were supplied
+by the evaluating agent.
+
+Independent verification found an applied receipt with ten rows and an
+immutable hash. A separate uncached Things Cloud read confirmed every changed
+start field and exact agreement with the five-item MCP Today result. The
+verifier performed no mutation. Operation IDs, receipt details, and task
+identifiers are retained privately. The visible run used 17 tool calls and took
+approximately 141 seconds from the initial message to the final answer,
+including the owner's response time. The trace included two skill reads,
+three tool-description calls, and two terminal calls; the exact latency to
+the first correct read and first settled write was not separately measured.
+
+Status: **Owner accepted** for this release, client, and Today-to-Anytime
+workflow. No further product friction was reported after the text-result fix.
+This does not establish Evening placement, arbitrary scheduling, other
+clients, or every journey below. The credential audit found no configured MCP
+bearer in the stored trace; a complete shell-history audit was not performed.
 
 ## 2026-09-04 owner-run routine acceptance
 
@@ -84,9 +117,9 @@ Trash; do not call that deletion or cleanup.
 - **Round 1 complete**: a human ran the workflow and recorded its failures.
 - **Repeat required**: fixes landed after that run, so it needs another human
   run against the current contract.
-- **Queued for v0.10.3**: the workflow is supported by the current eight tools
+- **Queued for v0.10.4**: the workflow is supported by the current eight tools
   but has no complete current human run.
-- **Deferred**: the workflow requires a capability outside the v0.10.3 public
+- **Deferred**: the workflow requires a capability outside the v0.10.4 public
   contract and must not be counted as a release failure.
 
 ## Historical first-round record
@@ -127,46 +160,46 @@ overlapping reads, skipped an empty-head check, mixed cleanup with planning,
 invented priority judgments, converted next-week intent into Monday start dates,
 and asked approval for unnamed changes.
 
-Status: **Repeat required** against v0.10.3. Use the natural prompt in
+Status: **Repeat required** against v0.10.4. Use the natural prompt in
 [`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt)
 without tool or form instructions.
 
-## Supported v0.10.3 queue
+## Supported v0.10.4 queue
 
 Run these workflows with natural prompts and the evidence fields above:
 
-1. **First correct read. Queued for v0.10.3.** Ask a fresh client what needs
-   attention today. Verify that the answer reflects current Things state and
-   performs no mutation.
-2. **Useful Inbox capture and refusal gate. Queued for v0.10.3.** Capture one
+1. **First correct read. Accepted on v0.10.3.** The fresh Hermes run above
+   read current state before asking the owner for planning choices.
+2. **Useful Inbox capture and refusal gate. Queued for v0.10.4.** Capture one
    wanted Task. Then give one ambiguous mashed request; it must ask a concise
    question and write nothing.
-3. **Named home and tag capture. Queued for v0.10.3.** Add one Task to an exact
+3. **Named home and tag capture. Queued for v0.10.4.** Add one Task to an exact
    named Project or Area with one existing named tag. It must not invent a home
    or second tag.
-4. **Ordinary Project capture. Queued for v0.10.3.** Create a Project with known
+4. **Ordinary Project capture. Queued for v0.10.4.** Create a Project with known
    actions and useful context. Check the Project fields, nested Task fields,
    checklists, and notes.
-5. **Inbox processing. Queued for v0.10.3.** Process a bounded mixed Inbox
+5. **Inbox processing. Queued for v0.10.4.** Process a bounded mixed Inbox
    without duplicate creation or invented dates.
-6. **Daily focus. Queued for v0.10.3.** Review Today, postpone one exact item,
-   move one item to Evening, and re-read the resulting view.
-7. **Exact changes and scheduling. Queued for v0.10.3.** Rename, complete, or
+6. **Daily focus. Partially accepted on v0.10.3.** Today-to-Anytime planning
+   passed with owner acceptance, receipt and Cloud verification. Evening
+   placement remains queued; the run did not require it.
+7. **Exact changes and scheduling. Queued for v0.10.4.** Rename, complete, or
    trash exact items; set supported dates and reminders; move a Task between
    homes; verify unmentioned fields remain unchanged.
-8. **Recurrence lifecycle. Queued for v0.10.3.** Create and update a supported
+8. **Recurrence lifecycle. Queued for v0.10.4.** Create and update a supported
    recurrence, modify its current copy, complete it, and stop repetition.
-9. **Tags, checklist, and Waiting. Queued for v0.10.3.** Patch exact direct tags
+9. **Tags, checklist, and Waiting. Queued for v0.10.4.** Patch exact direct tags
    and checklist rows while preserving unmentioned and inherited state.
-10. **Recoverable Trash. Queued for v0.10.3.** Move one exact disposable item to
+10. **Recoverable Trash. Queued for v0.10.4.** Move one exact disposable item to
     recoverable Trash and verify its receipt and Cloud state.
-11. **Install, update, rollback, and recovery. Queued for v0.10.3.** Verify
+11. **Install, update, rollback, and recovery. Queued for v0.10.4.** Verify
     client setup, health checks, preference preservation, rollback, and a safe
     recovery path. Record host and client topology precisely.
 
 ## Deferred until a bounded public contract exists
 
-These are not queued for v0.10.3 and must not block its dogfood program:
+These are not queued for v0.10.4 and must not block its dogfood program:
 
 - native heading deletion or Project merge;
 - restore from Trash or permanent deletion;
@@ -180,7 +213,7 @@ and recovery behavior, move only its bounded workflow into the supported queue.
 
 ## Regression round
 
-After each supported v0.10.3 workflow has one human run, repeat the supported
+After each supported v0.10.4 workflow has one human run, repeat the supported
 set against the then-current release using changed owner data and natural
 paraphrases. A workflow passes only when the trace is concise, the result matches
 one accepted intent, and the result remains correct without the chat. Writes

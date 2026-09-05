@@ -9,12 +9,10 @@ def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
     text = DOGFOOD.read_text()
 
     supported = (
-        "First correct read",
         "Useful Inbox capture and refusal gate",
         "Named home and tag capture",
         "Ordinary Project capture",
         "Inbox processing",
-        "Daily focus",
         "Exact changes and scheduling",
         "Recurrence lifecycle",
         "Tags, checklist, and Waiting",
@@ -31,7 +29,9 @@ def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
     )
 
     for workflow in supported:
-        assert f"**{workflow}. Queued for v0.10.3.**" in text
+        assert f"**{workflow}. Queued for v0.10.4.**" in text
+    assert "**First correct read. Accepted on v0.10.3.**" in text
+    assert "**Daily focus. Partially accepted on v0.10.3.**" in text
     for workflow in deferred:
         assert workflow in text
 
