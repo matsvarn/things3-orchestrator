@@ -94,6 +94,45 @@ Run each scheduled routine once and verify that it can use Things MCP in that
 execution. Check the expected result on its prompt page. The report must
 disclose failed or incomplete reads, and no Things item should change.
 
+## Handle receiver approval blocks
+
+Use the same enrichment prompt for Grok and Hermes. The task-editing behavior
+and authority stay the same; the receiver owns its approval controls. Never
+add a receiver-specific approval tool to the Things MCP contract.
+
+A receiver can block a call before Things Orchestrator sees it. Distinguish
+that from an MCP rejection such as unsupported rich-text note replacement,
+and from an uncertain write that needs receipt inspection. Report the actual
+reason, the proposed edit, and which fields were already applied. A successful
+title change does not make a blocked notes edit successful enrichment.
+
+For Grok, use the native approval flow when available and permitted. Its
+[approval documentation](https://docs.x.ai/grok-bot/approvals-security-and-privacy)
+describes approval cards and Auto Review rules. It does not establish
+`requestSmartModeApproval` as a portable API. Use a named tool only if the
+current receiver actually exposes and documents it. If a background run
+cannot present an approval, return the proposed edit and an explicit blocked
+status for the owner to resume interactively. Do not automatically retry a
+denied call. Narrow allow rules are not a guarantee: Require Approval rules
+win, and another review concern can still stop a matching allow rule.
+
+For Hermes, use the approval path supported by the actual execution context.
+Its [hooks documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)
+distinguishes blocking a tool from escalating it for approval. Its
+[security documentation](https://hermes-agent.nousresearch.com/docs/user-guide/security/)
+describes headless cron denial for dangerous shell commands; that is not a
+universal MCP approval policy. Do not assume an interactive approval card is
+available in a webhook or scheduled run, or change cron settings to approve
+everything. When escalation is unavailable, return the proposed edit and
+request owner action through the configured private result destination.
+
+Test both outcomes: a permitted notes edit and an approval-blocked edit. The
+blocked run must preserve the proposal, identify the affected fields, and
+request approval or report that approval is unavailable. It must not silently
+substitute a checklist, hide the failure behind other successful edits, or
+soften words such as "delete" to evade review. Planning account deletion in a
+Things note does not authorize deleting the external account.
+
 ## Know what the examples cover
 
 The reports use the available named views and exact Project membership reads.
