@@ -221,9 +221,15 @@ def apply_managed_files(
     *,
     interrupt: ApplyInterrupt | None = None,
 ) -> dict[str, object]:
-    root = _prepare_root(directory)
-    with _directory_lock(root):
-        return _apply_managed_files(root, bundle, interrupt=interrupt)
+    try:
+        root = _prepare_root(directory)
+        with _directory_lock(root):
+            return _apply_managed_files(root, bundle, interrupt=interrupt)
+    except OSError:
+        raise ClientSyncError(
+            "Cannot update the managed directory. Check permissions and free disk space, "
+            "then rerun client-sync to resume."
+        ) from None
 
 
 @contextmanager
@@ -719,9 +725,8 @@ def _write_state(path: Path, bundle: ClientBundle) -> None:
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    # A crash before rename must not leave an unknown file inside the managed tree.
     with tempfile.NamedTemporaryFile(
-        dir=path.parent.parent, prefix=f".{path.parent.name}-state-", delete=False
+        dir=path.parent, prefix=f"{RESERVED_PREFIX}state-", suffix=".tmp", delete=False
     ) as temporary:
         tmp = Path(temporary.name)
         temporary.write(text.encode("utf-8"))

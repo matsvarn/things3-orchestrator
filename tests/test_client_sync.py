@@ -744,3 +744,52 @@ assert "things_orchestrator.journal" not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", script, str(packet)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory permissions")
+def test_sync_writes_inside_delegated_directory(tmp_path: Path) -> None:
+    parent = tmp_path / "delegated"
+    directory = parent / "skill"
+    directory.mkdir(parents=True)
+    parent.chmod(0o555)
+    try:
+        report = _sync(directory, _bundle())
+        assert report.managed_files["status"] == "synced"
+        assert (directory / "SKILL.md").read_text() == "# skill\n"
+    finally:
+        parent.chmod(0o755)
+
+
+def test_client_command_reports_filesystem_failure_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import errno
+
+    from things_orchestrator import client_sync
+
+    raw = _bundle()
+    monkeypatch.setenv("THINGS_MCP_TOKEN", BEARER.reveal())
+    monkeypatch.setattr(client_sync, "fetch_client_bundle", lambda *_args: raw)
+    monkeypatch.setattr(client_sync, "discover_tools", lambda *_args: advertised_tools())
+    original = Path.replace
+
+    def full_disk(path: Path, target: Path) -> Path:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(Path, "replace", full_disk)
+    directory = tmp_path / "skill"
+    arguments = ["--url", str(URL), "--directory", str(directory)]
+    with pytest.raises(SystemExit) as result:
+        client_sync.main(arguments)
+    assert result.value.code == 1
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert report["managed_files"]["status"] == "not_verified"
+    assert report["required_actions"]
+    assert "Traceback" not in output.err
+    assert (directory / PENDING_NAME).is_file()
+    monkeypatch.setattr(Path, "replace", original)
+    client_sync.main(arguments)
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["managed_files"]["status"] == "synced"
+    assert not (directory / PENDING_NAME).exists()
