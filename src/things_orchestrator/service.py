@@ -211,8 +211,6 @@ def diagnostic_service_status(
     uid: int,
     home: Path,
 ) -> ServiceStatus:
-    """Report the managed service, or the known Linux deployment service."""
-
     managed = service_status(platform=platform, uid=uid, home=home)
     if platform != "linux" or managed is not ServiceStatus.NOT_INSTALLED:
         return managed
