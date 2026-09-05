@@ -311,14 +311,6 @@ def bearer_matches(authorization: str | None, token: str) -> bool:
     return hmac.compare_digest(authorization or "", f"Bearer {token}")
 
 
-def _declares_source_document(arguments: dict[str, Any]) -> bool:
-    creates = arguments.get("create")
-    return isinstance(creates, list) and any(
-        isinstance(entry, dict) and entry.get("document") == "source"
-        for entry in creates
-    )
-
-
 def _safe_validation_error(error: ValidationError, *, repair: str | None = None) -> str:
     items = error.errors(include_input=False, include_url=False)
     details: list[str] = []

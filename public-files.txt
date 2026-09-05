@@ -55,7 +55,6 @@ src/things_orchestrator/cloud.py
 src/things_orchestrator/config.py
 src/things_orchestrator/consistency.py
 src/things_orchestrator/context.py
-src/things_orchestrator/contextual.py
 src/things_orchestrator/deployment.py
 src/things_orchestrator/diagnostics.py
 src/things_orchestrator/doctor.py
@@ -77,7 +76,6 @@ src/things_orchestrator/skills/things-orchestrator/references/form.md
 src/things_orchestrator/skills/things-orchestrator/references/research.md
 src/things_orchestrator/skills/things-orchestrator/references/review.md
 src/things_orchestrator/skills/things-orchestrator/references/routines.md
-src/things_orchestrator/source_document.py
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
@@ -91,7 +89,6 @@ tests/test_cloud.py
 tests/test_config.py
 tests/test_consistency.py
 tests/test_context.py
-tests/test_contextual.py
 tests/test_deployment.py
 tests/test_diagnostics.py
 tests/test_doctor.py
@@ -113,7 +110,6 @@ tests/test_routines_store.py
 tests/test_routines_webhook.py
 tests/test_server.py
 tests/test_service.py
-tests/test_source_document.py
 tests/test_v07_dogfood_ux.py
 tests/test_v2_contract.py
 tests/test_v2_journal_authority.py

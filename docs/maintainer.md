@@ -9,12 +9,11 @@ Keep one production server and one stable model Interface.
   `oneOf` or `anyOf` to discovery schemas. Discovery output schemas expose
   control flow and compact item summaries. Runtime facts stay strict through
   the `Result` model.
-- `workspace.py` remains the one transaction engine. V2 shares private
-  preparation, application, read-back, and reconciliation primitives. It never
-  constructs the v1 `CommitCall` language.
+- `workspace.py` remains the one transaction engine. V2 owns preparation,
+  application, read-back, and reconciliation. The retired v1 commit and approval
+  language is absent; only its durable journal recovery remains.
 - List and search pagination keeps read cursors only. It does not build legacy
-  short-reference write contexts or persist a context database. The remaining
-  explicit v1 context paths are internal and are not exposed by the eight tools.
+  short-reference write contexts or persist a context database.
 - `consistency.py` owns native-state conflict detection for diagnostics
   and review signals.
 - `config.py` owns credentials, owner preferences, normalized MCP endpoints,

@@ -291,10 +291,8 @@ Task in Things 3. The visible `##` labels gave both note levels clear hierarchy.
 Natural stayed quiet. Visual used only the six fixed markers. Optional sections
 were absent, and each source label stayed beside its full link. Both Projects
 and all Task notes passed Cloud read-back and were moved to Trash after review.
-The public renderer goldens are in `tests/test_source_document.py`; the exact
-Cloud structure and note read-back are covered in `tests/test_workspace.py` and
-`tests/test_cloud.py`. The live screenshots were discarded to avoid publishing
-the owner's Things sidebar.
+Those renderer and Cloud checks belonged to the retired v1 write path. The live
+screenshots were discarded to avoid publishing the owner's Things sidebar.
 
 The first live proof also exposed a Cloud safety defect before release. A first
 heading or Task used `ix=0`. Things 3 trapped in `LegacySCHistoryPerformSync`
