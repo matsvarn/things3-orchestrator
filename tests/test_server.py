@@ -147,9 +147,37 @@ def test_health_is_public_liveness_and_authenticated_deployment_detail() -> None
     assert authenticated.status_code == 200
     assert authenticated.json()["ok"] is True
     assert authenticated.json()["tool_schema_hash"].startswith("sha256:")
+    assert authenticated.json()["tool_discovery_hash"].startswith("sha256:")
+    assert authenticated.json()["client_bundle"]["path"] == "/client/bundle"
+    assert "client_bundle" not in public.json()
     assert "capabilities" in authenticated.json()
     assert rejected.status_code == 401
     assert rejected_mcp.status_code == 401
+
+
+def test_client_bundle_is_authenticated_and_absent_from_public_health() -> None:
+    from things_orchestrator.client_bundle import encode_client_bundle
+
+    app = _server().build_http_app(token="secret")
+    expected = encode_client_bundle()
+
+    with TestClient(app) as client:
+        public_health = client.get("/health")
+        detailed_health = client.get("/health", headers={"Authorization": "Bearer secret"})
+        missing = client.get("/client/bundle")
+        rejected = client.get(
+            "/client/bundle", headers={"Authorization": "Bearer wrong"}
+        )
+        authenticated = client.get(
+            "/client/bundle", headers={"Authorization": "Bearer secret"}
+        )
+
+    assert public_health.json() == {"ok": True}
+    assert missing.status_code == 401
+    assert rejected.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.content == expected
+    assert detailed_health.json()["client_bundle"]["bundle_checksum"] == authenticated.json()["bundle_checksum"]
 
 
 def test_public_result_schema_contains_no_private_operation_controls() -> None:

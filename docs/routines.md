@@ -1,6 +1,6 @@
 # Run the built-in AI task routine
 
-Routines are optional and disabled by default. Version 0.10.5 has one built-in
+Routines are optional and disabled by default. Version 0.11.0 has one built-in
 routine. It selects a new normal, open, untrashed task only when that task has a
 direct tag titled exactly `AI`.
 
@@ -17,7 +17,7 @@ disabled or account-mismatched profile.
 Install the current exact release and verify the service first:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.10.5"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.11.0"
 things-orchestrator login
 things-orchestrator service install
 things-orchestrator doctor --wait
@@ -289,7 +289,7 @@ administration.
 You may tune `--interval` from 60 to 3600 seconds and `--settle` from 1 to 3600
 seconds. These are advanced settings. The trigger, direct-tag rule, event
 schema, event identity, routine ID, storage layout, retry policy, and delivery
-internals remain product-owned in v0.10.5.
+internals remain product-owned in v0.11.0.
 
 To stop polling and delivery without deleting configuration or durable state,
 run:

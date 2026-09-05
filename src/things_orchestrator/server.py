@@ -23,7 +23,6 @@ from mcp.types import (
     PaginatedRequestParams,
     TextContent,
     Tool,
-    ToolAnnotations,
 )
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -32,15 +31,14 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from .client_bundle import encode_client_bundle
 from .deployment import health_payload, package_version
+from .tools import CLIENT_BUNDLE_PATH, advertised_tools
 from .v2 import (
-    DESCRIPTIONS,
-    DISCOVERY_MODELS,
     MODELS,
     PublicIssue,
     PublicResult,
     ThingsV2,
-    flat_schema,
 )
 from .workspace import ThingsWorkspace
 
@@ -56,31 +54,7 @@ _FIELD_REPAIR = {
     "into_id": "into_id needs one exact project:<id> or area:<id>",
 }
 
-_READ_ONLY = ToolAnnotations(
-    read_only_hint=True,
-    destructive_hint=False,
-    idempotent_hint=True,
-    open_world_hint=False,
-)
-_IDEMPOTENT_WRITE = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=True,
-    idempotent_hint=True,
-    open_world_hint=False,
-)
-
-_TOOL_NAMES = tuple(MODELS)
-_READ_NAMES = frozenset(("things_view", "things_find", "things_get", "things_receipt"))
-_TOOLS = tuple(
-    Tool(
-        name=name,
-        description=DESCRIPTIONS[name],
-        input_schema=flat_schema(DISCOVERY_MODELS[name]),
-        output_schema=flat_schema(PublicResult),
-        annotations=_READ_ONLY if name in _READ_NAMES else _IDEMPOTENT_WRITE,
-    )
-    for name in _TOOL_NAMES
-)
+_TOOLS = advertised_tools()
 
 
 class RoutineLifecycle(Protocol):
@@ -128,6 +102,7 @@ class ThingsMCPServer:
         self._interface = workspace if isinstance(workspace, ThingsV2) else ThingsV2(workspace)
         self._lock = anyio.Lock()
         self._routines = routines or RoutineHTTPComposition.disabled()
+        self._client_bundle_bytes: bytes | None = None
         self._tools_only_server: Server[object] = Server(
             name=self.name,
             version=package_version(),
@@ -137,6 +112,11 @@ class ThingsMCPServer:
 
     async def list_tools(self) -> list[Tool]:
         return [tool.model_copy(deep=True) for tool in _TOOLS]
+
+    def _client_bundle(self) -> bytes:
+        if self._client_bundle_bytes is None:
+            self._client_bundle_bytes = encode_client_bundle()
+        return self._client_bundle_bytes
 
     def _dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
         return self._interface.dispatch(name, arguments)
@@ -243,12 +223,26 @@ class ThingsMCPServer:
             if not bearer_matches(authorization, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             payload = health_payload(authenticated=True)
+            payload["client_bundle"] = {
+                "format_version": 1,
+                "path": CLIENT_BUNDLE_PATH,
+                "bundle_checksum": json.loads(self._client_bundle())["bundle_checksum"],
+            }
             payload["routines"] = (
                 active_routine.snapshot()
                 if active_routine is not None
                 else {"state": self._routines.state}
             )
             return JSONResponse(payload)
+
+        async def client_bundle(request: Request) -> Response:
+            authorization = request.headers.get("authorization")
+            if not bearer_matches(authorization, token):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return Response(
+                self._client_bundle(),
+                media_type="application/json",
+            )
 
         @asynccontextmanager
         async def lifespan(_app: Starlette) -> Any:
@@ -282,6 +276,7 @@ class ThingsMCPServer:
         return Starlette(
             routes=[
                 Route("/health", health),
+                Route(CLIENT_BUNDLE_PATH, client_bundle),
                 Route("/mcp", mcp_app),
                 Route("/mcp/", mcp_app),
             ],

@@ -79,7 +79,7 @@ def render_client_config(
             f"{add_server}\n{install_skill}\n",
             "Run both commands one at a time. Hermes prompts for the MCP bearer "
             "privately and tests the MCP connection. The skill URL is pinned to "
-            f"v{release}.",
+            f"v{release} and installs one SKILL.md, not the complete skill tree.",
         )
 
     token = endpoint.bearer.reveal() if show_secrets else "<mcp_token>"

@@ -71,6 +71,8 @@ jobs:
         run: uv build
       - name: Inspect release archive allowlists
         run: uv run python scripts/check_release.py archives
+      - name: Check client bundle
+        run: uv run python scripts/check_release.py bundle
 
   secrets:
     name: Secret scan

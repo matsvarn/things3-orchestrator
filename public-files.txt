@@ -28,6 +28,7 @@ docs/maintainer.md
 docs/operations.md
 docs/owner.md
 docs/recovery.md
+docs/research/client-upgrade-audit.md
 docs/research/comparison.md
 docs/research/things3-cloud.md
 docs/research/weekly-review-best-practice.md
@@ -55,7 +56,9 @@ scripts/probe_cloud_capabilities.py
 scripts/run_live_acceptance.py
 src/things_orchestrator/__init__.py
 src/things_orchestrator/cli.py
+src/things_orchestrator/client_bundle.py
 src/things_orchestrator/client_config.py
+src/things_orchestrator/client_sync.py
 src/things_orchestrator/cloud.py
 src/things_orchestrator/config.py
 src/things_orchestrator/consistency.py
@@ -63,6 +66,7 @@ src/things_orchestrator/context.py
 src/things_orchestrator/deployment.py
 src/things_orchestrator/diagnostics.py
 src/things_orchestrator/doctor.py
+src/things_orchestrator/entrypoint.py
 src/things_orchestrator/interface.py
 src/things_orchestrator/journal.py
 src/things_orchestrator/library.py
@@ -85,15 +89,19 @@ src/things_orchestrator/skills/things-orchestrator/references/routine-enrichment
 src/things_orchestrator/skills/things-orchestrator/references/routine-morning-plan.md
 src/things_orchestrator/skills/things-orchestrator/references/routine-weekly-review.md
 src/things_orchestrator/skills/things-orchestrator/references/routines.md
+src/things_orchestrator/tools.py
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
 tests/fixtures/full_reorg_owner_prompt.txt
 tests/fixtures/mats_mode_owner_prompt.txt
+tests/fixtures/v0.10.5-closed-public-result.schema.json
 tests/fixtures/weekly_review_owner_prompt.txt
 tests/test_capability_proof.py
 tests/test_cli.py
+tests/test_client_bundle.py
 tests/test_client_config.py
+tests/test_client_sync.py
 tests/test_cloud.py
 tests/test_config.py
 tests/test_consistency.py
@@ -119,6 +127,7 @@ tests/test_routines_store.py
 tests/test_routines_webhook.py
 tests/test_server.py
 tests/test_service.py
+tests/test_tools.py
 tests/test_v07_dogfood_ux.py
 tests/test_v2_contract.py
 tests/test_v2_journal_authority.py

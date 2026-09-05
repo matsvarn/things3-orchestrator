@@ -29,8 +29,6 @@ from .config import (
 from .deployment import (
     DeploymentIdentity,
     installed_identity,
-    tool_contract_hash,
-    tool_schema_hash,
 )
 from .journal import journal_path, read_operation_state_counts
 from .library import Record
@@ -45,6 +43,7 @@ from .routines_config import (
 from .routines_store import read_routine_counts, routine_database_path
 from .routines_webhook import RoutineHTTPOpener, proxyless_no_redirect_opener
 from .service import diagnostic_service_status
+from .tools import tool_contract_hash, tool_discovery_hash, tool_schema_hash
 
 CloudStatus = Literal[
     "ok",
@@ -138,6 +137,7 @@ class SupportReport:
     python: str
     tool_schema_hash: str
     tool_contract_hash: str
+    tool_discovery_hash: str
     cloud_check: CloudCheck
     routines: RoutineDiagnostic
     service_status: str | None = None
@@ -152,6 +152,7 @@ class SupportReport:
             "python": self.python,
             "tool_schema_hash": self.tool_schema_hash,
             "tool_contract_hash": self.tool_contract_hash,
+            "tool_discovery_hash": self.tool_discovery_hash,
             "cloud_check": self.cloud_check.as_dict(),
             "routines": self.routines.as_dict(),
         }
@@ -236,6 +237,7 @@ def build_support_report(
         python=python_version,
         tool_schema_hash=tool_schema_hash(),
         tool_contract_hash=tool_contract_hash(),
+        tool_discovery_hash=tool_discovery_hash(),
         cloud_check=cloud,
         routines=routines,
         service_status=service,

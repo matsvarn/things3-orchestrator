@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import subprocess
@@ -12,10 +11,16 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
+from . import PACKAGE_NAME as PACKAGE_NAME
 from .cloud import _CACHE_VERSION
-from .v2 import DESCRIPTIONS, MODELS, PublicResult
+from .tools import (
+    CLIENT_BUNDLE_FORMAT_VERSION,
+    CLIENT_BUNDLE_PATH,
+    tool_contract_hash,
+    tool_discovery_hash,
+    tool_schema_hash,
+)
 
-PACKAGE_NAME = "things-orchestrator"
 CACHE_VERSION = _CACHE_VERSION
 _GIT_COMMIT = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 CAPABILITIES = {
@@ -135,34 +140,6 @@ def skill_path() -> Path:
     return path
 
 
-def _hash_payload(value: object) -> str:
-    blob = json.dumps(
-        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    )
-    return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()[:24]
-
-
-def tool_schema_hash() -> str:
-    return _hash_payload(
-        {
-            "version": "v2",
-            "inputs": {name: model.model_json_schema() for name, model in MODELS.items()},
-            "output": PublicResult.model_json_schema(),
-        }
-    )
-
-
-def tool_contract_hash() -> str:
-    return _hash_payload(
-        {
-            "version": "v2",
-            "inputs": {name: model.model_json_schema() for name, model in MODELS.items()},
-            "output": PublicResult.model_json_schema(),
-            "descriptions": DESCRIPTIONS,
-        }
-    )
-
-
 def health_payload(*, authenticated: bool = False) -> dict[str, object]:
     if not authenticated:
         return {"ok": True}
@@ -172,6 +149,11 @@ def health_payload(*, authenticated: bool = False) -> dict[str, object]:
         "cache_version": CACHE_VERSION,
         "tool_schema_hash": tool_schema_hash(),
         "tool_contract_hash": tool_contract_hash(),
+        "tool_discovery_hash": tool_discovery_hash(),
+        "client_bundle": {
+            "format_version": CLIENT_BUNDLE_FORMAT_VERSION,
+            "path": CLIENT_BUNDLE_PATH,
+        },
         "capabilities": dict(CAPABILITIES),
     }
     commit = git_commit()

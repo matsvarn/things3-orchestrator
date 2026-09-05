@@ -1021,10 +1021,62 @@ def archives(dist_dir: Path | None = None) -> None:
     print("Release archives contain only approved files.")
 
 
+def bundle() -> None:
+    from things_orchestrator.client_bundle import (
+        RECEIVER_INSTRUCTION_PATH,
+        encode_client_bundle,
+        is_named_routine_template,
+        parse_client_bundle,
+    )
+    from things_orchestrator.routines_config import ROUTINE_RECEIVER_INSTRUCTION
+    from things_orchestrator.tools import advertised_tool_payload, advertised_tools
+
+    first = encode_client_bundle()
+    second = encode_client_bundle()
+    errors: list[str] = []
+    if first != second:
+        errors.append("client bundle is not deterministic")
+    try:
+        parsed = parse_client_bundle(first)
+    except ValueError as error:
+        errors.append(f"client bundle failed validation: {error}")
+        fail(errors)
+        return
+    skill = ROOT / "src/things_orchestrator/skills/things-orchestrator"
+    expected = {
+        path.relative_to(skill).as_posix()
+        for path in skill.rglob("*")
+        if path.is_file()
+    }
+    expected.add(RECEIVER_INSTRUCTION_PATH)
+    actual = {item.path for item in parsed.files}
+    errors.extend(f"client bundle is missing file: {name}" for name in sorted(expected - actual))
+    errors.extend(
+        f"client bundle has unexpected file: {name}"
+        for name in sorted(actual - expected)
+    )
+    contents = {item.path: item.content for item in parsed.files}
+    for name in sorted(expected - {RECEIVER_INSTRUCTION_PATH}):
+        if contents.get(name) != (skill / name).read_text(encoding="utf-8"):
+            errors.append(f"client bundle file content differs: {name}")
+    if contents.get(RECEIVER_INSTRUCTION_PATH) != ROUTINE_RECEIVER_INSTRUCTION:
+        errors.append("client bundle receiver instruction differs from routines_config.py")
+    expected_tools = [advertised_tool_payload(tool) for tool in advertised_tools()]
+    if list(parsed.advertised_tools) != expected_tools:
+        errors.append("client bundle advertised tools differ from the canonical tools")
+    templates = {
+        item.path for item in parsed.files if is_named_routine_template(item.path)
+    }
+    if set(parsed.component_hashes.routine_templates) != templates:
+        errors.append("client bundle routine template hashes do not match named templates")
+    fail(errors)
+    print("Client bundle is deterministic and complete.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "check", choices=("metadata", "links", "instructions", "archives")
+        "check", choices=("metadata", "links", "instructions", "archives", "bundle")
     )
     parser.add_argument(
         "--dist-dir",
@@ -1035,6 +1087,9 @@ def main() -> None:
     selected = args.check
     if selected == "archives":
         archives(args.dist_dir)
+        return
+    if selected == "bundle":
+        bundle()
         return
     {"metadata": metadata, "links": links, "instructions": instructions}[selected]()
 

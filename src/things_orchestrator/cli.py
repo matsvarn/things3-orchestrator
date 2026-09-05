@@ -18,7 +18,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 
+from .client_bundle import encode_client_bundle
 from .client_config import ClientKind, Endpoint, render_client_config
+from .client_sync import add_arguments as add_client_sync_arguments
+from .client_sync import run_command as run_client_sync_command
 from .cloud import (
     CloudClient,
     CloudError,
@@ -140,6 +143,25 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--url", dest="public_url", help="HTTPS origin or /mcp URL")
     commands.add_parser("serve", help="MCP on stdio")
     commands.add_parser("skill-path", help="print the installed Things skill directory")
+    client_bundle = commands.add_parser(
+        "client-bundle",
+        help="write the installed client instruction bundle as JSON",
+    )
+    client_bundle.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="destination path for the deterministic client bundle",
+    )
+    client_sync = commands.add_parser(
+        "client-sync",
+        help="fetch a host client bundle and sync managed instruction files",
+        description=(
+            "Client-only sync. Requires an MCP URL and bearer, not Things Cloud "
+            "credentials. The bearer is read from --token-env or a private prompt."
+        ),
+    )
+    add_client_sync_arguments(client_sync)
     service = commands.add_parser(
         "service", help="install, uninstall, or inspect the supervised HTTP service"
     )
@@ -427,6 +449,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         return
     if args.action == "skill-path":
         print(skill_path())
+        return
+    if args.action == "client-bundle":
+        _client_bundle(parser, args.output)
+        return
+    if args.action == "client-sync":
+        run_client_sync_command(args)
         return
     if args.action == "service":
         dry_run = getattr(args, "dry_run", False)
@@ -801,6 +829,17 @@ def _print_config(
         file=sys.stderr,
     )
     print("Do not paste the Cloud password into chat.", file=sys.stderr)
+
+
+def _client_bundle(parser: argparse.ArgumentParser, output: Path) -> None:
+    try:
+        payload = encode_client_bundle()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(payload)
+    except OSError as error:
+        parser.error(str(error))
+        return
+    print(f"Wrote {len(payload)} bytes to {output}")
 
 
 def _mcp_token(*, rotate: bool, path: Path) -> str:

@@ -63,6 +63,12 @@ Doctor fails with
 `service: stale - restart` if the running commit differs from the installed
 commit.
 
+A host rollback keeps the installed tag identity.
+
+From v0.11.0, clients can run `client-sync` to follow the `/client/bundle`
+served by the running host. They must not fetch GitHub latest. See
+[Connect a client](clients.md).
+
 ## Create value-free diagnostics
 
 Verify Cloud authentication and a fresh full-history fold without writing to

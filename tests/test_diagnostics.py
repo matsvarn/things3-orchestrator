@@ -321,6 +321,7 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         },
         "service_status": "active",
         "tool_contract_hash": report.tool_contract_hash,
+        "tool_discovery_hash": report.tool_discovery_hash,
         "tool_schema_hash": report.tool_schema_hash,
         "version": "0.9.1",
     }
