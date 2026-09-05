@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
-from things_orchestrator.context import MemoryContextStore, SQLiteContextStore
+from things_orchestrator.context import MemoryContextStore
 from things_orchestrator.interface import (
-    ApproveCall,
-    CommitCall,
     ReadCall,
     dump_result,
 )
@@ -103,115 +98,6 @@ def test_change_read_returns_complete_dependency_context() -> None:
     assert result.items[0].checklist[0].title == "Open dashboard"
 
 
-@pytest.mark.parametrize("with_heading", [False, True])
-def test_task_change_context_moves_across_projects_in_one_commit(
-    with_heading: bool,
-) -> None:
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(uuid="destination", kind="project", title="Destination")
-    source_heading = Record(
-        uuid="source-heading",
-        kind="task",
-        title="Source heading",
-        parent_uuid=source.uuid,
-        heading=True,
-    )
-    destination_heading = Record(
-        uuid="destination-heading",
-        kind="task",
-        title="Destination heading",
-        parent_uuid=destination.uuid,
-        heading=True,
-    )
-    task = Record(
-        uuid="move-me",
-        kind="task",
-        title="Move me",
-        parent_uuid=source.uuid,
-        heading_uuid=source_heading.uuid,
-    )
-    workspace, library, _store = contextual_workspace(
-        [source, destination, source_heading, destination_heading, task]
-    )
-
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            id=task.id,
-            include=[{"id": destination.id}],
-        )
-    )
-
-    assert read.status == "ok"
-    assert read.context and read.context.complete
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[destination.id] is not None
-    assert refs[destination_heading.id] is not None
-    assert all(item.revision is None for item in read.items)
-
-    change: dict[str, str] = {
-        "ref": refs[task.id],
-        "into": refs[destination.id],
-    }
-    if with_heading:
-        change["heading_id"] = refs[destination_heading.id]
-    result = workspace.commit(
-        CommitCall(
-            intent_id=f"task-cross-project-{with_heading}",
-            context_id=read.context.id,
-            change=[change],
-        )
-    )
-
-    assert result.status == "applied"
-    assert library.records[task.uuid].parent_uuid == destination.uuid
-    assert library.records[task.uuid].heading_uuid == (
-        destination_heading.uuid if with_heading else None
-    )
-
-
-def test_task_change_include_binds_named_cross_project_after_anchor() -> None:
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(uuid="destination", kind="project", title="Destination")
-    target = Record(
-        uuid="target", kind="task", title="Target", parent_uuid=source.uuid
-    )
-    anchor = Record(
-        uuid="anchor", kind="task", title="Named anchor", parent_uuid=destination.uuid
-    )
-    workspace, library, _store = contextual_workspace(
-        [source, destination, target, anchor]
-    )
-
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            id=target.id,
-            include=[{"find": "Named anchor", "within": destination.id}],
-        )
-    )
-
-    assert read.status == "ok"
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[anchor.id]
-    result = workspace.commit(
-        CommitCall(
-            intent_id="included-after-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[target.id],
-                    "into": refs[destination.id],
-                    "after": refs[anchor.id],
-                }
-            ],
-        )
-    )
-    assert result.status == "applied"
-    assert library.records[target.uuid].sort_index > library.records[anchor.uuid].sort_index
-
-
 def test_change_include_missing_or_ambiguous_keeps_the_target_context() -> None:
     project = Record(uuid="project", kind="project", title="Work")
     target = Record(uuid="target", kind="task", title="Target", parent_uuid=project.uuid)
@@ -231,56 +117,6 @@ def test_change_include_missing_or_ambiguous_keeps_the_target_context() -> None:
     assert "include_unresolved" in result.signals
     assert target.id in {item.id for item in result.items}
     assert first.id not in {item.id for item in result.items}
-
-
-def test_task_change_include_today_after_anchor_is_revision_checked() -> None:
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(uuid="destination", kind="project", title="Destination")
-    target = Record(
-        uuid="target",
-        kind="task",
-        title="Target",
-        parent_uuid=source.uuid,
-        start=NOW.date(),
-        today_index=1024,
-    )
-    anchor = Record(
-        uuid="anchor",
-        kind="task",
-        title="Anchor",
-        parent_uuid=destination.uuid,
-        start=NOW.date(),
-        today_index=0,
-    )
-    workspace, library, _store = contextual_workspace(
-        [source, destination, target, anchor]
-    )
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            id=target.id,
-            include=[{"id": anchor.id}],
-        )
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-    library.records[anchor.uuid].title = "Owner changed anchor"
-    result = workspace.commit(
-        CommitCall(
-            intent_id="included-today-after-stale-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[target.id],
-                    "into": refs[destination.id],
-                    "today_after": refs[anchor.id],
-                }
-            ],
-        )
-    )
-    assert result.status == "stale"
-    assert result.recovery and result.recovery.code == "context_conflict"
-    assert library.records[target.uuid].parent_uuid == source.uuid
 
 
 def test_change_include_uses_combined_context_bound() -> None:
@@ -309,27 +145,6 @@ def test_change_include_uses_combined_context_bound() -> None:
     assert result.status == "ok"
     assert result.context is not None
     assert {item.id for item in result.items} >= {target.id, projects[0].id, anchor.id, projects[1].id}
-
-
-def test_task_change_rejects_an_invalid_destination_kind_without_a_write() -> None:
-    project = Record(uuid="project", kind="project", title="Project")
-    task = Record(uuid="task", kind="task", title="Task", parent_uuid=project.uuid)
-    workspace, library, _store = contextual_workspace([project, task])
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="task-invalid-destination-kind-001",
-            context_id=read.context.id,
-            change=[{"ref": refs[task.id], "into": refs[task.id]}],
-        )
-    )
-
-    assert result.status == "needs_input"
-    assert "must identify Area or Project" in result.instruction
-    assert library.records[task.uuid].parent_uuid == project.uuid
 
 
 def test_task_change_context_overflow_returns_bounded_recovery() -> None:
@@ -363,123 +178,6 @@ def test_task_change_context_overflow_returns_bounded_recovery() -> None:
     assert result.recovery.read == {"id": task.id, "limit": 40}
 
 
-def test_task_change_rejects_a_stale_destination_heading_without_a_write() -> None:
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(uuid="destination", kind="project", title="Destination")
-    destination_heading = Record(
-        uuid="destination-heading",
-        kind="task",
-        title="Destination heading",
-        parent_uuid=destination.uuid,
-        heading=True,
-    )
-    task = Record(
-        uuid="move-me",
-        kind="task",
-        title="Move me",
-        parent_uuid=source.uuid,
-    )
-    workspace, library, _store = contextual_workspace(
-        [source, destination, destination_heading, task]
-    )
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            id=task.id,
-            include=[{"id": destination.id}],
-        )
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-
-    destination_heading.title = "Changed while model was deciding"
-    result = workspace.commit(
-        CommitCall(
-            intent_id="task-stale-destination-heading-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[task.id],
-                    "into": refs[destination.id],
-                    "heading_id": refs[destination_heading.id],
-                }
-            ],
-        )
-    )
-
-    assert result.status == "stale"
-    assert result.recovery and result.recovery.code == "context_conflict"
-    assert library.records[task.uuid].parent_uuid == source.uuid
-    assert library.records[task.uuid].heading_uuid is None
-
-
-def test_project_change_context_moves_to_an_area_in_two_calls() -> None:
-    current = Record(uuid="work", kind="area", title="Work")
-    destination = Record(uuid="business", kind="area", title="Business")
-    project = Record(
-        uuid="website", kind="project", title="Website", area_uuid=current.uuid
-    )
-    workspace, library, _store = contextual_workspace(
-        [current, destination, project]
-    )
-
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            find="Website",
-            include=[{"id": destination.id}],
-        )
-    )
-
-    assert read.status == "ok"
-    assert read.context and read.context.complete
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[project.id] is not None
-    assert refs[current.id] is not None
-    assert refs[destination.id] is not None
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="project-area-two-calls-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[project.id],
-                    "into": refs[destination.id],
-                }
-            ],
-        )
-    )
-
-    assert result.status == "applied"
-    assert library.records[project.uuid].area_uuid == destination.uuid
-
-
-def test_project_change_rejects_non_area_destination_ref_without_write() -> None:
-    project = Record(uuid="project", kind="project", title="Website")
-    workspace, library, _store = contextual_workspace([project])
-    read = workspace.read(ReadCall(purpose="change", id=project.id))
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="project-task-destination-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[project.id],
-                    "into": refs[project.id],
-                }
-            ],
-        )
-    )
-
-    assert result.status == "needs_input"
-    assert "must identify an Area" in result.instruction
-    assert library.records[project.uuid].area_uuid is None
-
-
 def test_area_change_context_stays_the_local_neighborhood() -> None:
     areas = [
         Record(uuid=f"area-{index}", kind="area", title=f"Area {index}")
@@ -507,78 +205,6 @@ def test_area_change_include_binds_a_destination_area() -> None:
     )
     assert included.status == "ok"
     assert {item.id for item in included.items} == {current.id, destination.id}
-
-
-def test_living_project_change_is_the_writable_neighborhood() -> None:
-    area = Record(uuid="work", kind="area", title="Work")
-    project = Record(
-        uuid="launch", kind="project", title="Launch", area_uuid=area.uuid
-    )
-    heading = Record(
-        uuid="next",
-        kind="task",
-        title="Next",
-        parent_uuid=project.uuid,
-        heading=True,
-    )
-    task = Record(
-        uuid="ship",
-        kind="task",
-        title="Ship",
-        parent_uuid=project.uuid,
-        heading_uuid=heading.uuid,
-    )
-    hidden = Record(
-        uuid="gone",
-        kind="task",
-        title="Gone",
-        parent_uuid=project.uuid,
-        heading_uuid=heading.uuid,
-        trashed=True,
-    )
-    workspace, library, _store = contextual_workspace(
-        [area, project, heading, task, hidden]
-    )
-
-    result = workspace.read(ReadCall(purpose="change", id=project.id))
-
-    assert result.status == "ok"
-    assert result.context is not None
-    assert result.context.complete is True
-    assert {item.id for item in result.items} == {
-        project.id,
-        area.id,
-        heading.id,
-        task.id,
-        hidden.id,
-    }
-    assert result.layouts
-    assert result.layouts[0].complete
-    section = next(
-        row for row in result.layouts[0].sections if row.heading_ref is not None
-    )
-    assert section.hidden_count == 1
-    assert "contained records" not in result.instruction
-    refs = {item.id: item.ref for item in result.items}
-    drafted = workspace.commit(
-        CommitCall(
-            intent_id="living-project-draft-001",
-            context_id=result.context.id,
-            organize=[
-                {
-                    "project_ref": refs[project.id],
-                    "delete_headings": [refs[heading.id]],
-                }
-            ],
-        )
-    )
-    assert drafted.status == "needs_approval"
-    assert drafted.plan is not None
-    applied = workspace.approve(ApproveCall(plan_id=drafted.plan.id))
-    assert applied.status == "applied"
-    assert heading.uuid not in library.records
-    assert library.records[task.uuid].parent_uuid == project.uuid
-    assert library.records[task.uuid].heading_uuid is None
 
 
 def test_short_refs_stay_stable_when_a_fresh_read_adds_includes() -> None:
@@ -617,140 +243,6 @@ def test_short_refs_stay_stable_when_a_fresh_read_adds_includes() -> None:
     assert second_refs[project.id] == first_refs[project.id]
     assert second_refs[child.id] == first_refs[child.id]
     assert second_refs[loose.id] == first_refs[loose.id]
-
-
-def test_contextual_commit_can_stage_one_owner_reviewed_plan() -> None:
-    task = Record(uuid="invoice", kind="task", title="Invoice")
-    workspace, library, _store = contextual_workspace([task])
-    audit = workspace.read(ReadCall(purpose="change", id=task.id))
-    assert audit.context is not None
-
-    prepared = workspace.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "owner-reviewed-plan-001",
-                "require_approval": True,
-                "context_id": audit.context.id,
-                "change": [{"ref": audit.items[0].ref, "title": "Send invoice"}],
-            }
-        )
-    )
-
-    assert prepared.status == "needs_approval"
-    assert prepared.plan is not None
-    assert library.records[task.uuid].title == "Invoice"
-
-    settled = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
-
-    assert settled.status == "applied"
-    assert library.records[task.uuid].title == "Send invoice"
-
-
-def test_trashed_project_change_lists_contained_records() -> None:
-    area = Record(uuid="work", kind="area", title="Work")
-    project = Record(
-        uuid="launch",
-        kind="project",
-        title="Launch",
-        area_uuid=area.uuid,
-        trashed=True,
-    )
-    heading = Record(
-        uuid="next",
-        kind="task",
-        title="Next",
-        parent_uuid=project.uuid,
-        heading=True,
-        trashed=True,
-    )
-    task = Record(
-        uuid="ship",
-        kind="task",
-        title="Ship",
-        parent_uuid=project.uuid,
-        heading_uuid=heading.uuid,
-        trashed=True,
-    )
-    nested = Record(
-        uuid="nested",
-        kind="project",
-        title="Nested",
-        parent_uuid=project.uuid,
-        trashed=True,
-    )
-    leaf = Record(
-        uuid="leaf",
-        kind="task",
-        title="Leaf",
-        parent_uuid=nested.uuid,
-        trashed=True,
-    )
-    workspace, library, _store = contextual_workspace(
-        [area, project, heading, task, nested, leaf]
-    )
-
-    result = workspace.read(ReadCall(purpose="change", id=project.id))
-
-    assert result.status == "ok"
-    assert result.context is not None
-    assert result.context.complete is True
-    assert {item.id for item in result.items} == {
-        project.id,
-        area.id,
-        heading.id,
-        task.id,
-        nested.id,
-        leaf.id,
-    }
-    assert result.items[0].id == project.id
-    assert all(item.revision is None for item in result.items)
-    assert all(item.ref for item in result.items)
-    assert "trashed" in result.items[0].signals
-    assert "4 contained records" in result.instruction
-    assert heading.id.startswith("heading:")
-    assert result.layouts
-    assert [layout.complete for layout in result.layouts] == [True, True]
-    facts = {item.id: item.ref for item in result.items}
-    root_layout = next(
-        layout for layout in result.layouts if layout.project_ref == facts[project.id]
-    )
-    assert [section.heading_ref for section in root_layout.sections] == [
-        facts[heading.id]
-    ]
-    assert root_layout.sections[0].task_refs == [facts[task.id]]
-    assert root_layout.sections[0].hidden_count == 0
-    nested_layout = next(
-        layout for layout in result.layouts if layout.project_ref == facts[nested.id]
-    )
-    assert nested_layout.sections[0].heading_ref is None
-    assert nested_layout.sections[0].task_refs == [facts[leaf.id]]
-
-    refs = {item.id: item.ref for item in result.items}
-    prepared = workspace.commit(
-        CommitCall(
-            intent_id="trashed-project-purge-001",
-            context_id=result.context.id,
-            change=[
-                {
-                    "ref": refs[project.id],
-                    "lifecycle": "delete_permanently",
-                    "delete_contents": True,
-                }
-            ],
-        )
-    )
-    assert prepared.status == "needs_approval"
-    assert prepared.plan is not None
-    applied = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
-    assert applied.status == "applied"
-    assert set(library.records) == {area.uuid}
-    assert set(applied.missing_ids) == {
-        heading.id,
-        task.id,
-        nested.id,
-        leaf.id,
-        project.id,
-    }
 
 
 def test_trashed_project_change_overflow_points_at_exact_id() -> None:
@@ -955,98 +447,6 @@ def test_organize_read_accepts_exact_project_id_and_exposes_merge_registry() -> 
     assert result.layouts[0].sections[0].task_refs == [facts[task.id].ref]
 
 
-def test_one_read_project_merge_moves_children_and_trashes_source_after_approval() -> None:
-    destination_area = Record(uuid="destination-area", kind="area", title="Destination")
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(
-        uuid="destination",
-        kind="project",
-        title="Destination",
-        area_uuid=destination_area.uuid,
-    )
-    heading = Record(
-        uuid="heading",
-        kind="task",
-        title="Next",
-        parent_uuid=source.uuid,
-        heading=True,
-    )
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Move me",
-        parent_uuid=source.uuid,
-        heading_uuid=heading.uuid,
-    )
-    workspace, library, _store = contextual_workspace(
-        [destination_area, source, destination, heading, task]
-    )
-    read = workspace.read(
-        ReadCall(
-            purpose="organize",
-            id=source.id,
-            include=[{"id": destination.id}],
-        )
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="project-merge-001",
-            context_id=read.context.id,
-            change=[
-                {"ref": refs[heading.id], "into": refs[destination.id]},
-                {"ref": refs[task.id], "into": refs[destination.id]},
-                {"ref": refs[source.id], "lifecycle": "trash"},
-            ],
-        )
-    )
-
-    assert result.status == "needs_approval"
-    assert result.plan
-    applied = workspace.approve(ApproveCall(plan_id=result.plan.id))
-    assert applied.status == "applied"
-    assert library.records[source.uuid].trashed
-    assert library.records[heading.uuid].parent_uuid == destination.uuid
-    assert library.records[task.uuid].parent_uuid == destination.uuid
-    assert library.records[task.uuid].heading_uuid == heading.uuid
-
-
-def test_heading_into_another_project_is_rejected_without_merge() -> None:
-    source = Record(uuid="source", kind="project", title="Source")
-    destination = Record(uuid="destination", kind="project", title="Destination")
-    heading = Record(
-        uuid="heading",
-        kind="task",
-        title="Next",
-        parent_uuid=source.uuid,
-        heading=True,
-    )
-    workspace, library, _store = contextual_workspace([source, destination, heading])
-    read = workspace.read(
-        ReadCall(
-            purpose="organize",
-            id=source.id,
-            include=[{"id": destination.id}],
-        )
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="heading-cross-project-001",
-            context_id=read.context.id,
-            change=[{"ref": refs[heading.id], "into": refs[destination.id]}],
-        )
-    )
-
-    assert result.status == "rejected"
-    assert "atomic Project merge" in result.instruction
-    assert library.records[heading.uuid].parent_uuid == source.uuid
-
-
 def test_organize_find_requires_one_project() -> None:
     first = Record(uuid="first", kind="project", title="Launch")
     second = Record(uuid="second", kind="project", title="Launch follow-up")
@@ -1184,137 +584,6 @@ def test_system_review_stays_an_exact_registry_read() -> None:
     assert [item.id for item in read.items] == ["project:project"]
 
 
-def test_context_ref_commit_uses_existing_journal_and_apply_path() -> None:
-    task = Record(uuid="task", kind="task", title="Old")
-    workspace, library, _store = contextual_workspace([task])
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
-    assert read.context is not None
-    task_ref = read.items[0].ref
-    assert task_ref is not None
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="context-rename-001",
-            context_id=read.context.id,
-            change=[{"ref": task_ref, "title": "New"}],
-        )
-    )
-
-    assert result.status == "applied"
-    assert library.records[task.uuid].title == "New"
-    replay = workspace.commit(
-        CommitCall(
-            intent_id="context-rename-001",
-            context_id=read.context.id,
-            change=[{"ref": task_ref, "title": "New"}],
-        )
-    )
-    assert replay.status == "applied"
-
-
-def test_context_exact_changes_are_scoped_and_mixed_batches_are_atomic() -> None:
-    first = Record(uuid="first", kind="task", title="First")
-    second = Record(uuid="second", kind="task", title="Second")
-    workspace, library, store = contextual_workspace([first, second])
-    read = workspace.read(ReadCall(purpose="change", id=first.id))
-    assert read.context is not None
-    context = store.get(read.context.id, account_id="owner-a")
-    first_revision = next(
-        entry.revision for entry in context.refs if entry.exact_id == first.id
-    )
-
-    exact_only = workspace.commit(
-        CommitCall(
-            intent_id="context-exact-success-001",
-            context_id=context.id,
-            change=[
-                {
-                    "id": first.id,
-                    "if_revision": first_revision,
-                    "title": "First updated",
-                }
-            ],
-        )
-    )
-    assert exact_only.status == "applied"
-    assert library.records[first.uuid].title == "First updated"
-
-    mixed_workspace, mixed_library, mixed_store = contextual_workspace(
-        [Record(uuid="first", kind="task", title="First"),
-         Record(uuid="second", kind="task", title="Second")]
-    )
-    mixed_read = mixed_workspace.read(ReadCall(purpose="change", id="task:first"))
-    assert mixed_read.context is not None
-    mixed_context = mixed_store.get(mixed_read.context.id, account_id="owner-a")
-    mixed_first_revision = next(
-        entry.revision
-        for entry in mixed_context.refs
-        if entry.exact_id == "task:first"
-    )
-    mixed = mixed_workspace.commit(
-        CommitCall(
-            intent_id="context-exact-atomic-001",
-            context_id=mixed_context.id,
-            change=[
-                {
-                    "id": "task:first",
-                    "if_revision": mixed_first_revision,
-                    "title": "Must not partially apply",
-                },
-                {
-                    "id": "task:second",
-                    "if_revision": "revision-second",
-                    "title": "Must not apply",
-                },
-            ],
-        )
-    )
-    assert mixed.status == "stale"
-    assert mixed.recovery and mixed.recovery.code == "context_conflict"
-    assert mixed_library.records["first"].title == "First"
-    assert mixed_library.records["second"].title == "Second"
-
-
-def test_organize_commit_assigns_existing_task_to_new_heading() -> None:
-    project = Record(uuid="project", kind="project", title="Launch")
-    task = Record(
-        uuid="task", kind="task", title="Draft", parent_uuid=project.uuid
-    )
-    workspace, library, _store = contextual_workspace([project, task])
-    read = workspace.read(
-        ReadCall(
-            purpose="organize", view="project", within=project.id, limit=10
-        )
-    )
-    assert read.context and read.layouts
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[project.id] and refs[task.id]
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="organize-new-heading-001",
-            context_id=read.context.id,
-            organize=[
-                {
-                    "project_ref": refs[project.id],
-                    "sections": [
-                        {
-                            "heading_key": "$later",
-                            "heading_title": "Later",
-                            "task_refs": [refs[task.id]],
-                        }
-                    ],
-                }
-            ],
-        )
-    )
-
-    assert result.status == "applied"
-    headings = [record for record in library.records.values() if record.heading]
-    assert [heading.title for heading in headings] == ["Later"]
-    assert library.records[task.uuid].heading_uuid == headings[0].uuid
-
-
 def test_organize_layout_names_hidden_heading_occupants() -> None:
     project = Record(uuid="project", kind="project", title="KI")
     heading = Record(
@@ -1351,65 +620,207 @@ def test_organize_layout_names_hidden_heading_occupants() -> None:
     assert "trashed" in hidden_fact.signals
 
 
-def test_organize_can_delete_empty_headings_without_rewriting_layout() -> None:
-    project = Record(uuid="project", kind="project", title="Launch")
+def test_living_project_change_is_the_writable_neighborhood() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch", kind="project", title="Launch", area_uuid=area.uuid
+    )
     heading = Record(
-        uuid="later",
+        uuid="next",
         kind="task",
-        title="Later",
+        title="Next",
         parent_uuid=project.uuid,
         heading=True,
     )
-    sibling = Record(
-        uuid="now",
+    task = Record(
+        uuid="ship",
         kind="task",
-        title="Now",
-        parent_uuid=project.uuid,
-        heading=True,
-        sort_index=1024,
-    )
-    hidden = Record(
-        uuid="old",
-        kind="task",
-        title="Old",
+        title="Ship",
         parent_uuid=project.uuid,
         heading_uuid=heading.uuid,
-        status="done",
-        today_index=4,
     )
-    workspace, library, _store = contextual_workspace(
-        [project, heading, sibling, hidden]
+    hidden = Record(
+        uuid="gone",
+        kind="task",
+        title="Gone",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
     )
-    read = workspace.read(
-        ReadCall(purpose="organize", view="project", within=project.id)
+    workspace, _library, _store = contextual_workspace(
+        [area, project, heading, task, hidden]
     )
-    refs = {item.id: item.ref for item in read.items}
-    assert read.context is not None
 
-    prepared = workspace.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "organize-delete-headings-001",
-                "context_id": read.context.id,
-                "organize": [
-                    {
-                        "project_ref": refs[project.id],
-                        "delete_headings": [refs[heading.id]],
-                    }
-                ],
-            }
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        hidden.id,
+    }
+    assert result.layouts
+    assert result.layouts[0].complete
+    section = next(
+        row for row in result.layouts[0].sections if row.heading_ref is not None
+    )
+    assert section.hidden_count == 1
+    assert "contained records" not in result.instruction
+
+
+def test_trashed_project_change_lists_contained_records() -> None:
+    area = Record(uuid="work", kind="area", title="Work")
+    project = Record(
+        uuid="launch",
+        kind="project",
+        title="Launch",
+        area_uuid=area.uuid,
+        trashed=True,
+    )
+    heading = Record(
+        uuid="next",
+        kind="task",
+        title="Next",
+        parent_uuid=project.uuid,
+        heading=True,
+        trashed=True,
+    )
+    task = Record(
+        uuid="ship",
+        kind="task",
+        title="Ship",
+        parent_uuid=project.uuid,
+        heading_uuid=heading.uuid,
+        trashed=True,
+    )
+    nested = Record(
+        uuid="nested",
+        kind="project",
+        title="Nested",
+        parent_uuid=project.uuid,
+        trashed=True,
+    )
+    leaf = Record(
+        uuid="leaf",
+        kind="task",
+        title="Leaf",
+        parent_uuid=nested.uuid,
+        trashed=True,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [area, project, heading, task, nested, leaf]
+    )
+
+    result = workspace.read(ReadCall(purpose="change", id=project.id))
+
+    assert result.status == "ok"
+    assert result.context is not None
+    assert result.context.complete is True
+    assert {item.id for item in result.items} == {
+        project.id,
+        area.id,
+        heading.id,
+        task.id,
+        nested.id,
+        leaf.id,
+    }
+    assert result.items[0].id == project.id
+    assert all(item.revision is None for item in result.items)
+    assert all(item.ref for item in result.items)
+    assert "trashed" in result.items[0].signals
+    assert "4 contained records" in result.instruction
+    assert heading.id.startswith("heading:")
+    assert result.layouts
+    assert [layout.complete for layout in result.layouts] == [True, True]
+    facts = {item.id: item.ref for item in result.items}
+    root_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[project.id]
+    )
+    assert [section.heading_ref for section in root_layout.sections] == [
+        facts[heading.id]
+    ]
+    assert root_layout.sections[0].task_refs == [facts[task.id]]
+    assert root_layout.sections[0].hidden_count == 0
+    nested_layout = next(
+        layout for layout in result.layouts if layout.project_ref == facts[nested.id]
+    )
+    assert nested_layout.sections[0].heading_ref is None
+    assert nested_layout.sections[0].task_refs == [facts[leaf.id]]
+
+
+def test_task_change_include_exposes_destination_project_headings() -> None:
+    source = Record(uuid="source", kind="project", title="Source")
+    destination = Record(uuid="destination", kind="project", title="Destination")
+    source_heading = Record(
+        uuid="source-heading",
+        kind="task",
+        title="Source heading",
+        parent_uuid=source.uuid,
+        heading=True,
+    )
+    destination_heading = Record(
+        uuid="destination-heading",
+        kind="task",
+        title="Destination heading",
+        parent_uuid=destination.uuid,
+        heading=True,
+    )
+    task = Record(
+        uuid="move-me",
+        kind="task",
+        title="Move me",
+        parent_uuid=source.uuid,
+        heading_uuid=source_heading.uuid,
+    )
+    workspace, _library, _store = contextual_workspace(
+        [source, destination, source_heading, destination_heading, task]
+    )
+
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=task.id,
+            include=[{"id": destination.id}],
         )
     )
-    assert prepared.status == "needs_approval"
-    assert prepared.plan is not None
-    stored = workspace._journal.get("organize-delete-headings-001")  # noqa: SLF001
-    assert stored is not None
-    assert [write["action"] for write in stored.plan["writes"]] == ["permanent_delete"]
-    hidden.today_index = 99
-    applied = workspace.approve(ApproveCall(plan_id=prepared.plan.id))
-    assert applied.status == "applied"
-    assert heading.uuid not in library.records
-    assert hidden.heading_uuid is None
+
+    assert read.status == "ok"
+    assert read.context and read.context.complete
+    refs = {item.id: item.ref for item in read.items}
+    assert refs[destination.id] is not None
+    assert refs[destination_heading.id] is not None
+    assert all(item.revision is None for item in read.items)
+
+
+def test_task_change_include_resolves_named_cross_project_anchor() -> None:
+    source = Record(uuid="source", kind="project", title="Source")
+    destination = Record(uuid="destination", kind="project", title="Destination")
+    target = Record(
+        uuid="target", kind="task", title="Target", parent_uuid=source.uuid
+    )
+    anchor = Record(
+        uuid="anchor", kind="task", title="Named anchor", parent_uuid=destination.uuid
+    )
+    workspace, _library, _store = contextual_workspace(
+        [source, destination, target, anchor]
+    )
+
+    read = workspace.read(
+        ReadCall(
+            purpose="change",
+            id=target.id,
+            include=[{"find": "Named anchor", "within": destination.id}],
+        )
+    )
+
+    assert read.status == "ok"
+    assert read.context
+    refs = {item.id: item.ref for item in read.items}
+    assert refs[anchor.id]
 
 
 def test_organize_include_adds_a_second_complete_project_scope() -> None:
@@ -1421,7 +832,7 @@ def test_organize_include_adds_a_second_complete_project_scope() -> None:
     second_task = Record(
         uuid="two", kind="task", title="Beta next", parent_uuid=second.uuid
     )
-    workspace, library, _store = contextual_workspace(
+    workspace, _library, _store = contextual_workspace(
         [first, second, first_task, second_task]
     )
     read = workspace.read(
@@ -1434,311 +845,3 @@ def test_organize_include_adds_a_second_complete_project_scope() -> None:
     assert read.context is not None
     assert len(read.layouts) == 2
     assert all(item.revision is None for item in read.items)
-    refs = {item.id: item.ref for item in read.items}
-
-    result = workspace.commit(
-        CommitCall.model_validate(
-            {
-                "intent_id": "organize-two-projects-001",
-                "context_id": read.context.id,
-                "organize": [
-                    {
-                        "project_ref": refs[first.id],
-                        "sections": [
-                            {
-                                "heading_key": "$alpha",
-                                "heading_title": "Now",
-                                "task_refs": [refs[first_task.id]],
-                            }
-                        ],
-                    },
-                    {
-                        "project_ref": refs[second.id],
-                        "sections": [
-                            {
-                                "heading_key": "$beta",
-                                "heading_title": "Next",
-                                "task_refs": [refs[second_task.id]],
-                            }
-                        ],
-                    },
-                ],
-            }
-        )
-    )
-
-    assert result.status == "applied"
-    headings = {
-        record.title: record
-        for record in library.records.values()
-        if record.heading
-    }
-    assert headings["Now"].parent_uuid == first.uuid
-    assert headings["Next"].parent_uuid == second.uuid
-    assert library.records[first_task.uuid].heading_uuid == headings["Now"].uuid
-    assert library.records[second_task.uuid].heading_uuid == headings["Next"].uuid
-
-
-def test_context_is_account_bound_and_expiry_has_structured_recovery() -> None:
-    now = [NOW]
-    store = MemoryContextStore(
-        clock=lambda: now[0], token_factory=lambda: "ctx_12345678"
-    )
-    task = Record(uuid="task", kind="task", title="Old")
-    anchor = Record(uuid="anchor", kind="task", title="Anchor")
-    first, _library, _store = contextual_workspace(
-        [task, anchor], now=now, store=store, account_id="owner-a"
-    )
-    read = first.read(
-        ReadCall(
-            purpose="change",
-            id=task.id,
-            include=[{"find": "Anchor"}],
-        )
-    )
-    assert read.context and read.items[0].ref
-    call = CommitCall(
-        intent_id="bound-context-001",
-        context_id=read.context.id,
-        change=[{"ref": read.items[0].ref, "title": "New"}],
-    )
-    other, _other_library, _same_store = contextual_workspace(
-        [Record(uuid="task", kind="task", title="Old")],
-        now=now,
-        store=store,
-        account_id="owner-b",
-    )
-
-    wrong_account = other.commit(call)
-
-    assert wrong_account.status == "stale"
-    assert wrong_account.recovery
-    assert wrong_account.recovery.code == "context_required"
-
-    now[0] += timedelta(minutes=31)
-    expired = first.commit(call.model_copy(update={"intent_id": "expired-context-001"}))
-    assert expired.status == "stale"
-    assert expired.recovery and expired.recovery.code == "context_expired"
-    assert expired.recovery.read == {
-        "purpose": "change",
-        "id": task.id,
-        "include": [{"find": "Anchor"}],
-    }
-
-
-def test_context_revision_conflict_returns_recovery_without_write() -> None:
-    task = Record(uuid="task", kind="task", title="Old")
-    workspace, library, _store = contextual_workspace([task])
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
-    assert read.context and read.items[0].ref
-    library.records[task.uuid].title = "Owner edit"
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="context-conflict-001",
-            context_id=read.context.id,
-            change=[{"ref": read.items[0].ref, "title": "Model edit"}],
-        )
-    )
-
-    assert result.status == "stale"
-    assert result.recovery and result.recovery.code == "context_conflict"
-    assert library.records[task.uuid].title == "Owner edit"
-
-
-def test_context_stale_relationship_anchor_returns_recovery_without_write() -> None:
-    project = Record(uuid="project", kind="project", title="Launch")
-    anchor = Record(
-        uuid="anchor",
-        kind="task",
-        title="Anchor",
-        parent_uuid=project.uuid,
-        sort_index=0,
-    )
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Draft",
-        parent_uuid=project.uuid,
-        sort_index=1024,
-    )
-    workspace, library, _store = contextual_workspace([project, anchor, task])
-    read = workspace.read(
-        ReadCall(purpose="organize", view="project", within=project.id)
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[task.id] and refs[anchor.id]
-    original_sort = library.records[task.uuid].sort_index
-    library.records[anchor.uuid].title = "Owner changed anchor"
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="context-anchor-stale-001",
-            context_id=read.context.id,
-            change=[
-                {
-                    "ref": refs[task.id],
-                    "after": refs[anchor.id],
-                    "title": "Model edit",
-                }
-            ],
-        )
-    )
-
-    assert result.status == "stale"
-    assert result.recovery and result.recovery.code == "context_conflict"
-    assert library.records[task.uuid].title == "Draft"
-    assert library.records[task.uuid].sort_index == original_sort
-
-
-def test_context_stale_create_destination_returns_recovery_without_write() -> None:
-    area = Record(uuid="area", kind="area", title="Work")
-    project = Record(uuid="project", kind="project", title="Launch")
-    workspace, library, _store = contextual_workspace([area, project])
-    read = workspace.read(ReadCall(view="system"))
-    assert read.context is None
-
-    # A system read is intentionally legacy. Use a complete project-change
-    # context, which carries the Area registry needed by a Project create.
-    read = workspace.read(
-        ReadCall(
-            purpose="change",
-            id=project.id,
-            include=[{"id": area.id}],
-        )
-    )
-    assert read.context
-    refs = {item.id: item.ref for item in read.items}
-    assert refs[area.id]
-    library.records[area.uuid].title = "Owner changed destination"
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="context-destination-stale-001",
-            context_id=read.context.id,
-            create=[
-                {
-                    "title": "New project",
-                    "kind": "project",
-                    "into": refs[area.id],
-                }
-            ],
-        )
-    )
-
-    assert result.status == "stale"
-    assert result.recovery and result.recovery.code == "context_conflict"
-    assert [record.title for record in library.records.values()] == [
-        "Owner changed destination",
-        "Launch",
-    ]
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("purpose", "evil"),
-        ("limit", "20"),
-        ("view", "project"),
-        ("account_binding", "account-one"),
-    ],
-)
-def test_corrupt_sqlite_context_returns_safe_recovery(
-    tmp_path: Path, field: str, value: object
-) -> None:
-    now = [NOW]
-    path = tmp_path / "contexts.sqlite3"
-    store = SQLiteContextStore(
-        path, clock=lambda: now[0], token_factory=lambda: "ctx_12345678"
-    )
-    task = Record(uuid="task", kind="task", title="Old")
-    workspace, library, _store = contextual_workspace(
-        [task], now=now, store=store
-    )
-    read = workspace.read(ReadCall(purpose="change", id=task.id))
-    assert read.context and read.items[0].ref
-
-    with sqlite3.connect(path) as connection:
-        if field == "account_binding":
-            connection.execute(
-                "UPDATE read_contexts SET account_binding = ? WHERE context_id = ?",
-                (value, read.context.id),
-            )
-        else:
-            row = connection.execute(
-                "SELECT selector_json FROM read_contexts WHERE context_id = ?",
-                (read.context.id,),
-            ).fetchone()
-            assert row is not None
-            selector_data = json.loads(row[0])
-            selector_data[field] = value
-            connection.execute(
-                "UPDATE read_contexts SET selector_json = ? WHERE context_id = ?",
-                (json.dumps(selector_data), read.context.id),
-            )
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id=f"corrupt-context-{field}-001",
-            context_id=read.context.id,
-            change=[{"ref": read.items[0].ref, "title": "New"}],
-        )
-    )
-
-    assert result.status == "stale"
-    assert result.next == "read"
-    assert result.recovery and result.recovery.code == "context_corrupt"
-    assert result.recovery.retry == "read"
-    assert result.recovery.read is None
-    assert "evil" not in result.instruction
-    assert library.records[task.uuid].title == "Old"
-
-
-def test_context_area_change_carries_complete_registry_precondition() -> None:
-    area = Record(uuid="area", kind="area", title="Work")
-    project = Record(
-        uuid="project", kind="project", title="Launch", area_uuid=area.uuid
-    )
-    workspace, library, _store = contextual_workspace([area, project])
-    read = workspace.read(ReadCall(purpose="change", id=area.id))
-    assert read.context and read.context.complete
-    area_fact = next(item for item in read.items if item.id == area.id)
-    assert area_fact.ref
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="context-area-001",
-            context_id=read.context.id,
-            change=[{"ref": area_fact.ref, "title": "Career"}],
-        )
-    )
-
-    assert result.status == "needs_approval"
-    assert result.plan
-    applied = workspace.approve(ApproveCall(plan_id=result.plan.id))
-    assert applied.status == "applied"
-    assert library.records[area.uuid].title == "Career"
-
-
-def test_legacy_exact_read_and_commit_remain_unchanged() -> None:
-    task = Record(uuid="task", kind="task", title="Old")
-    workspace, library, _store = contextual_workspace([task])
-    read = workspace.read(ReadCall(id=task.id))
-    assert read.context is None
-
-    result = workspace.commit(
-        CommitCall(
-            intent_id="legacy-rename-001",
-            change=[
-                {
-                    "id": task.id,
-                    "if_revision": read.items[0].revision,
-                    "title": "New",
-                }
-            ],
-        )
-    )
-
-    assert result.status == "applied"
-    assert library.records[task.uuid].title == "New"

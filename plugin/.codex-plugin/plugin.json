@@ -1,6 +1,6 @@
 {
   "name": "things-orchestrator",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Unofficial self-hosted Things Cloud MCP with eight bounded agent-ready tools",
   "author": {
     "name": "Mats Varnskuhler"

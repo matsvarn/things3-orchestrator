@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.4 - 2026-09-05
+
+- Remove retired v1 commit and approval compilation, their exclusive models,
+  and obsolete tests. Keep the eight-tool v2 contract, shared transaction
+  helpers, durable outbox, account fences, receiver acknowledgements, and
+  signed legacy journal recovery.
+- Record the owner-accepted v0.10.3 Hermes daily-planning run with an applied
+  ten-item receipt and independent Things Cloud read-back.
+
 ## 0.10.3 - 2026-09-05
 
 - Return the complete bounded JSON result in MCP text content as well as
