@@ -28,6 +28,30 @@ tool names, schemas, or expected calls before the run. Record:
 Do not aggregate skill-installed and schema-only clients into one success rate.
 The skill contains retry and trust guidance that bare MCP schemas do not.
 
+## 2026-09-05 daily-planning failure
+
+The owner sent "Help me plan today" in a fresh Hermes Desktop 0.17.0 session
+using `openai-codex: gpt-5.6-sol`, connected to the private VPS. The backend was
+Hermes Agent v0.21.0, upstream `f159e581`, local `63279301`. Things Orchestrator
+was v0.10.2 at `2b9ad32847e4dd52e0d45e394e84af9db825069e`.
+
+The client attempted Today, Inbox, and This Week reads, but received only
+"Current Things facts." as model-visible text. It then made repeated terminal
+and fallback-tool attempts and asked the owner to paste the Today list or send
+a screenshot. The owner reported the failure with a screenshot. The session
+later showed both questions skipped and the operation interrupted. No correct
+current read or useful write was established. No mutation receipt was recorded.
+
+The server returned the actual facts in `structuredContent`, but its text block
+contained only the instruction. v0.10.3 returns the same complete bounded JSON
+in both fields. This preserves trust labels and control-flow fields for clients
+that consume text. The public tool count remains eight.
+
+Status: **Repeat required**. The installed skill state, exact elapsed time,
+full tool trace, and credential handling have not yet been audited. This is an
+observed human failure, not a completed acceptance run. Private screenshots and
+session identifiers remain outside the public repository.
+
 ## 2026-09-04 owner-run routine acceptance
 
 An owner ran the built-in routine on a private VPS with a supervised worker.
@@ -60,9 +84,9 @@ Trash; do not call that deletion or cleanup.
 - **Round 1 complete**: a human ran the workflow and recorded its failures.
 - **Repeat required**: fixes landed after that run, so it needs another human
   run against the current contract.
-- **Queued for v0.10.2**: the workflow is supported by the current eight tools
+- **Queued for v0.10.3**: the workflow is supported by the current eight tools
   but has no complete current human run.
-- **Deferred**: the workflow requires a capability outside the v0.10.2 public
+- **Deferred**: the workflow requires a capability outside the v0.10.3 public
   contract and must not be counted as a release failure.
 
 ## Historical first-round record
@@ -103,46 +127,46 @@ overlapping reads, skipped an empty-head check, mixed cleanup with planning,
 invented priority judgments, converted next-week intent into Monday start dates,
 and asked approval for unnamed changes.
 
-Status: **Repeat required** against v0.10.2. Use the natural prompt in
+Status: **Repeat required** against v0.10.3. Use the natural prompt in
 [`tests/fixtures/weekly_review_owner_prompt.txt`](../tests/fixtures/weekly_review_owner_prompt.txt)
 without tool or form instructions.
 
-## Supported v0.10.2 queue
+## Supported v0.10.3 queue
 
 Run these workflows with natural prompts and the evidence fields above:
 
-1. **First correct read. Queued for v0.10.2.** Ask a fresh client what needs
+1. **First correct read. Queued for v0.10.3.** Ask a fresh client what needs
    attention today. Verify that the answer reflects current Things state and
    performs no mutation.
-2. **Useful Inbox capture and refusal gate. Queued for v0.10.2.** Capture one
+2. **Useful Inbox capture and refusal gate. Queued for v0.10.3.** Capture one
    wanted Task. Then give one ambiguous mashed request; it must ask a concise
    question and write nothing.
-3. **Named home and tag capture. Queued for v0.10.2.** Add one Task to an exact
+3. **Named home and tag capture. Queued for v0.10.3.** Add one Task to an exact
    named Project or Area with one existing named tag. It must not invent a home
    or second tag.
-4. **Ordinary Project capture. Queued for v0.10.2.** Create a Project with known
+4. **Ordinary Project capture. Queued for v0.10.3.** Create a Project with known
    actions and useful context. Check the Project fields, nested Task fields,
    checklists, and notes.
-5. **Inbox processing. Queued for v0.10.2.** Process a bounded mixed Inbox
+5. **Inbox processing. Queued for v0.10.3.** Process a bounded mixed Inbox
    without duplicate creation or invented dates.
-6. **Daily focus. Queued for v0.10.2.** Review Today, postpone one exact item,
+6. **Daily focus. Queued for v0.10.3.** Review Today, postpone one exact item,
    move one item to Evening, and re-read the resulting view.
-7. **Exact changes and scheduling. Queued for v0.10.2.** Rename, complete, or
+7. **Exact changes and scheduling. Queued for v0.10.3.** Rename, complete, or
    trash exact items; set supported dates and reminders; move a Task between
    homes; verify unmentioned fields remain unchanged.
-8. **Recurrence lifecycle. Queued for v0.10.2.** Create and update a supported
+8. **Recurrence lifecycle. Queued for v0.10.3.** Create and update a supported
    recurrence, modify its current copy, complete it, and stop repetition.
-9. **Tags, checklist, and Waiting. Queued for v0.10.2.** Patch exact direct tags
+9. **Tags, checklist, and Waiting. Queued for v0.10.3.** Patch exact direct tags
    and checklist rows while preserving unmentioned and inherited state.
-10. **Recoverable Trash. Queued for v0.10.2.** Move one exact disposable item to
+10. **Recoverable Trash. Queued for v0.10.3.** Move one exact disposable item to
     recoverable Trash and verify its receipt and Cloud state.
-11. **Install, update, rollback, and recovery. Queued for v0.10.2.** Verify
+11. **Install, update, rollback, and recovery. Queued for v0.10.3.** Verify
     client setup, health checks, preference preservation, rollback, and a safe
     recovery path. Record host and client topology precisely.
 
 ## Deferred until a bounded public contract exists
 
-These are not queued for v0.10.2 and must not block its dogfood program:
+These are not queued for v0.10.3 and must not block its dogfood program:
 
 - native heading deletion or Project merge;
 - restore from Trash or permanent deletion;
@@ -156,7 +180,7 @@ and recovery behavior, move only its bounded workflow into the supported queue.
 
 ## Regression round
 
-After each supported v0.10.2 workflow has one human run, repeat the supported
+After each supported v0.10.3 workflow has one human run, repeat the supported
 set against the then-current release using changed owner data and natural
 paraphrases. A workflow passes only when the trace is concise, the result matches
 one accepted intent, and the result remains correct without the chat. Writes
