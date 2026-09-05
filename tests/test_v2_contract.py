@@ -1304,11 +1304,11 @@ def test_frozen_preconditions_are_rechecked_after_fence_claim_before_post() -> N
 
 @pytest.mark.parametrize("kind", ["task", "project"])
 @pytest.mark.parametrize("notes", ["Replacement", ""])
-def test_v2_rejects_rich_note_replacement_before_journaling(
+def test_v2_rejects_unavailable_note_replacement_before_journaling(
     kind: Literal["task", "project"], notes: str
 ) -> None:
     record = Record(
-        uuid="a", kind=kind, title="A", notes="Rich content", notes_format="rich"
+        uuid="a", kind=kind, title="A", notes="Rich content", notes_format="unavailable"
     )
     journal = MemoryJournal()
     result = ThingsV2(

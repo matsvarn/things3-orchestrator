@@ -144,3 +144,19 @@ git commit -m "Initial public release"
 The `comm` command must return no paths. Run the full test, build, link, and
 secret checks in the new repository. Add only the new public remote. Push only
 `main`.
+
+## Native note reconstruction
+
+Cloud note type 1 carries a complete text snapshot. Type 2 carries sequential
+UTF-8 byte patches with a position, removed length, replacement text, and CRC32
+of the resulting note after each patch. It is not a rich-text paragraph array.
+Apply patches to the preceding verified text, preserving literal Markdown,
+blank lines, and Unicode. Invalid boundaries, failed checksums, unknown shapes,
+and missing bases mark notes unavailable until a valid snapshot restores them.
+
+Cache version 11 invalidates the former fragment-only projection. The public
+`notes_state` distinguishes unavailable content from an empty note. Ordinary
+updates still write complete text snapshots through the existing mutation and
+read-back path. Existing precondition checks detect a native edit observed
+between planning and the final refresh; this does not provide a server-side
+compare-and-swap against edits arriving after that refresh.

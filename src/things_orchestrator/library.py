@@ -83,7 +83,7 @@ class Record:
     title: str
     notes: str = ""
     notes_source: Literal["none", "legacy", "structured"] = "none"
-    notes_format: Literal["plain", "markdown", "rich"] = "markdown"
+    notes_format: Literal["plain", "markdown", "unavailable"] = "markdown"
     status: Status = "open"
     completed_at: datetime | None = None
     trashed: bool = False

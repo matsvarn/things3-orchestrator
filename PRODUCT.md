@@ -74,7 +74,7 @@ remote-host security remain owner responsibilities.
 
 The current interface does not provide advanced scope redesign, heading
 deletion, Project merge, restore from Trash, permanent deletion, arbitrary
-rich-note replacement, registry mutation, RT2 recurrence writes, or full-system
+replacement of unreadable notes, registry mutation, RT2 recurrence writes, or full-system
 setup. It also does not provide mutation coaching through a staged approval
 workflow.
 

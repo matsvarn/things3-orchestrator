@@ -14,8 +14,8 @@ from things_orchestrator.deployment import (
 from things_orchestrator.v2 import MODELS
 
 ROOT = Path(__file__).parents[1]
-EXPECTED_TOOL_SCHEMA_HASH = "sha256:bc72f9c4434e853ef6646342"
-EXPECTED_TOOL_CONTRACT_HASH = "sha256:99a4dbd45f064c5a7307d431"
+EXPECTED_TOOL_SCHEMA_HASH = "sha256:df6df1c07dc83e7698baf177"
+EXPECTED_TOOL_CONTRACT_HASH = "sha256:fb364f86c8d4b27279f72837"
 EXPECTED_TOOLS = (
     "things_view",
     "things_find",
@@ -28,7 +28,7 @@ EXPECTED_TOOLS = (
 )
 
 
-def test_onboarding_changes_preserve_the_v080_tool_contract() -> None:
+def test_deployment_identity_matches_current_tool_contract() -> None:
     assert tuple(MODELS) == EXPECTED_TOOLS
     assert tool_schema_hash() == EXPECTED_TOOL_SCHEMA_HASH
     assert tool_contract_hash() == EXPECTED_TOOL_CONTRACT_HASH

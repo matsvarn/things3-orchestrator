@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -64,7 +64,7 @@ _TASK_KINDS = {"Task7", "Task6", "Task4", "Task3", "Task"}
 _AREA_KINDS = {"Area3", "Area2", "Area"}
 _TAG_KINDS = {"Tag4", "Tag3", "Tag"}
 _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
-_CACHE_VERSION = 10
+_CACHE_VERSION = 11
 
 
 class CloudError(RuntimeError):
@@ -91,42 +91,60 @@ def _now() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
-def _note_text(value: object) -> str:
+def _apply_note(value: object, previous: str | None) -> str | None:
+    """Fold Things text snapshots or UTF-8 byte patches; None means unreadable."""
     if value is None:
         return ""
     if isinstance(value, str):
         return value
-    if isinstance(value, dict):
-        note_type = value.get("t")
+    if not isinstance(value, dict) or value.get("_t", "tx") != "tx":
+        return None
+    note_type = value.get("t")
+    if type(note_type) is not int:
+        return None
+    try:
         if note_type == 1:
-            raw = value.get("v")
-            return raw if isinstance(raw, str) else ""
-        if note_type == 2:
-            lines: list[str] = []
-            for paragraph in value.get("ps") or []:
-                if isinstance(paragraph, dict):
-                    run = paragraph.get("r")
-                    if isinstance(run, str) and run:
-                        lines.append(
-                            run.replace("\u2028", "\n").replace("\u2029", "\n")
-                        )
-            return "\n".join(lines)
-    return ""
+            if set(value) - {"_t", "t", "v", "ch"}:
+                return None
+            text = value.get("v")
+            if not isinstance(text, str):
+                return None
+            if "ch" in value and not _note_checksum(text.encode(), value["ch"]):
+                return None
+            return text
+        if note_type != 2 or previous is None or set(value) - {"_t", "t", "ps"}:
+            return None
+        patches = value.get("ps")
+        if not isinstance(patches, list):
+            return None
+        current = previous.encode()
+        for patch in patches:
+            if not isinstance(patch, dict) or set(patch) != {"p", "l", "r", "ch"}:
+                return None
+            position, length, replacement = patch["p"], patch["l"], patch["r"]
+            if (
+                type(position) is not int or type(length) is not int
+                or position < 0 or length < 0 or position + length > len(current)
+                or not isinstance(replacement, str)
+            ):
+                return None
+            # Patch offsets count bytes, but boundaries must not split a character.
+            current[:position].decode()
+            current[position + length:].decode()
+            current = current[:position] + replacement.encode() + current[position + length:]
+            if not _note_checksum(current, patch["ch"]):
+                return None
+        return current.decode()
+    except UnicodeError:
+        return None
 
 
-def _note_metadata(
-    value: object,
-) -> tuple[
-    Literal["none", "legacy", "structured"],
-    Literal["plain", "markdown", "rich"],
-]:
-    if value is None:
-        return "none", "markdown"
-    if isinstance(value, str):
-        return "legacy", "plain"
-    if isinstance(value, dict) and value.get("t") == 2:
-        return "structured", "rich"
-    return "structured", "markdown"
+def _note_checksum(value: bytes, checksum: object) -> bool:
+    return type(checksum) is int and checksum == zlib.crc32(value) & 0xFFFFFFFF
+
+
+def _note_text(value: object) -> str:
+    return _apply_note(value, "") or ""
 
 
 def _native_date(value: object) -> date | None:
@@ -689,8 +707,11 @@ def fold_events(events: list[dict[str, Any]], *, library: MemoryLibrary) -> None
         if "tt" in payload and payload["tt"] is not None:
             item.title = str(payload["tt"])
         if "nt" in payload:
-            item.notes = _note_text(payload["nt"])
-            item.notes_source, item.notes_format = _note_metadata(payload["nt"])
+            note = payload["nt"]
+            text = _apply_note(note, item.notes if item.notes_format != "unavailable" else None)
+            item.notes = text if text is not None else ""
+            item.notes_source = "none" if note is None else "legacy" if isinstance(note, str) else "structured"
+            item.notes_format = "unavailable" if text is None else "plain" if isinstance(note, str) else "markdown"
         if "tp" in payload and payload["tp"] is not None:
             type_code = int(payload["tp"])
             if type_code == 2:

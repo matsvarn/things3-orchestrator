@@ -101,7 +101,7 @@ and authority stay the same; the receiver owns its approval controls. Never
 add a receiver-specific approval tool to the Things MCP contract.
 
 A receiver can block a call before Things Orchestrator sees it. Distinguish
-that from an MCP rejection such as unsupported rich-text note replacement,
+that from an MCP rejection because note content could not be reconstructed,
 and from an uncertain write that needs receipt inspection. Report the actual
 reason, the proposed edit, and which fields were already applied. A successful
 title change does not make a blocked notes edit successful enrichment.
@@ -134,6 +134,11 @@ soften words such as "delete" to evade review. Planning account deletion in a
 Things note does not authorize deleting the external account.
 
 ## Know what the examples cover
+
+When `notes_state` is `unavailable`, the note could not be reconstructed from
+Cloud history. A null note in that state is not an empty note. Preserve it and
+report the missing content. `truncated_fields` separately identifies content
+that exceeds the response limit.
 
 The reports use the available named views and exact Project membership reads.
 They do not promise an unrestricted library query, calendar planning, email
