@@ -3760,23 +3760,6 @@ class ThingsWorkspace:
                 return self._resume_v2(current)
             return {"state": "rejected", "instruction": "Another unresolved operation blocks approval.", "operation_id": operation_id, "blocking_operation_ids": start.blockers}
 
-    def host_decline_v2(self, operation_id: str, authorization: object) -> bool:
-        try:
-            operation = self._unambiguous_host_operation_v2(operation_id)
-        except AmbiguousV2Request:
-            return False
-        return bool(
-            operation is not None
-            and self._journal.verify_v2_authorization(operation, "decline", authorization) is not None
-            and self._journal.transition_v2(
-                operation_id,
-                expected="awaiting_owner",
-                state="declined",
-                authorization=authorization,
-                response={"state": "declined", "instruction": "The owner declined this operation.", "operation_id": operation_id},
-            )
-        )
-
     def host_resolve_partial_v2(
         self,
         operation_id: str,

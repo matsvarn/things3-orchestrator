@@ -21,13 +21,12 @@ Status = Literal["open", "completed", "canceled"]
 TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
 DetailField = Literal["notes", "checklist", "tags", "recurrence"]
 DETAIL_FIELDS: tuple[DetailField, ...] = ("notes", "checklist", "tags", "recurrence")
-Next = Literal["done", "ask", "approve", "read", "revise", "retry_same", "stop"]
+Next = Literal["done", "ask", "read", "retry_same", "stop"]
 ResultStatus = Literal[
     "ok",
     "applied",
     "unchanged",
     "needs_input",
-    "needs_approval",
     "stale",
     "pending",
     "partial",
@@ -557,21 +556,6 @@ class RecoveryFact(StrictModel):
         return value
 
 
-class PlanFact(StrictModel):
-    id: str = Field(pattern=r"^plan_[A-Za-z0-9_-]{8,120}$")
-    expires_at: str = Field(max_length=40)
-    summary: list[str] = Field(min_length=1, max_length=40)
-    preserves: list[str] = Field(default_factory=list, max_length=40)
-    warnings: list[str] = Field(default_factory=list, max_length=40)
-
-    @field_validator("expires_at")
-    @classmethod
-    def valid_expiry(cls, value: str) -> str:
-        checked = _validate_reminder(value)
-        assert checked is not None
-        return checked
-
-
 class ReceiptItemFact(StrictModel):
     id: str = Field(pattern=_ITEM_ID, max_length=512)
     title: str = Field(min_length=1, max_length=1000)
@@ -590,7 +574,6 @@ class Result(StrictModel):
     signals: list[str] = Field(default_factory=list, max_length=160)
     context: ContextFact | None = None
     recovery: RecoveryFact | None = None
-    plan: PlanFact | None = None
     receipt: str | None = Field(default=None, min_length=1, max_length=512)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
