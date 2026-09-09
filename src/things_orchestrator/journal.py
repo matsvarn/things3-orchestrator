@@ -211,28 +211,13 @@ class Journal(Protocol):
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
 
 
-class _V2ApplySettle(Protocol):
-    def __call__(
-        self,
-        operation_id: str,
-        *,
-        expected: V2State,
-        state: V2ApplyState,
-        response: JsonDict,
-        rows: list[JsonDict],
-        authorization: object = None,
-        action: str | None = None,
-        definitive_rejection: bool = False,
-    ) -> bool: ...
-
-
 class _OwnedV2ApplySession:
     def __init__(
         self,
         operation: V2Operation,
         *,
         mark: Callable[[str], bool],
-        settle: _V2ApplySettle,
+        settle: Callable[..., bool],
     ) -> None:
         self.operation = operation
         self._active = True
