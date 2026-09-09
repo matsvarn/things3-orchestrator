@@ -159,7 +159,11 @@ def validate_read_selector(
         raise ValueError("from and to need view logbook")
     if view == "logbook" and (from_date is None) != (to_date is None):
         raise ValueError("view logbook needs both from and to, or neither")
-    if from_date is not None and to_date is not None and from_date > to_date:
+    if (
+        from_date is not None
+        and to_date is not None
+        and date.fromisoformat(from_date) > date.fromisoformat(to_date)
+    ):
         raise ValueError("from must not be after to")
     if purpose == "change" and item_id is None and find is None:
         raise ValueError("change purpose needs an exact id or unique find")
