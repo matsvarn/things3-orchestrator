@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `print-config --client grokbot` renders a public HTTPS MCP URL and bearer for
+  ephemeral agent hosts, plus a Tailscale-free `mcp-remote` stdio recipe.
+  MagicDNS and known private endpoints are rejected. Doctor reports origin
+  unreachable from public `/health` without exception secrets.
+
 ## 0.11.0 - 2026-09-05
 
 - Advertise additive-tolerant tool output schemas so extra properties on

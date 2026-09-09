@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from things_orchestrator.client_config import ClientKind
 from things_orchestrator.v2 import MODELS as V2_MODELS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -862,15 +863,7 @@ def _print_config_error(tokens: tuple[str, ...]) -> str | None:
     if len(clients) != 1 or clients[0] is None:
         return "print-config needs exactly one exact --client"
     client = clients[0]
-    supported = {
-        "caddy",
-        "claude-code",
-        "codex",
-        "cursor",
-        "cursor-cloud",
-        "grok",
-        "hermes",
-    }
+    supported = {kind.value for kind in ClientKind}
     if client not in supported:
         return "unsupported print-config client"
     if unsupported or show_secrets > 1 or urls > 1:

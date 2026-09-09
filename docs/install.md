@@ -177,9 +177,9 @@ is private to tailnet members.
 
 ## Public HTTPS client
 
-Use public HTTPS only for a client that cannot join the tailnet, such as Cursor
-Cloud Agents. Point DNS at the host and allow inbound TCP 80 and 443. Keep port
-8787 private.
+Use public HTTPS for a client that cannot join the tailnet, including Cursor
+Cloud Agents and Grok Bot's ephemeral computer. Point DNS at the host and allow
+inbound TCP 80 and 443. Keep port 8787 private. Do not use Funnel.
 
 ```console
 things-orchestrator login --url https://mcp.example.com --timezone Europe/Berlin
@@ -191,6 +191,15 @@ sudo systemctl reload caddy
 things-orchestrator doctor --wait --url https://mcp.example.com
 things-orchestrator print-config --client cursor-cloud --show-secrets
 ```
+
+For Grok Bot's computer:
+
+```console
+things-orchestrator print-config --client grokbot --show-secrets
+```
+
+See [ephemeral agent host](clients.md). `doctor --url` against the public origin
+is an owner-run check on the VPS.
 
 The Caddy package owns the long-running systemd service. Do not run `caddy run`
 in an SSH session.

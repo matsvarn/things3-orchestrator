@@ -17,6 +17,7 @@ from .config import ConfigError, McpBearer, McpUrl
 class ClientKind(str, Enum):
     CODEX = "codex"
     GROK = "grok"
+    GROKBOT = "grokbot"
     HERMES = "hermes"
     CLAUDE_CODE = "claude-code"
     CURSOR = "cursor"
@@ -106,6 +107,47 @@ def render_client_config(
             "verify DNS or reachability. Provide the URL and required authentication "
             "from this output. Confirm that Grok discovers exactly eight tools "
             "before you activate a routine.",
+        )
+    if client is ClientKind.GROKBOT:
+        if not _is_https_without_known_local_host(endpoint.url):
+            raise ConfigError(
+                "Grok Bot configuration rejects HTTP, Tailscale MagicDNS, and known "
+                "local or private MCP endpoints. Use a public HTTPS origin"
+            )
+        body = json.dumps(
+            {
+                "url": str(endpoint.url),
+                "headers": {"Authorization": authorization},
+            },
+            indent=2,
+        ) + "\n"
+        secondary = json.dumps(
+            {
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "mcp-remote",
+                    str(endpoint.url),
+                    "--transport",
+                    "http-only",
+                    "--header",
+                    "Authorization:${THINGS_MCP_AUTH}",
+                ],
+                "env": {"THINGS_MCP_AUTH": authorization},
+            },
+            indent=2,
+        ) + "\n"
+        return RenderedClientConfig(
+            client,
+            body,
+            "Prefer this native HTTPS MCP URL on the ephemeral agent host. "
+            "Use the stdio mcp-remote recipe only if that host cannot speak "
+            "Streamable HTTP. Do not install Tailscale; Update Computer wipes "
+            "/var/lib/tailscale. MagicDNS is not the default. Possession of the "
+            "MCP bearer authorizes every bounded v2 write. Confirm public "
+            "reachability with doctor --url on the serving host after the Caddy "
+            "path in install.md.",
+            secondary,
         )
     if client is ClientKind.CODEX:
         body = (
