@@ -56,6 +56,18 @@ def test_read_rejects_ambiguous_or_invalid_input(payload: dict[str, object]) -> 
         ReadCall.model_validate(payload)
 
 
+def test_logbook_range_compares_mixed_iso_calendar_and_week_dates() -> None:
+    call = ReadCall.model_validate(
+        {"view": "logbook", "from": "2026-W02-1", "to": "2026-01-15"}
+    )
+    assert call.from_date == "2026-W02-1"
+    assert call.to_date == "2026-01-15"
+    with pytest.raises(ValidationError, match="from must not be after to"):
+        ReadCall.model_validate(
+            {"view": "logbook", "from": "2026-01-15", "to": "2026-W02-1"}
+        )
+
+
 def test_read_purpose_selects_task_oriented_context() -> None:
     assert ReadCall.model_validate({}).purpose == "review"
     assert (
