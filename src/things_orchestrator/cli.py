@@ -86,6 +86,33 @@ class _ExactArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+def _add_routine_profile_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile",
+        choices=("always_on",),
+        required=True,
+        help="host profile for the supervised routines worker",
+    )
+    parser.add_argument(
+        "--receiver",
+        choices=("hermes", "grok"),
+        default="hermes",
+        help="webhook receiver. Hermes is the default",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Things Cloud polling interval in seconds (60-3600, default: 60)",
+    )
+    parser.add_argument(
+        "--settle",
+        type=int,
+        default=120,
+        help="event settle window in seconds (1-3600, default: 120)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ExactArgumentParser(
         description="Things Cloud MCP server with eight bounded v2 tools.",
@@ -190,30 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Hermes is the default receiver."
         ),
     )
-    routines_setup.add_argument(
-        "--profile",
-        choices=("always_on",),
-        required=True,
-        help="host profile for the supervised routines worker",
-    )
-    routines_setup.add_argument(
-        "--receiver",
-        choices=("hermes", "grok"),
-        default="hermes",
-        help="webhook receiver. Hermes is the default",
-    )
-    routines_setup.add_argument(
-        "--interval",
-        type=int,
-        default=60,
-        help="Things Cloud polling interval in seconds (60-3600, default: 60)",
-    )
-    routines_setup.add_argument(
-        "--settle",
-        type=int,
-        default=120,
-        help="event settle window in seconds (1-3600, default: 120)",
-    )
+    _add_routine_profile_args(routines_setup)
     routines_configure = routines_commands.add_parser(
         "configure",
         help="store a disabled routines receiver profile",
@@ -222,36 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
             "Hermes is the default receiver."
         ),
     )
-    routines_configure.add_argument(
-        "--profile",
-        choices=("always_on",),
-        required=True,
-        help="host profile for the supervised routines worker",
-    )
-    routines_configure.add_argument(
-        "--receiver",
-        choices=("hermes", "grok"),
-        default="hermes",
-        help="webhook receiver. Hermes is the default",
-    )
+    _add_routine_profile_args(routines_configure)
     routines_configure.add_argument(
         "--url",
         help=(
             "receiver webhook URL. Omit it to enter the URL privately "
             "in a private terminal"
         ),
-    )
-    routines_configure.add_argument(
-        "--interval",
-        type=int,
-        default=60,
-        help="Things Cloud polling interval in seconds (60-3600, default: 60)",
-    )
-    routines_configure.add_argument(
-        "--settle",
-        type=int,
-        default=120,
-        help="event settle window in seconds (1-3600, default: 120)",
     )
     routines_commands.add_parser(
         "enable",
