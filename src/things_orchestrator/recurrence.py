@@ -285,26 +285,6 @@ def repeat_interval(rule: dict[str, JsonValue] | None) -> int | None:
     )
 
 
-def change_interval(
-    rule: dict[str, JsonValue] | None,
-    interval: int,
-) -> dict[str, JsonValue]:
-    """Change only the interval and preserve the complete opaque rule."""
-    if rule is None:
-        raise ValueError("Only a repeating template can change its repeat interval")
-    if repeat_interval(rule) is None:
-        raise ValueError("This repeat rule has an unsupported interval")
-    if (
-        isinstance(interval, bool)
-        or not isinstance(interval, int)
-        or not 1 <= interval <= _MAX_INTERVAL
-    ):
-        raise ValueError(f"Repeat interval must be between 1 and {_MAX_INTERVAL}")
-    changed = deepcopy(rule)
-    changed["fa"] = interval
-    return changed
-
-
 def new_rule(
     *,
     mode: RepeatMode,

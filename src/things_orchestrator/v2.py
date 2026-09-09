@@ -309,9 +309,6 @@ class PublicRecurrence(StrictModel):
         return value
 
 
-RecurrenceFact = PublicRecurrence
-
-
 class PublicChecklistRow(StrictModel):
     id: str
     title: TaintedText
