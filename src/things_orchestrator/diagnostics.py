@@ -316,89 +316,59 @@ def collect_routines_diagnostic(
         "enabled" if isinstance(config, EnabledRoutineConfig) else "disabled"
     )
     profile = config.profile
-    receiver_kind = profile.receiver.kind
-    if credentials is None:
-        return RoutineDiagnostic(
-            state,
-            "unknown",
-            service,
-            liveness,
-            receiver_kind=receiver_kind,
-            poll_interval_seconds=profile.poll_interval_seconds,
-            settlement_window_seconds=profile.settle_seconds,
-            last_successful_poll_at=last_poll,
-            last_delivery_at=runtime_delivery,
-        )
-    digest = account_digest(credentials.email)
-    if profile.account_digest != digest:
-        return RoutineDiagnostic(
-            state,
-            "mismatch",
-            service,
-            liveness,
-            receiver_kind=receiver_kind,
-            poll_interval_seconds=profile.poll_interval_seconds,
-            settlement_window_seconds=profile.settle_seconds,
-            last_successful_poll_at=last_poll,
-            last_delivery_at=runtime_delivery,
-        )
-    path = database_path or routine_database_path(digest)
-    counts = read_routine_counts(path, digest)
-    if counts is None:
-        return RoutineDiagnostic(
-            state,
-            "bound",
-            service,
-            liveness,
-            receiver_kind=receiver_kind,
-            poll_interval_seconds=profile.poll_interval_seconds,
-            settlement_window_seconds=profile.settle_seconds,
-            last_successful_poll_at=last_poll,
-            last_delivery_at=runtime_delivery,
-        )
-    if counts.phase not in {"uninitialized", "seeding", "live"}:
-        return RoutineDiagnostic(
-            state,
-            "bound",
-            service,
-            liveness,
-            receiver_kind=receiver_kind,
-            poll_interval_seconds=profile.poll_interval_seconds,
-            settlement_window_seconds=profile.settle_seconds,
-            last_successful_poll_at=last_poll,
-            last_delivery_at=runtime_delivery,
-        )
-    safe_counts = (
-        ("candidates", counts.candidates),
-        ("dead", counts.dead),
-        ("delivered", counts.delivered),
-        ("pending", counts.pending),
-    )
-    tag_discovered = counts.ai_tags > 0 if counts.phase == "live" else None
-    ready = (
-        state == "enabled"
-        and counts.phase == "live"
-        and tag_discovered
-        and liveness in {"running", "backing_off"}
-    )
+    account_binding: RoutineAccountBinding = "unknown"
+    history_phase = "unknown"
+    tag_discovered: bool | None = None
+    ready: bool | None = None
+    safe_counts: tuple[tuple[str, int], ...] | None = None
+    last_delivery = runtime_delivery
+    if credentials is not None:
+        digest = account_digest(credentials.email)
+        if profile.account_digest != digest:
+            account_binding = "mismatch"
+        else:
+            account_binding = "bound"
+            counts = read_routine_counts(
+                database_path or routine_database_path(digest), digest
+            )
+            if counts is not None and counts.phase in {
+                "uninitialized",
+                "seeding",
+                "live",
+            }:
+                history_phase = counts.phase
+                tag_discovered = counts.ai_tags > 0 if counts.phase == "live" else None
+                ready = (
+                    state == "enabled"
+                    and counts.phase == "live"
+                    and tag_discovered
+                    and liveness in {"running", "backing_off"}
+                )
+                safe_counts = (
+                    ("candidates", counts.candidates),
+                    ("dead", counts.dead),
+                    ("delivered", counts.delivered),
+                    ("pending", counts.pending),
+                )
+                last_delivery = (
+                    counts.last_delivery_at
+                    if counts.last_delivery_at is not None
+                    else runtime_delivery
+                )
     return RoutineDiagnostic(
         configuration_state=state,
-        account_binding="bound",
+        account_binding=account_binding,
         service_state=service,
         worker_liveness=liveness,
-        history_phase=counts.phase,
+        history_phase=history_phase,
         trigger_tag_discovered=tag_discovered,
         trigger_ready=ready,
         counts=safe_counts,
-        receiver_kind=receiver_kind,
-        poll_interval_seconds=config.profile.poll_interval_seconds,
-        settlement_window_seconds=config.profile.settle_seconds,
+        receiver_kind=profile.receiver.kind,
+        poll_interval_seconds=profile.poll_interval_seconds,
+        settlement_window_seconds=profile.settle_seconds,
         last_successful_poll_at=last_poll,
-        last_delivery_at=(
-            counts.last_delivery_at
-            if counts.last_delivery_at is not None
-            else runtime_delivery
-        ),
+        last_delivery_at=last_delivery,
     )
 
 
