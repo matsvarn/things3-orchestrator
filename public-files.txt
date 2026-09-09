@@ -1,8 +1,4 @@
 .agents/plugins/marketplace.json
-.audit/routines-feature.tsv
-.audit/routines-oracle-brief.md
-.audit/routines-v0.10.0.tsv
-.audit/v2-owner-safe-interface.tsv
 .github/workflows/ci.yml
 .gitignore
 .python-version
