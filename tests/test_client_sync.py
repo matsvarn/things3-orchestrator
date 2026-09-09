@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -12,6 +13,7 @@ from mcp.types import Tool
 
 from things_orchestrator.client_bundle import (
     RECEIVER_INSTRUCTION_PATH,
+    RESERVED_PREFIX,
     BundleError,
     PackageIdentity,
     bundle_file,
@@ -744,6 +746,49 @@ assert "things_orchestrator.journal" not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", script, str(packet)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory permissions")
+def test_sync_preserves_shared_skill_directory_mode(tmp_path: Path) -> None:
+    directory = tmp_path / "skill"
+    directory.mkdir(mode=0o775)
+    directory.chmod(0o775)
+    report = _sync(directory, _bundle())
+    assert report.managed_files["status"] == "synced"
+    assert directory.stat().st_mode & 0o777 == 0o775
+    assert (directory / MARKER_NAME).stat().st_mode & 0o777 == 0o600
+
+
+def test_client_sync_writes_state_without_fchmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    directory = tmp_path / "skill"
+    report = _sync(directory, _bundle())
+    assert report.managed_files["status"] == "synced"
+    assert (directory / MARKER_NAME).is_file()
+    assert (directory / "SKILL.md").read_text() == "# skill\n"
+
+
+def test_client_sync_ignores_crash_tmp_leftovers(tmp_path: Path) -> None:
+    directory = tmp_path / "skill"
+    directory.mkdir()
+    first_leftover = directory / f".{MARKER_NAME}.crash.tmp"
+    first_leftover.write_text("partial")
+    first = _sync(directory, _bundle())
+    assert first.managed_files["status"] == "synced"
+    leftovers = (
+        directory / f"{RESERVED_PREFIX}state-crash.tmp",
+        first_leftover,
+        directory / f".{PENDING_NAME}.crash.tmp",
+    )
+    for leftover in leftovers:
+        leftover.write_text("partial")
+    report = _sync(directory, _bundle())
+    assert report.managed_files["status"] == "unchanged"
+    assert (directory / "SKILL.md").read_text() == "# skill\n"
+    for leftover in leftovers:
+        assert leftover.is_file()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory permissions")
