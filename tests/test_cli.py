@@ -654,7 +654,7 @@ def test_grokbot_print_config_uses_saved_public_endpoint_and_stdio_bridge(
     captured = capsys.readouterr()
     decoder = json.JSONDecoder()
     native, index = decoder.raw_decode(captured.out)
-    stdio, _ = decoder.raw_decode(captured.out[index:])
+    stdio, _ = decoder.raw_decode(captured.out[index:].lstrip())
     assert native == {
         "url": "https://tasks.example.com/mcp",
         "headers": {"Authorization": "Bearer keep-me"},
