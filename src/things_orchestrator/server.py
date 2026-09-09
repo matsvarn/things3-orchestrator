@@ -33,7 +33,7 @@ from starlette.types import Receive, Scope, Send
 
 from .client_bundle import encode_client_bundle
 from .deployment import health_payload, package_version
-from .tools import CLIENT_BUNDLE_PATH, advertised_tools
+from .tools import CLIENT_BUNDLE_PATH, ITEM_ID, advertised_tools
 from .v2 import (
     MODELS,
     PublicIssue,
@@ -363,9 +363,7 @@ def _public_issues(
             and isinstance(raw_items[item_index].get("id"), str)
         ):
             candidate = raw_items[item_index]["id"]
-            if len(candidate) <= 512 and re.fullmatch(
-                r"(?:task|project|area|heading):[^\s:]+", candidate
-            ):
+            if len(candidate) <= 512 and re.fullmatch(ITEM_ID, candidate):
                 item_id = candidate
         issues.append(
             PublicIssue(

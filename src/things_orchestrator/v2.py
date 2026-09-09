@@ -10,10 +10,10 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Annotated, Any, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .interface import ReadCall, TruncatedField
+from .interface import ReadCall, StrictModel, TruncatedField, Weekday
 from .journal import AmbiguousV2Request, same_account_id
 from .tools import ITEM_ID as ITEM_ID
 
@@ -138,25 +138,10 @@ class OperationManifest:
         }
 
 
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
 class TaintedText(StrictModel):
     value: str
     source: Literal["things_cloud"] = "things_cloud"
     trust: Literal["untrusted"] = "untrusted"
-
-
-Weekday = Literal[
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-    "sunday",
-]
 
 
 class RepeatOn(StrictModel):
@@ -449,7 +434,7 @@ class GetCall(StrictModel):
     def exact_unique(cls, value: list[str]) -> list[str]:
         if len(value) != len(set(value)):
             raise ValueError("ids must be unique")
-        if any(re.fullmatch(r"(?:task|project|area|heading):[^\s:]+", item) is None for item in value):
+        if any(re.fullmatch(ITEM_ID, item) is None for item in value):
             raise ValueError("ids must be exact typed Things IDs")
         return value
 

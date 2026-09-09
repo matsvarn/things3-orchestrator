@@ -359,6 +359,7 @@ def test_sqlite_rejects_noncanonical_account_binding(
     ("field", "value"),
     [
         ("purpose", "evil"),
+        ("view", "not_a_view"),
         ("limit", "20"),
         ("within", None),
     ],
@@ -441,7 +442,7 @@ def test_types_reject_unsafe_or_inconsistent_context_facts() -> None:
         CompletenessFact(
             scope="project:launch", seen=1, complete=True, next_cursor="cursor"
         )
-    with pytest.raises(ValueError, match="exact item"):
+    with pytest.raises(ValueError, match="exact id or unique find"):
         ReadSelector(purpose="change", view="today")
     assert ReadSelector(purpose="organize", find="Launch").find == "Launch"
     with pytest.raises(ValueError, match="ISO dates"):
@@ -469,3 +470,17 @@ def test_change_include_selector_round_trips_in_both_stores(tmp_path: Path) -> N
     )
     sqlite_context = sqlite.create(account_id="one", selector=contextual)
     assert sqlite.get(sqlite_context.id, account_id="one").selector == contextual
+
+
+@pytest.mark.parametrize("view", ["repeating", "weekly_review"])
+def test_sqlite_round_trips_views_from_the_shared_view_set(
+    tmp_path: Path, view: str
+) -> None:
+    store = SQLiteContextStore(
+        tmp_path / "contexts.sqlite3",
+        clock=Clock(),
+        token_factory=Tokens("abcdefgh"),
+    )
+    selector = ReadSelector(view=view)
+    context = store.create(account_id="one", selector=selector)
+    assert store.get(context.id, account_id="one").selector.view == view
