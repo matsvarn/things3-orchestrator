@@ -9,6 +9,7 @@ from things_orchestrator.config import McpUrl, normalize_mcp_url
 from things_orchestrator.deployment import DeploymentIdentity
 from things_orchestrator.doctor import (
     DoctorFailure,
+    DoctorUnavailable,
     TargetReceipt,
     curl_tool_count_command,
     validate_target,
@@ -151,3 +152,29 @@ def test_curl_command_uses_environment_bearer_and_returns_tool_count() -> None:
 def test_curl_command_shell_quotes_its_url_even_if_a_caller_bypasses_parsing() -> None:
     command = curl_tool_count_command(McpUrl("https://$(id)"))
     assert "POST 'https://$(id)/mcp'" in command
+
+
+def test_transport_failure_reports_origin_unreachable_without_exception_secrets() -> None:
+    url = normalize_mcp_url("https://tasks.example.com")
+    error = ConnectionError("Bearer secret-bearer refused for https://tasks.example.com")
+
+    failure = DoctorFailure.from_transport(url, error, stage="public /health")
+
+    assert isinstance(failure, DoctorUnavailable)
+    assert str(failure) == "https://tasks.example.com/mcp: origin unreachable (public /health)"
+    assert "secret-bearer" not in str(failure)
+
+
+def test_transport_failure_omits_raw_exception_text_for_other_errors() -> None:
+    url = normalize_mcp_url("https://tasks.example.com")
+    error = RuntimeError("Authorization: Bearer secret-bearer")
+
+    failure = DoctorFailure.from_transport(
+        url, error, stage="authenticated /health or MCP"
+    )
+
+    assert type(failure) is DoctorFailure
+    assert str(failure) == (
+        "https://tasks.example.com/mcp: authenticated /health or MCP failed"
+    )
+    assert "secret-bearer" not in str(failure)

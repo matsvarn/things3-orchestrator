@@ -15,6 +15,7 @@ stale. Do not install Things Cloud credentials on a client-only machine.
 |---|---|---|
 | Codex | `codex` | Merge the TOML block into `~/.codex/config.toml`. |
 | Grok | `grok` | Add a Custom connector at `grok.com/connectors` with an HTTPS URL that the public internet can reach and with required authentication. |
+| Grok Bot computer | `grokbot` | Public HTTPS MCP URL and bearer. Use the printed stdio `mcp-remote` recipe only if that ephemeral host cannot speak Streamable HTTP. |
 | Hermes | `hermes` | Run the two native Hermes commands. Hermes prompts for the bearer and tests the connection. |
 | Claude Code | `claude-code` | Run the printed command. For the alternative block, run `claude mcp add-json things '<JSON>'` with the printed JSON as the argument. |
 | Cursor desktop | `cursor` | Merge the `things` entry into `~/.cursor/mcp.json`. |
@@ -50,6 +51,34 @@ endpoint, then confirm that Grok discovers exactly these eight tools:
 `things_view`, `things_find`, `things_get`, `things_capture`, `things_update`,
 `things_complete`, `things_trash`, and `things_receipt`.
 
+## Ephemeral agent host
+
+Use this path for Grok Bot's computer and similar hosts that keep `/home/box`
+across "Update Computer" but wipe apt packages and `/var/lib/tailscale`.
+Public HTTPS plus the MCP bearer is the supported primary client path. Tailscale
+Serve remains optional for other clients that stay on the tailnet.
+Do not use Funnel. Do not put Things Cloud credentials on the agent box.
+
+On the serving host, finish the [public HTTPS Caddy path](install.md), then
+verify that origin:
+
+```console
+things-orchestrator doctor --wait --url https://mcp.example.com
+things-orchestrator print-config --client grokbot --show-secrets
+```
+
+If login still stores a MagicDNS URL, pass `--url https://mcp.example.com` to
+`print-config`. The command rejects HTTP, known local or private addresses, and
+`.ts.net` endpoints. It cannot verify DNS or public reachability; `doctor --url`
+on the VPS is the owner-run check.
+
+Stdout is native Streamable HTTP. The alternative JSON is an `npx mcp-remote`
+stdio bridge to the same public HTTPS URL. Prefer native HTTP when the agent
+supports it. The stdio recipe does not call Tailscale.
+
+This selector is not the Grok Custom connector at `grok.com/connectors`. Use
+`--client grok` for that hosted connector.
+
 Do not paste the Things Cloud password into any client. Possession of the MCP
 bearer authorizes every bounded v2 mutation, including recoverable Trash and
 repeat Stop. There is no per-client identity.
@@ -60,6 +89,9 @@ repeat Stop. There is no per-client identity.
   reach over HTTPS. The official connector guide documents connector discovery
   in Grok conversations. It does not prove that every webhook-triggered Grok Bot
   execution receives that connector. Complete the positive routine smoke test.
+- Grok Bot's computer is an ephemeral agent host. Use `print-config --client
+  grokbot --show-secrets` and the public HTTPS origin. Tailscale is not the
+  critical path. Possession of the bearer authorizes every bounded write.
 - Hermes stores the MCP configuration in its active profile. Run
   `things-orchestrator print-config --client hermes --show-secrets` in a private
   terminal, then run the two printed commands one at a time on the Hermes host.
@@ -183,11 +215,11 @@ checks. It is not a breaking-change flag by itself.
 - Hosted Grok Custom connector. Use the Grok renderer and the public HTTPS
   connector workflow. Provider reconnect and prompt steps stay manual. A
   successful interactive chat does not prove webhook Bot access.
-- Grogbot or another local agent with a stdio-to-HTTP bridge. Inspect that
-  executable, transport, and process owner before applying Grok web steps.
-  Prefer native HTTP if the client supports it. `mcp-remote` is one bridge for
-  clients that need local stdio. Its presence is not evidence that this agent
-  uses that package.
+- Ephemeral agent host such as Grok Bot's computer. Use the `grokbot` renderer
+  and the public HTTPS origin. Prefer native HTTP. The printed `mcp-remote`
+  recipe is a Tailscale-free stdio bridge for clients that still need local
+  stdio. Do not treat MagicDNS as the default. Box-side wrappers that still
+  call Tailscale are a follow-up on that host, not this selector.
 - Same-host Codex plugin. This launches local `serve` over stdio and bundles
   a skill. It does not proxy the HTTP host. Updating the remote service does
   not update this process. Treat it as an advanced path, or connect Codex to

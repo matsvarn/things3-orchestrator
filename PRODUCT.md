@@ -44,7 +44,7 @@ reconciles the frozen operation instead of posting it again.
 - macOS launchd or Linux systemd hosting.
 - Loopback MCP transport, or owner-configured TLS through Tailscale Serve or
   Caddy.
-- Codex, Claude Code, Cursor, Cursor Cloud, Grok, and Hermes client
+- Codex, Claude Code, Cursor, Cursor Cloud, Grok, Grok Bot, and Hermes client
   configuration.
 - A repository-distributed Codex plugin and a release-pinned Hermes skill.
 - Exact-tag installation and version-, commit-, schema-, contract-, and

@@ -91,6 +91,48 @@ def test_grok_config_exposes_public_mcp_url_and_required_bearer(
     assert "cannot verify DNS or reachability" in revealed.guidance
 
 
+def test_grokbot_config_emits_public_https_and_tailscale_free_stdio_bridge(
+    endpoint: Endpoint,
+) -> None:
+    redacted = render_client_config(ClientKind.GROKBOT, endpoint, show_secrets=False)
+    revealed = render_client_config(ClientKind.GROKBOT, endpoint, show_secrets=True)
+
+    assert json.loads(redacted.body) == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer <mcp_token>"},
+    }
+    assert json.loads(revealed.body) == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer secret-bearer"},
+    }
+    assert json.loads(redacted.secondary_body or "") == {
+        "command": "npx",
+        "args": [
+            "-y",
+            "mcp-remote",
+            "https://tasks.example.com/mcp",
+            "--transport",
+            "http-only",
+            "--header",
+            "Authorization:${THINGS_MCP_AUTH}",
+        ],
+        "env": {"THINGS_MCP_AUTH": "Bearer <mcp_token>"},
+    }
+    assert json.loads(revealed.secondary_body or "")["env"] == {
+        "THINGS_MCP_AUTH": "Bearer secret-bearer"
+    }
+    assert "tailscale" not in (revealed.secondary_body or "").casefold()
+    assert ".ts.net" not in revealed.body
+    assert ".ts.net" not in (revealed.secondary_body or "")
+    assert "MagicDNS is not the default" in revealed.guidance
+    assert "Do not install Tailscale" in revealed.guidance
+    assert "bounded v2 write" in revealed.guidance
+    assert "doctor --url" in revealed.guidance
+    assert "secret-bearer" not in redacted.body
+    assert "secret-bearer" not in (redacted.secondary_body or "")
+
+
+@pytest.mark.parametrize("client", (ClientKind.GROK, ClientKind.GROKBOT))
 @pytest.mark.parametrize(
     "url",
     (
@@ -112,7 +154,8 @@ def test_grok_config_exposes_public_mcp_url_and_required_bearer(
         "https://[ff02::1]",
     ),
 )
-def test_grok_config_rejects_http_and_known_local_or_private_endpoints(
+def test_public_https_clients_reject_http_and_known_local_or_private_endpoints(
+    client: ClientKind,
     url: str,
 ) -> None:
     endpoint = Endpoint(
@@ -121,7 +164,7 @@ def test_grok_config_rejects_http_and_known_local_or_private_endpoints(
     )
 
     with pytest.raises(ConfigError, match="known local or private"):
-        render_client_config(ClientKind.GROK, endpoint, show_secrets=True)
+        render_client_config(client, endpoint, show_secrets=True)
 
 
 def test_grok_config_accepts_public_ipv6_without_claiming_reachability() -> None:

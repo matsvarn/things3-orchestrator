@@ -30,9 +30,28 @@ from .v2 import MODELS
 class DoctorFailure(RuntimeError):
     """A target is reachable but does not match the installed server contract."""
 
+    @staticmethod
+    def from_transport(
+        url: McpUrl, error: BaseException, *, stage: str
+    ) -> DoctorFailure:
+        if DoctorUnavailable.matches(error):
+            return DoctorUnavailable(f"{url}: origin unreachable ({stage})")
+        return DoctorFailure(f"{url}: {stage} failed")
+
 
 class DoctorUnavailable(DoctorFailure):
     """A target is not listening yet and may become ready during --wait."""
+
+    @staticmethod
+    def matches(error: BaseException) -> bool:
+        if isinstance(
+            error,
+            (httpx2.ConnectError, httpx2.ConnectTimeout, ConnectionError),
+        ):
+            return True
+        if isinstance(error, BaseExceptionGroup):
+            return any(DoctorUnavailable.matches(item) for item in error.exceptions)
+        return False
 
 
 @dataclass(frozen=True)
@@ -95,7 +114,12 @@ async def probe_target(url: McpUrl, bearer: McpBearer) -> TargetReceipt:
             public_response = await public_client.get(url.health)
             public_response.raise_for_status()
             public_payload = public_response.json()
-        headers = {"Authorization": f"Bearer {bearer.reveal()}"}
+    except Exception as error:
+        raise DoctorFailure.from_transport(
+            url, error, stage="public /health"
+        ) from None
+    headers = {"Authorization": f"Bearer {bearer.reveal()}"}
+    try:
         async with httpx2.AsyncClient(headers=headers, timeout=10.0) as client:
             detailed_response = await client.get(url.health)
             if detailed_response.status_code == 401:
@@ -111,8 +135,9 @@ async def probe_target(url: McpUrl, bearer: McpBearer) -> TargetReceipt:
     except DoctorFailure:
         raise
     except Exception as error:
-        failure = DoctorUnavailable if _is_unavailable(error) else DoctorFailure
-        raise failure(f"{url}: authenticated MCP round trip failed: {_message(error)}") from None
+        raise DoctorFailure.from_transport(
+            url, error, stage="authenticated /health or MCP"
+        ) from None
     if not isinstance(public_payload, dict) or not isinstance(detailed_payload, dict):
         raise DoctorFailure(f"{url}: health endpoint returned no JSON object")
     return TargetReceipt(
@@ -162,20 +187,3 @@ def curl_tool_count_command(url: McpUrl) -> str:
 
 def _is_loopback(url: McpUrl) -> bool:
     return url.origin.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:"))
-
-
-def _message(error: BaseException) -> str:
-    if isinstance(error, BaseExceptionGroup):
-        return "; ".join(_message(item) for item in error.exceptions)
-    return str(error) or type(error).__name__
-
-
-def _is_unavailable(error: BaseException) -> bool:
-    if isinstance(
-        error,
-        (httpx2.ConnectError, httpx2.ConnectTimeout, ConnectionError),
-    ):
-        return True
-    if isinstance(error, BaseExceptionGroup):
-        return any(_is_unavailable(item) for item in error.exceptions)
-    return False

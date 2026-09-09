@@ -631,6 +631,85 @@ def test_grok_print_config_uses_saved_public_endpoint_and_bearer(
     assert "exactly eight tools" in captured.err
 
 
+def test_grokbot_print_config_uses_saved_public_endpoint_and_stdio_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {"email": "user@example.com", "password": "secret", "mcp_token": "keep-me"}
+        )
+        + "\n"
+    )
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text(
+        '{"version":2,"note_style":"natural","mcp_url":"https://tasks.example.com/mcp"}\n'
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+
+    main(["print-config", "--client", "grokbot", "--show-secrets"])
+
+    captured = capsys.readouterr()
+    decoder = json.JSONDecoder()
+    native, index = decoder.raw_decode(captured.out)
+    stdio, _ = decoder.raw_decode(captured.out[index:].lstrip())
+    assert native == {
+        "url": "https://tasks.example.com/mcp",
+        "headers": {"Authorization": "Bearer keep-me"},
+    }
+    assert stdio["command"] == "npx"
+    assert stdio["args"][1] == "mcp-remote"
+    assert stdio["args"][2] == "https://tasks.example.com/mcp"
+    assert "tailscale" not in captured.out.casefold()
+    assert "Alternative JSON" in captured.err
+    assert "Do not install Tailscale" in captured.err
+    assert "keep-me" in captured.out
+    assert "secret" not in captured.out.replace("keep-me", "")
+
+
+def test_grokbot_print_config_rejects_saved_magicdns_and_accepts_public_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = tmp_path / "credentials.json"
+    creds.write_text(
+        json.dumps(
+            {"email": "user@example.com", "password": "secret", "mcp_token": "keep-me"}
+        )
+        + "\n"
+    )
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text(
+        '{"version":2,"note_style":"natural",'
+        '"mcp_url":"https://cloud-agent-01.tail56995b.ts.net/mcp"}\n'
+    )
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+
+    with pytest.raises(SystemExit) as caught:
+        main(["print-config", "--client", "grokbot", "--show-secrets"])
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "MagicDNS" in error
+    assert "keep-me" not in error
+
+    main(
+        [
+            "print-config",
+            "--client",
+            "grokbot",
+            "--show-secrets",
+            "--url",
+            "https://mcp.example.com",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert "https://mcp.example.com/mcp" in captured.out
+    assert ".ts.net" not in captured.out
+
+
 @pytest.mark.parametrize("show_secrets", [False, True])
 def test_hermes_print_config_keeps_the_bearer_out_of_commands(
     monkeypatch: pytest.MonkeyPatch,
@@ -1147,15 +1226,22 @@ def test_readme_is_safe_to_publish() -> None:
     install = (ROOT / "docs/install.md").read_text()
     assert "sudo tailscale serve --bg 8787" in install
     assert "one-time prompt" in install
+    assert "Do not use Funnel" in install
     assert "sudo apt install caddy" in install
     assert "/etc/caddy/Caddyfile" in install
     assert "sudo systemctl reload caddy" in install
+    assert "print-config --client grokbot" in install
     clients = (ROOT / "docs/clients.md").read_text()
     assert "cursor.com/agents" in clients
     assert "environment interpolation is unavailable" in clients
     assert "cannot be viewed" in clients
     assert "bearer_token_env_var" in clients
     assert "Do not add a second" in clients
+    assert "## Ephemeral agent host" in clients
+    assert "print-config --client grokbot --show-secrets" in clients
+    assert "Do not use Funnel" in clients
+    assert "Do not put Things Cloud credentials on the agent box" in clients
+    assert "mcp-remote" in clients
     assert not (ROOT / "docs/host.md").exists()
     assert not (ROOT / "docs/public-launch.md").exists()
 

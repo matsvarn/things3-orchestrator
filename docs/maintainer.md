@@ -23,6 +23,8 @@ Keep one production server and one stable model Interface.
 - `config.py` owns credentials, owner preferences, normalized MCP endpoints,
   and the exact plugin launcher binding.
 - `client_config.py` renders one client artifact from one endpoint and bearer.
+  Grok Bot (`grokbot`) reuses the Grok public-HTTPS gate and adds a stdio
+  `mcp-remote` recipe. It does not bootstrap Tailscale.
 - `deployment.py` owns package resources, version, installed Git identity,
   cache version, authenticated health detail, `tool_schema_hash`,
   `tool_contract_hash`, `tool_discovery_hash`, and the client-bundle path.
