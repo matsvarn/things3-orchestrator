@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from .config import _atomic_write
 from .library import (
     MAX_RECURRENCE_INSTANCE_COUNT,
     ApplyResult,
@@ -1864,19 +1865,6 @@ def state_cache_path() -> Path:
     root = os.environ.get("XDG_STATE_HOME")
     base = Path(root) if root else Path.home() / ".local" / "state"
     return base / "things-orchestrator" / "state.json"
-
-
-def _ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    path.chmod(0o700)
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    _ensure_private_dir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    tmp.chmod(0o600)
-    tmp.replace(path)
 
 
 def _record_to_json(item: Record) -> dict[str, Any]:

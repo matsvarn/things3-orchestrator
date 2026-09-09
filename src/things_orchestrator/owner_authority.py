@@ -9,7 +9,6 @@ import hmac
 import json
 import os
 import re
-import tempfile
 import unicodedata
 from base64 import b64decode, b64encode
 from hashlib import scrypt, sha256
@@ -19,6 +18,7 @@ from secrets import token_bytes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from .config import _atomic_write
 from .journal import (
     OwnerAuthorization,
     V2Operation,
@@ -57,16 +57,16 @@ def enroll_owner_factor(passphrase: str, *, path: Path | None = None) -> Path:
         "encrypted_private_key": b64encode(encrypted_private_key).decode(),
     }
     target = path or owner_factor_path()
-    _atomic_private_write(
+    _atomic_write(
         target,
-        (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(),
+        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
     )
     public_target = (
         target.with_name("owner-public-key.ed25519")
         if path is not None
         else owner_public_key_path()
     )
-    _atomic_private_write(public_target, public_key)
+    _atomic_write(public_target, public_key)
     return target
 
 
@@ -165,20 +165,3 @@ def host_escape(value: str) -> str:
 
 def _digest(passphrase: str, salt: bytes) -> bytes:
     return scrypt(passphrase.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
-
-
-def _atomic_private_write(target: Path, body: bytes) -> None:
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    target.parent.chmod(0o700)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(body)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    target.chmod(0o600)

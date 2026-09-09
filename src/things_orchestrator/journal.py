@@ -20,6 +20,8 @@ from typing import Callable, ContextManager, Iterator, Literal, Protocol, cast, 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .config import _ensure_private_dir
+
 IntentState = Literal[
     "prepared",
     "needs_approval",
@@ -1988,11 +1990,6 @@ def _verify_owner_authorization(
     except (ValueError, InvalidSignature):
         return None
     return authorization.record
-
-
-def _ensure_private_dir(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
 
 
 def _json(value: object) -> str:
