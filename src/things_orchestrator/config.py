@@ -418,7 +418,7 @@ def _atomic_write(path: Path, data: str | bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(path)
+        os.replace(temporary, path)
         path.chmod(0o600)
     except BaseException:
         try:
