@@ -211,13 +211,36 @@ class Journal(Protocol):
     def verify_v2_authorization(self, operation: V2Operation, action: str, authorization: object) -> str | None: ...
 
 
+class _V2ApplySettle(Protocol):
+    def __call__(
+        self,
+        operation_id: str,
+        *,
+        expected: V2State,
+        state: V2ApplyState,
+        response: JsonDict,
+        rows: list[JsonDict],
+        authorization: object = None,
+        action: str | None = None,
+        definitive_rejection: bool = False,
+    ) -> bool: ...
+
+
 class _OwnedV2ApplySession:
-    def __init__(self, operation: V2Operation) -> None:
+    def __init__(
+        self,
+        operation: V2Operation,
+        *,
+        mark: Callable[[str], bool],
+        settle: _V2ApplySettle,
+    ) -> None:
         self.operation = operation
         self._active = True
         self._owner_pid = os.getpid()
         self._owner_thread_id = get_ident()
         self._lifecycle_lock = Lock()
+        self._mark = mark
+        self._settle = settle
 
     def close(self) -> None:
         with self._lifecycle_lock:
@@ -234,17 +257,9 @@ class _OwnedV2ApplySession:
                 return False
             return action()
 
-
-class _MemoryV2ApplySession(_OwnedV2ApplySession):
-    def __init__(self, journal: MemoryJournal, operation: V2Operation) -> None:
-        super().__init__(operation)
-        self._journal = journal
-
     def mark_dispatched(self) -> bool:
         def mark() -> bool:
-            if not self._journal._mark_v2_dispatched_locked(
-                self.operation.operation_id
-            ):
+            if not self._mark(self.operation.operation_id):
                 return False
             self.operation = replace(self.operation, dispatch_started=True)
             return True
@@ -258,7 +273,7 @@ class _MemoryV2ApplySession(_OwnedV2ApplySession):
         rows: list[JsonDict],
     ) -> bool:
         return self._act_owned(
-            lambda: self._journal._settle_v2_locked(
+            lambda: self._settle(
                 self.operation.operation_id,
                 expected="pending",
                 state="not_applied",
@@ -278,66 +293,7 @@ class _MemoryV2ApplySession(_OwnedV2ApplySession):
         action: str | None = None,
     ) -> bool:
         return self._act_owned(
-            lambda: self._journal._settle_v2_locked(
-                self.operation.operation_id,
-                expected="pending",
-                state=state,
-                response=response,
-                rows=rows,
-                authorization=authorization,
-                action=action,
-            )
-        )
-
-
-class _SQLiteV2ApplySession(_OwnedV2ApplySession):
-    def __init__(
-        self,
-        journal: SQLiteJournal,
-        operation: V2Operation,
-    ) -> None:
-        super().__init__(operation)
-        self._journal = journal
-
-    def mark_dispatched(self) -> bool:
-        def mark() -> bool:
-            if not self._journal._mark_v2_dispatched_owned(
-                self.operation.operation_id
-            ):
-                return False
-            self.operation = replace(self.operation, dispatch_started=True)
-            return True
-
-        return self._act_owned(mark)
-
-    def settle_rejected(
-        self,
-        *,
-        response: JsonDict,
-        rows: list[JsonDict],
-    ) -> bool:
-        return self._act_owned(
-            lambda: self._journal._settle_v2_owned(
-                self.operation.operation_id,
-                expected="pending",
-                state="not_applied",
-                response=response,
-                rows=rows,
-                definitive_rejection=True,
-            )
-        )
-
-    def settle(
-        self,
-        *,
-        state: V2ApplyState,
-        response: JsonDict,
-        rows: list[JsonDict],
-        authorization: object = None,
-        action: str | None = None,
-    ) -> bool:
-        return self._act_owned(
-            lambda: self._journal._settle_v2_owned(
+            lambda: self._settle(
                 self.operation.operation_id,
                 expected="pending",
                 state=state,
@@ -686,6 +642,13 @@ class MemoryJournal:
             )
             return True, []
 
+    def _owned_apply_session(self, operation: V2Operation) -> _OwnedV2ApplySession:
+        return _OwnedV2ApplySession(
+            operation,
+            mark=self._mark_v2_dispatched_locked,
+            settle=self._settle_v2_locked,
+        )
+
     @contextmanager
     def apply_session_v2(
         self, operation_id: str
@@ -695,7 +658,7 @@ class MemoryJournal:
             if operation is None or operation.state != "pending":
                 yield None
                 return
-            session = _MemoryV2ApplySession(self, operation)
+            session = self._owned_apply_session(operation)
             try:
                 yield session
             finally:
@@ -710,7 +673,7 @@ class MemoryJournal:
                 operation, claim_fence=claim_fence
             )
             session = (
-                _MemoryV2ApplySession(self, stored)
+                self._owned_apply_session(stored)
                 if outcome in {"created", "existing"}
                 and stored is not None
                 and stored.state == "pending"
@@ -740,7 +703,7 @@ class MemoryJournal:
                 else self._v2_operations.get(operation_id)
             )
             session = (
-                _MemoryV2ApplySession(self, operation)
+                self._owned_apply_session(operation)
                 if operation is not None and operation.state == "pending"
                 else None
             )
@@ -1379,6 +1342,13 @@ class SQLiteJournal:
         finally:
             connection.close()
 
+    def _owned_apply_session(self, operation: V2Operation) -> _OwnedV2ApplySession:
+        return _OwnedV2ApplySession(
+            operation,
+            mark=self._mark_v2_dispatched_owned,
+            settle=self._settle_v2_owned,
+        )
+
     @contextmanager
     def apply_session_v2(
         self, operation_id: str
@@ -1400,7 +1370,7 @@ class SQLiteJournal:
             if request is None or request.operation_id != operation_id:
                 yield None
                 return
-            session = _SQLiteV2ApplySession(self, operation)
+            session = self._owned_apply_session(operation)
             try:
                 yield session
             finally:
@@ -1415,7 +1385,7 @@ class SQLiteJournal:
                 operation, claim_fence=claim_fence
             )
             session = (
-                _SQLiteV2ApplySession(self, stored)
+                self._owned_apply_session(stored)
                 if outcome in {"created", "existing"}
                 and stored is not None
                 and stored.state == "pending"
@@ -1453,7 +1423,7 @@ class SQLiteJournal:
                     if request is None or request.operation_id != operation_id:
                         operation = None
             session = (
-                _SQLiteV2ApplySession(self, operation)
+                self._owned_apply_session(operation)
                 if operation is not None and operation.state == "pending"
                 else None
             )
