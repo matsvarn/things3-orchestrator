@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from collections.abc import Hashable, Sequence
 from datetime import date, datetime
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .tools import ITEM_ID
 
 
 class StrictModel(BaseModel):
@@ -74,7 +76,6 @@ RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
 
-_ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 _DIAGNOSTIC_ID = r"^(task|project|area|heading|tag):[^\s:]+$"
 _CONTAINER_ID = r"^(trash|(project|area):[^\s:]+)$"
 _CHECK_ID = r"^check:[^\s:]+$"
@@ -120,10 +121,85 @@ def _duplicates(values: Sequence[Hashable]) -> bool:
     return len(values) != len(set(values))
 
 
+def validate_read_selector(
+    *,
+    purpose: Purpose,
+    view: View | None,
+    item_id: str | None,
+    find: str | None,
+    within: str | None,
+    from_date: str | None,
+    to_date: str | None,
+    has_includes: bool = False,
+) -> None:
+    """Shared purpose/view/within/logbook rules for ReadCall and ReadSelector."""
+
+    if purpose not in get_args(Purpose):
+        raise ValueError("invalid selector purpose")
+    if view is not None and view not in get_args(View):
+        raise ValueError("invalid selector view")
+    if within is not None and find is None and view not in {"project", "area"}:
+        raise ValueError("within needs find, view project, or view area")
+    if view == "project":
+        container = within or (
+            item_id if item_id is not None and item_id.startswith("project:") else None
+        )
+        if container is None or not container.startswith("project:"):
+            raise ValueError(
+                "view project needs id or within as an exact Project id"
+            )
+    if view == "area":
+        container = within or (
+            item_id if item_id is not None and item_id.startswith("area:") else None
+        )
+        if container is None or not container.startswith("area:"):
+            raise ValueError("view area needs id or within as an exact Area id")
+    has_range = from_date is not None or to_date is not None
+    if has_range and view != "logbook":
+        raise ValueError("from and to need view logbook")
+    if view == "logbook" and (from_date is None) != (to_date is None):
+        raise ValueError("view logbook needs both from and to, or neither")
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise ValueError("from must not be after to")
+    if purpose == "change" and item_id is None and find is None:
+        raise ValueError("change purpose needs an exact id or unique find")
+    if has_includes and purpose not in {"review", "change", "organize"}:
+        raise ValueError("include is only available for review, change, or organize")
+    if purpose == "recurrence" and item_id is None:
+        raise ValueError("recurrence purpose needs an exact Task or Project id")
+    if purpose == "recurrence" and any(
+        value is not None
+        for value in (
+            view,
+            find,
+            within,
+            from_date,
+            to_date,
+        )
+    ):
+        raise ValueError(
+            "recurrence purpose accepts only an exact Task or Project id"
+        )
+    if purpose == "organize" and not (
+        item_id is not None
+        or find is not None
+        or (view == "project" and within is not None)
+    ):
+        raise ValueError(
+            "organize purpose needs an exact Project id, Project find, or Project read"
+        )
+    if purpose == "organize" and item_id is not None:
+        if not item_id.startswith("project:"):
+            raise ValueError("organize purpose needs an exact Project id")
+    if purpose == "organize" and view == "project":
+        if within is None or not within.startswith("project:"):
+            raise ValueError("organize Project view needs a Project scope")
+
+
 class ReadInclude(StrictModel):
     """One bounded item lookup to add to a change context."""
 
-    id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
     find: str | None = Field(default=None, min_length=1, max_length=500)
     within: str | None = Field(default=None, pattern=_CONTAINER_ID, max_length=512)
 
@@ -151,7 +227,7 @@ class ReadCall(StrictModel):
 
     purpose: Purpose = "review"
     view: View | None = None
-    id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
     find: str | None = Field(default=None, min_length=1, max_length=500)
     within: str | None = Field(default=None, pattern=_CONTAINER_ID, max_length=512)
     from_date: str | None = Field(default=None, alias="from", max_length=10)
@@ -185,7 +261,7 @@ class ReadCall(StrictModel):
     @field_validator("ids")
     @classmethod
     def valid_ids(cls, value: list[str]) -> list[str]:
-        if any(re.fullmatch(_ITEM_ID, item) is None for item in value):
+        if any(re.fullmatch(ITEM_ID, item) is None for item in value):
             raise ValueError("ids need exact item IDs")
         if _duplicates(value):
             raise ValueError("ids cannot contain duplicates")
@@ -250,66 +326,16 @@ class ReadCall(StrictModel):
                 raise ValueError("within trash needs find")
             if self.view is not None:
                 raise ValueError("within trash cannot combine with view")
-        elif self.within is not None and self.find is None and self.view not in {
-            "project",
-            "area",
-        }:
-            raise ValueError("within needs find, view project, or view area")
-        if self.view == "project":
-            container = self.within or (
-                self.id if self.id is not None and self.id.startswith("project:") else None
-            )
-            if container is None or not container.startswith("project:"):
-                raise ValueError(
-                    "view project needs id or within as an exact Project id"
-                )
-        if self.view == "area":
-            container = self.within or (
-                self.id if self.id is not None and self.id.startswith("area:") else None
-            )
-            if container is None or not container.startswith("area:"):
-                raise ValueError("view area needs id or within as an exact Area id")
-        has_range = self.from_date is not None or self.to_date is not None
-        if has_range and self.view != "logbook":
-            raise ValueError("from and to need view logbook")
-        if self.view == "logbook" and (self.from_date is None) != (self.to_date is None):
-            raise ValueError("view logbook needs both from and to, or neither")
-        if self.from_date is not None and self.to_date is not None:
-            if self.from_date > self.to_date:
-                raise ValueError("from must not be after to")
-        if self.purpose == "change" and self.id is None and self.find is None:
-            raise ValueError("change purpose needs an exact id or unique find")
-        if self.include and self.purpose not in {"review", "change", "organize"}:
-            raise ValueError("include is only available for review, change, or organize")
-        if self.purpose == "recurrence" and self.id is None:
-            raise ValueError("recurrence purpose needs an exact Task or Project id")
-        if self.purpose == "recurrence" and any(
-            value is not None
-            for value in (
-                self.view,
-                self.find,
-                self.within,
-                self.from_date,
-                self.to_date,
-            )
-        ):
-            raise ValueError(
-                "recurrence purpose accepts only an exact Task or Project id"
-            )
-        if self.purpose == "organize" and not (
-            self.id is not None
-            or self.find is not None
-            or (self.view == "project" and self.within is not None)
-        ):
-            raise ValueError(
-                "organize purpose needs an exact Project id, Project find, or Project read"
-            )
-        if self.purpose == "organize" and self.id is not None:
-            if not self.id.startswith("project:"):
-                raise ValueError("organize purpose needs an exact Project id")
-        if self.purpose == "organize" and self.view == "project":
-            if self.within is None or not self.within.startswith("project:"):
-                raise ValueError("organize Project view needs a Project scope")
+        validate_read_selector(
+            purpose=self.purpose,
+            view=self.view,
+            item_id=self.id,
+            find=self.find,
+            within=self.within,
+            from_date=self.from_date,
+            to_date=self.to_date,
+            has_includes=bool(self.include),
+        )
         if self.cursor is not None and "purpose" in self.model_fields_set:
             raise ValueError("cursor cannot combine with purpose")
         return self
@@ -331,7 +357,7 @@ class TagFact(StrictModel):
     title: str = Field(min_length=1, max_length=1000)
     parent_ids: list[str] = Field(default_factory=list, max_length=20)
     parents_truncated: bool = False
-    from_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    from_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
 
     @field_validator("parent_ids")
     @classmethod
@@ -361,7 +387,7 @@ class RepeatOnFact(StrictModel):
 class RecurrenceFact(StrictModel):
     engine: Literal["rt1", "rt2"] = "rt1"
     kind: RecurrenceKind
-    template_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    template_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
     mode: Literal["fixed", "after_completion"] | None = None
     unit: Literal["day", "week", "month", "year"] | None = None
     interval: int | None = Field(default=None, ge=1, le=366)
@@ -389,7 +415,7 @@ class RecurrenceFact(StrictModel):
     @classmethod
     def valid_linked_items(cls, value: list[str]) -> list[str]:
         if _duplicates(value) or any(
-            re.fullmatch(_ITEM_ID, item) is None for item in value
+            re.fullmatch(ITEM_ID, item) is None for item in value
         ):
             raise ValueError("linked_item_ids need unique exact item IDs")
         return value
@@ -397,12 +423,12 @@ class RecurrenceFact(StrictModel):
 
 class ItemFact(StrictModel):
     ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
-    id: str = Field(pattern=_ITEM_ID, max_length=512)
+    id: str = Field(pattern=ITEM_ID, max_length=512)
     revision: str | None = Field(default=None, min_length=1, max_length=512)
     kind: Kind
     title: str = Field(min_length=1, max_length=1000)
     status: Status
-    into_id: str | None = Field(default=None, pattern=_ITEM_ID, max_length=512)
+    into_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
     into_title: str | None = Field(default=None, min_length=1, max_length=1000)
     heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
     heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -473,7 +499,7 @@ class ReviewSection(StrictModel):
     @field_validator("item_ids")
     @classmethod
     def valid_item_ids(cls, value: list[str]) -> list[str]:
-        if any(re.fullmatch(_ITEM_ID, item) is None for item in value):
+        if any(re.fullmatch(ITEM_ID, item) is None for item in value):
             raise ValueError("item_ids need exact item IDs")
         if _duplicates(value):
             raise ValueError("item_ids cannot contain duplicates")
@@ -557,7 +583,7 @@ class RecoveryFact(StrictModel):
 
 
 class ReceiptItemFact(StrictModel):
-    id: str = Field(pattern=_ITEM_ID, max_length=512)
+    id: str = Field(pattern=ITEM_ID, max_length=512)
     title: str = Field(min_length=1, max_length=1000)
 
 

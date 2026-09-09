@@ -12,24 +12,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
-Purpose = Literal["review", "change", "organize", "recurrence"]
-View = Literal[
-    "today",
-    "inbox",
-    "week",
-    "repeating",
-    "weekly_review",
-    "system",
-    "project",
-    "area",
-    "audit",
-    "diagnostics",
-    "logbook",
-    "trash",
-    "tags",
-]
+from .interface import Purpose, View, validate_read_selector
 
 _CONTEXT_ID = re.compile(r"^ctx_[A-Za-z0-9_-]{8,120}$")
 _SHORT_REF = re.compile(r"^[a-z][a-z0-9]{0,11}$")
@@ -120,67 +105,27 @@ class ReadSelector:
             raise ValueError("selector includes cannot exceed 40")
         if len({entry for entry in self.includes}) != len(self.includes):
             raise ValueError("selector includes must be unique")
-        if self.purpose not in {"review", "change", "organize"} and self.includes:
-            raise ValueError(
-                "selector includes are only available for review, change, or organize"
-            )
         selectors = sum(
             value is not None for value in (self.view, self.item_id, self.find)
         )
         if selectors > 1:
             raise ValueError("selector accepts only one of view, item_id, or find")
-        if self.purpose == "change" and self.item_id is None and self.find is None:
-            raise ValueError("change context needs an exact item or unique find")
-        if self.purpose == "recurrence" and self.item_id is None:
-            raise ValueError("recurrence context needs an exact Task")
-        if self.purpose == "recurrence" and any(
-            value is not None
-            for value in (
-                self.view,
-                self.find,
-                self.within,
-                self.from_date,
-                self.to_date,
-            )
-        ):
-            raise ValueError("recurrence context accepts only an exact Task")
-        if self.purpose == "organize" and not (
-            self.item_id is not None
-            or self.find is not None
-            or (self.view == "project" and self.within is not None)
-        ):
-            raise ValueError(
-                "organize context needs an exact Project id, Project find, or Project read"
-            )
-        if self.purpose == "organize" and self.item_id is not None:
-            if not self.item_id.startswith("project:"):
-                raise ValueError("organize context needs an exact Project")
-        if self.purpose == "organize" and self.view == "project":
-            if self.within is None or not self.within.startswith("project:"):
-                raise ValueError("organize Project view needs a Project scope")
-        if self.view == "project" and self.within is None:
-            raise ValueError("Project selector needs within")
-        if self.view == "area" and self.within is None:
-            raise ValueError("Area selector needs within")
-        if (
-            self.within is not None
-            and self.find is None
-            and self.view not in {"project", "area"}
-        ):
-            raise ValueError("within needs find or a Project or Area selector")
-        has_range = self.from_date is not None or self.to_date is not None
-        if has_range and self.view != "logbook":
-            raise ValueError("date range needs a Logbook selector")
-        if self.view == "logbook" and (self.from_date is None) != (self.to_date is None):
-            raise ValueError("Logbook selector needs both from_date and to_date, or neither")
         if self.from_date is not None and self.to_date is not None:
             try:
-                start = date.fromisoformat(self.from_date)
-                end = date.fromisoformat(self.to_date)
+                date.fromisoformat(self.from_date)
+                date.fromisoformat(self.to_date)
             except ValueError as error:
                 raise ValueError("selector dates must be ISO dates") from error
-            if start > end:
-                raise ValueError("selector from_date cannot be after to_date")
+        validate_read_selector(
+            purpose=self.purpose,
+            view=self.view,
+            item_id=self.item_id,
+            find=self.find,
+            within=self.within,
+            from_date=self.from_date,
+            to_date=self.to_date,
+            has_includes=bool(self.includes),
+        )
 
     def recovery_arguments(self) -> dict[str, object]:
         """Return one credential-free read payload for guided recovery."""
@@ -741,31 +686,13 @@ def _selector_from_data(data: dict[str, object]) -> ReadSelector:
         raise ValueError("stored object has an invalid shape")
     if not required <= set(data):
         raise ValueError("stored object has an invalid shape")
-    purpose = data["purpose"]
-    view = data["view"]
-    if purpose not in {"review", "change", "organize", "recurrence"}:
-        raise ValueError("invalid selector purpose")
-    if view is not None and view not in {
-        "today",
-        "inbox",
-        "week",
-        "system",
-        "project",
-        "area",
-        "audit",
-        "diagnostics",
-        "logbook",
-        "trash",
-        "tags",
-    }:
-        raise ValueError("invalid selector view")
     includes_data = data.get("includes", [])
     if not isinstance(includes_data, list):
         raise ValueError("includes must be a list")
     includes = tuple(_include_from_data(entry) for entry in includes_data)
     return ReadSelector(
-        purpose=cast(Purpose, _required_text_or_none(purpose, "purpose")),
-        view=cast(View | None, _required_text_or_none(view, "view")),
+        purpose=cast(Purpose, _required_text_or_none(data["purpose"], "purpose")),
+        view=cast(View | None, _required_text_or_none(data["view"], "view")),
         item_id=_required_text_or_none(data["item_id"], "item_id"),
         find=_required_text_or_none(data["find"], "find"),
         within=_required_text_or_none(data["within"], "within"),
