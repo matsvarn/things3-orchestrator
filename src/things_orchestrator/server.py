@@ -306,7 +306,7 @@ def bearer_matches(authorization: str | None, token: str) -> bool:
     return hmac.compare_digest(authorization or "", f"Bearer {token}")
 
 
-def _safe_validation_error(error: ValidationError, *, repair: str | None = None) -> str:
+def _safe_validation_error(error: ValidationError) -> str:
     items = error.errors(include_input=False, include_url=False)
     details: list[str] = []
     field_repair: str | None = None
@@ -331,8 +331,6 @@ def _safe_validation_error(error: ValidationError, *, repair: str | None = None)
         )
     elif details:
         message = "Invalid tool request: " + "; ".join(details)
-    elif repair is not None:
-        message = f"Invalid tool request. {repair}."
     else:
         message = "Invalid tool request."
     return message if len(message) <= 997 else message[:997] + "..."

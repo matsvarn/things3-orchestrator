@@ -284,7 +284,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(client.value for client in ClientKind),
         help="client whose configuration to render",
     )
-    show.add_argument("--http", action="store_true", help=argparse.SUPPRESS)
     show.add_argument(
         "--url",
         dest="public_url",
@@ -414,7 +413,6 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             )
         except ConfigError as error:
             parser.error(str(error))
-            return
         if args.note_style is not None:
             print(f"Note style: {args.note_style}")
         if saved_schemes is not None:
@@ -462,10 +460,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             result = service_action(args.service_action, dry_run=dry_run)
         except ServiceApplyError as error:
             parser.error(str(error))
-            return
         except OSError as error:
             parser.error(str(error))
-            return
         for effect in result.effects:
             prefix = "Would" if dry_run else "Applied"
             print(f"{prefix}: {effect.description}")
@@ -508,10 +504,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         credentials = load_credentials()
     except ConfigError:
         parser.error(_LOGIN)
-        return
     if args.action == "serve":
-        _compose_server(
-            parser, credentials, RoutineHTTPComposition.disabled()
+        _server(
+            parser, credentials=credentials, routines=RoutineHTTPComposition.disabled()
         ).run()
         return
     bearer = credentials.bearer
@@ -520,7 +515,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     routines = _routine_http_composition(
         credentials, service_managed=bool(args.service_managed)
     )
-    _compose_server(parser, credentials, routines).run_http(
+    _server(parser, credentials=credentials, routines=routines).run_http(
         port=args.port, token=bearer.reveal()
     )
 
@@ -532,7 +527,6 @@ def _routines_command(
         credentials = load_credentials()
     except ConfigError:
         parser.error(_LOGIN)
-        return
     action = args.routines_action
     if action in {"configure", "setup"}:
         with _routine_secret_tty(parser) as terminal:
@@ -574,7 +568,6 @@ def _routines_command(
                     "`things-orchestrator service install`. The saved receiver "
                     "values do not need to be entered again."
                 )
-                return
             print(
                 json.dumps(
                     routines_status(enabled, email=credentials.email), sort_keys=True
@@ -779,10 +772,8 @@ def _print_config(
         credentials = load_credentials(path=creds)
     except ConfigError:
         parser.error(_LOGIN)
-        return
     if credentials.bearer is None:
         parser.error(_LOGIN)
-        return
     preferences_file = creds.with_name("preferences.json")
     try:
         url = (
@@ -802,7 +793,6 @@ def _print_config(
         )
     except ConfigError as error:
         parser.error(str(error))
-        return
     if client is None:
         print(
             "No --client selected; rendering generic HTTP JSON (deprecated default).",
@@ -838,7 +828,6 @@ def _client_bundle(parser: argparse.ArgumentParser, output: Path) -> None:
         output.write_bytes(payload)
     except OSError as error:
         parser.error(str(error))
-        return
     print(f"Wrote {len(payload)} bytes to {output}")
 
 
@@ -859,10 +848,8 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
         credentials = load_credentials(path=creds)
     except ConfigError:
         parser.error(_LOGIN)
-        return
     if credentials.bearer is None:
         parser.error(_LOGIN)
-        return
     print(f"credentials: ok ({credentials.email})")
     timezone_name = load_timezone(
         preferences_file=creds.with_name("preferences.json"),
@@ -925,14 +912,6 @@ def _server(
 ) -> ThingsMCPServer:
     workspace = _workspace(parser, credentials=credentials)
     return ThingsMCPServer(workspace, routines=routines)
-
-
-def _compose_server(
-    parser: argparse.ArgumentParser,
-    credentials: Credentials,
-    routines: RoutineHTTPComposition,
-) -> ThingsMCPServer:
-    return _server(parser, credentials=credentials, routines=routines)
 
 
 def _workspace(
@@ -1005,7 +984,6 @@ def _migration_report(parser: argparse.ArgumentParser) -> None:
         email = load_credentials().email
     except ConfigError:
         parser.error(_LOGIN)
-        return
     journal = SQLiteJournal(journal_path(email))
     print(json.dumps(journal.cutover_v1(), sort_keys=True))
 
