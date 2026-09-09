@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from .client_bundle import (
     ComponentHashes,
     parse_client_bundle,
 )
-from .config import ConfigError, McpBearer, McpUrl, normalize_mcp_url
+from .config import ConfigError, McpBearer, McpUrl, _atomic_write, normalize_mcp_url
 from .tools import (
     CLIENT_BUNDLE_PATH,
     ITEM_ID,
@@ -720,20 +719,10 @@ def _write_state(path: Path, bundle: ClientBundle) -> None:
         "package_name": bundle.package.name,
         "package_version": bundle.package.version,
     }
-    _atomic_write_json(path, payload)
-
-
-def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    with tempfile.NamedTemporaryFile(
-        dir=path.parent, prefix=f"{RESERVED_PREFIX}state-", suffix=".tmp", delete=False
-    ) as temporary:
-        tmp = Path(temporary.name)
-        temporary.write(text.encode("utf-8"))
-    try:
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    _atomic_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
 
 
 def _safe_destination(root: Path, relative: str) -> Path:
