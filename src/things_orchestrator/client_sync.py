@@ -29,7 +29,7 @@ from .client_bundle import (
     ComponentHashes,
     parse_client_bundle,
 )
-from .config import ConfigError, McpBearer, McpUrl, _atomic_write, normalize_mcp_url
+from .config import ConfigError, McpBearer, McpUrl, _atomic_replace, normalize_mcp_url
 from .tools import (
     CLIENT_BUNDLE_PATH,
     ITEM_ID,
@@ -637,7 +637,7 @@ def _existing_entries(root: Path) -> set[str]:
         for name in filenames:
             relative = (current / name).relative_to(root).as_posix()
             first = relative.split("/", 1)[0]
-            if first.startswith(RESERVED_PREFIX) and first.endswith(".tmp"):
+            if _is_crash_tmp(first):
                 continue
             names.add(relative)
     return names
@@ -710,6 +710,12 @@ def _owned_files(marker: _StoredState, pending: _StoredState) -> dict[str, set[s
     return owned
 
 
+def _is_crash_tmp(name: str) -> bool:
+    return name.endswith(".tmp") and (
+        name.startswith(RESERVED_PREFIX) or name.startswith("." + RESERVED_PREFIX)
+    )
+
+
 def _write_state(path: Path, bundle: ClientBundle) -> None:
     payload: dict[str, object] = {
         "commit": bundle.package.commit,
@@ -719,9 +725,10 @@ def _write_state(path: Path, bundle: ClientBundle) -> None:
         "package_name": bundle.package.name,
         "package_version": bundle.package.version,
     }
-    _atomic_write(
+    _atomic_replace(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        prefix=f"{RESERVED_PREFIX}state-",
     )
 
 

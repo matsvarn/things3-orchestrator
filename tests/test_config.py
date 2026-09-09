@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,21 @@ def test_launcher_binding_is_exact_private_and_executable(tmp_path: Path) -> Non
 
     assert saved.read_text() == f"{executable.resolve()}\n"
     assert saved.stat().st_mode & 0o777 == 0o600
+
+
+def test_private_write_without_fchmod_keeps_owner_only_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    credentials = tmp_path / "private" / "credentials.json"
+
+    save_credentials(
+        "user@example.com", "secret", McpBearer("bearer"), path=credentials
+    )
+
+    assert json.loads(credentials.read_text())["mcp_token"] == "bearer"
+    assert credentials.parent.stat().st_mode & 0o777 == 0o700
+    assert credentials.stat().st_mode & 0o777 == 0o600
 
 
 def test_launcher_binding_rejects_a_non_executable(tmp_path: Path) -> None:

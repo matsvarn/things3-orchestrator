@@ -402,24 +402,42 @@ def _load_preferences_payload(path: Path) -> dict[str, object]:
 
 def _ensure_private_dir(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
+    _chmod(path, 0o700)
+
+
+def _chmod(path: Path, mode: int, *, descriptor: int | None = None) -> None:
+    if descriptor is not None:
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(descriptor, mode)
+            return
+    chmod = getattr(os, "chmod", None)
+    if chmod is not None:
+        chmod(path, mode)
 
 
 def _atomic_write(path: Path, data: str | bytes) -> None:
     _ensure_private_dir(path.parent)
+    _atomic_replace(path, data)
+
+
+def _atomic_replace(
+    path: Path, data: str | bytes, *, prefix: str | None = None
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        prefix=prefix or f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary = Path(temporary_name)
     payload = data.encode("utf-8") if isinstance(data, str) else data
     try:
-        os.fchmod(descriptor, 0o600)
+        _chmod(temporary, 0o600, descriptor=descriptor)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        path.chmod(0o600)
+        _chmod(path, 0o600)
     except BaseException:
         try:
             os.close(descriptor)
