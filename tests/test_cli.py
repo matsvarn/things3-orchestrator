@@ -251,35 +251,10 @@ def test_login_stores_credentials_and_preferences_without_snippets(
     assert tmp_path.stat().st_mode & 0o777 == 0o700
 
 
-def test_login_show_secrets_never_prints_bearer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    creds = tmp_path / "credentials.json"
-    _fake_cloud(monkeypatch)
-    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
-    monkeypatch.setattr(
-        "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
-    )
-    monkeypatch.setattr(
-        "things_orchestrator.cli.token_urlsafe", lambda _n: "fixed-token"
-    )
-    main(
-        [
-            "login",
-            "--timezone",
-            "Europe/Berlin",
-            "--show-secrets",
-            "--url",
-            "https://tasks.example.com",
-        ]
-    )
-    out = capsys.readouterr().out
-    assert "fixed-token" not in out
-    assert "Bearer fixed-token" not in out
-    assert "mcp_servers" not in out
-    assert "mcpServers" not in out
-    assert "--show-secrets moved to print-config --client CLIENT" in out
-    assert '"secret"' not in out
+def test_login_rejects_show_secrets() -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["login", "--show-secrets"])
+    assert caught.value.code == 2
 
 
 def test_login_keeps_mcp_token_unless_rotated(
