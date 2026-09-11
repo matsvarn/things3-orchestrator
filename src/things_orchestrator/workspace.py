@@ -2031,7 +2031,7 @@ class ThingsWorkspace:
             manifest=manifest.to_json(),
             manifest_hash=manifest.manifest_hash,
             safety_policy_digest=manifest.safety_policy_digest,
-            expires_at=manifest.expires_at,
+            expires_at=None,
         )
         try:
             ownership = journal.create_apply_session_v2(
@@ -2774,8 +2774,6 @@ class ThingsWorkspace:
             before=before,
             display_titles=display_titles,
             result_ids=result_ids,
-            requires_owner=False,
-            clock=self._clock(),
         )
         return manifest, writes, before
 
@@ -3721,69 +3719,6 @@ class ThingsWorkspace:
                 "authorization": authorization_record,
                 "instruction": "The owner released this retained v1 fence without a Cloud write.",
             },
-        )
-
-    def host_approve_v2(self, operation_id: str, authorization: object) -> JsonDict:
-        try:
-            operation = self._unambiguous_host_operation_v2(operation_id)
-        except AmbiguousV2Request:
-            return {
-                "state": "rejected",
-                "instruction": "Conflicting stored operations share this request_id.",
-            }
-        if operation is None:
-            return {"state": "rejected", "instruction": "That operation does not belong to this account."}
-        if self._journal.verify_v2_authorization(operation, "approve", authorization) is None:
-            return {"state": "rejected", "instruction": "Verified host authorization is required.", "operation_id": operation_id}
-        if operation.state != "awaiting_owner":
-            return self._resume_v2(operation)
-        if operation.expires_at is None or datetime.fromisoformat(operation.expires_at) <= self._clock():
-            response: JsonDict = {"state": "stale", "instruction": "The owner approval window expired.", "operation_id": operation_id}
-            self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
-            return response
-        failed = self._refresh(force=True)
-        if failed is not None:
-            return {"state": "awaiting_owner", "instruction": "Cloud state could not be rechecked.", "operation_id": operation_id}
-        if not self._v2_preconditions_match(operation):
-            response = {"state": "stale", "instruction": "A private operation precondition changed.", "operation_id": operation_id}
-            self._journal.transition_v2(operation_id, expected="awaiting_owner", state="stale", response=response)
-            return response
-        with self._journal.authorize_apply_session_v2(
-            operation_id, authorization, now=self._clock
-        ) as start:
-            if start.authorized:
-                return self._apply_v2_session(operation_id, start.session)
-            if start.session is not None:
-                return self._resume_v2_session(operation_id, start.session)
-            current = self._journal.get_v2_operation(operation_id)
-            if current is not None and current.state != "awaiting_owner":
-                return self._resume_v2(current)
-            return {"state": "rejected", "instruction": "Another unresolved operation blocks approval.", "operation_id": operation_id, "blocking_operation_ids": start.blockers}
-
-    def host_resolve_partial_v2(
-        self,
-        operation_id: str,
-        resolution: Literal["accepted_as_is", "superseded"],
-        authorization: object,
-    ) -> bool:
-        from .v2 import SAFETY_POLICY_DIGEST
-
-        try:
-            operation = self._unambiguous_host_operation_v2(operation_id)
-        except AmbiguousV2Request:
-            return False
-        return bool(
-            operation is not None
-            and operation.safety_policy_digest != SAFETY_POLICY_DIGEST
-            and self._journal.verify_v2_authorization(operation, resolution, authorization) is not None
-            and self._journal.transition_v2(
-                operation_id,
-                expected="partial",
-                state="partial_resolved",
-                authorization=authorization,
-                resolution=resolution,
-                response={"state": "partial_resolved", "instruction": "The owner recorded the partial outcome without replay.", "operation_id": operation_id},
-            )
         )
 
     def _v2_receipt_rows(self, operation: V2Operation, writes: list[Write], before: list[JsonDict | None], outcome: str) -> list[JsonDict]:

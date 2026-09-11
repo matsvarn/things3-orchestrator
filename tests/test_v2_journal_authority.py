@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
-from typing import Callable
 
 import pytest
 
@@ -36,7 +35,7 @@ from things_orchestrator.owner_authority import (
     verified_authorization,
     verify_owner_factor,
 )
-from things_orchestrator.v2 import SAFETY_POLICY_DIGEST, OperationDraft
+from things_orchestrator.v2 import OperationDraft
 from things_orchestrator.workspace import ThingsWorkspace
 
 
@@ -566,37 +565,6 @@ def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp
     assert stored.authorization.startswith("ed25519:v1:")
 
 
-def test_current_policy_partial_is_terminal_without_owner_resolution() -> None:
-    journal = MemoryJournal()
-    operation = _operation(
-        "op_terminal_partial",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-    )
-    operation = replace(operation, safety_policy_digest=SAFETY_POLICY_DIGEST)
-    operation = _with_manifest(operation)
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
-    assert journal.settle_v2(
-        operation.operation_id,
-        expected="pending",
-        state="partial",
-        response={"state": "partial"},
-        rows=[{"sequence": 1}],
-    )
-
-    workspace = ThingsWorkspace(
-        MemoryLibrary([]),
-        journal=journal,
-        account_id="owner@example.com",
-    )
-    assert not workspace.host_resolve_partial_v2(
-        operation.operation_id,
-        "accepted_as_is",
-        object(),
-    )
-    stored = journal.get_v2_operation(operation.operation_id)
-    assert stored is not None and stored.state == "partial"
-
-
 def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> None:
     first = tmp_path / "first" / "owner-factor.json"
     second = tmp_path / "second" / "owner-factor.json"
@@ -702,76 +670,8 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
     direct_apply = workspace._apply_v2(stored)  # noqa: SLF001
     reconcile = workspace.host_reconcile_v2(operation.operation_id)
 
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
     assert direct_apply["state"] == "rejected"
     assert reconcile["state"] == "rejected"
-    assert result["state"] == "rejected"
-    assert library.records["a"].status == "open"
-
-
-def test_sqlite_approval_rejects_api_version_downgrade_bypass(tmp_path: Path) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal_path = tmp_path / "journal.sqlite3"
-    journal = SQLiteJournal(
-        journal_path,
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
-    )
-    operation = _with_manifest(
-        _operation(
-            "op_version_downgrade",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
-        ),
-        tool="things_trash",
-        writes=[{"action": "trash", "uuid": "a", "kind": "task"}],
-        before=[{"id": "task:a", "trashed": False}],
-        touched=[["trashed"]],
-        preconditions={},
-        display_titles=["A"],
-        requires_owner=True,
-    )
-    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    tampered = {
-        **operation.manifest,
-        "writes": [
-            {
-                "action": "complete",
-                "uuid": "a",
-                "kind": "task",
-                "status": "done",
-            }
-        ],
-        "touched": [["status"]],
-    }
-    with sqlite3.connect(journal_path) as connection:
-        connection.execute(
-            """UPDATE owner_operations_v2
-               SET api_version='legacy-v1', manifest_json=?
-               WHERE operation_id=?""",
-            (
-                json.dumps(tampered, separators=(",", ":"), sort_keys=True),
-                operation.operation_id,
-            ),
-        )
-    library = MemoryLibrary([Record(uuid="a", kind="task", title="A")])
-    workspace = ThingsWorkspace(
-        library,
-        journal=journal,
-        account_id=operation.account_id,
-    )
-
-    result = workspace.host_approve_v2(operation.operation_id, authorization)
-
-    assert result["state"] == "rejected"
     assert library.records["a"].status == "open"
 
 
@@ -795,80 +695,7 @@ def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> No
         state="declined",
         authorization=object(),
     )
-    workspace = ThingsWorkspace(
-        MemoryLibrary(),
-        journal=journal,
-        account_id=operation.account_id,
-    )
-
-    result = workspace.host_approve_v2(operation.operation_id, "sha256:forged")
-
-    assert result["state"] == "rejected"
-    assert journal.get_v2_operation(operation.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
-
-
-def test_owner_approval_rejects_ambiguous_canonical_request_before_cloud_io(
-    tmp_path: Path,
-) -> None:
-    class CountingLibrary(MemoryLibrary):
-        refreshes = 0
-        apply_calls = 0
-
-        def refresh(self, *, force: bool = False) -> None:
-            self.refreshes += 1
-
-        def apply(self, writes: list[Write]) -> ApplyResult:
-            self.apply_calls += 1
-            return super().apply(writes)
-
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
-    original = replace(
-        _operation(
-            "op_original",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
-        ),
-        account_id="Owner@Example.com",
-    )
-    original = _with_manifest(original)
-    assert journal.create_v2(original, claim_fence=False)[0] == "created"
-    conflicting = replace(
-        _operation(
-            "op_conflicting",
-            request_id=original.request_id,
-            state="awaiting_owner",
-        ),
-        request_hash="sha256:conflicting-request",
-    )
-    conflicting = _with_manifest(conflicting)
-    journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
-    authorization = verified_authorization(
-        original,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    library = CountingLibrary()
-    workspace = ThingsWorkspace(
-        library,
-        journal=journal,
-        account_id="Owner@Example.com",
-    )
-
-    result = workspace.host_approve_v2(original.operation_id, authorization)
-
-    assert result == {
-        "state": "rejected",
-        "instruction": "Conflicting stored operations share this request_id.",
-    }
-    assert library.refreshes == 0
-    assert library.apply_calls == 0
-    stored = journal.get_v2_operation(original.operation_id)
+    stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None and stored.state == "awaiting_owner"
 
 
@@ -1041,82 +868,9 @@ def test_prune_preserves_active_tombstone_ambiguity_without_mutation(
         assert len(journal._v2_tombstones) == 1  # noqa: SLF001
 
 
-def test_host_approval_rejects_conflict_inserted_after_authorization(
-    tmp_path: Path,
-) -> None:
-    class RacingJournal(MemoryJournal):
-        def authorize_v2(
-            self,
-            operation_id: str,
-            authorization: object,
-            *,
-            now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        ) -> tuple[bool, list[str]]:
-            result = super().authorize_v2(
-                operation_id, authorization, now=now
-            )
-            if result[0]:
-                original = self._v2_operations[operation_id]  # noqa: SLF001
-                conflicting = _with_manifest(
-                    replace(
-                        original,
-                        account_id=original.account_id.lower(),
-                        operation_id="op_conflicting",
-                        request_hash="sha256:conflicting-request",
-                    )
-                )
-                _inject_v2_operation(self, conflicting)
-            return result
-
-    class CountingLibrary(MemoryLibrary):
-        apply_calls = 0
-
-        def apply(self, writes: list[Write]) -> ApplyResult:
-            self.apply_calls += 1
-            return super().apply(writes)
-
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = RacingJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
-    operation = _with_manifest(
-        _operation(
-            "op_original",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
-        )
-    )
-    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    library = CountingLibrary()
-
-    result = ThingsWorkspace(
-        library, journal=journal, account_id=operation.account_id
-    ).host_approve_v2(operation.operation_id, authorization)
-
-    assert result == {
-        "state": "rejected",
-        "code": "request_conflict",
-        "next_action": "correct_request",
-        "instruction": (
-            "Conflicting stored operations share this request_id. "
-            "No Cloud write was attempted."
-        ),
-    }
-    assert library.apply_calls == 0
-
-
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
 def test_apply_session_serializes_cloud_write_and_concurrent_retry(
-    journal_kind: str, entrypoint: str, tmp_path: Path
+    journal_kind: str, tmp_path: Path
 ) -> None:
     class BlockingLibrary(MemoryLibrary):
         apply_calls = 0
@@ -1135,53 +889,9 @@ def test_apply_session_serializes_cloud_write_and_concurrent_retry(
     journal = (
         MemoryJournal()
         if journal_kind == "memory"
-        else SQLiteJournal(tmp_path / f"{entrypoint}.sqlite3")
+        else SQLiteJournal(tmp_path / "journal.sqlite3")
     )
     library = BlockingLibrary()
-    operation_id: str | None = None
-    authorization: object = None
-    if entrypoint == "approve":
-        factor_dir = tmp_path / journal_kind
-        factor_dir.mkdir()
-        factor = factor_dir / "owner-factor.json"
-        enroll_owner_factor("correct horse battery staple", path=factor)
-        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
-        journal = (
-            MemoryJournal(owner_public_key=public_key)
-            if journal_kind == "memory"
-            else SQLiteJournal(
-                tmp_path / f"{entrypoint}.sqlite3",
-                owner_public_key=public_key,
-            )
-        )
-        operation = _with_manifest(
-            _operation(
-                "op_approved",
-                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-                state="awaiting_owner",
-            ),
-            tool="things_update",
-            writes=[
-                {
-                    "action": "update",
-                    "uuid": "a",
-                    "kind": "task",
-                    "title": "B",
-                }
-            ],
-            touched=[["title"]],
-            before=[{"id": "task:a", "title": "A"}],
-            display_titles=["A"],
-        )
-        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-        operation_id = operation.operation_id
-        authorization = verified_authorization(
-            operation,
-            action="approve",
-            passphrase="correct horse battery staple",
-            path=factor,
-        )
-        assert authorization is not None
     workspace_one = ThingsWorkspace(
         library, journal=journal, account_id="owner@example.com"
     )
@@ -1197,12 +907,7 @@ def test_apply_session_serializes_cloud_write_and_concurrent_retry(
     )
 
     def invoke(workspace: ThingsWorkspace) -> None:
-        result = (
-            workspace.execute_v2(draft)
-            if entrypoint == "execute"
-            else workspace.host_approve_v2(operation_id or "", authorization)
-        )
-        results.append(result)
+        results.append(workspace.execute_v2(draft))
 
     first = Thread(target=invoke, args=(workspace_one,))
     first.start()
@@ -1283,9 +988,8 @@ def test_pending_retry_reads_only_after_outcome_unknown_writer_exits(
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("entrypoint", ["execute", "approve"])
-def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
-    journal_kind: str, entrypoint: str, tmp_path: Path
+def test_pending_owner_is_acquired_before_create_becomes_visible(
+    journal_kind: str, tmp_path: Path
 ) -> None:
     class PauseMixin:
         def _initialize_pause(self) -> None:
@@ -1298,7 +1002,7 @@ def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
 
         def create_v2(self, *args: object, **kwargs: object) -> object:
             result = super().create_v2(*args, **kwargs)  # type: ignore[misc]
-            if entrypoint == "execute" and result[0] == "created":
+            if result[0] == "created":
                 self._pause_creator()
             return result
 
@@ -1309,37 +1013,18 @@ def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
             with super().create_apply_session_v2(  # type: ignore[misc]
                 *args, **kwargs
             ) as start:
-                if entrypoint == "execute" and start.outcome == "created":
-                    self._pause_creator()
-                yield start
-
-        def authorize_v2(self, *args: object, **kwargs: object) -> object:
-            result = super().authorize_v2(*args, **kwargs)  # type: ignore[misc]
-            if entrypoint == "approve" and result[0]:
-                self._pause_creator()
-            return result
-
-        @contextmanager
-        def authorize_apply_session_v2(
-            self, *args: object, **kwargs: object
-        ) -> object:
-            with super().authorize_apply_session_v2(  # type: ignore[misc]
-                *args, **kwargs
-            ) as start:
-                if entrypoint == "approve" and start.authorized:
+                if start.outcome == "created":
                     self._pause_creator()
                 yield start
 
     class GapMemoryJournal(PauseMixin, MemoryJournal):
-        def __init__(self, *, owner_public_key: bytes | None = None) -> None:
-            super().__init__(owner_public_key=owner_public_key)
+        def __init__(self) -> None:
+            super().__init__()
             self._initialize_pause()
 
     class GapSQLiteJournal(PauseMixin, SQLiteJournal):
-        def __init__(
-            self, path: Path, *, owner_public_key: bytes | None = None
-        ) -> None:
-            super().__init__(path, owner_public_key=owner_public_key)
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
             self._initialize_pause()
 
     class CountingLibrary(MemoryLibrary):
@@ -1349,52 +1034,12 @@ def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
             self.apply_calls += 1
             return super().apply(writes)
 
-    public_key: bytes | None = None
-    factor: Path | None = None
-    if entrypoint == "approve":
-        factor = tmp_path / "owner-factor.json"
-        enroll_owner_factor("correct horse battery staple", path=factor)
-        public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
     journal = (
-        GapMemoryJournal(owner_public_key=public_key)
+        GapMemoryJournal()
         if journal_kind == "memory"
-        else GapSQLiteJournal(
-            tmp_path / f"{entrypoint}.sqlite3", owner_public_key=public_key
-        )
+        else GapSQLiteJournal(tmp_path / "journal.sqlite3")
     )
     library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
-    operation_id: str | None = None
-    authorization: object = None
-    if entrypoint == "approve":
-        operation = _with_manifest(
-            _operation(
-                "op_approved",
-                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-                state="awaiting_owner",
-            ),
-            tool="things_update",
-            writes=[
-                {
-                    "action": "update",
-                    "uuid": "a",
-                    "kind": "task",
-                    "title": "B",
-                }
-            ],
-            touched=[["title"]],
-            before=[{"id": "task:a", "title": "A"}],
-            display_titles=["A"],
-        )
-        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-        operation_id = operation.operation_id
-        assert factor is not None
-        authorization = verified_authorization(
-            operation,
-            action="approve",
-            passphrase="correct horse battery staple",
-            path=factor,
-        )
-        assert authorization is not None
     draft = OperationDraft.build(
         "things_update",
         "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
@@ -1406,11 +1051,7 @@ def test_pending_owner_is_acquired_before_create_or_authorize_becomes_visible(
         workspace = ThingsWorkspace(
             library, journal=journal, account_id="owner@example.com"
         )
-        results.append(
-            workspace.execute_v2(draft)
-            if entrypoint == "execute"
-            else workspace.host_approve_v2(operation_id or "", authorization)
-        )
+        results.append(workspace.execute_v2(draft))
 
     creator = Thread(target=invoke)
     creator.start()
@@ -2295,123 +1936,6 @@ def test_authorize_apply_session_rejects_expired_operation(
         "instruction": "The owner approval window expired.",
         "operation_id": operation.operation_id,
     }
-
-
-def test_host_approval_rechecks_expiry_after_waiting_for_apply_owner(
-    tmp_path: Path,
-) -> None:
-    attempted = Event()
-
-    class WaitingSQLiteJournal(SQLiteJournal):
-        @contextmanager
-        def authorize_apply_session_v2(
-            self, *args: object, **kwargs: object
-        ) -> object:
-            attempted.set()
-            with super().authorize_apply_session_v2(  # type: ignore[misc]
-                *args, **kwargs
-            ) as start:
-                yield start
-
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
-    journal = WaitingSQLiteJournal(
-        tmp_path / "journal.sqlite3", owner_public_key=public_key
-    )
-    expires_at = "2030-01-01T00:00:01+00:00"
-    operation = _with_manifest(
-        replace(
-            _operation(
-                "op_expiry_sqlite",
-                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-                state="awaiting_owner",
-            ),
-            expires_at=expires_at,
-        ),
-        expires_at=expires_at,
-        tool="things_update",
-        writes=[
-            {
-                "action": "update",
-                "uuid": "a",
-                "kind": "task",
-                "title": "B",
-            }
-        ],
-        touched=[["title"]],
-        before=[{"id": "task:a", "title": "A"}],
-        display_titles=["A"],
-    )
-    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-    blocker = _with_manifest(
-        replace(
-            _operation(
-                "op_blocker_sqlite",
-                request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
-            ),
-            account_id="other@example.com",
-        )
-    )
-    _inject_v2_operation(journal, blocker)
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    entered = Event()
-    release = Event()
-
-    def hold_owner() -> None:
-        with journal.apply_session_v2(blocker.operation_id) as session:
-            assert session is not None
-            entered.set()
-            release.wait(5)
-
-    holder = Thread(target=hold_owner)
-    holder.start()
-    assert entered.wait(5)
-    now = [datetime(2030, 1, 1, tzinfo=timezone.utc)]
-
-    class CountingLibrary(MemoryLibrary):
-        apply_calls = 0
-
-        def apply(self, writes: list[Write]) -> ApplyResult:
-            self.apply_calls += 1
-            return super().apply(writes)
-
-    library = CountingLibrary([Record(uuid="a", kind="task", title="A")])
-    workspace = ThingsWorkspace(
-        library,
-        journal=journal,
-        account_id=operation.account_id,
-        clock=lambda: now[0],
-    )
-    results: list[dict[str, object]] = []
-    approver = Thread(
-        target=lambda: results.append(
-            workspace.host_approve_v2(operation.operation_id, authorization)
-        )
-    )
-    approver.start()
-    assert attempted.wait(5)
-    now[0] = datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc)
-    release.set()
-    holder.join(5)
-    approver.join(5)
-
-    assert not holder.is_alive() and not approver.is_alive()
-    assert results == [
-        {
-            "state": "stale",
-            "instruction": "The owner approval window expired.",
-            "operation_id": operation.operation_id,
-        }
-    ]
-    assert library.apply_calls == 0
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:

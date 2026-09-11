@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Delete leftover owner-approval host methods and unused internal Result
+  surface. New v2 manifests always emit `requires_owner=False` with
+  `expires_at=None`. Bearer still authorizes bounded writes; leftover
+  `awaiting_owner` rows retire as stale with no Cloud I/O.
 - Remove the unused SQLite context adapter. Workspace always mints in-memory
   read contexts; the service does not persist a context database.
 - `print-config --client grokbot` renders a public HTTPS MCP URL and bearer for

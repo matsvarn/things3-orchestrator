@@ -80,17 +80,7 @@ _DIAGNOSTIC_ID = r"^(task|project|area|heading|tag):[^\s:]+$"
 _CONTAINER_ID = r"^(trash|(project|area):[^\s:]+)$"
 _CHECK_ID = r"^check:[^\s:]+$"
 _TAG_ID = r"^tag:[^\s:]+$"
-_HOME_REFERENCE = (
-    r"^(inbox|anytime|\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
-    r"(project|area):[^\s:]+)$"
-)
-_AFTER_REFERENCE = (
-    r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|"
-    r"(task|project|area|heading):[^\s:]+)$"
-)
-_AREA_ID = r"^area:[^\s:]+$"
 _HEADING_ID = r"^heading:[^\s:]+$"
-_HEADING_REFERENCE = r"^(\$[A-Za-z][A-Za-z0-9_-]{0,79}|heading:[^\s:]+)$"
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
 _CONTEXT_ID = r"^ctx_[A-Za-z0-9_-]{8,120}$"
@@ -586,17 +576,11 @@ class RecoveryFact(StrictModel):
         return value
 
 
-class ReceiptItemFact(StrictModel):
-    id: str = Field(pattern=ITEM_ID, max_length=512)
-    title: str = Field(min_length=1, max_length=1000)
-
-
 class Result(StrictModel):
     next: Next
     status: ResultStatus
     instruction: str = Field(min_length=1, max_length=1000)
     items: list[ItemFact] = Field(default_factory=list, max_length=120)
-    already_correct: list[ReceiptItemFact] = Field(default_factory=list, max_length=120)
     tags: list[TagFact] = Field(default_factory=list, max_length=400)
     diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)

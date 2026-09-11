@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Annotated, Any, Literal, Self, cast
@@ -61,9 +61,7 @@ class OperationManifest:
     before_json: tuple[str | None, ...]
     display_titles: tuple[str, ...]
     result_ids: tuple[str, ...]
-    requires_owner: bool
     safety_policy_digest: str
-    expires_at: str | None
     manifest_hash: str
 
     @classmethod
@@ -78,10 +76,7 @@ class OperationManifest:
         before: list[dict[str, object] | None],
         display_titles: list[str],
         result_ids: list[str],
-        requires_owner: bool,
-        clock: datetime,
     ) -> OperationManifest:
-        expires_at = (clock + timedelta(minutes=30)).isoformat() if requires_owner else None
         body = {
             "version": MANIFEST_VERSION,
             "account_id": account_id,
@@ -95,9 +90,9 @@ class OperationManifest:
             "before": before,
             "display_titles": display_titles,
             "result_ids": result_ids,
-            "requires_owner": requires_owner,
+            "requires_owner": False,
             "safety_policy_digest": SAFETY_POLICY_DIGEST,
-            "expires_at": expires_at,
+            "expires_at": None,
         }
         return cls(
             account_id=account_id,
@@ -110,9 +105,7 @@ class OperationManifest:
             ),
             display_titles=tuple(display_titles),
             result_ids=tuple(result_ids),
-            requires_owner=requires_owner,
             safety_policy_digest=SAFETY_POLICY_DIGEST,
-            expires_at=expires_at,
             manifest_hash="sha256:v1:" + sha256(_canonical(body).encode()).hexdigest(),
         )
 
@@ -132,9 +125,9 @@ class OperationManifest:
             ],
             "display_titles": list(self.display_titles),
             "result_ids": list(self.result_ids),
-            "requires_owner": self.requires_owner,
+            "requires_owner": False,
             "safety_policy_digest": self.safety_policy_digest,
-            "expires_at": self.expires_at,
+            "expires_at": None,
         }
 
 
