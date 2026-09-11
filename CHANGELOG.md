@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The Codex plugin wrapper only launches `serve`. Owner and recovery commands
+  stay on the uv tool.
 - Delete leftover owner-approval host methods and unused internal Result
   surface. New v2 manifests always emit `requires_owner=False` with
   `expires_at=None`. Bearer still authorizes bounded writes; leftover

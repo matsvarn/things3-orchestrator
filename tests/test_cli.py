@@ -1298,7 +1298,7 @@ def test_plugin_wrapper_executes_the_recorded_launcher(tmp_path: Path) -> None:
     env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
     env["HOME"] = str(tmp_path / "home")
     result = subprocess.run(
-        [str(script), "skill-path"],
+        [str(script), "serve"],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
@@ -1306,7 +1306,7 @@ def test_plugin_wrapper_executes_the_recorded_launcher(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0
-    assert result.stdout == "launcher:skill-path\n"
+    assert result.stdout == "launcher:serve\n"
 
 
 def test_plugin_wrapper_uses_checkout_venv_fallback(tmp_path: Path) -> None:
@@ -1332,7 +1332,7 @@ def test_plugin_wrapper_uses_checkout_venv_fallback(tmp_path: Path) -> None:
     }
 
     result = subprocess.run(
-        [str(script), "service", "status"],
+        [str(script), "serve"],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
@@ -1341,7 +1341,7 @@ def test_plugin_wrapper_uses_checkout_venv_fallback(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
-    assert result.stdout == "fallback:service status\n"
+    assert result.stdout == "fallback:serve\n"
 
 
 def test_plugin_wrapper_without_launcher_explains_recovery(tmp_path: Path) -> None:
@@ -1372,25 +1372,68 @@ def test_plugin_wrapper_without_launcher_explains_recovery(tmp_path: Path) -> No
     assert "No module named" not in result.stderr
 
 
-def test_plugin_wrapper_routes_every_recovery_command() -> None:
+def test_plugin_wrapper_is_serve_only() -> None:
     script = (ROOT / "plugin/bin/things-orchestrator").read_text()
-    commands = ("legacy-reconcile", "legacy-resolve", "operation-reconcile")
-    for command in commands:
-        assert command in script
-    usage = next(
-        line for line in script.splitlines() if line.startswith('    echo "Usage:')
-    )
-    for command in commands:
-        assert command in usage
+    assert 'exec "$TO_LAUNCHER" serve' in script
+    assert "Usage:" not in script
     assert "python3" not in script
     assert "PYTHONPATH" not in script
-    for removed in (
+    for leftover in (
+        "cloud-check",
+        "configure",
+        "print-config",
+        "serve-http",
+        "doctor",
+        "support-bundle",
+        "skill-path",
+        "owner-factor",
+        "migration-report",
+        "legacy-reconcile",
+        "legacy-resolve",
+        "operation-show",
+        "operation-reconcile",
         "operation-settle-not-applied",
         "operation-approve",
         "operation-decline",
         "operation-accept-partial",
     ):
-        assert removed not in script
+        assert leftover not in script
+
+
+def test_plugin_wrapper_rejects_owner_commands(tmp_path: Path) -> None:
+    import os
+    import stat
+    import subprocess
+
+    plugin = tmp_path / "cache" / "plugin"
+    (plugin / "bin").mkdir(parents=True)
+    script = plugin / "bin" / "things-orchestrator"
+    script.write_text((ROOT / "plugin/bin/things-orchestrator").read_text())
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    state = tmp_path / "state"
+    (state / "things-orchestrator").mkdir(parents=True)
+    launcher = tmp_path / "installed" / "things-orchestrator"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/bin/sh\nprintf 'launcher:%s\\n' \"$*\"\n")
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+    (state / "things-orchestrator" / "launcher").write_text(f"{launcher}\n")
+    env = os.environ.copy()
+    env["XDG_STATE_HOME"] = str(state)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["HOME"] = str(tmp_path / "home")
+    result = subprocess.run(
+        [str(script), "login"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "only runs serve" in result.stderr
+    assert "uv tool" in result.stderr
+    assert "launcher:" not in result.stdout
 
 
 def test_legacy_resolution_renders_before_reading_passphrase(

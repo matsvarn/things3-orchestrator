@@ -16,12 +16,8 @@ if [ -z "$TO_LAUNCHER" ] || [ ! -x "$TO_LAUNCHER" ]; then
   exit 2
 fi
 
-case "${1:-}" in
-  cloud-check|configure|login|service|serve|serve-http|print-config|doctor|support-bundle|skill-path|owner-factor|migration-report|legacy-reconcile|legacy-resolve|operation-show|operation-reconcile)
-    exec "$TO_LAUNCHER" "$@"
-    ;;
-  *)
-    echo "Usage: things-orchestrator {cloud-check,configure,login,service,serve,serve-http,print-config,doctor,support-bundle,skill-path,owner-factor,migration-report,legacy-reconcile,legacy-resolve,operation-show,operation-reconcile}" >&2
-    exit 2
-    ;;
-esac
+if [ "${1:-}" != "serve" ]; then
+  echo "plugin/bin/things-orchestrator only runs serve. Use the uv tool for owner commands." >&2
+  exit 2
+fi
+exec "$TO_LAUNCHER" serve
