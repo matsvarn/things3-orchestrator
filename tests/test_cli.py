@@ -1307,6 +1307,16 @@ def test_plugin_wrapper_executes_the_recorded_launcher(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert result.stdout == "launcher:serve\n"
+    extra = subprocess.run(
+        [str(script), "serve", "--unknown"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert extra.returncode == 0
+    assert extra.stdout == "launcher:serve --unknown\n"
 
 
 def test_plugin_wrapper_uses_checkout_venv_fallback(tmp_path: Path) -> None:
@@ -1374,7 +1384,7 @@ def test_plugin_wrapper_without_launcher_explains_recovery(tmp_path: Path) -> No
 
 def test_plugin_wrapper_is_serve_only() -> None:
     script = (ROOT / "plugin/bin/things-orchestrator").read_text()
-    assert 'exec "$TO_LAUNCHER" serve' in script
+    assert 'exec "$TO_LAUNCHER" "$@"' in script
     assert "Usage:" not in script
     assert "python3" not in script
     assert "PYTHONPATH" not in script

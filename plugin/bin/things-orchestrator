@@ -20,4 +20,4 @@ if [ "${1:-}" != "serve" ]; then
   echo "plugin/bin/things-orchestrator only runs serve. Use the uv tool for owner commands." >&2
   exit 2
 fi
-exec "$TO_LAUNCHER" serve
+exec "$TO_LAUNCHER" "$@"
