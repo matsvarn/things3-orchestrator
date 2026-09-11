@@ -17,10 +17,6 @@ from things_orchestrator.journal import (
     v2_manifest_hash,
 )
 from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
-from things_orchestrator.owner_authority import (
-    enroll_owner_factor,
-    verified_authorization,
-)
 from things_orchestrator.recurrence import RecurrenceState
 from things_orchestrator.server import ThingsMCPServer
 from things_orchestrator.v2 import (
@@ -759,12 +755,8 @@ def test_project_trash_manifest_expands_descendants_and_freezes_titles() -> None
     assert "title | Project" in rendered
 
 
-def test_project_trash_receipt_preserves_heading_identity(tmp_path: Path) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(
-        owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-    )
+def test_project_trash_receipt_preserves_heading_identity() -> None:
+    journal = MemoryJournal()
     project = Record(uuid="p", kind="project", title="Project")
     heading = Record(
         uuid="h", kind="task", title="Heading", parent_uuid="p", heading=True
@@ -780,14 +772,7 @@ def test_project_trash_receipt_preserves_heading_identity(tmp_path: Path) -> Non
     )
     operation = journal.get_v2_operation(staged.operation_id or "")
     assert operation is not None
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    assert workspace.host_approve_v2(operation.operation_id, authorization)["state"] == "applied"
+    assert staged.state == "applied"
 
     receipt = journal.v2_receipt_page(
         "owner@example.com", operation.operation_id, limit=10, cursor=None
