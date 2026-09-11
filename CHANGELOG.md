@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove the unused SQLite context adapter. Workspace always mints in-memory
+  read contexts; the service does not persist a context database.
 - `print-config --client grokbot` renders a public HTTPS MCP URL and bearer for
   ephemeral agent hosts, plus a Tailscale-free `mcp-remote` stdio recipe.
   MagicDNS and known private endpoints are rejected. Doctor reports origin
