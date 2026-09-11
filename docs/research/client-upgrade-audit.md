@@ -1,5 +1,8 @@
 Client upgrade audit, 2026-09-05
 
+Status: the client bundle, additive output, advertised-tool hashes, and
+client-sync path landed in v0.11.0. Bridge-kill remains deferred as noted below.
+
 Audit baseline: v0.10.5, commit `517df9906d29092725b02b45dd780edd41029bfc`.
 This is a design recommendation, not an implemented or deployed upgrade path.
 

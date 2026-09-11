@@ -2104,27 +2104,6 @@ def _copy_v2(operation: V2Operation | None) -> V2Operation | None:
     )
 
 
-def _v2_values(operation: V2Operation) -> dict[str, object]:
-    return {
-        "account_id": operation.account_id,
-        "api_version": operation.api_version,
-        "request_id": operation.request_id,
-        "request_hash": operation.request_hash,
-        "operation_id": operation.operation_id,
-        "tool": operation.tool,
-        "state": operation.state,
-        "manifest": operation.manifest,
-        "manifest_hash": operation.manifest_hash,
-        "safety_policy_digest": operation.safety_policy_digest,
-        "expires_at": operation.expires_at,
-        "response": operation.response,
-        "authorization": operation.authorization,
-        "resolution": operation.resolution,
-        "receipt_hash": operation.receipt_hash,
-        "dispatch_started": operation.dispatch_started,
-    }
-
-
 def _v2_sql_values(operation: V2Operation) -> tuple[object, ...]:
     return (
         operation.account_id,

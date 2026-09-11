@@ -148,11 +148,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mint a new mcp_token (existing HTTP clients will 401 until they paste it)",
     )
-    login.add_argument(
-        "--show-secrets",
-        action="store_true",
-        help="deprecated; use print-config --client CLIENT --show-secrets",
-    )
     configure = commands.add_parser(
         "configure", help="change owner preferences without changing credentials"
     )
@@ -356,7 +351,6 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             public_url=args.public_url,
             rotate_token=args.rotate_token,
             timezone_name=args.timezone,
-            show_secrets=args.show_secrets,
         )
         return
     if args.action == "print-config":
@@ -682,7 +676,6 @@ def _login(
     public_url: str,
     rotate_token: bool,
     timezone_name: str | None,
-    show_secrets: bool,
 ) -> None:
     if not sys.stdin.isatty():
         parser.error(
@@ -732,8 +725,6 @@ def _login(
     print(f"Bound the Codex plugin launcher in {launcher} (mode 0600).")
     if rotate_token:
         print("mcp_token rotated. Update every HTTP client header.")
-    if show_secrets:
-        print("--show-secrets moved to print-config --client CLIENT --show-secrets.")
     print("The HTTP Bearer is the MCP token, not the Cloud password.")
     print(
         "Next: install the HTTP service, run doctor --wait, then render a client config."
