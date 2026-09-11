@@ -7,13 +7,12 @@ import ipaddress
 import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias, assert_never
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from .config import ConfigError
+from .config import ConfigError, _atomic_write
 
 ROUTINE_ID = "things-ai-task-created-v1"
 ROUTINE_EVENT_TYPE = "task.created"
@@ -204,7 +203,7 @@ def save_routines_config(
             },
         },
     }
-    _atomic_private_write(target, json.dumps(payload, indent=2) + "\n")
+    _atomic_write(target, json.dumps(payload, indent=2) + "\n")
     return target
 
 
@@ -428,20 +427,3 @@ def _bounded_int(value: object, lower: int, upper: int, label: str) -> int:
     ):
         raise ConfigError(f"{label} must be between {lower} and {upper} seconds")
     return value
-
-
-def _atomic_private_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp = Path(raw_temp)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-        os.chmod(path, 0o600)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
