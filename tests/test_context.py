@@ -1,24 +1,18 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
 from things_orchestrator.context import (
     CompletenessFact,
     ContextConflict,
-    ContextCorrupt,
     ContextExpired,
     ContextNotFound,
     ContextRef,
     MemoryContextStore,
     ReadIncludeSelector,
     ReadSelector,
-    SQLiteContextStore,
     UnknownReference,
 )
 
@@ -186,61 +180,6 @@ def test_unknown_short_ref_does_not_fall_back_to_an_exact_id() -> None:
         store.resolve(context.id, "task:first", account_id="account-one")
 
 
-def test_sqlite_context_survives_adapter_restart(tmp_path: Path) -> None:
-    path = tmp_path / "contexts.sqlite3"
-    clock = Clock()
-    first = SQLiteContextStore(path, clock=clock, token_factory=Tokens("abcdefgh"))
-    context = first.create(
-        account_id="account-one",
-        selector=selector(),
-        refs=[ref("t1", "task:first")],
-        completeness=[CompletenessFact(scope="project:launch", seen=1)],
-    )
-
-    second = SQLiteContextStore(path, clock=clock, token_factory=Tokens("ijklmnop"))
-    restored = second.get(context.id, account_id="account-one")
-    extended = second.extend(
-        context.id,
-        account_id="account-one",
-        refs=[ref("t2", "task:second")],
-        completeness=[
-            CompletenessFact(scope="project:launch", seen=2, total=2, complete=True)
-        ],
-    )
-
-    assert restored == context
-    assert extended.complete is True
-    assert second.resolve(context.id, "t2", account_id="account-one").revision == (
-        "revision-1"
-    )
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert b"account-one" not in path.read_bytes()
-
-
-def test_sqlite_context_enforces_expiry_and_account_isolation(tmp_path: Path) -> None:
-    clock = Clock()
-    store = SQLiteContextStore(
-        tmp_path / "contexts.sqlite3",
-        clock=clock,
-        token_factory=Tokens("abcdefgh"),
-    )
-    context = store.create(
-        account_id="account-one",
-        selector=selector(),
-        ttl=timedelta(seconds=1),
-    )
-
-    with pytest.raises(ContextNotFound):
-        store.get(context.id, account_id="account-two")
-    clock.now += timedelta(seconds=1)
-    with pytest.raises(ContextExpired) as error:
-        store.get(context.id, account_id="account-one")
-    assert error.value.selector == context.selector
-    # The expired evidence is a tombstone, not a usable mutable context.
-    with pytest.raises(ContextNotFound):
-        store.get(context.id, account_id="account-one")
-
-
 def test_expiry_payload_keeps_bounded_include_recovery_without_account_data() -> None:
     clock = Clock()
     include = ReadIncludeSelector(find="Anchor", within="project:launch")
@@ -265,174 +204,11 @@ def test_expiry_payload_keeps_bounded_include_recovery_without_account_data() ->
     assert "account-one" not in repr(error.value)
 
 
-def test_sqlite_extension_uses_the_same_merge_rules_as_memory(
-    tmp_path: Path,
-) -> None:
-    store = SQLiteContextStore(
-        tmp_path / "contexts.sqlite3",
-        clock=Clock(),
-        token_factory=Tokens("abcdefgh"),
-    )
-    context = store.create(
-        account_id="account-one",
-        selector=selector(),
-        refs=[ref("t1", "task:first")],
-        completeness=[CompletenessFact(scope="project:launch", seen=2)],
-    )
-
-    with pytest.raises(ContextConflict, match="reference changed"):
-        store.extend(
-            context.id,
-            account_id="account-one",
-            refs=[ref("t1", "task:attacker")],
-        )
-    with pytest.raises(ContextConflict, match="moved backwards"):
-        store.extend(
-            context.id,
-            account_id="account-one",
-            completeness=[CompletenessFact(scope="project:launch", seen=1)],
-        )
-
-
-def test_context_id_collisions_fail_closed_after_bounded_retries(
-    tmp_path: Path,
-) -> None:
+def test_context_id_collisions_fail_closed_after_bounded_retries() -> None:
     memory = MemoryContextStore(clock=Clock(), token_factory=lambda: "same-token")
     memory.create(account_id="one", selector=selector())
     with pytest.raises(ContextConflict, match="unique context ID"):
         memory.create(account_id="one", selector=selector())
-
-    sqlite = SQLiteContextStore(
-        tmp_path / "contexts.sqlite3",
-        clock=Clock(),
-        token_factory=lambda: "same-token",
-    )
-    sqlite.create(account_id="one", selector=selector())
-    with pytest.raises(ContextConflict, match="unique context ID"):
-        sqlite.create(account_id="one", selector=selector())
-
-
-def test_sqlite_rejects_tampered_rows_without_exposing_payload(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "contexts.sqlite3"
-    store = SQLiteContextStore(path, clock=Clock(), token_factory=Tokens("abcdefgh"))
-    context = store.create(account_id="one", selector=selector())
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "UPDATE read_contexts SET refs_json = ? WHERE context_id = ?",
-            ('{"credential":"secret"}', context.id),
-        )
-
-    with pytest.raises(ContextCorrupt) as caught:
-        store.get(context.id, account_id="one")
-
-    assert "secret" not in str(caught.value)
-
-
-@pytest.mark.parametrize(
-    "account_binding",
-    [
-        "account-one",
-        "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
-    ],
-)
-def test_sqlite_rejects_noncanonical_account_binding(
-    tmp_path: Path, account_binding: str
-) -> None:
-    path = tmp_path / "contexts.sqlite3"
-    store = SQLiteContextStore(path, clock=Clock(), token_factory=Tokens("abcdefgh"))
-    context = store.create(account_id="one", selector=selector())
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "UPDATE read_contexts SET account_binding = ? WHERE context_id = ?",
-            (account_binding, context.id),
-        )
-
-    with pytest.raises(ContextCorrupt, match="stored context failed integrity checks"):
-        store.get(context.id, account_id="one")
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("purpose", "evil"),
-        ("view", "not_a_view"),
-        ("limit", "20"),
-        ("within", None),
-    ],
-)
-def test_sqlite_rejects_tampered_selector_values(
-    tmp_path: Path, field: str, value: object
-) -> None:
-    path = tmp_path / "contexts.sqlite3"
-    store = SQLiteContextStore(path, clock=Clock(), token_factory=Tokens("abcdefgh"))
-    context = store.create(account_id="one", selector=selector())
-    with sqlite3.connect(path) as connection:
-        row = connection.execute(
-            "SELECT selector_json FROM read_contexts WHERE context_id = ?",
-            (context.id,),
-        ).fetchone()
-        assert row is not None
-        selector_data = json.loads(row[0])
-        selector_data[field] = value
-        connection.execute(
-            "UPDATE read_contexts SET selector_json = ? WHERE context_id = ?",
-            (json.dumps(selector_data), context.id),
-        )
-
-    with pytest.raises(ContextCorrupt, match="stored context failed integrity checks"):
-        store.get(context.id, account_id="one")
-
-
-def test_sqlite_extensions_serialize_without_lost_refs(tmp_path: Path) -> None:
-    path = tmp_path / "private" / "contexts.sqlite3"
-    path.parent.mkdir(mode=0o755)
-    store = SQLiteContextStore(path, clock=Clock(), token_factory=Tokens("abcdefgh"))
-    context = store.create(
-        account_id="one",
-        selector=selector(),
-        completeness=[
-            CompletenessFact(
-                scope="project:launch",
-                seen=0,
-                total=2,
-                next_cursor="cursor-first",
-            )
-        ],
-    )
-
-    def extend(entry: ContextRef) -> None:
-        store.extend(
-            context.id,
-            account_id="one",
-            refs=[entry],
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        list(
-            workers.map(
-                extend,
-                [ref("t1", "task:first"), ref("t2", "task:second")],
-            )
-        )
-
-    store.extend(
-        context.id,
-        account_id="one",
-        completeness=[
-            CompletenessFact(
-                scope="project:launch", seen=2, total=2, complete=True
-            )
-        ],
-    )
-    stored = store.get(context.id, account_id="one")
-    assert {entry.ref for entry in stored.refs} == {"t1", "t2"}
-    assert stored.complete is True
-    assert path.parent.stat().st_mode & 0o777 == 0o700
-    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_types_reject_unsafe_or_inconsistent_context_facts() -> None:
@@ -451,7 +227,7 @@ def test_types_reject_unsafe_or_inconsistent_context_facts() -> None:
         )
 
 
-def test_change_include_selector_round_trips_in_both_stores(tmp_path: Path) -> None:
+def test_change_include_selector_round_trips() -> None:
     include = ReadIncludeSelector(find="Anchor", within="project:launch")
     contextual = ReadSelector(
         purpose="change", item_id="task:target", includes=(include,)
@@ -462,25 +238,3 @@ def test_change_include_selector_round_trips_in_both_stores(tmp_path: Path) -> N
     assert contextual.recovery_arguments()["include"] == [
         {"find": "Anchor", "within": "project:launch"}
     ]
-
-    sqlite = SQLiteContextStore(
-        tmp_path / "contexts.sqlite3",
-        clock=Clock(),
-        token_factory=Tokens("sqlite123"),
-    )
-    sqlite_context = sqlite.create(account_id="one", selector=contextual)
-    assert sqlite.get(sqlite_context.id, account_id="one").selector == contextual
-
-
-@pytest.mark.parametrize("view", ["repeating", "weekly_review"])
-def test_sqlite_round_trips_views_from_the_shared_view_set(
-    tmp_path: Path, view: str
-) -> None:
-    store = SQLiteContextStore(
-        tmp_path / "contexts.sqlite3",
-        clock=Clock(),
-        token_factory=Tokens("abcdefgh"),
-    )
-    selector = ReadSelector(view=view)
-    context = store.create(account_id="one", selector=selector)
-    assert store.get(context.id, account_id="one").selector.view == view

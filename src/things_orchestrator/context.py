@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
-import os
 import re
-import sqlite3
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from .interface import Purpose, View, validate_read_selector
 
 _CONTEXT_ID = re.compile(r"^ctx_[A-Za-z0-9_-]{8,120}$")
 _SHORT_REF = re.compile(r"^[a-z][a-z0-9]{0,11}$")
-_ACCOUNT_BINDING = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class ContextError(Exception):
@@ -50,10 +45,6 @@ class UnknownReference(ContextError):
 
 class ContextConflict(ContextError):
     """An extension conflicts with facts already bound to the context."""
-
-
-class ContextCorrupt(ContextError):
-    """Stored context data failed its typed integrity checks."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +224,7 @@ class ReadContext:
 
 
 class ContextStore(Protocol):
-    """Persistence seam for short-lived read evidence."""
+    """In-process seam for short-lived read evidence."""
 
     def create(
         self,
@@ -245,71 +236,6 @@ class ContextStore(Protocol):
         ttl: timedelta = timedelta(minutes=30),
     ) -> ReadContext: ...
 
-    def get(self, context_id: str, *, account_id: str) -> ReadContext: ...
-
-    def resolve(self, context_id: str, ref: str, *, account_id: str) -> ContextRef: ...
-
-    def extend(
-        self,
-        context_id: str,
-        *,
-        account_id: str,
-        refs: Iterable[ContextRef] = (),
-        completeness: Iterable[CompletenessFact] = (),
-    ) -> ReadContext: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _ContextPolicy:
-    """Shared account, expiry, and merge rules for context stores."""
-
-    clock: Callable[[], datetime]
-
-    def expires_at(self, ttl: timedelta) -> datetime:
-        return _aware_now(self.clock) + _valid_ttl(ttl)
-
-    def build(
-        self,
-        *,
-        context_id: str,
-        account_id: str,
-        selector: ReadSelector,
-        refs: Iterable[ContextRef],
-        completeness: Iterable[CompletenessFact],
-        expires_at: datetime,
-    ) -> ReadContext:
-        return _new_context(
-            context_id=context_id,
-            account_id=account_id,
-            selector=selector,
-            refs=refs,
-            completeness=completeness,
-            expires_at=expires_at,
-        )
-
-    def require(
-        self, context: ReadContext | None, *, account_id: str
-    ) -> ReadContext:
-        if context is None or not _same_account(context, account_id):
-            raise ContextNotFound("context is unknown")
-        if context.expires_at <= _aware_now(self.clock):
-            raise ContextExpired(selector=context.selector)
-        return context
-
-    def extend(
-        self,
-        context: ReadContext | None,
-        *,
-        account_id: str,
-        refs: Iterable[ContextRef],
-        completeness: Iterable[CompletenessFact],
-    ) -> ReadContext:
-        return _extend(
-            self.require(context, account_id=account_id),
-            refs=refs,
-            completeness=completeness,
-        )
-
 
 class MemoryContextStore:
     """In-process context adapter for tests and local sessions."""
@@ -320,7 +246,7 @@ class MemoryContextStore:
         clock: Callable[[], datetime],
         token_factory: Callable[[], str],
     ) -> None:
-        self._policy = _ContextPolicy(clock=clock)
+        self._clock = clock
         self._token_factory = token_factory
         self._contexts: dict[str, ReadContext] = {}
 
@@ -333,13 +259,13 @@ class MemoryContextStore:
         completeness: Iterable[CompletenessFact] = (),
         ttl: timedelta = timedelta(minutes=30),
     ) -> ReadContext:
-        context = self._policy.build(
+        context = _new_context(
             context_id=self._available_id(),
             account_id=account_id,
             selector=selector,
             refs=refs,
             completeness=completeness,
-            expires_at=self._policy.expires_at(ttl),
+            expires_at=_aware_now(self._clock) + _valid_ttl(ttl),
         )
         self._contexts[context.id] = context
         return context
@@ -347,7 +273,7 @@ class MemoryContextStore:
     def get(self, context_id: str, *, account_id: str) -> ReadContext:
         context = self._contexts.get(context_id)
         try:
-            return self._policy.require(context, account_id=account_id)
+            return self._require(context, account_id=account_id)
         except ContextExpired:
             self._contexts.pop(context_id, None)
             raise
@@ -364,9 +290,8 @@ class MemoryContextStore:
         completeness: Iterable[CompletenessFact] = (),
     ) -> ReadContext:
         try:
-            extended = self._policy.extend(
-                self._contexts.get(context_id),
-                account_id=account_id,
+            extended = _extend(
+                self._require(self._contexts.get(context_id), account_id=account_id),
                 refs=refs,
                 completeness=completeness,
             )
@@ -376,155 +301,21 @@ class MemoryContextStore:
         self._contexts[context_id] = extended
         return extended
 
+    def _require(
+        self, context: ReadContext | None, *, account_id: str
+    ) -> ReadContext:
+        if context is None or not _same_account(context, account_id):
+            raise ContextNotFound("context is unknown")
+        if context.expires_at <= _aware_now(self._clock):
+            raise ContextExpired(selector=context.selector)
+        return context
+
     def _available_id(self) -> str:
         for _ in range(8):
             candidate = _context_id(self._token_factory())
             if candidate not in self._contexts:
                 return candidate
         raise ContextConflict("could not allocate a unique context ID")
-
-
-class SQLiteContextStore:
-    """Process-safe SQLite adapter for contexts that survive server restarts."""
-
-    def __init__(
-        self,
-        path: Path,
-        *,
-        clock: Callable[[], datetime],
-        token_factory: Callable[[], str],
-    ) -> None:
-        self.path = path
-        self._policy = _ContextPolicy(clock=clock)
-        self._token_factory = token_factory
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.parent.chmod(0o700)
-        flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags, 0o600)
-        os.close(descriptor)
-        path.chmod(0o600)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS read_contexts (
-                    context_id TEXT PRIMARY KEY,
-                    account_binding TEXT NOT NULL,
-                    selector_json TEXT NOT NULL,
-                    refs_json TEXT NOT NULL,
-                    completeness_json TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
-                )
-                """
-            )
-        path.chmod(0o600)
-
-    def create(
-        self,
-        *,
-        account_id: str,
-        selector: ReadSelector,
-        refs: Iterable[ContextRef] = (),
-        completeness: Iterable[CompletenessFact] = (),
-        ttl: timedelta = timedelta(minutes=30),
-    ) -> ReadContext:
-        expiry = self._policy.expires_at(ttl)
-        saved_refs = tuple(refs)
-        saved_completeness = tuple(completeness)
-        for _ in range(8):
-            context = self._policy.build(
-                context_id=_context_id(self._token_factory()),
-                account_id=account_id,
-                selector=selector,
-                refs=saved_refs,
-                completeness=saved_completeness,
-                expires_at=expiry,
-            )
-            try:
-                with self._connect() as connection:
-                    self._insert(connection, context)
-                return context
-            except sqlite3.IntegrityError:
-                continue
-        raise ContextConflict("could not allocate a unique context ID")
-
-    def get(self, context_id: str, *, account_id: str) -> ReadContext:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM read_contexts WHERE context_id = ?", (context_id,)
-            ).fetchone()
-            try:
-                context = _context_from_row(row) if row is not None else None
-            except ContextCorrupt:
-                raise
-            try:
-                return self._policy.require(context, account_id=account_id)
-            except ContextExpired:
-                connection.execute(
-                    "DELETE FROM read_contexts WHERE context_id = ?", (context_id,)
-                )
-                connection.commit()
-                raise
-
-    def resolve(self, context_id: str, ref: str, *, account_id: str) -> ContextRef:
-        return self.get(context_id, account_id=account_id).resolve(ref)
-
-    def extend(
-        self,
-        context_id: str,
-        *,
-        account_id: str,
-        refs: Iterable[ContextRef] = (),
-        completeness: Iterable[CompletenessFact] = (),
-    ) -> ReadContext:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM read_contexts WHERE context_id = ?", (context_id,)
-            ).fetchone()
-            try:
-                current = _context_from_row(row) if row is not None else None
-            except ContextCorrupt:
-                raise
-            try:
-                extended = self._policy.extend(
-                    current,
-                    account_id=account_id,
-                    refs=refs,
-                    completeness=completeness,
-                )
-            except ContextExpired:
-                connection.execute(
-                    "DELETE FROM read_contexts WHERE context_id = ?", (context_id,)
-                )
-                connection.commit()
-                raise
-            self._update(connection, extended)
-            return extended
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    @staticmethod
-    def _insert(connection: sqlite3.Connection, context: ReadContext) -> None:
-        values = _context_values(context)
-        connection.execute(
-            "INSERT INTO read_contexts VALUES (?, ?, ?, ?, ?, ?)", values
-        )
-
-    @staticmethod
-    def _update(connection: sqlite3.Connection, context: ReadContext) -> None:
-        values = _context_values(context)
-        connection.execute(
-            """
-            UPDATE read_contexts SET
-                account_binding = ?, selector_json = ?, refs_json = ?,
-                completeness_json = ?, expires_at = ?
-            WHERE context_id = ?
-            """,
-            (*values[1:], values[0]),
-        )
 
 
 def _new_context(
@@ -628,165 +419,3 @@ def _valid_ttl(ttl: timedelta) -> timedelta:
     if ttl <= timedelta(0) or ttl > timedelta(hours=24):
         raise ValueError("context ttl must be more than zero and at most 24 hours")
     return ttl
-
-
-def _context_values(context: ReadContext) -> tuple[str, str, str, str, str, str]:
-    return (
-        context.id,
-        context.account_binding,
-        json.dumps(asdict(context.selector), separators=(",", ":"), sort_keys=True),
-        json.dumps(
-            [asdict(entry) for entry in context.refs],
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        json.dumps(
-            [asdict(fact) for fact in context.completeness],
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        context.expires_at.isoformat(),
-    )
-
-
-def _context_from_row(row: sqlite3.Row) -> ReadContext:
-    try:
-        selector_data = _json_mapping(row["selector_json"])
-        ref_data = _json_list(row["refs_json"])
-        fact_data = _json_list(row["completeness_json"])
-        context_id = _text(row["context_id"])
-        account_binding = _text(row["account_binding"])
-        if _ACCOUNT_BINDING.fullmatch(account_binding) is None:
-            raise ValueError("stored account binding is not canonical")
-        expires_at = _text(row["expires_at"])
-        return ReadContext(
-            id=context_id,
-            account_binding=account_binding,
-            selector=_selector_from_data(selector_data),
-            refs=tuple(_ref_from_data(entry) for entry in ref_data),
-            completeness=tuple(_fact_from_data(entry) for entry in fact_data),
-            expires_at=datetime.fromisoformat(expires_at),
-        )
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ContextCorrupt("stored context failed integrity checks") from error
-
-
-def _selector_from_data(data: dict[str, object]) -> ReadSelector:
-    required = {
-        "purpose",
-        "view",
-        "item_id",
-        "find",
-        "within",
-        "from_date",
-        "to_date",
-        "limit",
-    }
-    if set(data) - required - {"includes"}:
-        raise ValueError("stored object has an invalid shape")
-    if not required <= set(data):
-        raise ValueError("stored object has an invalid shape")
-    includes_data = data.get("includes", [])
-    if not isinstance(includes_data, list):
-        raise ValueError("includes must be a list")
-    includes = tuple(_include_from_data(entry) for entry in includes_data)
-    return ReadSelector(
-        purpose=cast(Purpose, _required_text_or_none(data["purpose"], "purpose")),
-        view=cast(View | None, _required_text_or_none(data["view"], "view")),
-        item_id=_required_text_or_none(data["item_id"], "item_id"),
-        find=_required_text_or_none(data["find"], "find"),
-        within=_required_text_or_none(data["within"], "within"),
-        from_date=_required_text_or_none(data["from_date"], "from_date"),
-        to_date=_required_text_or_none(data["to_date"], "to_date"),
-        limit=_required_int(data["limit"], "limit"),
-        includes=includes,
-    )
-
-
-def _include_from_data(data: object) -> ReadIncludeSelector:
-    if not isinstance(data, dict) or not all(isinstance(key, str) for key in data):
-        raise ValueError("stored include must be an object")
-    _require_keys(data, {"item_id", "find", "within"})
-    return ReadIncludeSelector(
-        item_id=_required_text_or_none(data["item_id"], "include item_id"),
-        find=_required_text_or_none(data["find"], "include find"),
-        within=_required_text_or_none(data["within"], "include within"),
-    )
-
-
-def _ref_from_data(data: dict[str, object]) -> ContextRef:
-    _require_keys(data, {"ref", "exact_id", "revision"})
-    return ContextRef(
-        ref=_required_text(data["ref"], "ref"),
-        exact_id=_required_text(data["exact_id"], "exact_id"),
-        revision=_required_text(data["revision"], "revision"),
-    )
-
-
-def _fact_from_data(data: dict[str, object]) -> CompletenessFact:
-    _require_keys(data, {"scope", "seen", "total", "next_cursor", "complete"})
-    total = data["total"]
-    if total is not None:
-        total = _required_int(total, "total")
-    next_cursor = data["next_cursor"]
-    if next_cursor is not None:
-        next_cursor = _required_text(next_cursor, "next_cursor")
-    complete = data["complete"]
-    if type(complete) is not bool:
-        raise ValueError("complete must be a boolean")
-    return CompletenessFact(
-        scope=_required_text(data["scope"], "scope"),
-        seen=_required_int(data["seen"], "seen"),
-        total=total,
-        next_cursor=next_cursor,
-        complete=complete,
-    )
-
-
-def _json_mapping(value: object) -> dict[str, object]:
-    decoded = json.loads(_text(value))
-    if not isinstance(decoded, dict) or not all(
-        isinstance(key, str) for key in decoded
-    ):
-        raise ValueError("stored JSON must be an object")
-    return decoded
-
-
-def _json_list(value: object) -> list[dict[str, object]]:
-    decoded = json.loads(_text(value))
-    if not isinstance(decoded, list) or not all(
-        isinstance(entry, dict)
-        and all(isinstance(key, str) for key in entry)
-        for entry in decoded
-    ):
-        raise ValueError("stored JSON must be a list of objects")
-    return cast(list[dict[str, object]], decoded)
-
-
-def _text(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("stored value must be text")
-    return value
-
-
-def _required_text(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{name} must be text")
-    return value
-
-
-def _required_text_or_none(value: object, name: str) -> str | None:
-    if value is None:
-        return None
-    return _required_text(value, name)
-
-
-def _required_int(value: object, name: str) -> int:
-    if type(value) is not int:
-        raise ValueError(f"{name} must be an integer")
-    return value
-
-
-def _require_keys(data: dict[str, object], expected: set[str]) -> None:
-    if set(data) != expected:
-        raise ValueError("stored object has an invalid shape")
