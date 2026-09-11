@@ -298,7 +298,7 @@ def test_atomic_write_failure_preserves_existing_config_and_removes_temp_file(
     def fail_replace(_source: object, _target: object) -> None:
         raise OSError("simulated atomic replace failure")
 
-    monkeypatch.setattr("things_orchestrator.routines_config.os.replace", fail_replace)
+    monkeypatch.setattr("things_orchestrator.config.os.replace", fail_replace)
 
     with pytest.raises(OSError, match="atomic replace failure"):
         set_routines_enabled(True, email="owner@example.com", path=path)
