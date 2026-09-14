@@ -411,12 +411,14 @@ class ThingsWorkspace:
                 )
             if item.kind in {"area", "project"} and not item.heading:
                 if item.kind == "project":
+                    records = self._library.project(item.id)
                     return self._page(
-                        self._library.project(item.id),
+                        records,
                         call.limit,
                         full=False,
                         instruction="This Project and its contents.",
                         view="project",
+                        membership_revision=self._scope_revision(records),
                         call=call,
                     )
                 return self._page(
@@ -514,8 +516,8 @@ class ThingsWorkspace:
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
-        audit_membership_revision = (
-            self._scope_revision(visible) if view == "audit" else None
+        membership_revision = (
+            self._scope_revision(visible) if view in {"audit", "project"} else None
         )
         if view == "audit":
             visible = self._filter_audit_items(visible, call.signals_any)
@@ -551,7 +553,7 @@ class ThingsWorkspace:
             public_scope=(
                 self._area_scope_revision() if view in {"system", "audit"} else None
             ),
-            membership_revision=audit_membership_revision,
+            membership_revision=membership_revision,
             call=call,
         )
 
@@ -2973,6 +2975,12 @@ class ThingsWorkspace:
             or (
                 saved.view == "audit"
                 and self._scope_revision(self._library.audit())
+                != saved.membership_revision
+            )
+            or (
+                saved.view == "project"
+                and saved.ids
+                and self._scope_revision(self._library.project(saved.ids[0]))
                 != saved.membership_revision
             )
             or (

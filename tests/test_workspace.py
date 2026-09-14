@@ -943,6 +943,38 @@ def test_area_and_project_ids_expand_to_children_on_review() -> None:
     assert {item.id for item in by_view_project.items} == {project.id, nested.id}
 
 
+def test_project_cursor_stales_when_a_child_is_added() -> None:
+    project = Record(uuid="kitchen", kind="project", title="Kitchen")
+    tasks = [
+        Record(
+            uuid=f"task-{index:02d}",
+            kind="task",
+            title=f"Task {index:02d}",
+            parent_uuid=project.uuid,
+        )
+        for index in range(50)
+    ]
+    module = workspace([project, *tasks])
+
+    first = module.read(ReadCall(id=project.id, limit=40))
+    assert first.status == "ok"
+    assert first.cursor is not None
+    assert len(first.items) == 40
+
+    module._library.records["new-child"] = Record(  # noqa: SLF001
+        uuid="new-child",
+        kind="task",
+        title="New child",
+        parent_uuid=project.uuid,
+    )
+
+    continued = module.read(ReadCall(cursor=first.cursor, limit=40))
+
+    assert continued.status == "stale"
+    assert continued.next == "read"
+    assert continued.items == []
+
+
 def test_truncated_audit_pages_without_accumulating_write_context() -> None:
     records = [
         Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
