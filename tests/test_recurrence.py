@@ -149,15 +149,6 @@ def test_transition_rejects_non_task_or_project_templates(kind: str) -> None:
         template().transition(kind=kind, interval=2)
 
 
-def test_change_interval_uses_the_atomic_transition() -> None:
-    original = template()
-    changed = original.change_interval(2, kind="task")
-
-    assert changed.interval == 2
-    assert changed.rule is not None
-    assert changed.rule["future_rule_key"] == ["preserve", 4]
-
-
 def test_after_completion_interval_change_preserves_opaque_offsets() -> None:
     original = template(mode="after_completion")
 

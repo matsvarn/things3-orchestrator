@@ -341,33 +341,6 @@ class ApplyResult:
     read_back_verified: bool = False
 
 
-class Library(Protocol):
-    def refresh(self, *, force: bool = False) -> None: ...
-    def get(self, value: str) -> Record | None: ...
-    def find(
-        self, text: str, limit: int = 10, into: str | None = None
-    ) -> list[Record]: ...
-    def today(self, *, today: date) -> list[Record]: ...
-    def inbox(self, limit: int = 15) -> list[Record]: ...
-    def week(self, *, today: date, limit: int = 15) -> list[Record]: ...
-    def trash(self) -> list[Record]: ...
-    def area(self, value: str) -> list[Record]: ...
-    def audit(self) -> list[Record]: ...
-    def project(self, value: str) -> list[Record]: ...
-    def heading_title(self, item: Record) -> str | None: ...
-    def next_index(self, write: Write) -> int: ...
-    def system(self) -> list[Record]: ...
-    def areas(self) -> list[Record]: ...
-    def children_in_area(self, uuid: str) -> list[Record]: ...
-    def parent_title(self, item: Record) -> str | None: ...
-    def resolve_into(self, value: str) -> Record | None | list[Record]: ...
-    def tag_uuid(self, title: str) -> str | None: ...
-    def waiting_tag(self) -> str: ...
-    def recurrence_instances(self, template_uuid: str) -> list[Record]: ...
-    def apply(self, writes: list[Write]) -> ApplyResult: ...
-    def matches(self, writes: list[Write]) -> bool: ...
-
-
 def template_uuid_of(item: Record) -> str | None:
     """Return the stored template UUID for an instance, from either representation."""
 
@@ -411,34 +384,6 @@ class MemoryLibrary:
         if kind is not None and item.public_kind != kind:
             return None
         return item
-
-    def find(self, text: str, limit: int = 10, into: str | None = None) -> list[Record]:
-        needle = text.casefold()
-        hits = [
-            item
-            for item in self._open()
-            if needle in item.title.casefold()
-            or needle in item.notes.casefold()
-            or any(needle in line.title.casefold() for line in item.checklists)
-        ]
-        if into:
-            home = self.resolve_into(into)
-            if isinstance(home, list) or home is None:
-                return []
-            if home.kind == "area":
-                hits = [
-                    item
-                    for item in hits
-                    if item.area_uuid == home.uuid or item.uuid == home.uuid
-                ]
-            else:
-                hits = [
-                    item
-                    for item in hits
-                    if item.parent_uuid == home.uuid or item.uuid == home.uuid
-                ]
-        hits.sort(key=lambda item: (item.sort_index, item.title))
-        return hits[:limit]
 
     def today(self, *, today: date) -> list[Record]:
         ranked: list[tuple[int, Record]] = []
@@ -625,22 +570,6 @@ class MemoryLibrary:
             ],
             key=lambda item: (item.sort_index, item.title),
         )
-
-    def resolve_into(self, value: str) -> Record | None | list[Record]:
-        exact = self.get(value)
-        if exact is not None and exact.kind in {"area", "project"}:
-            return exact
-        needle = value.casefold()
-        matches = [
-            item
-            for item in self._open()
-            if item.kind in {"area", "project"} and item.title.casefold() == needle
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if not matches:
-            return None
-        return matches
 
     def tag_uuid(self, title: str) -> str | None:
         for uuid, name in self.tags.items():

@@ -7,7 +7,6 @@ import json
 from typing import Any, cast
 
 from mcp.types import Tool, ToolAnnotations
-from pydantic import BaseModel
 
 ITEM_ID = r"^(task|project|area|heading):[^\s:]+$"
 
@@ -29,12 +28,12 @@ _IDEMPOTENT_WRITE = ToolAnnotations(
 )
 
 
-def advertised_output_schema(model: type[BaseModel] | None = None) -> dict[str, Any]:
+def advertised_output_schema() -> dict[str, Any]:
     """Flattened PublicResult schema that tolerates additive object properties."""
 
     from .v2 import PublicResult, flat_schema
 
-    return cast(dict[str, Any], _allow_additional_object_properties(flat_schema(model or PublicResult)))
+    return cast(dict[str, Any], _allow_additional_object_properties(flat_schema(PublicResult)))
 
 
 def advertised_tools() -> tuple[Tool, ...]:
