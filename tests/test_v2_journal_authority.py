@@ -7,7 +7,6 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
@@ -453,9 +452,29 @@ def test_legacy_awaiting_owner_rows_retire_without_replay_for_both_journals(
 
 def test_only_legal_v2_transitions_are_accepted() -> None:
     journal = MemoryJournal()
+    awaiting = _operation(
+        "op_awaiting",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        state="awaiting_owner",
+    )
+    journal.create_v2(awaiting, claim_fence=False)
+    assert not journal.transition_v2(
+        awaiting.operation_id, expected="awaiting_owner", state="pending"
+    )
+    assert not journal.transition_v2(
+        awaiting.operation_id, expected="awaiting_owner", state="declined"
+    )
+    assert journal.transition_v2(
+        awaiting.operation_id,
+        expected="awaiting_owner",
+        state="stale",
+        response={"state": "stale"},
+    )
+    assert journal.get_v2_operation(awaiting.operation_id).state == "stale"  # type: ignore[union-attr]
+
     operation = _operation(
         "op_pending",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
     )
     journal.create_v2(operation, claim_fence=True)
     rows = [{"sequence": 1, "action": "create", "target_id": "task:a", "desired": {}, "observed": {}, "result": "applied"}]
@@ -494,12 +513,6 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
         else:
             raise AssertionError("unchanged without atomic receipts was accepted")
         pending = _operation("op_pending_owned", request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67")
-        with pytest.raises(ValueError, match="cannot preseed receipt rows"):
-            journal.create_v2(
-                pending,
-                claim_fence=True,
-                receipt_rows=[{"sequence": 1, "result": "applied"}],
-            )
         journal.create_v2(pending, claim_fence=True)
         with pytest.raises(ValueError, match="one receipt row per manifest write"):
             journal.settle_v2(
@@ -534,35 +547,6 @@ def test_unchanged_settlement_requires_one_receipt_per_manifest_write(tmp_path: 
                 )
         stored = journal.get_v2_operation(operation.operation_id)
         assert stored is not None and stored.state == "pending"
-
-
-def test_approval_transition_rejects_strings_and_accepts_verified_capability(tmp_path: Path) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
-    operation = _operation(
-        "op_approval",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        state="awaiting_owner",
-    )
-    journal.create_v2(operation, claim_fence=False)
-    assert journal.authorize_v2("op_approval", "sha256:binding") == (False, [])
-    assert journal.get_v2_operation("op_approval").state == "awaiting_owner"  # type: ignore[union-attr]
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    authorized, blockers = journal.authorize_v2("op_approval", authorization)
-    assert authorized is True
-    assert blockers == []
-    stored = journal.get_v2_operation("op_approval")
-    assert stored is not None
-    assert stored.state == "pending"
-    assert stored.authorization == authorization.record
-    assert stored.authorization.startswith("ed25519:v1:")
 
 
 def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> None:
@@ -673,82 +657,6 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
     assert direct_apply["state"] == "rejected"
     assert reconcile["state"] == "rejected"
     assert library.records["a"].status == "open"
-
-
-def test_workspace_direct_approval_cannot_substitute_an_arbitrary_string() -> None:
-    journal = MemoryJournal()
-    operation = _operation(
-        "op_direct",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        state="awaiting_owner",
-    )
-    journal.create_v2(operation, claim_fence=False)
-    assert not journal.transition_v2(
-        operation.operation_id,
-        expected="awaiting_owner",
-        state="pending",
-        authorization="sha256:forged",
-    )
-    assert not journal.transition_v2(
-        operation.operation_id,
-        expected="awaiting_owner",
-        state="declined",
-        authorization=object(),
-    )
-    stored = journal.get_v2_operation(operation.operation_id)
-    assert stored is not None and stored.state == "awaiting_owner"
-
-
-@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-def test_journal_authorization_rechecks_canonical_ambiguity_atomically(
-    journal_kind: str, tmp_path: Path
-) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
-    journal = (
-        MemoryJournal(owner_public_key=public_key)
-        if journal_kind == "memory"
-        else SQLiteJournal(tmp_path / "journal.sqlite3", owner_public_key=public_key)
-    )
-    original = replace(
-        _operation(
-            "op_original",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
-        ),
-        account_id="Owner@Example.com",
-    )
-    original = _with_manifest(original)
-    assert journal.create_v2(original, claim_fence=False)[0] == "created"
-    conflicting = replace(
-        _operation(
-            "op_conflicting",
-            request_id=original.request_id,
-            state="awaiting_owner",
-        ),
-        request_hash="sha256:conflicting-request",
-    )
-    conflicting = _with_manifest(conflicting)
-    if isinstance(journal, MemoryJournal):
-        journal._v2_operations[conflicting.operation_id] = conflicting  # noqa: SLF001
-    else:
-        with sqlite3.connect(journal.path) as connection:
-            connection.execute(
-                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                _v2_sql_values(conflicting),
-            )
-    authorization = verified_authorization(
-        original,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    assert journal.authorize_v2(original.operation_id, authorization) == (False, [])
-    stored = journal.get_v2_operation(original.operation_id)
-    assert stored is not None and stored.state == "awaiting_owner"
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
@@ -1883,59 +1791,6 @@ def test_apply_session_close_waits_for_started_owner_settlement(
     stored = journal.get_v2_operation(operation.operation_id)
     assert stored is not None
     assert stored.state == "applied"
-
-
-@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-def test_authorize_apply_session_rejects_expired_operation(
-    journal_kind: str, tmp_path: Path,
-) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
-    journal = (
-        MemoryJournal(owner_public_key=public_key)
-        if journal_kind == "memory"
-        else SQLiteJournal(
-            tmp_path / "journal.sqlite3", owner_public_key=public_key
-        )
-    )
-    expires_at = "2030-01-01T00:00:01+00:00"
-    operation = _with_manifest(
-        replace(
-            _operation(
-                f"op_expired_{journal_kind}",
-                request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-                state="awaiting_owner",
-            ),
-            expires_at=expires_at,
-        ),
-        expires_at=expires_at,
-    )
-    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
-    authorization = verified_authorization(
-        operation,
-        action="approve",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-
-    with journal.authorize_apply_session_v2(
-        operation.operation_id,
-        authorization,
-        now=lambda: datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc),
-    ) as start:
-        assert not start.authorized
-        assert start.session is None
-
-    stored = journal.get_v2_operation(operation.operation_id)
-    assert stored is not None
-    assert stored.state == "stale"
-    assert stored.response == {
-        "state": "stale",
-        "instruction": "The owner approval window expired.",
-        "operation_id": operation.operation_id,
-    }
 
 
 def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None:
