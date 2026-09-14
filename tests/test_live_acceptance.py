@@ -84,6 +84,20 @@ def test_live_acceptance_exercises_dogfood_workflow_and_verifies_cleanup_in_one_
     assert operation is not None and operation.state == "applied"
 
 
+def test_live_acceptance_save_does_not_lock_a_shared_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    state_path = parent / "acceptance.json"
+    LiveAcceptanceRunner(
+        LocalMCPClient(ThingsMCPServer(ThingsV2(ThingsWorkspace(MemoryLibrary([]))))),
+        state_path,
+        target={"url": "memory://test", "commit": "abc"},
+    )._save({"schema_version": 1, "phase": "new"})
+
+    assert state_path.stat().st_mode & 0o777 == 0o600
+    assert parent.stat().st_mode & 0o777 == 0o755
+
+
 def test_live_acceptance_refuses_to_replay_after_partial_cleanup(
     tmp_path: Path,
 ) -> None:

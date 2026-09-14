@@ -6,7 +6,7 @@ from secrets import token_hex
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
-from .config import _atomic_write
+from .config import _atomic_replace
 
 
 class ToolClient(Protocol):
@@ -99,7 +99,7 @@ class LiveAcceptanceRunner:
         return state
 
     def _save(self, state: State) -> None:
-        _atomic_write(
+        _atomic_replace(
             self.state_path,
             json.dumps(state, indent=2, sort_keys=True) + "\n",
         )
