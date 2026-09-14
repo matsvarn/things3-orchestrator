@@ -57,7 +57,6 @@ src/things_orchestrator/client_sync.py
 src/things_orchestrator/cloud.py
 src/things_orchestrator/config.py
 src/things_orchestrator/consistency.py
-src/things_orchestrator/context.py
 src/things_orchestrator/deployment.py
 src/things_orchestrator/diagnostics.py
 src/things_orchestrator/doctor.py
@@ -100,7 +99,6 @@ tests/test_client_sync.py
 tests/test_cloud.py
 tests/test_config.py
 tests/test_consistency.py
-tests/test_context.py
 tests/test_deployment.py
 tests/test_diagnostics.py
 tests/test_doctor.py
@@ -129,5 +127,4 @@ tests/test_v2_journal_authority.py
 tests/test_v2_recurrence.py
 tests/test_workflow_skill.py
 tests/test_workspace.py
-tests/test_workspace_context.py
 uv.lock

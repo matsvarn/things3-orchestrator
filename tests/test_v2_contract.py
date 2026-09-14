@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from things_orchestrator.cloud import CloudError, CloudWriteRejected
 from things_orchestrator.journal import (
-    JsonDict,
     MemoryJournal,
     SQLiteJournal,
     V2Operation,
@@ -43,6 +42,23 @@ def _server(*records: Record, journal: MemoryJournal | None = None) -> ThingsMCP
         account_id="owner@example.com",
     )
     return ThingsMCPServer(ThingsV2(workspace))
+
+
+def _install_v2_test_fence(
+    journal: MemoryJournal, *, account_id: str, operation_id: str
+) -> None:
+    journal._v2_operations[operation_id] = V2Operation(  # noqa: SLF001
+        account_id=account_id,
+        api_version="2",
+        request_id="00000000-0000-4000-8000-000000000000",
+        request_hash="sha256:test",
+        operation_id=operation_id,
+        tool="test",
+        state="pending",
+        manifest={},
+        manifest_hash="sha256:test",
+        safety_policy_digest="sha256:test",
+    )
 
 
 def test_default_discovery_is_exactly_the_bounded_eight() -> None:
@@ -617,7 +633,7 @@ def test_capture_supports_nested_tasks_only_under_new_project() -> None:
 
 def test_fence_rejection_does_not_consume_request_id() -> None:
     journal = MemoryJournal()
-    journal.install_v2_test_fence(account_id="owner@example.com", operation_id="op_block")
+    _install_v2_test_fence(journal, account_id="owner@example.com", operation_id="op_block")
     server = _server(journal=journal)
     first = asyncio.run(server.call_tool("things_capture", {"request_id": REQUEST, "items": [{"kind": "task", "title": "A"}]}))
     assert first.structured_content["state"] == "rejected"
@@ -1463,7 +1479,6 @@ def test_unchanged_result_rechecks_after_claiming_the_fence() -> None:
             operation: V2Operation,
             *,
             claim_fence: bool,
-            receipt_rows: list[JsonDict] | None = None,
         ) -> tuple[
             Literal["created", "existing", "conflict", "blocked"],
             V2Operation | None,
@@ -1473,7 +1488,6 @@ def test_unchanged_result_rechecks_after_claiming_the_fence() -> None:
             return super().create_v2(
                 operation,
                 claim_fence=claim_fence,
-                receipt_rows=receipt_rows,
             )
 
     journal = RacingJournal()
