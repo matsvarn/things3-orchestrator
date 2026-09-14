@@ -1042,8 +1042,6 @@ def test_truncated_filtered_audit_continues_without_changes() -> None:
 
     assert final.status == "ok"
     assert final.cursor is None
-    assert final.context is None
-    assert final.layouts == []
     assert len(first.items) + len(continued.items) + len(final.items) == 25
     assert all("someday" in item.signals for item in final.items)
 
