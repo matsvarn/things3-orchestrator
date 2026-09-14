@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Hashable, Sequence
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -42,36 +42,16 @@ View = Literal[
     "inbox",
     "week",
     "repeating",
-    "weekly_review",
     "system",
     "project",
     "area",
     "audit",
-    "diagnostics",
     "logbook",
     "trash",
     "tags",
 ]
-INCLUDE_LIMIT = 40
 BULK_ID_LIMIT = 10
 START_PATTERN = r"^(today|evening|tomorrow|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
-Purpose = Literal["review", "change", "organize", "recurrence"]
-WeeklyCategory = Literal[
-    "inbox",
-    "stale_start",
-    "overdue",
-    "today",
-    "upcoming",
-    "possible_duplicate",
-    "waiting",
-    "project_without_candidate_task",
-    "project_review",
-    "active_task_in_someday_project",
-    "open_task_with_finished_checklist",
-    "recently_completed_project",
-    "someday",
-    "weekly_candidate",
-]
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
@@ -83,8 +63,8 @@ _TAG_ID = r"^tag:[^\s:]+$"
 _HEADING_ID = r"^heading:[^\s:]+$"
 _ORDER_MIN = -(2**63)
 _ORDER_MAX = 2**63 - 1
-_CONTEXT_ID = r"^ctx_[A-Za-z0-9_-]{8,120}$"
-_SHORT_REF = r"^[a-z][a-z0-9]{0,11}$"
+
+
 def _validate_date(value: str | None, *, name: str) -> str | None:
     if value is None:
         return None
@@ -95,37 +75,21 @@ def _validate_date(value: str | None, *, name: str) -> str | None:
     return value
 
 
-def _validate_reminder(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as error:
-        raise ValueError("remind_at must be an ISO date-time") from error
-    if parsed.utcoffset() is None:
-        raise ValueError("remind_at needs a UTC offset")
-    return value
-
-
 def _duplicates(values: Sequence[Hashable]) -> bool:
     return len(values) != len(set(values))
 
 
 def validate_read_selector(
     *,
-    purpose: Purpose,
     view: View | None,
     item_id: str | None,
     find: str | None,
     within: str | None,
     from_date: str | None,
     to_date: str | None,
-    has_includes: bool = False,
 ) -> None:
-    """Shared purpose/view/within/logbook rules for ReadCall and ReadSelector."""
+    """Shared view/within/logbook rules for ReadCall."""
 
-    if purpose not in get_args(Purpose):
-        raise ValueError("invalid selector purpose")
     if view is not None and view not in get_args(View):
         raise ValueError("invalid selector view")
     if within is not None and find is None and view not in {"project", "area"}:
@@ -155,57 +119,6 @@ def validate_read_selector(
         and date.fromisoformat(from_date) > date.fromisoformat(to_date)
     ):
         raise ValueError("from must not be after to")
-    if purpose == "change" and item_id is None and find is None:
-        raise ValueError("change purpose needs an exact id or unique find")
-    if has_includes and purpose not in {"review", "change", "organize"}:
-        raise ValueError("include is only available for review, change, or organize")
-    if purpose == "recurrence" and item_id is None:
-        raise ValueError("recurrence purpose needs an exact Task or Project id")
-    if purpose == "recurrence" and any(
-        value is not None
-        for value in (
-            view,
-            find,
-            within,
-            from_date,
-            to_date,
-        )
-    ):
-        raise ValueError(
-            "recurrence purpose accepts only an exact Task or Project id"
-        )
-    if purpose == "organize" and not (
-        item_id is not None
-        or find is not None
-        or (view == "project" and within is not None)
-    ):
-        raise ValueError(
-            "organize purpose needs an exact Project id, Project find, or Project read"
-        )
-    if purpose == "organize" and item_id is not None:
-        if not item_id.startswith("project:"):
-            raise ValueError("organize purpose needs an exact Project id")
-    if purpose == "organize" and view == "project":
-        if within is None or not within.startswith("project:"):
-            raise ValueError("organize Project view needs a Project scope")
-
-
-class ReadInclude(StrictModel):
-    """One bounded item lookup to add to a change context."""
-
-    id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
-    find: str | None = Field(default=None, min_length=1, max_length=500)
-    within: str | None = Field(default=None, pattern=_CONTAINER_ID, max_length=512)
-
-    @model_validator(mode="after")
-    def valid_include(self) -> Self:
-        if (self.id is None) == (self.find is None):
-            raise ValueError("include needs exactly one id or find")
-        if self.within is not None and self.find is None:
-            raise ValueError("include within needs find")
-        if self.within == "trash":
-            raise ValueError("include within must identify an Area or Project")
-        return self
 
 
 class ReadCall(StrictModel):
@@ -219,7 +132,6 @@ class ReadCall(StrictModel):
         serialize_by_alias=True,
     )
 
-    purpose: Purpose = "review"
     view: View | None = None
     id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
     find: str | None = Field(default=None, min_length=1, max_length=500)
@@ -228,11 +140,9 @@ class ReadCall(StrictModel):
     to_date: str | None = Field(default=None, alias="to", max_length=10)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
     limit: int = Field(default=20, ge=1, le=40)
-    include: list[ReadInclude] = Field(default_factory=list, max_length=INCLUDE_LIMIT)
     ids: list[str] = Field(default_factory=list, max_length=BULK_ID_LIMIT)
     fields: list[DetailField] = Field(default_factory=list, max_length=4)
     signals_any: list[str] = Field(default_factory=list, max_length=8)
-    category: WeeklyCategory | None = None
 
     @field_validator("from_date")
     @classmethod
@@ -243,14 +153,6 @@ class ReadCall(StrictModel):
     @classmethod
     def valid_to_date(cls, value: str | None) -> str | None:
         return _validate_date(value, name="to")
-
-    @field_validator("include")
-    @classmethod
-    def unique_includes(cls, value: list[ReadInclude]) -> list[ReadInclude]:
-        keys = [(row.id, row.find, row.within) for row in value]
-        if _duplicates(keys):
-            raise ValueError("include lookups must be unique")
-        return value
 
     @field_validator("ids")
     @classmethod
@@ -275,10 +177,10 @@ class ReadCall(StrictModel):
         ):
             raise ValueError("cursor cannot combine with another item selector")
         if self.cursor is not None and (
-            self.include or self.ids or self.signals_any or self.fields or self.category
+            self.ids or self.signals_any or self.fields
         ):
             raise ValueError(
-                "cursor cannot combine with include, ids, fields, signals_any, or category"
+                "cursor cannot combine with ids, fields, or signals_any"
             )
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
@@ -300,19 +202,14 @@ class ReadCall(StrictModel):
             raise ValueError("signals_any values need 1 to 80 characters")
         if _duplicates(self.signals_any):
             raise ValueError("signals_any cannot contain duplicates")
-        if self.category is not None and self.view != "weekly_review":
-            raise ValueError("category needs view weekly_review")
         if "fields" in self.model_fields_set and not self.ids:
             raise ValueError("fields needs ids")
         if _duplicates(self.fields):
             raise ValueError("fields cannot contain duplicates")
-        if self.ids and self.purpose != "review":
-            raise ValueError("ids is only available for review purpose")
         if self.ids and (
             self.within is not None
             or self.from_date is not None
             or self.to_date is not None
-            or self.include
         ):
             raise ValueError("ids cannot combine with another selector")
         if self.within == "trash":
@@ -321,17 +218,13 @@ class ReadCall(StrictModel):
             if self.view is not None:
                 raise ValueError("within trash cannot combine with view")
         validate_read_selector(
-            purpose=self.purpose,
             view=self.view,
             item_id=self.id,
             find=self.find,
             within=self.within,
             from_date=self.from_date,
             to_date=self.to_date,
-            has_includes=bool(self.include),
         )
-        if self.cursor is not None and "purpose" in self.model_fields_set:
-            raise ValueError("cursor cannot combine with purpose")
         return self
 
 
@@ -416,7 +309,6 @@ class RecurrenceFact(StrictModel):
 
 
 class ItemFact(StrictModel):
-    ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
     id: str = Field(pattern=ITEM_ID, max_length=512)
     revision: str | None = Field(default=None, min_length=1, max_length=512)
     kind: Kind
@@ -460,23 +352,6 @@ class ItemFact(StrictModel):
         return value
 
 
-class DiagnosticRepair(StrictModel):
-    conflict: str = Field(min_length=1, max_length=80)
-    repair_kind: str = Field(min_length=1, max_length=80)
-
-
-class DiagnosticFact(StrictModel):
-    """One native-state conflict, including tag conflicts."""
-
-    id: str = Field(pattern=_DIAGNOSTIC_ID, max_length=512)
-    kind: Literal["task", "project", "area", "heading", "tag"]
-    title: str = Field(min_length=1, max_length=1000)
-    conflicts: list[str] = Field(min_length=1, max_length=20)
-    repair: str | None = Field(default=None, max_length=400)
-    repair_kind: str | None = Field(default=None, max_length=80)
-    repairs: list[DiagnosticRepair] = Field(default_factory=list, max_length=20)
-
-
 class ReviewSection(StrictModel):
     key: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=200)
@@ -500,94 +375,14 @@ class ReviewSection(StrictModel):
         return value
 
 
-class ContextFact(StrictModel):
-    id: str = Field(pattern=_CONTEXT_ID, max_length=124)
-    purpose: Purpose
-    expires_at: str = Field(max_length=40)
-    complete: bool
-
-    @field_validator("expires_at")
-    @classmethod
-    def valid_expiry(cls, value: str) -> str:
-        checked = _validate_reminder(value)
-        assert checked is not None
-        return checked
-
-
-class LayoutSectionFact(StrictModel):
-    heading_ref: str | None = Field(default=None, pattern=_SHORT_REF, max_length=12)
-    task_refs: list[str] = Field(default_factory=list, max_length=120)
-    hidden_count: int = Field(default=0, ge=0, le=10_000)
-    hidden_signals: list[str] = Field(default_factory=list, max_length=8)
-
-    @field_validator("task_refs")
-    @classmethod
-    def unique_task_refs(cls, value: list[str]) -> list[str]:
-        if _duplicates(value) or any(
-            re.fullmatch(_SHORT_REF, item) is None for item in value
-        ):
-            raise ValueError("layout task_refs need unique context refs")
-        return value
-
-    @field_validator("hidden_signals")
-    @classmethod
-    def unique_hidden_signals(cls, value: list[str]) -> list[str]:
-        if _duplicates(value):
-            raise ValueError("hidden_signals cannot contain duplicates")
-        return value
-
-
-class LayoutFact(StrictModel):
-    project_ref: str = Field(pattern=_SHORT_REF, max_length=12)
-    sections: list[LayoutSectionFact] = Field(default_factory=list, max_length=120)
-    complete: bool
-
-    @model_validator(mode="after")
-    def unique_refs(self) -> Self:
-        tasks = [ref for section in self.sections for ref in section.task_refs]
-        headings = [
-            section.heading_ref
-            for section in self.sections
-            if section.heading_ref is not None
-        ]
-        if _duplicates(tasks) or _duplicates(headings):
-            raise ValueError("layout refs must appear once")
-        return self
-
-
-class RecoveryFact(StrictModel):
-    code: Literal[
-        "context_required",
-        "context_expired",
-        "context_incomplete",
-        "context_conflict",
-        "context_corrupt",
-    ]
-    retry: Literal["read", "same", "rebuild"]
-    read: dict[str, Any] | None = None
-
-    @field_validator("read")
-    @classmethod
-    def valid_read(
-        cls, value: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
-        if value is not None:
-            ReadCall.model_validate(value)
-        return value
-
-
 class Result(StrictModel):
     next: Next
     status: ResultStatus
     instruction: str = Field(min_length=1, max_length=1000)
     items: list[ItemFact] = Field(default_factory=list, max_length=120)
     tags: list[TagFact] = Field(default_factory=list, max_length=400)
-    diagnostics: list[DiagnosticFact] = Field(default_factory=list, max_length=40)
     sections: list[ReviewSection] = Field(default_factory=list, max_length=40)
-    layouts: list[LayoutFact] = Field(default_factory=list, max_length=120)
     signals: list[str] = Field(default_factory=list, max_length=160)
-    context: ContextFact | None = None
-    recovery: RecoveryFact | None = None
     receipt: str | None = Field(default=None, min_length=1, max_length=512)
     scope_revision: str | None = Field(default=None, min_length=1, max_length=512)
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
@@ -602,15 +397,6 @@ class Result(StrictModel):
         ):
             raise ValueError("missing_ids need unique exact item or tag IDs")
         return value
-
-    @model_validator(mode="after")
-    def contextual_facts_have_context(self) -> Self:
-        refs = [item.ref for item in self.items if item.ref is not None]
-        if _duplicates(refs):
-            raise ValueError("item context refs must be unique")
-        if (refs or self.layouts) and self.context is None:
-            raise ValueError("context refs and layouts need context")
-        return self
 
 
 def dump_result(result: Result) -> dict[str, Any]:

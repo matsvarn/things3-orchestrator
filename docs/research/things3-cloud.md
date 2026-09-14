@@ -186,7 +186,7 @@ Risks this repo does **not** mitigate:
 
 Steal:
 
-- Disk cache: NDJSON history + versioned folded state + byte offset. We currently re-pull from `start-index=0` after process restart.
+- Disk cache: NDJSON history + versioned folded state + byte offset.
 - Overlap fetch with a stale fold, then fold again.
 - Pagination stop condition `end-total-content-size >= latest-total-content-size` — verify against our GROUP COUNT vs `current-item-index` loop; keep whichever matches live Cloud.
 - Mac headers on **all** methods (`Schema`, `App-Id`, `things-client-info`), not only POST.
@@ -196,8 +196,6 @@ Steal:
 - Emit `Task7` for Task6 and Task7 mutations. Keep `Area3` for Area writes. Filter `tp=2` and `rr` templates from listings.
 - Sparse patches that can send JSON `null` to clear `sr`/`tir`/`dd`.
 - Atomic tmp+rename for any cache we add; version the snapshot so old files are discarded.
-- If we add checklists later: `ChecklistItem3` as sibling UUIDs in the same commit, parent `ts`.
-- If we add reorder later: `ix` gap / stride-1024 rebalance, not fractional indexes.
 
 Skip / do not copy:
 
@@ -207,6 +205,5 @@ Skip / do not copy:
 - Setting `md` on create (they send now; we send `md: null` on create). Do not change create `md` without a Things.app round-trip.
 - SHA1-truncating hyphenated UUIDs on parse. Keep one identity form (compact Base58) end to end.
 - Plaintext `auth.json` and logging full commit bodies.
-- Heading writes, recurrence writes, and `agr` placement. They have not shipped these either.
 - Wiping nothing when `history-key` changes. If we cache, invalidate on key mismatch.
 - Cache-only `--no-sync` as the MCP default. Fine as an optional fast path, not as the only refresh.

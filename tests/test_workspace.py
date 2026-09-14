@@ -92,54 +92,16 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     assert item.revision.startswith("r_")
 
 
-def test_change_find_resolves_one_active_item_and_hides_revision() -> None:
-    module = workspace(
-        [
-            Record(uuid="invoice", kind="task", title="Pay invoice"),
-            Record(uuid="other", kind="task", title="Book travel"),
-        ]
-    )
-
-    result = module.read(ReadCall(purpose="change", find="invoice"))
-
-    assert result.status == "ok"
-    assert result.context is not None
-    assert result.context.purpose == "change"
-    assert result.items[0].ref is not None
-    assert result.items[0].revision is None
-
-
-def test_change_find_requires_one_active_match() -> None:
-    empty = workspace([Record(uuid="one", kind="task", title="Pay rent")])
-    no_match = empty.read(ReadCall(purpose="change", find="invoice"))
-    assert no_match.status == "needs_input"
-    assert no_match.context is None
-    assert no_match.recovery is None
-
-    ambiguous = workspace(
-        [
-            Record(uuid="one", kind="task", title="Pay invoice"),
-            Record(uuid="two", kind="task", title="Email invoice"),
-        ]
-    ).read(ReadCall(purpose="change", find="invoice"))
-    assert ambiguous.status == "needs_input"
-    assert ambiguous.context is None
-    assert "matches 2 items" in ambiguous.instruction
-    assert {item.id for item in ambiguous.items} == {"task:one", "task:two"}
-    assert all(item.revision is None for item in ambiguous.items)
-
-
-def test_change_find_ignores_articles_for_one_unique_title_match() -> None:
+def test_find_ignores_articles_for_one_unique_title_match() -> None:
     module = workspace([Record(uuid="plants", kind="task", title="Water plants")])
 
-    result = module.read(ReadCall(purpose="change", find="water the plants"))
+    result = module.read(ReadCall(find="water the plants"))
 
     assert result.status == "ok"
     assert result.items[0].id == "task:plants"
-    assert result.context is not None
 
 
-def test_change_find_keeps_article_fallback_ambiguous() -> None:
+def test_find_keeps_article_fallback_ambiguous() -> None:
     module = workspace(
         [
             Record(uuid="one", kind="task", title="Water plants"),
@@ -147,10 +109,9 @@ def test_change_find_keeps_article_fallback_ambiguous() -> None:
         ]
     )
 
-    result = module.read(ReadCall(purpose="change", find="water the plants"))
+    result = module.read(ReadCall(find="water the plants"))
 
-    assert result.status == "needs_input"
-    assert result.next == "ask"
+    assert result.status == "ok"
     assert {item.id for item in result.items} == {"task:one", "task:two"}
 
 
@@ -174,23 +135,23 @@ def test_change_find_keeps_article_fallback_ambiguous() -> None:
         ),
     ],
 )
-def test_change_find_article_fallback_matches_notes_and_checklists(
+def test_find_article_fallback_matches_notes_and_checklists(
     record: Record, query: str
 ) -> None:
-    result = workspace([record]).read(ReadCall(purpose="change", find=query))
+    result = workspace([record]).read(ReadCall(find=query))
 
     assert result.status == "ok"
     assert result.items[0].id == f"task:{record.uuid}"
 
 
-def test_change_find_does_not_stem_or_fuzz_token_fallback() -> None:
+def test_find_does_not_stem_or_fuzz_token_fallback() -> None:
     module = workspace([Record(uuid="plants", kind="task", title="Water plants")])
 
-    result = module.read(ReadCall(purpose="change", find="water planting"))
+    result = module.read(ReadCall(find="water planting"))
 
-    assert result.status == "needs_input"
-    assert result.context is None
-    assert "found no item" in result.instruction
+    assert result.status == "ok"
+    assert result.items == []
+    assert "no match" in result.instruction.casefold()
 
 
 def test_find_includes_active_headings_for_rename() -> None:
@@ -199,11 +160,8 @@ def test_find_includes_active_headings_for_rename() -> None:
     )
     module = workspace([heading])
 
-    contextual = module.read(ReadCall(purpose="change", find="Prep"))
     review = module.read(ReadCall(find="Prep"))
 
-    assert contextual.status == "ok"
-    assert contextual.items[0].id == "heading:prep"
     assert review.status == "ok"
     assert review.items[0].id == "heading:prep"
     assert review.instruction.startswith(
@@ -230,17 +188,6 @@ def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:
     assert "trashed" in next(
         item.signals for item in review.items if item.id == "task:trash"
     )
-
-    change = workspace(records).read(ReadCall(purpose="change", find="invoice"))
-    assert change.status == "needs_input"
-    assert change.context is None
-
-    restore = workspace(records).read(ReadCall(purpose="change", find="Prep trash"))
-    assert restore.status == "ok"
-    assert restore.context is not None
-    assert [item.id for item in restore.items if item.id == "task:trash"] == [
-        "task:trash"
-    ]
 
 
 def test_exact_read_exposes_heading_repeat_pattern_and_linked_copy() -> None:
@@ -333,12 +280,11 @@ def test_template_lists_both_recurrence_relationship_forms_without_duplicates() 
         via_uuid.id,
         via_links.id,
     ]
-    links_only = module.read(ReadCall(purpose="recurrence", id=via_links.id))
-    uuid_only = module.read(ReadCall(purpose="recurrence", id=via_uuid.id))
-    assert links_only.status == "ok"
-    assert uuid_only.status == "ok"
-    assert links_only.items[0].recurrence is not None
-    assert links_only.items[0].recurrence.template_id == template.id
+    links_only = detail(module, via_links.id)
+    uuid_only = detail(module, via_uuid.id)
+    assert links_only.recurrence is not None
+    assert uuid_only.recurrence is not None
+    assert links_only.recurrence.template_id == template.id
 
 
 def test_template_detail_pages_mixed_recurrence_relationships() -> None:
@@ -428,94 +374,7 @@ def test_template_detail_cursor_stales_when_an_instance_is_removed() -> None:
     assert stale.next == "read"
 
 
-def test_recurrence_read_verifies_template_and_generated_copy_relationship() -> None:
-    template = Record(
-        uuid="inspect-template",
-        kind="task",
-        title="Review",
-        recurrence=RecurrenceState(
-            role="template",
-            repeat_type="fixed",
-            rule={"tp": 0, "fu": 256, "fa": 1},
-        ),
-    )
-    copy = Record(
-        uuid="inspect-copy",
-        kind="task",
-        title="Review",
-        recurrence=RecurrenceState(
-            role="instance",
-            repeat_type="fixed",
-            template_uuid=template.uuid,
-            links=(template.uuid,),
-        ),
-    )
-    module = workspace([template, copy])
 
-    template_result = module.read(
-        ReadCall(purpose="recurrence", id=template.id)
-    )
-    copy_result = module.read(ReadCall(purpose="recurrence", id=copy.id))
-
-    assert template_result.status == "ok"
-    assert copy_result.status == "ok"
-    assert "recurrence_relationship_verified" in template_result.signals
-    assert "recurrence_relationship_verified" in copy_result.signals
-    assert template_result.items[0].recurrence is not None
-    assert copy_result.items[0].recurrence is not None
-    assert copy.id in template_result.items[0].recurrence.linked_item_ids
-    assert copy_result.items[0].recurrence.template_id == template.id
-
-
-def test_recurrence_read_verifies_repeating_project_relationship() -> None:
-    template = Record(
-        uuid="inspect-project-template",
-        kind="project",
-        title="Release train",
-        recurrence=RecurrenceState(
-            role="template",
-            repeat_type="fixed",
-            rule={"tp": 0, "fu": 256, "fa": 1},
-        ),
-    )
-    copy = Record(
-        uuid="inspect-project-copy",
-        kind="project",
-        title="Release train",
-        recurrence=RecurrenceState(
-            role="instance",
-            repeat_type="fixed",
-            template_uuid=template.uuid,
-            links=(template.uuid,),
-        ),
-    )
-    module = workspace([template, copy])
-
-    template_result = module.read(ReadCall(purpose="recurrence", id=template.id))
-    copy_result = module.read(ReadCall(purpose="recurrence", id=copy.id))
-
-    assert template_result.status == copy_result.status == "ok"
-    assert copy.id in template_result.items[0].recurrence.linked_item_ids
-    assert copy_result.items[0].recurrence.template_id == template.id
-
-
-def test_recurrence_read_rejects_dangling_generated_copy() -> None:
-    copy = Record(
-        uuid="dangling-copy",
-        kind="task",
-        title="Broken repeat",
-        recurrence=RecurrenceState(
-            role="instance",
-            repeat_type="fixed",
-            template_uuid="missing-template",
-            links=("missing-template",),
-        ),
-    )
-
-    result = workspace([copy]).read(ReadCall(purpose="recurrence", id=copy.id))
-
-    assert result.status == "unsupported"
-    assert result.next == "stop"
 
 
 def test_trash_view_returns_recoverable_exact_items() -> None:
@@ -1077,18 +936,43 @@ def test_area_and_project_ids_expand_to_children_on_review() -> None:
 
     assert {item.id for item in by_id.items} == {area.id, project.id, loose.id}
     assert {item.id for item in by_view.items} == {area.id, project.id, loose.id}
-    assert by_id.context is None
-    assert all(item.ref is None for item in by_id.items)
 
     project_read = module.read(ReadCall(id=project.id))
-    assert {item.id for item in project_read.items} == {
-        project.id,
-        area.id,
-        nested.id,
-    }
-    assert project_read.context is not None
-    assert project_read.layouts
-    assert project_read.layouts[0].complete
+    assert {item.id for item in project_read.items} == {project.id, nested.id}
+    by_view_project = module.read(ReadCall(view="project", id=project.id))
+    assert {item.id for item in by_view_project.items} == {project.id, nested.id}
+
+
+def test_project_cursor_stales_when_a_child_is_added() -> None:
+    project = Record(uuid="kitchen", kind="project", title="Kitchen")
+    tasks = [
+        Record(
+            uuid=f"task-{index:02d}",
+            kind="task",
+            title=f"Task {index:02d}",
+            parent_uuid=project.uuid,
+        )
+        for index in range(50)
+    ]
+    module = workspace([project, *tasks])
+
+    first = module.read(ReadCall(id=project.id, limit=40))
+    assert first.status == "ok"
+    assert first.cursor is not None
+    assert len(first.items) == 40
+
+    module._library.records["new-child"] = Record(  # noqa: SLF001
+        uuid="new-child",
+        kind="task",
+        title="New child",
+        parent_uuid=project.uuid,
+    )
+
+    continued = module.read(ReadCall(cursor=first.cursor, limit=40))
+
+    assert continued.status == "stale"
+    assert continued.next == "read"
+    assert continued.items == []
 
 
 def test_truncated_audit_pages_without_accumulating_write_context() -> None:
@@ -1101,8 +985,6 @@ def test_truncated_audit_pages_without_accumulating_write_context() -> None:
     seen = []
     while True:
         assert page.status == "ok"
-        assert page.context is None
-        assert all(item.ref is None for item in page.items)
         assert page.truncated == (page.cursor is not None)
         seen.extend(item.id for item in page.items)
         if page.cursor is None:
@@ -1192,8 +1074,6 @@ def test_truncated_filtered_audit_continues_without_changes() -> None:
 
     assert final.status == "ok"
     assert final.cursor is None
-    assert final.context is None
-    assert final.layouts == []
     assert len(first.items) + len(continued.items) + len(final.items) == 25
     assert all("someday" in item.signals for item in final.items)
 
@@ -1293,160 +1173,10 @@ def test_audit_view_lists_each_active_item_once() -> None:
     assert result.items[2].direct_tag_ids == ["tag:errand"]
 
 
-def test_diagnostics_view_exposes_inbox_hybrids() -> None:
-    project = Record(uuid="launch", kind="project", title="Launch")
-    hybrid = Record(
-        uuid="stuck",
-        kind="task",
-        title="Stuck",
-        inbox=True,
-        parent_uuid=project.uuid,
-    )
-    clean = Record(uuid="ok", kind="task", title="Clean", parent_uuid=project.uuid)
-    module = workspace([project, hybrid, clean])
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert result.status == "ok"
-    assert [item.id for item in result.items] == [hybrid.id]
-    assert "inbox_with_project" in result.items[0].signals
 
 
-def test_diagnostics_treats_a_project_area_on_its_child_as_inherited() -> None:
-    work = Record(uuid="work", kind="area", title="Work")
-    private = Record(uuid="private", kind="area", title="Private")
-    project = Record(
-        uuid="launch",
-        kind="project",
-        title="Launch",
-        area_uuid=work.uuid,
-    )
-    inherited = Record(
-        uuid="ship",
-        kind="task",
-        title="Ship",
-        parent_uuid=project.uuid,
-        area_uuid=work.uuid,
-    )
-    conflicting = Record(
-        uuid="misfiled",
-        kind="task",
-        title="Misfiled",
-        parent_uuid=project.uuid,
-        area_uuid=private.uuid,
-    )
-    module = workspace([work, private, project, inherited, conflicting])
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert [item.id for item in result.items] == [conflicting.id]
-    assert "both_project_and_area" in result.items[0].signals
-    assert result.diagnostics[0].repair_kind == "owner_choice"
 
 
-def test_diagnostics_view_includes_completed_orphans_and_tag_conflicts() -> None:
-    both = Record(
-        uuid="both",
-        kind="task",
-        title="Both homes",
-        parent_uuid="launch",
-        area_uuid="home",
-        status="done",
-    )
-    orphan = Record(
-        uuid="orphan",
-        kind="task",
-        title="Orphan heading",
-        heading_uuid="missing-heading",
-        parent_uuid="launch",
-    )
-    library = MemoryLibrary(
-        [
-            Record(uuid="launch", kind="project", title="Launch"),
-            both,
-            orphan,
-        ]
-    )
-    library.tags["child"] = "Child"
-    library.tag_parents["child"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert result.status == "ok"
-    by_id = {item.id: item.signals for item in result.items}
-    assert "both_project_and_area" in by_id[both.id]
-    assert "orphaned_heading" in by_id[orphan.id]
-    assert any(
-        row.id == "tag:child" and "dangling_tag_parent" in row.conflicts
-        for row in result.diagnostics
-    )
-    assert result.truncated is False
-    child = next(row for row in result.diagnostics if row.id == "tag:child")
-    assert child.repair_kind == "clear_or_repair_tag_parent"
-    assert any(repair.conflict == "dangling_tag_parent" for repair in child.repairs)
-
-
-def test_tag_only_diagnostics_are_not_an_empty_state() -> None:
-    library = MemoryLibrary()
-    library.tags["child"] = "Child"
-    library.tag_parents["child"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert result.status == "ok"
-    assert result.items == []
-    assert result.diagnostics[0].id == "tag:child"
-    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
-    assert "No native-state conflicts" not in result.instruction
-    assert "test_residue" not in result.instruction
-    assert result.truncated is False
-
-
-def test_diagnostics_instruction_names_residue_only_when_that_signal_is_on_the_page() -> None:
-    loose = Record(
-        uuid="loose",
-        kind="task",
-        title="Install /unslop Skill…",
-        heading_uuid="gone",
-    )
-    leftover = Record(
-        uuid="probe",
-        kind="task",
-        title="__TO_PROBE__ leftover",
-    )
-    only_heading = workspace([loose]).read(ReadCall(view="diagnostics"))
-    assert only_heading.status == "ok"
-    assert "heading_without_project" in only_heading.diagnostics[0].conflicts
-    assert "test_residue" not in only_heading.instruction
-
-    page = workspace([loose, leftover]).read(ReadCall(view="diagnostics"))
-    assert page.status == "ok"
-    assert any("test_residue" in row.conflicts for row in page.diagnostics)
-    assert "Trash test_residue with this context and short refs." in page.instruction
-
-
-def test_tag_diagnostics_page_beyond_the_first_forty() -> None:
-    library = MemoryLibrary()
-    for index in range(45):
-        library.tags[f"t{index}"] = f"Tag {index}"
-        library.tag_parents[f"t{index}"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    first = module.read(ReadCall(view="diagnostics", limit=40))
-
-    assert first.status == "ok"
-    assert len(first.diagnostics) == 40
-    assert first.truncated is True
-    assert first.cursor is not None
-    second = module.read(ReadCall(cursor=first.cursor, limit=40))
-    assert second.status == "ok"
-    assert len(second.diagnostics) == 5
-    assert second.truncated is False
-    library.tag_parents["t0"] = ["t0"]
-    stale = module.read(ReadCall(cursor=first.cursor, limit=40))
-    assert stale.status == "stale"
 
 
 def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
@@ -1463,54 +1193,7 @@ def test_bulk_ids_return_found_items_when_one_id_is_missing() -> None:
     assert "task:missing" in result.instruction
 
 
-def test_diagnostics_bounds_a_long_conflicting_tag_title() -> None:
-    library = MemoryLibrary()
-    library.tags["long"] = "T" * 1001
-    library.tag_parents["long"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert result.status == "ok"
-    assert result.diagnostics[0].id == "tag:long"
-    assert len(result.diagnostics[0].title) == 1000
-    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
-    assert result.diagnostics[0].repair_kind == "clear_or_repair_tag_parent"
-
-
-def test_diagnostics_uses_untitled_for_a_blank_conflicting_tag() -> None:
-    library = MemoryLibrary()
-    library.tags["blank"] = "   "
-    library.tag_parents["blank"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    assert result.status == "ok"
-    assert result.diagnostics[0].title == "(untitled)"
-    assert "dangling_tag_parent" in result.diagnostics[0].conflicts
-
-
-def test_diagnostics_lists_every_repair_on_a_multi_conflict_item() -> None:
-    project = Record(uuid="launch", kind="project", title="Launch")
-    hybrid = Record(
-        uuid="stuck",
-        kind="task",
-        title="Stuck",
-        inbox=True,
-        parent_uuid=project.uuid,
-        start=NOW.date(),
-    )
-    module = workspace([project, hybrid])
-
-    result = module.read(ReadCall(view="diagnostics"))
-
-    row = next(item for item in result.diagnostics if item.id == hybrid.id)
-    kinds = {repair.repair_kind for repair in row.repairs}
-    assert row.repair_kind is None
-    assert "repeat_placement" in kinds
-    assert "clear_inbox_or_schedule" in kinds
-    assert [repair.conflict for repair in row.repairs] == row.conflicts
 
 
 def test_bulk_exact_read_truncates_checklist_text_in_the_shared_budget() -> None:
@@ -1560,89 +1243,7 @@ def test_bulk_exact_read_truncates_notes_across_the_batch() -> None:
     assert total == 100_000
 
 
-def test_diagnostics_serializes_a_maximally_conflicted_task() -> None:
-    heading = Record(
-        uuid="elsewhere",
-        kind="task",
-        title="Heading",
-        heading=True,
-        parent_uuid="other-project",
-    )
-    other = Record(uuid="other-project", kind="project", title="Other")
-    task = Record(
-        uuid="max",
-        kind="task",
-        title="Max",
-        inbox=True,
-        parent_uuid="missing-project",
-        area_uuid="missing-area",
-        someday=True,
-        tonight=True,
-        start=NOW.date(),
-        remind="25:99",
-        heading_uuid="elsewhere",
-        recurrence=RecurrenceState(
-            role="instance",
-            repeat_type="unknown",
-            template_uuid="missing-template",
-        ),
-    )
-    module = workspace([heading, other, task])
 
-    result = module.read(ReadCall(view="diagnostics"))
-
-    row = next(item for item in result.diagnostics if item.id == task.id)
-    assert result.status == "ok"
-    assert row.repair is None
-    assert row.repair_kind is None
-    assert len(row.conflicts) >= 12
-    assert [repair.conflict for repair in row.repairs] == row.conflicts
-
-
-def test_diagnostics_cursor_stales_when_a_title_changes() -> None:
-    library = MemoryLibrary()
-    library.tags["a"] = "First"
-    library.tags["b"] = "Second"
-    library.tag_parents["a"] = ["missing"]
-    library.tag_parents["b"] = ["missing"]
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    first = module.read(ReadCall(view="diagnostics", limit=1))
-    assert first.status == "ok"
-    assert first.cursor is not None
-    library.tags["b"] = "Renamed"
-    stale = module.read(ReadCall(cursor=first.cursor, limit=1))
-
-    assert stale.status == "stale"
-    assert stale.next == "read"
-
-
-def test_area_invalid_relations_recommend_clearing_the_relation() -> None:
-    task = Record(uuid="loose", kind="task", title="Loose")
-    project = Record(uuid="launch", kind="project", title="Launch")
-    under_task = Record(
-        uuid="area-under-task",
-        kind="area",
-        title="Under task",
-        parent_uuid=task.uuid,
-    )
-    home_project = Record(
-        uuid="area-home-project",
-        kind="area",
-        title="Home project",
-        area_uuid=project.uuid,
-    )
-    module = workspace([task, project, under_task, home_project])
-
-    result = module.read(ReadCall(view="diagnostics"))
-    by_id = {row.id: row for row in result.diagnostics}
-
-    assert "area_invalid_parent" in by_id[under_task.id].conflicts
-    assert by_id[under_task.id].repair_kind == "clear_area_parent"
-    assert by_id[under_task.id].repair == "clear the invalid Area parent"
-    assert "area_invalid_home" in by_id[home_project.id].conflicts
-    assert by_id[home_project.id].repair_kind == "clear_area_home"
-    assert by_id[home_project.id].repair == "clear the invalid Area home"
 
 
 def test_bulk_read_keeps_bounded_inherited_tags_when_already_truncated() -> None:
@@ -1932,27 +1533,6 @@ def test_bulk_tag_registry_caps_unique_tags_without_crashing() -> None:
     assert any("tags" in item.truncated_fields for item in result.items)
 
 
-def test_area_missing_relations_use_clear_repairs() -> None:
-    area = Record(
-        uuid="lost",
-        kind="area",
-        title="Lost",
-        parent_uuid="gone-project",
-        area_uuid="gone-area",
-    )
-    module = workspace([area])
-
-    result = module.read(ReadCall(view="diagnostics"))
-    row = next(item for item in result.diagnostics if item.id == area.id)
-    kinds = {repair.repair_kind for repair in row.repairs}
-    assert "area_missing_parent" in row.conflicts
-    assert "area_missing_home" in row.conflicts
-    assert "clear_area_parent" in kinds
-    assert "clear_area_home" in kinds
-    assert "rehome_item" not in kinds
-    assert "rehome_or_clear_area" not in kinds
-    assert row.repair_kind is None
-
 
 def test_audit_can_filter_by_signal() -> None:
     later = Record(uuid="later", kind="task", title="Later", someday=True)
@@ -2126,16 +1706,6 @@ def test_instance_recurrence_fact_inherits_the_template_rule() -> None:
     assert fact.recurrence.template_id == template.id
 
 
-def test_change_find_can_bind_trashed_work() -> None:
-    trashed = Record(uuid="old-invoice", kind="task", title="Pay invoice", trashed=True)
-    module = workspace([trashed])
-
-    result = module.read(ReadCall(purpose="change", find="invoice"))
-
-    assert result.status == "ok"
-    assert result.context is not None
-    assert [item.id for item in result.items] == [trashed.id]
-
 
 def test_paged_read_asks_for_the_cursor() -> None:
     records = [
@@ -2162,452 +1732,15 @@ def test_empty_week_does_not_use_find_copy() -> None:
     assert "find" not in result.instruction.casefold()
 
 
-def test_weekly_review_returns_exception_first_facts() -> None:
-    healthy = Record(uuid="healthy", kind="project", title="Submit tax return")
-    healthy_action = Record(
-        uuid="healthy-action",
-        kind="task",
-        title="Download bank statement",
-        parent_uuid=healthy.uuid,
-    )
-    gap = Record(uuid="gap", kind="project", title="Renew office contract")
-    waiting_action = Record(
-        uuid="waiting-action",
-        kind="task",
-        title="Receive landlord reply",
-        parent_uuid=gap.uuid,
-        tag_uuids=["waiting"],
-    )
-    vague = Record(uuid="vague", kind="project", title="Launch new site")
-    vague_action = Record(
-        uuid="vague-action",
-        kind="task",
-        title="Plan launch",
-        parent_uuid=vague.uuid,
-    )
-    inherited_wait = Record(
-        uuid="inherited-wait",
-        kind="project",
-        title="Receive contract",
-        tag_uuids=["waiting"],
-    )
-    inherited_wait_action = Record(
-        uuid="inherited-wait-action",
-        kind="task",
-        title="Read contract reply",
-        parent_uuid=inherited_wait.uuid,
-    )
-    parked = Record(
-        uuid="parked",
-        kind="project",
-        title="Create workshop",
-        someday=True,
-    )
-    parked_active_task = Record(
-        uuid="parked-active",
-        kind="task",
-        title="Draft workshop outline",
-        parent_uuid=parked.uuid,
-    )
-    records = [
-        healthy,
-        healthy_action,
-        gap,
-        waiting_action,
-        vague,
-        vague_action,
-        inherited_wait,
-        inherited_wait_action,
-        parked,
-        parked_active_task,
-        Record(uuid="inbox", kind="task", title="Book dentist", inbox=True),
-        Record(
-            uuid="stale",
-            kind="task",
-            title="Correct invoice",
-            start=NOW.date() - timedelta(days=2),
-        ),
-        Record(
-            uuid="today",
-            kind="task",
-            title="Submit report",
-            start=NOW.date(),
-        ),
-        Record(
-            uuid="upcoming",
-            kind="task",
-            title="Call accountant",
-            start=NOW.date() + timedelta(days=3),
-        ),
-        Record(uuid="someday", kind="task", title="Learn pottery", someday=True),
-        Record(
-            uuid="finished-checklist",
-            kind="task",
-            title="Send application",
-            checklists=[ChecklistLine("row", "Attach file", status="done")],
-        ),
-        Record(uuid="duplicate-1", kind="task", title="Review contract"),
-        Record(uuid="duplicate-2", kind="task", title="Review contract"),
-        Record(
-            uuid="done-project",
-            kind="project",
-            title="Move from Cursor to Paper",
-            status="done",
-            completed_at=NOW - timedelta(days=5),
-        ),
-    ]
-    module = workspace(records)
-    module._library.tags["waiting"] = "Waiting"  # noqa: SLF001
-
-    result = module.read(ReadCall(view="weekly_review", limit=40))
-
-    assert result.status == "ok"
-    assert result.context is None
-    assert [section.key for section in result.sections] == [
-        "get_clear",
-        "get_current",
-        "get_creative",
-        "plan_week",
-    ]
-    by_id = {item.id: item for item in result.items}
-    assert "project:healthy" not in by_id
-    assert "task:healthy-action" not in by_id
-    assert "project:gap" in by_id
-    assert "project_without_candidate_task" in by_id["project:gap"].signals
-    assert "project_without_candidate_task" in by_id["project:vague"].signals
-    assert "project_without_candidate_task" in by_id["project:inherited-wait"].signals
-    assert "waiting" in by_id["task:inherited-wait-action"].signals
-    assert "stale_start" in by_id["task:stale"].signals
-    assert "upcoming" in by_id["task:upcoming"].signals
-    assert "task:someday" not in by_id
-    assert "possible_duplicate" in by_id["task:duplicate-1"].signals
-    assert "active_task_in_someday_project" in by_id["task:parked-active"].signals
-    assert "open_task_with_finished_checklist" in by_id["task:finished-checklist"].signals
-    assert "has_checklist" in by_id["task:finished-checklist"].signals
-    assert "project:done-project" not in by_id
-    current = next(section for section in result.sections if section.key == "get_current")
-    assert "project:healthy" not in current.item_ids
-    assert any("Active Projects: 4" in signal for signal in current.signals)
-    assert any(
-        "recently completed Projects available on request: 1" in signal
-        for signal in current.signals
-    )
-    assert result.signals == [
-        "capture_check_required",
-        "calendar_scan_required",
-        "weekly_planning_optional",
-    ]
-    plan = next(section for section in result.sections if section.key == "plan_week")
-    assert plan.item_ids == []
-    assert any(NOW.date().isoformat() in signal for signal in plan.signals)
-    assert "real begin day" in result.instruction
-
-    planning = module.read(
-        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
-    )
-    planning_ids = {item.id for item in planning.items}
-    assert "task:healthy-action" in planning_ids
-    assert "project:healthy" not in planning_ids
-    assert "task:vague-action" not in planning_ids
-    assert "exact IDs and current revisions" in planning.instruction
-    assert "send those exact IDs" in planning.instruction
-    assert "Open one named category" not in planning.instruction
-
-    recent = module.read(
-        ReadCall(
-            view="weekly_review",
-            category="recently_completed_project",
-            limit=40,
-        )
-    )
-    assert [item.id for item in recent.items] == ["project:done-project"]
-    assert recent.context is None
-
-    project_review = module.read(
-        ReadCall(view="weekly_review", category="project_review", limit=40)
-    )
-    review_ids = {item.id for item in project_review.items}
-    assert review_ids == {
-        "task:healthy-action",
-        "task:waiting-action",
-        "task:vague-action",
-        "task:inherited-wait-action",
-    }
 
 
-def test_weekly_review_category_pages_keep_exact_revisions() -> None:
-    records = [
-        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
-        for index in range(45)
-    ]
-    module = workspace(records)
-
-    page = module.read(
-        ReadCall(view="weekly_review", category="someday", limit=10)
-    )
-    assert page.context is None
-    seen = len(page.items)
-    assert all(item.revision is not None for item in page.items)
-    while page.cursor is not None:
-        page = module.read(
-            ReadCall(view="weekly_review", cursor=page.cursor, limit=10)
-        )
-        assert page.context is None
-        assert all(item.revision is not None for item in page.items)
-        seen += len(page.items)
-
-    assert seen == 45
 
 
-def test_weekly_review_default_is_bounded_and_summarized() -> None:
-    records = [
-        Record(uuid=f"gap-{index}", kind="project", title=f"Finish result {index}")
-        for index in range(80)
-    ]
-    module = workspace(records)
-
-    result = module.read(ReadCall(view="weekly_review", limit=40))
-
-    assert len(result.items) == 40
-    assert result.cursor is None
-    assert result.context is None
-    assert "weekly_review_summarized" in result.signals
-    assert "do not repeat the default read" in result.instruction
-    returned_ids = {item.id for item in result.items}
-    assert all(
-        item_id in returned_ids
-        for section in result.sections
-        for item_id in section.item_ids
-    )
 
 
-def test_weekly_review_default_balances_exception_categories() -> None:
-    records = [
-        Record(
-            uuid=f"stale-{index}",
-            kind="task",
-            title=f"Stale {index}",
-            start=NOW.date() - timedelta(days=1),
-        )
-        for index in range(60)
-    ]
-    records.append(Record(uuid="gap", kind="project", title="Ship release"))
-    module = workspace(records)
-
-    result = module.read(ReadCall(view="weekly_review", limit=40))
-
-    assert len(result.items) == 40
-    assert "project:gap" in {item.id for item in result.items}
 
 
-def test_weekly_review_filtered_cursor_is_bounded_and_membership_safe() -> None:
-    records = [
-        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
-        for index in range(125)
-    ]
-    module = workspace(records)
 
-    first = module.read(
-        ReadCall(view="weekly_review", category="someday", limit=40)
-    )
-    assert first.cursor is not None
-    module._library.records["later-124"].title = "Changed while paging"  # noqa: SLF001
-
-    stale = module.read(ReadCall(view="weekly_review", cursor=first.cursor, limit=40))
-
-    assert stale.status == "stale"
-
-
-def test_weekly_review_filtered_category_returns_every_row() -> None:
-    records = [
-        Record(uuid=f"later-{index}", kind="task", title=f"Later {index}", someday=True)
-        for index in range(125)
-    ]
-    module = workspace(records)
-
-    page = module.read(
-        ReadCall(view="weekly_review", category="someday", limit=40)
-    )
-    seen = len(page.items)
-    assert page.context is None
-    while page.cursor is not None:
-        page = module.read(
-            ReadCall(view="weekly_review", cursor=page.cursor, limit=40)
-        )
-        seen += len(page.items)
-        assert page.context is None
-
-    assert seen == 125
-
-
-def test_weekly_review_project_category_returns_all_projects() -> None:
-    records: list[Record] = []
-    for index in range(125):
-        project = Record(uuid=f"project-{index}", kind="project", title=f"Result {index}")
-        records.extend(
-            [
-                project,
-                Record(
-                    uuid=f"action-{index}",
-                    kind="task",
-                    title=f"Write result {index}",
-                    parent_uuid=project.uuid,
-                ),
-            ]
-        )
-    module = workspace(records)
-
-    page = module.read(
-        ReadCall(view="weekly_review", category="project_review", limit=40)
-    )
-    seen = len(page.items)
-    assert [section.key for section in page.sections] == ["get_current"]
-    while page.cursor is not None:
-        page = module.read(
-            ReadCall(view="weekly_review", cursor=page.cursor, limit=40)
-        )
-        seen += len(page.items)
-
-    assert seen == 125
-
-
-def test_weekly_review_uses_first_task_in_native_heading_order() -> None:
-    project = Record(uuid="project", kind="project", title="Ship product")
-    later_heading = Record(
-        uuid="later-heading",
-        kind="task",
-        title="Later",
-        heading=True,
-        parent_uuid=project.uuid,
-        sort_index=2048,
-    )
-    first_heading = Record(
-        uuid="first-heading",
-        kind="task",
-        title="First",
-        heading=True,
-        parent_uuid=project.uuid,
-        sort_index=1024,
-    )
-    records = [
-        project,
-        later_heading,
-        first_heading,
-        Record(
-            uuid="later-task",
-            kind="task",
-            title="Send release notes",
-            parent_uuid=project.uuid,
-            heading_uuid=later_heading.uuid,
-            sort_index=0,
-        ),
-        Record(
-            uuid="first-task",
-            kind="task",
-            title="Plan launch",
-            parent_uuid=project.uuid,
-            heading_uuid=first_heading.uuid,
-            sort_index=9999,
-        ),
-    ]
-    module = workspace(records)
-
-    default = module.read(ReadCall(view="weekly_review", limit=40))
-    review = module.read(
-        ReadCall(view="weekly_review", category="project_review", limit=40)
-    )
-    planning = module.read(
-        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
-    )
-
-    assert "project:project" in {item.id for item in default.items}
-    assert [item.id for item in review.items] == ["task:first-task"]
-    assert planning.items == []
-
-
-def test_weekly_review_does_not_skip_a_waiting_first_task() -> None:
-    project = Record(uuid="project", kind="project", title="Sign contract")
-    records = [
-        project,
-        Record(
-            uuid="waiting-first",
-            kind="task",
-            title="Receive legal reply",
-            parent_uuid=project.uuid,
-            tag_uuids=["waiting"],
-            sort_index=0,
-        ),
-        Record(
-            uuid="later-action",
-            kind="task",
-            title="Sign contract PDF",
-            parent_uuid=project.uuid,
-            sort_index=1024,
-        ),
-    ]
-    module = workspace(records)
-    module._library.tags["waiting"] = "Waiting"  # noqa: SLF001
-
-    review = module.read(
-        ReadCall(view="weekly_review", category="project_review", limit=40)
-    )
-    planning = module.read(
-        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
-    )
-
-    assert [item.id for item in review.items] == ["task:waiting-first"]
-    assert planning.items == []
-
-
-def test_weekly_review_cursor_depends_on_date_and_tag_catalog() -> None:
-    now = [NOW]
-    records = [
-        Record(
-            uuid=f"wait-{index}",
-            kind="task",
-            title=f"Wait {index}",
-            tag_uuids=["waiting"],
-        )
-        for index in range(45)
-    ]
-    library = MemoryLibrary(records)
-    library.tags["waiting"] = "Waiting"
-    module = ThingsWorkspace(
-        library,
-        journal=MemoryJournal(),
-        clock=lambda: now[0],
-    )
-
-    dated = module.read(
-        ReadCall(view="weekly_review", category="waiting", limit=20)
-    )
-    assert dated.cursor is not None
-    now[0] = NOW + timedelta(days=1)
-    assert module.read(
-        ReadCall(view="weekly_review", cursor=dated.cursor, limit=20)
-    ).status == "stale"
-
-    now[0] = NOW
-    tagged = module.read(
-        ReadCall(view="weekly_review", category="waiting", limit=20)
-    )
-    assert tagged.cursor is not None
-    library.tags["waiting"] = "Delegated"
-    assert module.read(
-        ReadCall(view="weekly_review", cursor=tagged.cursor, limit=20)
-    ).status == "stale"
-
-
-def test_weekly_planning_excludes_tonight_without_a_start_date() -> None:
-    module = workspace(
-        [Record(uuid="tonight", kind="task", title="Send note", tonight=True)]
-    )
-
-    result = module.read(
-        ReadCall(view="weekly_review", category="weekly_candidate", limit=40)
-    )
-
-    assert result.items == []
 
 
 def test_find_within_trash_ignores_living_notes_hits() -> None:
@@ -2702,7 +1835,6 @@ def test_system_review_copy_names_area_scope() -> None:
 
     result = module.read(ReadCall(view="system"))
 
-    assert result.context is None
     assert "scope_revision" in result.instruction
     assert "Area" in result.instruction
     kitchen = next(item for item in result.items if item.id == project.id)
