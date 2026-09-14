@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Superseded by ADR 0006 and ADR 0007. The three-tool design below remains
+only as a historical record and is not the current implementation contract.
 
 ## Context
 

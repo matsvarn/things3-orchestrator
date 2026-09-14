@@ -184,7 +184,7 @@ def test_operations_describes_health_support_and_setup_recovery_truthfully() -> 
     assert "converge after a partial setup" not in text
 
 
-def test_maintainer_docs_describe_endpoint_free_status_and_current_evidence_date() -> None:
+def test_maintainer_docs_describe_endpoint_free_status_and_current_proof_gates() -> None:
     adr = (ROOT / "docs/adr/0008-opt-in-routines-worker.md").read_text()
     maintainer = (ROOT / "docs/maintainer.md").read_text()
     capability = (ROOT / "docs/capability-proof.md").read_text()
@@ -194,5 +194,11 @@ def test_maintainer_docs_describe_endpoint_free_status_and_current_evidence_date
         assert "receiver kind only" in text
         assert "redacted status" not in text
         assert "redacted rendering" not in text
-    assert "Created: 2026-08-16" in capability
-    assert "Last verified: 2026-09-04" in capability
+    for gate in (
+        "## v0.10.0 routines gate",
+        "## 2026-09-01 authenticated-write gate",
+        "## v0.7.0 recurrence gate",
+        "uv run python scripts/probe_cloud_capabilities.py --read-only-live-probe --native-parity",
+        "uv run python scripts/run_live_acceptance.py",
+    ):
+        assert gate in capability

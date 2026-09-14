@@ -1,7 +1,6 @@
 # Capability proof
 
 Created: 2026-08-16
-Last verified: 2026-09-04
 
 This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and
@@ -75,39 +74,6 @@ Advanced Project scopes, mutation coaching, registries, recurrence, checklist
 editing, rich-note replacement, and permanent deletion are not public v0.6.0
 capabilities. They require a later safety gate.
 
-- `Yes` means the layer has a passing proof.
-- `Partial` means the live probe covers only the named slice.
-- `Exercised` means the live probe used the approval plan and approval call.
-- `Defined` means the approval contract is tested but this live row did not
-  need, or did not exercise, an approval call.
-- `Not required` means the operation is safe without approval.
-
-## Historical v1 private-engine proof matrix
-
-| Capability | Model | Memory | Cloud fixture | Live Cloud | Approval evidence | Forced read-back |
-| --- | --- | --- | --- | --- | --- | --- |
-| Capture a Task | Yes | Yes | Yes | Partial (`recurrence.create_template_and_instance` only) | Not required | Yes |
-| Capture a Project and Area | Yes | Yes | Yes | Yes (`ax.project_move_to_area`) | Exercised for Area registry | Yes |
-| Schedule start, deadline, reminder, and placement | Yes | Yes | Yes | Partial (`recurrence.convert_existing_task` only) | Defined | Yes |
-| Checklist add, change, remove, order, and preservation | Yes | Yes | Yes | Yes (`recurrence.convert_existing_task`, `project.restore_tree`) | Exercised in repeat conversion | Yes |
-| Task and Project Trash or restore | Yes | Yes | Yes | Yes (`task.restore`, `project.restore_tree`) | Exercised | Yes |
-| Task purge and descendant-first Project purge | Yes | Yes | Yes | Yes (`task.purge`, `project.purge_tree_descendants_first`) | Exercised | Yes |
-| Task, Project, and heading placement | Yes | Yes | Yes | Yes (`ax.project_move_to_area`, `ax.organize_draft`) | Defined; move path exercised | Yes |
-| Area registry create and Project-to-Area placement | Yes | Yes | Yes | Yes (`ax.project_move_to_area`) | Exercised for create; move needs no approval | Yes |
-| Context refs for exact change and placement | Yes | Yes | Yes | Yes (`ax.context_change`, `ax.project_move_to_area`) | Not required | Yes |
-| Editable Project organize drafts | Yes | Yes | Yes | Yes (`ax.organize_draft`) | Exercised | Yes |
-| Atomic Project merge | Yes | Yes | Yes | Partial (`ax.project_merge`) | Exercised | Yes (`ax.project_merge_readback`) |
-| Heading create, rename, assign, clear, and reorder | Yes | Yes | Yes | Yes (`ax.organize_draft`, `heading.reorder`, `heading.rename`, `heading.clear_assignment`, `heading.delete_with_assignments`) | Defined | Yes |
-| Heading deletion with assignment cleanup | Yes | Yes | Yes | Yes (`heading.delete_with_assignments`) | Exercised | Yes |
-| Tag create, assign, rename, reparent, and delete | Yes | Yes | Yes | Yes (`tag.create_hierarchy`, `tag.assign_task_readback`, `tag.rename_reparent`, `tag.delete`) | Exercised | Yes |
-| Markdown write and explicit rich-note replacement | Yes | Yes | Yes | Yes (`note.write_rich_structure`, `note.replace_rich_with_markdown`) | Exercised for replacement | Yes |
-| Repeat inspect, create, convert, edit, complete, and stop | Yes | Yes | Yes | Yes (`recurrence.inspect_relationship`, `recurrence.create_template_and_instance`, `recurrence.convert_existing_task`, `recurrence.change_full_rule`, `recurrence.change_generated_copy`, `recurrence.complete_current_copy`, `recurrence.remove_keep_copy`) | Exercised | Yes |
-
-The behavior tests are the executable release gate. They exercise the public
-interface through the memory adapter and inspect each Cloud envelope. The
-probe adds disposable live Cloud cases. `Partial` does not mean unsupported;
-it means that the live case does not cover every input variation in the row.
-
 ## Model behavior gate
 
 The unit suite proves accepted calls and stored Things records. It does not
@@ -152,34 +118,6 @@ durable public artifacts.
 
 Start a new client session after the server and skill update. This refreshes
 the tool schema before the run.
-
-### Weekly Review behavior gate
-
-Run the natural request in `tests/fixtures/weekly_review_owner_prompt.txt`
-against a realistic isolated library. It must contain Inbox work, stale and
-future starts, Waiting, possible duplicates, Someday work, one healthy active
-Project, and one active Project without an available next action.
-
-One `view=weekly_review` read must return Get Clear, Get Current, Get Creative,
-and optional weekly planning in one revision-bound context. Its default result
-contains at most 40 exception rows. Someday and planning actions stay closed.
-`category` opens one named list and pages its complete exact result
-without creating another write context. The result reports the active Project
-count. A focused `project_review` category exposes each active Project's first
-Task in native heading order for semantic next-action review.
-
-The agent asks for uncaptured work. It scans the past and upcoming calendars
-before Waiting and Project choices. Weekly planning first shows the Things load
-for each day and asks for calendar capacity. It keeps subjective priorities
-neutral. It does not translate "next week" into Monday. A write uses one exact
-server manifest and one owner confirmation. Its receipt identifies changed
-items and exact requested no-ops. It states any bounded omission and excludes
-unrelated Areas and tags.
-
-The public memory tests prove the bounded index, category continuation, Project
-coverage, inherited Waiting, checklist exceptions, stable pagination, date
-semantics, mixed Someday state, duplicate signals, and bounded receipts.
-A human rerun remains required in `docs/dogfood.md`.
 
 ### Full reorganization behavior gate
 
@@ -356,10 +294,6 @@ current copy and lets native Things create the later copy.
 
 ## Safety boundaries
 
-Permanent Project deletion is a descendant-first transaction through one
-approved `things_commit` plan. A direct tombstone for a non-empty Project can
-leave detached Tasks and is not used.
-
 Things Project trees are flat. The live probe covers a native Project with
 headings, a Task, and a checklist. A memory contract also injects a non-native
 nested Project and proves that defensive cleanup walks deepest-first.
@@ -368,13 +302,3 @@ Repeat rule updates preserve every unknown rule field. Creation writes the
 complete observed rule with version, anchor, end sentinel, count, and skip
 metadata. The public interface uses semantic mode, unit, interval, and weekday
 names. Cloud codes stay inside the recurrence module.
-
-Rich notes are preserved by default. `replace_rich_note: true` is the explicit,
-approval-bound full replacement path.
-
-## Exact capability-to-probe mapping
-
-The table uses the exact result keys declared by
-`V2_CAPABILITY_KEYS` in `scripts/probe_cloud_capabilities.py`. A live run
-must pass every key listed for a capability before that row can claim `Yes`.
-`Partial` rows name the tested slice and do not claim full input coverage.
