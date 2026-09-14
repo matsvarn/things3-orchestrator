@@ -132,10 +132,6 @@ def test_routine_secret_tty_rejects_process_without_a_terminal(
     assert caught.value.code == 2
 
 
-def _stdout_without_secret_flag(out: str) -> str:
-    return out.replace("--show-secrets", "").replace("show-secrets", "")
-
-
 def test_mcp_plugin_launches_the_checkout_wrapper() -> None:
     payload = json.loads((ROOT / "plugin/.mcp.json").read_text())
     things = payload["mcpServers"]["things"]
@@ -231,7 +227,7 @@ def test_login_stores_credentials_and_preferences_without_snippets(
     assert "Do not paste the Cloud password into chat." in out
     assert "The HTTP Bearer is the MCP token, not the Cloud password." in out
     assert "codex plugin marketplace add ." not in out
-    assert "secret" not in _stdout_without_secret_flag(out)
+    assert "secret" not in out
     assert not list(tmp_path.glob("mcp.*"))
     stored = json.loads(creds.read_text())
     assert stored["mcp_token"] == "fixed-token"
@@ -249,12 +245,6 @@ def test_login_stores_credentials_and_preferences_without_snippets(
     for name in ("credentials.json", "preferences.json"):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
-
-
-def test_login_rejects_show_secrets() -> None:
-    with pytest.raises(SystemExit) as caught:
-        build_parser().parse_args(["login", "--show-secrets"])
-    assert caught.value.code == 2
 
 
 def test_login_keeps_mcp_token_unless_rotated(
@@ -535,7 +525,7 @@ def test_print_config_renders_without_writing_and_hides_token(
     main(["print-config", "--url", "https://tasks.example.com"])
     captured = capsys.readouterr()
     out = captured.out
-    assert "secret" not in _stdout_without_secret_flag(out)
+    assert "secret" not in out
     assert "keep-me" not in out
     assert "Bearer" in out
     assert "https://tasks.example.com/mcp" in out

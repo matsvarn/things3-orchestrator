@@ -208,10 +208,6 @@ def load_preferences(*, path: Path | None = None) -> Preferences:
     )
 
 
-def load_note_style(*, path: Path | None = None) -> NoteStyle:
-    return load_preferences(path=path).note_style
-
-
 def load_source_schemes(*, path: Path | None = None) -> tuple[str, ...]:
     return load_preferences(path=path).source_schemes
 
@@ -237,12 +233,7 @@ def load_timezone(
     return _normalize_timezone(legacy)
 
 
-def load_mcp_url(
-    *,
-    preferences_file: Path | None = None,
-    credentials_file: Path | None = None,
-) -> McpUrl | None:
-    del credentials_file
+def load_mcp_url(*, preferences_file: Path | None = None) -> McpUrl | None:
     return load_preferences(path=preferences_file).mcp_url
 
 
@@ -283,14 +274,6 @@ def select_login_mcp_url(
     if explicit.strip():
         return normalize_mcp_url(explicit)
     return saved or legacy or normalize_mcp_url("http://127.0.0.1:8787")
-
-
-def save_note_style(style: NoteStyle, *, path: Path | None = None) -> Path:
-    return save_preferences(note_style=style, path=path)
-
-
-def save_source_schemes(schemes: Iterable[str], *, path: Path | None = None) -> Path:
-    return save_preferences(source_schemes=schemes, path=path)
 
 
 def save_preferences(
