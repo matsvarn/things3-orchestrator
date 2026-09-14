@@ -71,9 +71,6 @@ class RecurrenceState:
             codes.append(code)
         return tuple(codes)
 
-    def change_interval(self, interval: int, *, kind: str) -> RecurrenceState:
-        return self.transition(kind=kind, interval=interval)
-
     def transition(
         self,
         *,
