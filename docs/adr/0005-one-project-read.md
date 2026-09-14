@@ -1,5 +1,10 @@
 # One Project read is the writable neighborhood
 
+## Status
+
+Superseded by ADR 0006 and ADR 0007. The three-tool design below remains
+only as a historical record and is not the current implementation contract.
+
 A living Project change hid headings, tasks, and hidden occupants. Organize
 and `id=project` showed the layout. After trash, change suddenly listed the
 tree. `view=trash` stayed a list. Agents picked `purpose`, then picked it

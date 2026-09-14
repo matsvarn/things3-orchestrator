@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from base64 import b32encode
 from calendar import monthrange
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
@@ -15,33 +14,16 @@ from typing import Any, Callable, Literal, cast
 
 from .cloud import CloudError, CloudWriteRejected
 from .config import Preferences
-from .consistency import Conflict, diagnose, item_conflicts
-from .context import (
-    CompletenessFact,
-    ContextConflict,
-    ContextRef,
-    ContextStore,
-    MemoryContextStore,
-    ReadContext,
-    ReadIncludeSelector,
-    ReadSelector,
-)
+from .consistency import item_conflicts
 from .interface import (
     DETAIL_FIELDS,
     ChecklistFact,
-    ContextFact,
-    DiagnosticFact,
-    DiagnosticRepair,
     ItemFact,
-    LayoutFact,
-    LayoutSectionFact,
     ReadCall,
-    RecoveryFact,
     RecurrenceFact,
     RecurrenceKind,
     RepeatOnFact,
     Result,
-    ResultStatus,
     ReviewSection,
     TagFact,
     TruncatedField,
@@ -91,9 +73,6 @@ _TRUNCATION_SIGNALS = {
     "tags": "tags_truncated",
     "recurrence": "recurrence_links_truncated",
 }
-_CONTEXT_LIMIT = 120
-_WEEKLY_DEFAULT_LIMIT = 40
-_CHANGE_FIND_LIMIT = 40
 _NOTES_LIMIT = 50_000
 _TITLE_LIMIT = 1000
 _ORDER_MIN = -(2**63)
@@ -329,10 +308,8 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
     )
 _SEARCH_ARTICLES = frozenset({"a", "an", "the"})
 _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
-_NON_STARTABLE_ACTION_ROW = re.compile(
-    r"(?i)^\s*(audit|consider|decide|explore|figure out|handle|investigate|"
-    r"look into|plan|research|think about|work on)\b"
-)
+
+
 @dataclass(frozen=True)
 class _NormalizedSearchText:
     """Keep the old substring search and provide exact token fallback."""
@@ -340,15 +317,6 @@ class _NormalizedSearchText:
     folded: str
     tokens: tuple[str, ...]
 
-
-@dataclass(frozen=True)
-class _WeeklyReviewSnapshot:
-    records: list[Record]
-    signals_by_id: dict[str, list[str]]
-    sections: list[ReviewSection]
-    result_signals: list[str]
-    membership_revision: str
-    summary_instruction: str = ""
 
 
 def _normalize_search_text(text: str) -> _NormalizedSearchText:
@@ -364,25 +332,6 @@ class _RepeatStopPlan:
     replacement: Write
     writes: list[Write]
     preconditions: dict[str, str]
-
-
-@dataclass
-class _Neighborhood:
-    """Local records for one change or organize include."""
-
-    records: list[Record] = field(default_factory=list)
-    placement_ids: set[str] = field(default_factory=set)
-    missing_ids: list[str] = field(default_factory=list)
-    include_signals: list[str] = field(default_factory=list)
-    include_note: str | None = None
-
-    def add(self, item: Record | None, *, placement: bool = False) -> None:
-        if item is None:
-            return
-        if all(saved.uuid != item.uuid for saved in self.records):
-            self.records.append(item)
-        if placement:
-            self.placement_ids.add(item.uuid)
 
 
 @dataclass(frozen=True)
@@ -431,17 +380,12 @@ class ThingsWorkspace:
         *,
         journal: Journal | None = None,
         clock: Callable[[], datetime] | None = None,
-        context_store: ContextStore | None = None,
         account_id: str | None = None,
         preferences: Callable[[], Preferences] | None = None,
     ) -> None:
         self._library = library
         self._journal = journal or MemoryJournal()
         self._clock = clock or (lambda: datetime.now().astimezone())
-        self._context_store = context_store or MemoryContextStore(
-            clock=self._clock,
-            token_factory=lambda: token_urlsafe(18),
-        )
         self._account_id = account_id or f"workspace:{token_urlsafe(18)}"
         self._preferences = preferences or Preferences
         self._cursors: dict[str, _ItemCursor] = {}
@@ -455,12 +399,6 @@ class ThingsWorkspace:
         if call.cursor is not None:
             return self._continue(call.cursor, call.limit, view=call.view)
 
-        if call.purpose == "change":
-            return self._context_change(call)
-        if call.purpose == "organize":
-            return self._context_organize(call)
-        if call.purpose == "recurrence":
-            return self._recurrence_read(call)
         if call.ids:
             return self._bulk_exact(call)
 
@@ -471,13 +409,18 @@ class ThingsWorkspace:
                 return self._needs_input(
                     "I could not find that exact item. Read or search again."
                 )
-            if (
-                call.purpose == "review"
-                and item.kind in {"area", "project"}
-                and not item.heading
-            ):
+            if item.kind in {"area", "project"} and not item.heading:
                 if item.kind == "project":
-                    return self._writable_project(item, call)
+                    records = self._library.project(item.id)
+                    return self._page(
+                        records,
+                        call.limit,
+                        full=False,
+                        instruction="This Project and its contents.",
+                        view="project",
+                        membership_revision=self._scope_revision(records),
+                        call=call,
+                    )
                 return self._page(
                     self._library.area(item.id),
                     call.limit,
@@ -517,12 +460,8 @@ class ThingsWorkspace:
                 )
             within = self._exact_item(call.within) if call.within else None
             if call.within and within is None:
-                return self._context_recovery(
-                    code="context_required",
-                    instruction="I could not find that exact search scope. Read it again.",
-                    retry="read",
-                    read=self._selector_arguments(call),
-                    status="needs_input",
+                return self._needs_input(
+                    "I could not find that exact search scope. Read it again."
                 )
             if within is not None and within.kind not in {"area", "project"}:
                 return self._needs_input("Search within an exact Area or Project.")
@@ -574,22 +513,11 @@ class ThingsWorkspace:
             ]
             return self._tag_page(rows, offset=0, limit=call.limit)
 
-        if view == "diagnostics":
-            return self._diagnostics_page(call.limit)
-        if view == "weekly_review":
-            return self._weekly_review_page(call)
-        if view == "project":
-            container = call.within or call.id
-            assert container is not None
-            project = self._exact_item(container)
-            if project is None or project.kind != "project" or project.heading:
-                return self._needs_input("I could not find that exact Project.")
-            return self._writable_project(project, call)
         visible = self._view_items(call)
         if isinstance(visible, Result):
             return visible
-        audit_membership_revision = (
-            self._scope_revision(visible) if view == "audit" else None
+        membership_revision = (
+            self._scope_revision(visible) if view in {"audit", "project"} else None
         )
         if view == "audit":
             visible = self._filter_audit_items(visible, call.signals_any)
@@ -612,6 +540,8 @@ class ThingsWorkspace:
                 "This Area, its loose tasks, and its Projects. "
                 "Read a Project for its layout and contents."
             )
+        elif view == "project":
+            instruction = "This Project and its contents."
         elif view == "trash":
             instruction = "This is Trash. Read an item to restore or purge."
         return self._page(
@@ -623,7 +553,7 @@ class ThingsWorkspace:
             public_scope=(
                 self._area_scope_revision() if view in {"system", "audit"} else None
             ),
-            membership_revision=audit_membership_revision,
+            membership_revision=membership_revision,
             call=call,
         )
 
@@ -648,539 +578,6 @@ class ThingsWorkspace:
             membership_revision=(
                 self._scope_revision(source) if view == "audit" else None
             ),
-        )
-
-    def _diagnostics_page(
-        self,
-        limit: int,
-        *,
-        offset: int = 0,
-        expected_ids: list[str] | None = None,
-        expected_digest: str | None = None,
-    ) -> Result:
-        conflicts = diagnose(self._library)
-        ids = [row.item_id for row in conflicts]
-        digest = _diagnostics_digest(
-            conflicts, [self._diagnostic_title(row) for row in conflicts]
-        )
-        if expected_ids is not None and (
-            ids != expected_ids or digest != expected_digest
-        ):
-            return self._stale("That result changed. Start the read again.")
-        limit = min(limit, _READ_LIMIT)
-        page = conflicts[offset : offset + limit]
-        next_offset = offset + len(page)
-        cursor = None
-        if next_offset < len(conflicts):
-            cursor = self._encode_cursor(
-                ids,
-                next_offset,
-                digest,
-                digest,
-                False,
-                "diagnostics",
-            )
-        diagnostics = [self._diagnostic_fact(row) for row in page]
-        records = [
-            item
-            for row in page
-            if (item := self._exact_item(row.item_id)) is not None
-        ]
-        items = [self._fact(item, full=False) for item in records]
-        result = self._follow_cursor(
-            Result(
-                next="done",
-                status="ok",
-                instruction=_diagnostics_instruction(diagnostics),
-                items=items,
-                diagnostics=diagnostics,
-                cursor=cursor,
-                truncated=cursor is not None,
-            )
-        )
-        return result
-
-    def _weekly_review_page(
-        self,
-        call: ReadCall,
-        *,
-        offset: int = 0,
-        expected_ids: list[str] | None = None,
-        expected_snapshot: str | None = None,
-        expected_membership: str | None = None,
-    ) -> Result:
-        categories = [call.category] if call.category is not None else []
-        review = self._weekly_review_snapshot(categories)
-        ids = [record.id for record in review.records]
-        snapshot = self._scope_revision(review.records)
-        if expected_ids is not None and (
-            ids != expected_ids
-            or snapshot != expected_snapshot
-            or review.membership_revision != expected_membership
-        ):
-            return self._stale("That weekly review changed. Start the read again.")
-
-        limit = min(call.limit, _READ_LIMIT)
-        page_records = review.records[offset : offset + limit]
-        next_offset = offset + len(page_records)
-        cursor = None
-        if next_offset < len(review.records):
-            cursor = self._encode_cursor(
-                ids,
-                next_offset,
-                snapshot,
-                snapshot,
-                False,
-                "weekly_review",
-                signals_any=categories,
-                membership_revision=review.membership_revision,
-            )
-        facts = []
-        for record in page_records:
-            fact = self._fact(record, full=False)
-            facts.append(
-                fact.model_copy(
-                    update={
-                        "signals": list(
-                            dict.fromkeys(
-                                [*fact.signals, *review.signals_by_id[record.id]]
-                            )
-                        )
-                    }
-                )
-            )
-        sections = review.sections
-        if call.category is not None:
-            signal = call.category
-            section_key = (
-                "get_clear"
-                if signal == "inbox"
-                else "get_creative"
-                if signal == "someday"
-                else "plan_week"
-                if signal == "weekly_candidate"
-                else "get_current"
-            )
-            sections = [section for section in sections if section.key == section_key]
-        instruction = (
-            "This category returns exact IDs and current revisions. Continue its "
-            "cursor when present. For a change, send those exact IDs with the returned "
-            "revisions. Do not create a second write context."
-            if call.category is not None
-            else (
-                "This review contains the exceptions and choices for Get Clear, "
-                "Get Current, and Get Creative. Ask for uncaptured work and a "
-                "past-and-upcoming calendar scan before date changes. Open one "
-                "named category only when it needs a decision. Offer weekly planning "
-                "only after the review. A start date is a real begin day."
-                + (
-                    f" {review.summary_instruction}"
-                    if review.summary_instruction
-                    else ""
-                )
-            )
-        )
-        result = self._follow_cursor(
-            Result(
-                next="done",
-                status="ok",
-                instruction=instruction,
-                items=facts,
-                sections=sections if offset == 0 else [],
-                signals=review.result_signals if offset == 0 else [],
-                cursor=cursor,
-                truncated=cursor is not None,
-            )
-        )
-        return result
-
-    def _weekly_review_snapshot(
-        self, signals_any: Sequence[str] = ()
-    ) -> _WeeklyReviewSnapshot:
-        today = self._clock().date()
-        week_end = today + timedelta(days=6)
-        audit = self._library.audit()
-        waiting_tag = self._library.tag_uuid(self._library.waiting_tag())
-
-        inbox = [item for item in audit if item.inbox]
-        stale_starts = [
-            item for item in audit if item.start is not None and item.start < today
-        ]
-        overdue = [
-            item for item in audit if item.deadline is not None and item.deadline < today
-        ]
-        today_items = [
-            item
-            for item in audit
-            if item.start == today or item.deadline == today or item.tonight
-        ]
-        upcoming = [
-            item
-            for item in audit
-            if (
-                item.start is not None and today < item.start <= week_end
-            )
-            or (
-                item.deadline is not None and today < item.deadline <= week_end
-            )
-        ]
-        someday = [item for item in audit if item.someday and not item.heading]
-        by_title: dict[tuple[str, str], list[Record]] = {}
-        for item in audit:
-            if item.kind == "area" or item.heading:
-                continue
-            key = (item.kind, " ".join(item.title.casefold().split()))
-            by_title.setdefault(key, []).append(item)
-        possible_duplicates = [
-            item
-            for group in by_title.values()
-            if len(group) > 1
-            for item in group
-        ]
-
-        active_projects = [
-            item
-            for item in audit
-            if item.kind == "project"
-            and not item.heading
-            and not item.someday
-            and (item.start is None or item.start <= today)
-        ]
-        direct_tasks: dict[str, list[Record]] = {}
-        project_headings: dict[str, list[Record]] = {}
-        for item in audit:
-            if item.kind == "task" and not item.heading and item.parent_uuid is not None:
-                direct_tasks.setdefault(item.parent_uuid, []).append(item)
-            elif item.heading and item.parent_uuid is not None:
-                project_headings.setdefault(item.parent_uuid, []).append(item)
-
-        def project_tasks_in_native_order(project: Record) -> list[Record]:
-            tasks = direct_tasks.get(project.uuid, [])
-            ordered: list[Record] = []
-            for heading in sorted(
-                project_headings.get(project.uuid, []),
-                key=lambda item: (item.sort_index, item.uuid),
-            ):
-                ordered.extend(
-                    sorted(
-                        (task for task in tasks if task.heading_uuid == heading.uuid),
-                        key=lambda item: (item.sort_index, item.uuid),
-                    )
-                )
-            ordered.extend(
-                sorted(
-                    (task for task in tasks if task.heading_uuid is None),
-                    key=lambda item: (item.sort_index, item.uuid),
-                )
-            )
-            return ordered
-
-        def has_waiting_tag(item: Record) -> bool:
-            if waiting_tag is None:
-                return False
-            return waiting_tag in {
-                *item.tag_uuids,
-                *(tag for source in self._tag_sources(item) for tag in source.tag_uuids),
-            }
-
-        waiting = [item for item in audit if has_waiting_tag(item)]
-
-        def is_candidate_action(item: Record) -> bool:
-            if item.someday or (item.start is not None and item.start > today):
-                return False
-            if has_waiting_tag(item):
-                return False
-            return _NON_STARTABLE_ACTION_ROW.match(item.title) is None
-
-        first_project_tasks = {
-            project.uuid: tasks[0] if tasks else None
-            for project in active_projects
-            for tasks in [project_tasks_in_native_order(project)]
-        }
-        project_gaps = [
-            project
-            for project in active_projects
-            if (first := first_project_tasks[project.uuid]) is None
-            or not is_candidate_action(first)
-        ]
-        project_review: list[Record] = []
-        for project in active_projects:
-            project_review.append(first_project_tasks[project.uuid] or project)
-        plan_candidates: list[Record] = []
-        for project in active_projects:
-            first = first_project_tasks[project.uuid]
-            if (
-                first is not None
-                and is_candidate_action(first)
-                and first.start is None
-                and not first.tonight
-            ):
-                plan_candidates.append(first)
-        plan_candidates.extend(
-            item
-            for item in audit
-            if item.kind == "task"
-            and item.parent_uuid is None
-            and not item.inbox
-            and item.start is None
-            and not item.tonight
-            and is_candidate_action(item)
-        )
-        someday_project_ids = {
-            item.uuid for item in audit if item.kind == "project" and item.someday
-        }
-        active_tasks_in_someday = [
-            item
-            for item in audit
-            if item.kind == "task"
-            and item.parent_uuid in someday_project_ids
-            and not item.someday
-        ]
-
-        finished_checklists = [
-            item
-            for item in audit
-            if item.kind == "task"
-            and item.checklists
-            and all(row.status != "open" for row in item.checklists)
-        ]
-        completed_since = today - timedelta(days=_LOGBOOK_DAYS - 1)
-        recent_completed_projects = [
-            item
-            for item in self._library.records.values()
-            if item.kind == "project"
-            and item.status == "done"
-            and not item.trashed
-            and item.completed_at is not None
-            and completed_since
-            <= item.completed_at.astimezone(self._clock().tzinfo).date()
-            <= today
-        ]
-
-        signal_groups: list[tuple[str, list[Record]]] = [
-            ("inbox", inbox),
-            ("stale_start", stale_starts),
-            ("overdue", overdue),
-            ("today", today_items),
-            ("upcoming", upcoming),
-            ("possible_duplicate", possible_duplicates),
-            ("waiting", waiting),
-            ("project_without_candidate_task", project_gaps),
-            ("project_review", project_review),
-            ("active_task_in_someday_project", active_tasks_in_someday),
-            ("open_task_with_finished_checklist", finished_checklists),
-            ("recently_completed_project", recent_completed_projects),
-            ("someday", someday),
-            ("weekly_candidate", plan_candidates),
-        ]
-        signal_map: dict[str, list[str]] = {}
-        for signal, group in signal_groups:
-            for item in group:
-                signal_map.setdefault(item.id, []).append(signal)
-
-        selected: list[Record] = []
-        seen: set[str] = set()
-
-        def add(group: Sequence[Record], *, count: int, limit: int) -> None:
-            added = 0
-            if len(selected) >= limit:
-                return
-            for item in group:
-                if item.id in seen:
-                    continue
-                seen.add(item.id)
-                selected.append(item)
-                added += 1
-                if added >= count or len(selected) >= limit:
-                    return
-
-        default_signals = {
-            "inbox",
-            "stale_start",
-            "overdue",
-            "today",
-            "possible_duplicate",
-            "waiting",
-            "project_without_candidate_task",
-            "active_task_in_someday_project",
-            "open_task_with_finished_checklist",
-            "upcoming",
-        }
-        selected_signals = set(signals_any) or default_signals
-        result_limit = len(audit) + len(recent_completed_projects)
-        if not signals_any:
-            result_limit = _WEEKLY_DEFAULT_LIMIT
-        selected_groups = [
-            group
-            for signal, group in signal_groups
-            if signal in selected_signals and group
-        ]
-        if signals_any:
-            for group in selected_groups:
-                add(group, count=result_limit, limit=result_limit)
-                if len(selected) >= result_limit:
-                    break
-        elif selected_groups:
-            quota = max(1, result_limit // len(selected_groups))
-            for group in selected_groups:
-                add(group, count=quota, limit=result_limit)
-            for group in selected_groups:
-                add(group, count=result_limit, limit=result_limit)
-                if len(selected) >= result_limit:
-                    break
-        selected_ids = {item.id for item in selected}
-        requested_total = len(
-            {
-                item.id
-                for signal, group in signal_groups
-                if signal in selected_signals
-                for item in group
-            }
-        )
-        summarized = not signals_any and requested_total > len(selected)
-        summary_instruction = ""
-        if summarized:
-            summary_instruction = (
-                f"This index shows {len(selected)} of {requested_total} exception "
-                "rows. Open one named category; do not repeat the default read."
-            )
-
-        def section_ids(groups: Sequence[list[Record]]) -> list[str]:
-            values: list[str] = []
-            for group in groups:
-                for item in group:
-                    if item.id in selected_ids and item.id not in values:
-                        values.append(item.id)
-            return values[:40]
-
-        day_load = []
-        for offset in range(7):
-            day = today + timedelta(days=offset)
-            count = sum(
-                1
-                for item in audit
-                if item.start == day or item.deadline == day
-            )
-            day_load.append(f"{day.isoformat()}: {count}")
-
-        sections = [
-            ReviewSection(
-                key="get_clear",
-                title="Get Clear",
-                item_ids=section_ids([inbox]),
-                signals=[
-                    f"Inbox: {len(inbox)}.",
-                    "Ask for work that is not yet in Things.",
-                ],
-            ),
-            ReviewSection(
-                key="get_current",
-                title="Get Current",
-                item_ids=section_ids(
-                    [
-                        stale_starts,
-                        overdue,
-                        today_items,
-                        possible_duplicates,
-                        waiting,
-                        project_gaps,
-                        project_review,
-                        active_tasks_in_someday,
-                        finished_checklists,
-                        recent_completed_projects,
-                        upcoming,
-                    ]
-                ),
-                signals=[
-                    f"Active Projects: {len(active_projects)}; obvious candidate gaps: {len(project_gaps)}. Open category=project_review to verify each Project's first Task.",
-                    f"Stale starts: {len(stale_starts)}; overdue deadlines: {len(overdue)}; Waiting: {len(waiting)}.",
-                    f"Possible duplicate items: {len(possible_duplicates)}.",
-                    f"Active Tasks inside Someday Projects: {len(active_tasks_in_someday)}.",
-                    f"Open Tasks whose checklist is finished: {len(finished_checklists)}.",
-                    f"Seven-day window: {len(today_items)} today and {len(upcoming)} future-dated; recently completed Projects available on request: {len(recent_completed_projects)}.",
-                    "Scan the past and upcoming calendars before changing dates.",
-                ],
-            ),
-            ReviewSection(
-                key="get_creative",
-                title="Get Creative",
-                item_ids=section_ids([someday]),
-                signals=[
-                    f"Someday: {len(someday)}.",
-                    "Open category=someday only when the owner requests it or says it is due.",
-                ],
-            ),
-            ReviewSection(
-                key="plan_week",
-                title="Plan the week, if requested",
-                item_ids=section_ids(
-                    [
-                        plan_candidates
-                        if "weekly_candidate" in set(signals_any)
-                        else [],
-                    ]
-                ),
-                signals=[
-                    "This step is optional and starts after the review is current.",
-                    "Things load by day: " + "; ".join(day_load) + ".",
-                    "Calendar capacity is unknown until the owner scans the calendar.",
-                    "Keep an item in Anytime unless the owner chooses a real start day.",
-                    f"Planning actions: {len(plan_candidates)}. Open category=weekly_candidate only when the owner requests planning.",
-                ],
-            ),
-        ]
-        result_signals = [
-            "capture_check_required",
-            "calendar_scan_required",
-            "weekly_planning_optional",
-        ]
-        if summarized:
-            result_signals.append("weekly_review_summarized")
-        membership_records = [*audit, *recent_completed_projects]
-        membership_revision = "s_" + _digest(
-            [
-                self._scope_revision(membership_records),
-                today.isoformat(),
-                self._tag_revision(),
-            ]
-        )
-        return _WeeklyReviewSnapshot(
-            records=selected,
-            signals_by_id=signal_map,
-            sections=sections,
-            result_signals=result_signals,
-            membership_revision=membership_revision,
-            summary_instruction=summary_instruction,
-        )
-
-    def _diagnostic_title(self, conflict: Conflict) -> str:
-        if conflict.item_id.startswith("tag:"):
-            uuid = conflict.item_id.removeprefix("tag:")
-            title = _bounded_tag_title(self._library.tags.get(uuid) or "")
-            return title if title.strip() else "(untitled)"
-        item = self._exact_item(conflict.item_id)
-        return _bounded_title(item.title) if item is not None else "(untitled)"
-
-    def _diagnostic_kind(
-        self, conflict: Conflict
-    ) -> Literal["task", "project", "area", "heading", "tag"]:
-        if conflict.item_id.startswith("tag:"):
-            return "tag"
-        item = self._exact_item(conflict.item_id)
-        return item.public_kind if item is not None else "task"
-
-    def _diagnostic_fact(self, conflict: Conflict) -> DiagnosticFact:
-        return DiagnosticFact(
-            id=conflict.item_id,
-            kind=self._diagnostic_kind(conflict),
-            title=self._diagnostic_title(conflict),
-            conflicts=list(conflict.signals),
-            repair=conflict.repair,
-            repair_kind=conflict.repair_kind,
-            repairs=[
-                DiagnosticRepair(conflict=name, repair_kind=kind)
-                for name, kind in conflict.repairs
-            ],
         )
 
     def _bulk_exact(self, call: ReadCall) -> Result:
@@ -1231,665 +628,11 @@ class ThingsWorkspace:
             )
         return result
 
-    def _context_change(self, call: ReadCall) -> Result:
-        if call.id is not None:
-            target = self._exact_item(call.id)
-            if target is None:
-                return self._needs_input(
-                    "I could not find that exact item. Read or search again."
-                )
-        else:
-            assert call.find is not None
-            if call.within == "trash":
-                matches = [
-                    item
-                    for item in self._search(call.find, None, closed=True)
-                    if item.trashed
-                ]
-            else:
-                within = self._exact_item(call.within) if call.within else None
-                if call.within and within is None:
-                    return self._needs_input(
-                        "I could not find that exact search scope. Read the Project or Area, then search again."
-                    )
-                if within is not None and within.kind not in {"area", "project"}:
-                    return self._needs_input("Search within an exact Area or Project.")
-                matches = self._search(call.find, within, closed=True)
-            if len(matches) > _CHANGE_FIND_LIMIT:
-                return self._needs_input(
-                    f"That change search matches more than {_CHANGE_FIND_LIMIT} items. Use a narrower find or exact id."
-                )
-            if not matches:
-                return self._needs_input(
-                    "That change search found no item. Use a narrower find or exact id."
-                )
-            if len(matches) > 1:
-                return Result(
-                    next="ask",
-                    status="needs_input",
-                    instruction=(
-                        f"That change search matches {len(matches)} items. "
-                        "Choose one item, then read it with purpose=change and its exact id."
-                    ),
-                    items=[
-                        self._fact(item, full=False, include_revision=False)
-                        for item in matches
-                    ],
-                )
-            target = matches[0]
-        if target.kind == "project" and not target.heading:
-            return self._writable_project(target, call)
-        if not self._context_detail_is_complete(target):
-            return self._context_recovery(
-                code="context_incomplete",
-                instruction=(
-                    "That item is too large for one safe change context. "
-                    "Use the exact paged read and a revisioned change."
-                ),
-                retry="rebuild",
-                read=self._selector_arguments(call),
-                status="unsupported",
-            )
-        try:
-            neighborhood = self._neighborhood_collect(target)
-            self._neighborhood_include(neighborhood, call)
-        except _Abort as error:
-            return error.result
-        if len(neighborhood.records) > _CONTEXT_LIMIT:
-            return self._oversized_context(call, len(neighborhood.records))
-        refs, by_id = self._context_refs(neighborhood.records)
-        context = self._create_context(
-            call,
-            refs,
-            scopes=[f"change:{target.id}"],
-        )
-        facts = [
-            self._fact(
-                record,
-                full=record.uuid == target.uuid,
-                include_revision=False,
-            ).model_copy(update={"ref": by_id[record.id]})
-            for record in neighborhood.records
-        ]
-        instruction = (
-            "Use context_id and short refs for one coherent change. "
-            "Omitted item fields remain unchanged. Include a destination to move."
-        )
-        if neighborhood.include_note:
-            instruction = f"{instruction} {neighborhood.include_note}"
-        if target.kind == "area":
-            scope_revision = self._area_scope_revision()
-        else:
-            scope_revision = self._detail_revision(target)
-        return Result(
-            next="done",
-            status="ok",
-            instruction=instruction,
-            items=facts,
-            signals=neighborhood.include_signals,
-            context=self._public_context(context),
-            scope_revision=scope_revision,
-            missing_ids=neighborhood.missing_ids,
-        )
-
-    def _neighborhood_collect(self, target: Record) -> _Neighborhood:
-        """Collect the local neighborhood for one Task, Area, or heading change."""
-        neighborhood = _Neighborhood()
-
-        def place(item: Record) -> None:
-            neighborhood.add(self._library.records.get(item.parent_uuid or ""))
-            neighborhood.add(self._library.records.get(item.area_uuid or ""))
-            neighborhood.add(self._library.records.get(item.heading_uuid or ""))
-
-        neighborhood.add(target)
-        place(target)
-        if target.kind == "project" and target.trashed:
-            for descendant in reversed(self._project_descendants(target.uuid)):
-                neighborhood.add(descendant)
-        if target.kind == "task":
-            parent = self._library.records.get(target.parent_uuid or "")
-            if parent is not None and parent.kind == "project":
-                for heading in self._project_headings(parent.uuid):
-                    neighborhood.add(heading)
-        template = self._library.records.get(template_uuid_of(target) or "")
-        if template is not None:
-            neighborhood.add(template)
-            place(template)
-        if target.recurrence.role == "template":
-            for candidate in self._library.recurrence_instances(target.uuid):
-                neighborhood.add(candidate)
-        return neighborhood
-
-    def _neighborhood_include(self, neighborhood: _Neighborhood, call: ReadCall) -> None:
-        """Add resolved includes without aborting the target neighborhood."""
-        notes: list[str] = []
-        for include in call.include:
-            within = self._exact_item(include.within) if include.within else None
-            if include.within and (
-                within is None
-                or within.kind not in {"area", "project"}
-                or not self._is_searchable(within)
-            ):
-                notes.append("An include scope must identify an active Area or Project.")
-                neighborhood.include_signals.append("include_unresolved")
-                continue
-            if include.id is not None:
-                exact = self._exact_item(include.id)
-                matches = [exact] if exact is not None else []
-                if not matches:
-                    neighborhood.missing_ids.append(include.id)
-            else:
-                assert include.find is not None
-                matches = self._search(include.find, within)
-            if len(matches) != 1:
-                neighborhood.include_signals.append("include_unresolved")
-                if not matches:
-                    notes.append(
-                        "An include found no item. Use an exact id or a narrower find."
-                    )
-                else:
-                    notes.append(
-                        "An include was not unique. Choose one item or narrow the find."
-                    )
-                continue
-            for dependency in self._include_dependencies(matches[0]):
-                neighborhood.add(dependency, placement=True)
-        neighborhood.include_signals = list(dict.fromkeys(neighborhood.include_signals))
-        neighborhood.missing_ids = list(dict.fromkeys(neighborhood.missing_ids))[:10]
-        neighborhood.include_note = " ".join(dict.fromkeys(notes)) or None
-
-    def _include_dependencies(self, record: Record) -> list[Record]:
-        """Return one included item, its anchors, and destination headings."""
-        dependencies: list[Record] = []
-
-        def add(item: Record | None) -> None:
-            if item is not None and all(saved.uuid != item.uuid for saved in dependencies):
-                dependencies.append(item)
-
-        add(record)
-        add(self._library.records.get(record.parent_uuid or ""))
-        add(self._library.records.get(record.area_uuid or ""))
-        add(self._library.records.get(record.heading_uuid or ""))
-        if record.kind == "project":
-            for heading in self._project_headings(record.uuid):
-                add(heading)
-        return dependencies
-
-    def _project_headings(self, project_uuid: str) -> list[Record]:
-        return sorted(
-            (
-                item
-                for item in self._library.records.values()
-                if item.heading
-                and item.parent_uuid == project_uuid
-                and not item.trashed
-                and item.status == "open"
-            ),
-            key=lambda item: (item.sort_index, item.title, item.uuid),
-        )
-
-    def _recurrence_read(self, call: ReadCall) -> Result:
-        """Read one item and verify its repeat template/copy relationship."""
-        assert call.id is not None
-        target = self._exact_item(call.id)
-        if target is None or target.kind not in {"task", "project"} or target.heading:
-            return self._unsupported(
-                "Recurrence inspection needs one exact Task or Project, not a heading."
-            )
-        if not self._recurrence_relationship_is_valid(target):
-            return self._unsupported(
-                "Things returned an inconsistent repeat template and generated-copy relationship."
-            )
-        relationship = (
-            "No existing repeat relationship is present."
-            if target.recurrence.role == "none"
-            else "The repeat template and generated copy relationship is verified."
-        )
-        return Result(
-            next="done",
-            status="ok",
-            instruction=(
-                f"{relationship} Use this recurrence fact before a repeat mutation."
-            ),
-            items=[self._fact(target, full=True)],
-            signals=["recurrence_relationship_verified"],
-        )
-
-    def _context_organize(self, call: ReadCall) -> Result:
-        project: Record | None = None
-        if call.id is not None:
-            project = self._exact_item(call.id)
-            if project is None or project.kind != "project" or project.heading:
-                return self._organize_unavailable(project)
-        elif call.find is not None:
-            within = self._exact_item(call.within) if call.within else None
-            if call.within and (within is None or not within.is_open()):
-                return self._context_recovery(
-                    code="context_required",
-                    instruction=(
-                        "That search scope is not an active visible Area or Project. "
-                        "Read it again."
-                    ),
-                    retry="read",
-                    read=self._selector_arguments(call),
-                    status="needs_input",
-                )
-            if within is not None and within.kind not in {"area", "project"}:
-                return self._needs_input("Search within an exact Area or Project.")
-            hits = self._search(call.find, within)
-            projects = [
-                item
-                for item in hits
-                if item.kind == "project" and not item.heading
-            ]
-            if not projects:
-                parents: list[Record] = []
-                seen_parents: set[str] = set()
-                for item in hits:
-                    parent_uuid = item.parent_uuid
-                    if parent_uuid is None or parent_uuid in seen_parents:
-                        continue
-                    parent = self._library.records.get(parent_uuid)
-                    if (
-                        parent is not None
-                        and parent.kind == "project"
-                        and parent.is_open()
-                    ):
-                        seen_parents.add(parent_uuid)
-                        parents.append(parent)
-                if len(parents) == 1:
-                    projects = parents
-                elif len(parents) > 1:
-                    return Result(
-                        next="ask",
-                        status="needs_input",
-                        instruction=(
-                            f"Those matching items sit in {len(parents)} Projects. "
-                            "Choose one Project, then read it with purpose=organize "
-                            "and its exact id."
-                        ),
-                        items=[
-                            self._fact(item, full=False, include_revision=False)
-                            for item in parents
-                        ],
-                        recovery=RecoveryFact(
-                            code="context_incomplete",
-                            retry="rebuild",
-                        ),
-                    )
-                else:
-                    closed_projects = [
-                        item
-                        for item in self._search(call.find, within, closed=True)
-                        if item.kind == "project"
-                        and not item.heading
-                        and item.trashed
-                    ]
-                    if len(closed_projects) == 1:
-                        return self._writable_project(closed_projects[0], call)
-                    orphans = [
-                        item
-                        for item in self._library.records.values()
-                        if item.kind == "task"
-                        and not item.heading
-                        and item.is_open()
-                        and item.parent_uuid is None
-                    ]
-                    if orphans:
-                        orphans.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
-                        return Result(
-                            next="done",
-                            status="ok",
-                            instruction=(
-                                "No Project matched. To group these existing tasks, "
-                                "create one Project and move them in their current order."
-                            ),
-                            items=[
-                                self._fact(item, full=False, include_revision=True)
-                                for item in orphans[:40]
-                            ],
-                        )
-                    return self._context_recovery(
-                        code="context_required",
-                        instruction=(
-                            "I could not find one active Project. Use a narrower find "
-                            "or exact id."
-                        ),
-                        retry="rebuild",
-                        read=self._selector_arguments(call),
-                        status="needs_input",
-                    )
-            if len(projects) > 1:
-                return Result(
-                    next="ask",
-                    status="needs_input",
-                    instruction=(
-                        f"That Project find matches {len(projects)} active Projects. "
-                        "Choose one Project, then read it with purpose=organize and its exact id."
-                    ),
-                    items=[self._fact(item, full=False, include_revision=False) for item in projects],
-                    recovery=RecoveryFact(
-                        code="context_incomplete",
-                        retry="rebuild",
-                    ),
-                )
-            project = projects[0]
-        elif call.view == "project":
-            assert call.within is not None
-            project = self._exact_item(call.within)
-            if project is None or project.kind != "project" or project.heading:
-                return self._organize_unavailable(project)
-        else:
-            raise AssertionError("organize selector must identify a Project")
-        assert project is not None
-        return self._writable_project(project, call)
-
-    def _writable_project(self, project: Record, call: ReadCall) -> Result:
-        """Return the one writable Project neighborhood."""
-        neighborhood = _Neighborhood()
-        neighborhood.add(project)
-        neighborhood.add(self._library.records.get(project.area_uuid or ""))
-        if project.trashed:
-            for descendant in reversed(self._project_descendants(project.uuid)):
-                neighborhood.add(descendant)
-        else:
-            for record in self._library.project(project.id):
-                neighborhood.add(record)
-            for record in self._hidden_project_occupants(project.uuid):
-                neighborhood.add(record)
-        self._neighborhood_include(neighborhood, call)
-        extra_projects: list[Record] = []
-        for record in list(neighborhood.records):
-            if record.kind != "project" or record.uuid == project.uuid:
-                continue
-            extra_projects.append(record)
-            if record.trashed:
-                for descendant in reversed(self._project_descendants(record.uuid)):
-                    neighborhood.add(descendant)
-                continue
-            for member in self._library.project(record.id):
-                neighborhood.add(member)
-            for occupant in self._hidden_project_occupants(record.uuid):
-                neighborhood.add(occupant)
-        if len(neighborhood.records) > _CONTEXT_LIMIT:
-            return self._project_overflow(call, project, len(neighborhood.records))
-        refs, by_id = self._context_refs(neighborhood.records)
-        scopes = [project.id, *[item.id for item in extra_projects]]
-        context = self._create_context(call, refs, scopes=scopes)
-        facts = [
-            self._fact(
-                record,
-                full=record.uuid == project.uuid,
-                include_revision=False,
-            ).model_copy(update={"ref": by_id[record.id]})
-            for record in neighborhood.records
-        ]
-        layouts = [
-            self._project_layout(
-                project, self._project_layout_records(project), by_id
-            )
-        ]
-        layouts.extend(
-            self._project_layout(
-                item, self._project_layout_records(item), by_id
-            )
-            for item in extra_projects
-            if item.id in by_id
-        )
-        instruction = (
-            "Use this context to rename, date, trash, or send one organize draft. "
-            "Listed work can move; unlisted work stays unchanged. "
-            "Empty open sections can still have hidden occupants."
-        )
-        if project.trashed:
-            contained = len(self._project_descendants(project.uuid))
-            instruction = (
-                f"This Project is in Trash with {contained} contained records. "
-                "Restore or permanently delete with this context."
-                if contained
-                else "This Project is in Trash. Restore or permanently delete with this context."
-            )
-        if extra_projects:
-            instruction = (
-                f"{instruction} Included Projects can be organized in this same commit."
-            )
-        if neighborhood.include_note:
-            instruction = f"{instruction} {neighborhood.include_note}"
-        return Result(
-            next="done",
-            status="ok",
-            instruction=instruction,
-            items=facts,
-            layouts=layouts,
-            signals=neighborhood.include_signals,
-            context=self._public_context(context),
-            scope_revision=self._project_scope_revision(project.uuid),
-            missing_ids=neighborhood.missing_ids,
-        )
-
-    def _project_overflow(
-        self, call: ReadCall, project: Record, count: int
-    ) -> Result:
-        return self._context_recovery(
-            code="context_incomplete",
-            instruction=(
-                f"This Project has {count} required items. A safe context can contain "
-                f"at most {_CONTEXT_LIMIT}. Search within it, or change the Project "
-                "with id and if_revision."
-            ),
-            retry="rebuild",
-            read={"ids": [project.id]},
-            status="needs_input",
-        )
-
-    def _organize_unavailable(self, _project: Record | None) -> Result:
-        """Point organize recovery at a live look, never the same dead selector."""
-        return self._context_recovery(
-            code="context_required",
-            instruction=(
-                "That exact Project is not an active visible Project. "
-                "Read an active Project again."
-            ),
-            retry="read",
-            read={"view": "system"},
-            status="needs_input",
-        )
-
-    def _context_detail_is_complete(self, item: Record) -> bool:
-        checklist, direct, inherited = self._detail_lists(item)
-        linked = self._library.recurrence_instances(item.uuid)
-        return (
-            len(item.notes) <= _NOTES_LIMIT
-            and len(checklist) <= 100
-            and len(direct) <= 40
-            and len(inherited) <= 40
-            and len(linked) <= 40
-        )
-
-    def _context_refs(
-        self, records: list[Record], *, existing: Sequence[ContextRef] = ()
-    ) -> tuple[list[ContextRef], dict[str, str]]:
-        prefixes = {"task": "t", "project": "p", "area": "a", "heading": "h"}
-        by_id = {entry.exact_id: entry.ref for entry in existing}
-        used = {entry.ref for entry in existing}
-        refs: list[ContextRef] = []
-        for record in records:
-            if record.id in by_id:
-                continue
-            kind = record.public_kind
-            short = self._stable_context_ref(record.id, prefixes[kind], used)
-            refs.append(
-                ContextRef(
-                    ref=short,
-                    exact_id=record.id,
-                    revision=self._revision(record),
-                )
-            )
-            by_id[record.id] = short
-            used.add(short)
-        return refs, by_id
-
-    @staticmethod
-    def _stable_context_ref(exact_id: str, prefix: str, used: set[str]) -> str:
-        for salt in range(16):
-            digest = sha256(f"{salt}:{exact_id}".encode()).digest()
-            token = b32encode(digest).decode("ascii").lower().rstrip("=")[:11]
-            candidate = f"{prefix}{token}"
-            if candidate not in used:
-                return candidate
-        raise ContextConflict("could not allocate a unique context reference")
-
-    def _create_context(
-        self,
-        call: ReadCall,
-        refs: list[ContextRef],
-        *,
-        scopes: Sequence[str],
-        complete: bool = True,
-        seen: int | None = None,
-        total: int | None = None,
-        next_cursor: str | None = None,
-    ) -> ReadContext:
-        view, item_id, within, from_date, to_date = self._selector_fields(call)
-        count = seen if seen is not None else len(refs)
-        known_total = total if total is not None else (count if complete else None)
-        return self._context_store.create(
-            account_id=self._account_id,
-            selector=ReadSelector(
-                purpose=call.purpose,
-                view=view,
-                item_id=item_id,
-                find=call.find,
-                within=within,
-                from_date=from_date,
-                to_date=to_date,
-                limit=call.limit,
-                includes=tuple(
-                    ReadIncludeSelector(
-                        item_id=entry.id,
-                        find=entry.find,
-                        within=entry.within,
-                    )
-                    for entry in call.include
-                ),
-            ),
-            refs=refs,
-            completeness=tuple(
-                CompletenessFact(
-                    scope=scope,
-                    seen=count,
-                    total=known_total,
-                    complete=complete,
-                    next_cursor=None if complete else next_cursor,
-                )
-                for scope in scopes
-            ),
-        )
-
-    def _selector_fields(
-        self, call: ReadCall
-    ) -> tuple[View | None, str | None, str | None, str | None, str | None]:
-        view: View | None = call.view
-        item_id = call.id
-        within = call.within
-        if call.purpose == "review" and call.id is not None:
-            if call.id.startswith("area:"):
-                view = view or "area"
-                within = within or call.id
-                if view == "area":
-                    item_id = None
-            elif call.id.startswith("project:"):
-                view = view or "project"
-                within = within or call.id
-                if view == "project":
-                    item_id = None
-        elif call.view in {"area", "project"} and call.id is not None and within is None:
-            within = call.id
-            item_id = None
-        from_date = call.from_date
-        to_date = call.to_date
-        if call.view == "logbook" and from_date is None and to_date is None:
-            start, end = self._logbook_range(call)
-            from_date = start.isoformat()
-            to_date = end.isoformat()
-        return view, item_id, within, from_date, to_date
-
     def _logbook_range(self, call: ReadCall) -> tuple[date, date]:
         if call.from_date is not None and call.to_date is not None:
             return date.fromisoformat(call.from_date), date.fromisoformat(call.to_date)
         end = self._clock().date()
         return end - timedelta(days=_LOGBOOK_DAYS - 1), end
-
-    @staticmethod
-    def _public_context(context: ReadContext) -> ContextFact:
-        return ContextFact(
-            id=context.id,
-            purpose=context.selector.purpose,
-            expires_at=context.expires_at.isoformat(),
-            complete=context.complete,
-        )
-
-    def _project_layout_records(self, project: Record) -> list[Record]:
-        """Direct members the layout can name, including Trash children."""
-        if not project.trashed:
-            return self._library.project(project.id)
-        children = [
-            item
-            for item in self._library.records.values()
-            if item.parent_uuid == project.uuid
-        ]
-        children.sort(key=lambda item: (item.sort_index, item.title, item.uuid))
-        return [project, *children]
-
-    def _project_layout(
-        self, project: Record, records: list[Record], by_id: dict[str, str]
-    ) -> LayoutFact:
-        listed = {record.uuid for record in records}
-        headings = sorted(
-            [
-                record
-                for record in records
-                if record.heading and record.parent_uuid == project.uuid
-            ],
-            key=lambda item: (item.sort_index, item.uuid),
-        )
-        tasks = [
-            record
-            for record in records
-            if record.kind == "task"
-            and not record.heading
-            and record.parent_uuid == project.uuid
-        ]
-        sections = [
-            LayoutSectionFact(
-                heading_ref=by_id[heading.id],
-                task_refs=[
-                    by_id[task.id]
-                    for task in sorted(
-                        [task for task in tasks if task.heading_uuid == heading.uuid],
-                        key=lambda item: (item.sort_index, item.uuid),
-                    )
-                    if task.id in by_id
-                ],
-                hidden_count=hidden[0],
-                hidden_signals=hidden[1],
-            )
-            for heading in headings
-            for hidden in [
-                self._heading_hidden_occupancy(heading.uuid, listed=listed)
-            ]
-        ]
-        unheaded = sorted(
-            [task for task in tasks if task.heading_uuid is None],
-            key=lambda item: (item.sort_index, item.uuid),
-        )
-        if unheaded:
-            sections.append(
-                LayoutSectionFact(task_refs=[by_id[task.id] for task in unheaded])
-            )
-        return LayoutFact(
-            project_ref=by_id[project.id], sections=sections, complete=True
-        )
 
     def _heading_hidden_occupancy(
         self, heading_uuid: str, *, listed: set[str] | None = None
@@ -1917,66 +660,6 @@ class ThingsWorkspace:
             elif item.status == "dropped":
                 signals.append("canceled")
         return count, list(dict.fromkeys(signals))
-
-    def _hidden_project_occupants(self, project_uuid: str) -> list[Record]:
-        return [
-            item
-            for item in self._library.records.values()
-            if item.parent_uuid == project_uuid
-            and not item.heading
-            and (
-                item.trashed
-                or item.status != "open"
-                or item.recurrence.role == "template"
-            )
-        ]
-
-    def _oversized_context(self, call: ReadCall, count: int) -> Result:
-        read = self._selector_arguments(call)
-        if not call.include:
-            read.pop("purpose", None)
-        read["limit"] = _READ_LIMIT
-        return self._context_recovery(
-            code="context_incomplete",
-            instruction=(
-                f"This scope has {count} required items. A safe context can contain "
-                f"at most {_CONTEXT_LIMIT}. Use the suggested paged review, then "
-                "narrow the requested structure."
-            ),
-            retry="rebuild",
-            read=read,
-            status="needs_input",
-        )
-
-    @staticmethod
-    def _selector_arguments(call: ReadCall) -> dict[str, object]:
-        values: dict[str, object] = {"purpose": call.purpose}
-        selectors = {
-            "view": call.view,
-            "id": call.id,
-            "find": call.find,
-            "within": call.within,
-            "from": call.from_date,
-            "to": call.to_date,
-            "category": call.category,
-        }
-        values.update({key: value for key, value in selectors.items() if value})
-        if call.limit != 20:
-            values["limit"] = call.limit
-        if call.include:
-            values["include"] = [
-                {
-                    key: value
-                    for key, value in {
-                        "id": entry.id,
-                        "find": entry.find,
-                        "within": entry.within,
-                    }.items()
-                    if value is not None
-                }
-                for entry in call.include
-            ]
-        return values
 
     def execute_v2(self, draft: object) -> JsonDict:
         """Prepare one immutable v2 operation and run or stage its manifest."""
@@ -4008,28 +2691,6 @@ class ThingsWorkspace:
             "until": until,
         }
 
-    @staticmethod
-    def _context_recovery(
-        *,
-        code: Literal[
-            "context_required",
-            "context_expired",
-            "context_incomplete",
-            "context_conflict",
-            "context_corrupt",
-        ],
-        instruction: str,
-        retry: Literal["read", "same", "rebuild"],
-        status: ResultStatus,
-        read: dict[str, object] | None = None,
-    ) -> Result:
-        return Result(
-            next="read" if retry in {"read", "rebuild"} else "retry_same",
-            status=status,
-            instruction=instruction,
-            recovery=RecoveryFact(code=code, retry=retry, read=read),
-        )
-
     def _view_items(self, call: ReadCall) -> list[Record] | Result:
         view = call.view or "today"
         today = self._clock().date()
@@ -4236,7 +2897,6 @@ class ThingsWorkspace:
             "today": "Nothing on Today.",
             "week": "Nothing on the week.",
             "inbox": "Inbox is empty.",
-            "diagnostics": "No native-state conflicts are visible.",
             "logbook": "Nothing in the Logbook for that range.",
         }.get(view or "", "No matching work is visible. Search with find and one title token.")
         visible = bool(facts or result_signals)
@@ -4306,28 +2966,6 @@ class ThingsWorkspace:
             return self._needs_input(error)
         if saved.expires_at <= self._clock():
             return self._stale("That cursor expired. Start the read again.")
-        if saved.view == "diagnostics":
-            return self._diagnostics_page(
-                limit,
-                offset=saved.offset,
-                expected_ids=saved.ids,
-                expected_digest=saved.snapshot_revision,
-            )
-        if saved.view == "weekly_review":
-            continued = ReadCall.model_validate(
-                {
-                    "view": "weekly_review",
-                    "limit": limit,
-                    "category": saved.signals_any[0] if saved.signals_any else None,
-                }
-            )
-            return self._weekly_review_page(
-                continued,
-                offset=saved.offset,
-                expected_ids=saved.ids,
-                expected_snapshot=saved.snapshot_revision,
-                expected_membership=saved.membership_revision,
-            )
         items = [
             item for value in saved.ids if (item := self._exact_item(value)) is not None
         ]
@@ -4337,6 +2975,12 @@ class ThingsWorkspace:
             or (
                 saved.view == "audit"
                 and self._scope_revision(self._library.audit())
+                != saved.membership_revision
+            )
+            or (
+                saved.view == "project"
+                and saved.ids
+                and self._scope_revision(self._library.project(saved.ids[0]))
                 != saved.membership_revision
             )
             or (
@@ -4649,7 +3293,6 @@ class ThingsWorkspace:
                 "Area",
             ),
             "audit": "Active items",
-            "diagnostics": "Conflicts",
             "trash": "Trash",
             "inbox": "Inbox",
             "week": "Week",
@@ -5107,106 +3750,6 @@ class ThingsWorkspace:
             return None, None
         parsed = datetime.fromisoformat(value).astimezone(self._clock().tzinfo)
         return parsed.date(), parsed.strftime("%H:%M")
-
-    def _check_after_index(
-        self,
-        item: Record,
-        reference: str | None,
-        local: dict[str, tuple[str, Kind | str]],
-        planned: list[Write],
-        *,
-        present: bool,
-        moving_uuid: str | None = None,
-    ) -> int | None:
-        indexes = [row.sort_index for row in item.checklists if row.uuid != moving_uuid]
-        indexes.extend(
-            write.checklist_index
-            for write in planned
-            if write.action == "checklist"
-            and write.checklist_parent_uuid == item.uuid
-            and not write.checklist_remove
-            and write.uuid != moving_uuid
-            and write.checklist_index is not None
-        )
-        if not present:
-            return max(indexes, default=-1024) + 1024 if moving_uuid is None else None
-        if reference is None:
-            return min(indexes, default=1024) - 1024
-        if reference.startswith("$"):
-            uuid = local[reference][0]
-            previous = next(
-                (write for write in reversed(planned) if write.uuid == uuid), None
-            )
-            if previous is None or previous.checklist_parent_uuid != item.uuid:
-                raise _Abort(
-                    self._rejected("A checklist after reference must come earlier.")
-                )
-            anchor_uuid = previous.uuid
-            anchor_index = previous.checklist_index or 0
-        else:
-            uuid = reference.removeprefix("check:")
-            if uuid == moving_uuid:
-                raise _Abort(self._rejected("A checklist row cannot follow itself."))
-            row = next((row for row in item.checklists if row.uuid == uuid), None)
-            if row is None:
-                raise _Abort(
-                    self._needs_input(
-                        f"Checklist row {reference} is not on {item.title}."
-                    )
-                )
-            anchor_uuid = row.uuid
-            anchor_index = row.sort_index
-        later = sorted(index for index in indexes if index > anchor_index)
-        if not later:
-            return anchor_index + 1024
-        if later[0] - anchor_index > 1:
-            return anchor_index + (later[0] - anchor_index) // 2
-        repaired = self._rebalance_checklist(item, planned, moving_uuid=moving_uuid)
-        return repaired[anchor_uuid] + 512
-
-    @staticmethod
-    def _rebalance_checklist(
-        item: Record,
-        planned: list[Write],
-        *,
-        moving_uuid: str | None,
-    ) -> dict[str, int]:
-        existing = [row for row in item.checklists if row.uuid != moving_uuid]
-        planned_rows = [
-            (index, write)
-            for index, write in enumerate(planned)
-            if write.action == "checklist"
-            and write.checklist_parent_uuid == item.uuid
-            and not write.checklist_remove
-            and write.uuid != moving_uuid
-        ]
-        combined = sorted(
-            [(row.sort_index, row.uuid, "existing", row) for row in existing]
-            + [
-                (write.checklist_index or 0, write.uuid, "planned", index)
-                for index, write in planned_rows
-            ],
-            key=lambda row: (row[0], row[1]),
-        )
-        positions: dict[str, int] = {}
-        for order, (_old, uuid, source, value) in enumerate(combined):
-            new_index = order * 1024
-            positions[uuid] = new_index
-            if source == "existing":
-                row = cast(ChecklistLine, value)
-                if row.sort_index != new_index:
-                    planned.append(
-                        Write(
-                            action="checklist",
-                            uuid=row.uuid,
-                            checklist_parent_uuid=item.uuid,
-                            checklist_index=new_index,
-                        )
-                    )
-            else:
-                index = cast(int, value)
-                planned[index] = replace(planned[index], checklist_index=new_index)
-        return positions
 
     @staticmethod
     def _is_today_member(
@@ -6043,20 +4586,6 @@ def _signals_with_truncation(
     return [*extras, *ordinary[: max(20 - len(extras), 0)]]
 
 
-def _diagnostics_digest(conflicts: list[Conflict], titles: list[str]) -> str:
-    return "s_" + _digest(
-        [
-            [
-                row.item_id,
-                title,
-                list(row.signals),
-                row.repair_kind,
-                list(row.repairs),
-            ]
-            for row, title in zip(conflicts, titles, strict=True)
-        ]
-    )
-
 
 def _bounded_id_list(ids: list[str]) -> str:
     text = ", ".join(ids)
@@ -6290,12 +4819,3 @@ def _taint_things_text(value: object) -> object:
     return projected
 
 
-def _diagnostics_instruction(diagnostics: list[DiagnosticFact]) -> str:
-    if not diagnostics:
-        return "No native-state conflicts are visible."
-    instruction = (
-        "These records have native-state conflicts. Use diagnostics and repairs."
-    )
-    if any("test_residue" in row.conflicts for row in diagnostics):
-        instruction += " Trash test_residue with this context and short refs."
-    return instruction

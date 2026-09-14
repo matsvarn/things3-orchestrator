@@ -4,7 +4,6 @@ import pytest
 from pydantic import ValidationError
 
 from things_orchestrator.interface import (
-    ContextFact,
     ReadCall,
     Result,
     dump_result,
@@ -40,11 +39,12 @@ def test_empty_read_means_today_and_aliases_are_wire_names() -> None:
         {"fields": ["notes"]},
         {"ids": ["task:one"], "fields": ["notes", "notes"]},
         {"signals_any": ["someday"]},
-        {
-            "purpose": "change",
-            "id": "task:one",
-            "include": [{"id": "task:two"}, {"id": "task:two"}],
-        },
+        {"purpose": "change", "id": "task:one"},
+        {"purpose": "organize", "find": "Launch"},
+        {"purpose": "recurrence", "id": "task:repeat"},
+        {"view": "weekly_review"},
+        {"view": "diagnostics"},
+        {"include": [{"id": "task:anchor"}]},
         {"view": "logbook", "from": "2026-08-01"},
         {"view": "logbook", "from": "2026-08-15", "to": "2026-08-01"},
         {"find": "tax", "unknown": True},
@@ -68,60 +68,20 @@ def test_logbook_range_compares_mixed_iso_calendar_and_week_dates() -> None:
         )
 
 
-def test_read_purpose_selects_task_oriented_context() -> None:
-    assert ReadCall.model_validate({}).purpose == "review"
-    assert (
-        ReadCall.model_validate({"purpose": "change", "id": "task:one"}).purpose
-        == "change"
-    )
-    assert (
-        ReadCall.model_validate(
-            {
-                "purpose": "organize",
-                "view": "project",
-                "within": "project:one",
-            }
-        ).purpose
-        == "organize"
-    )
+def test_read_keeps_live_selector_rules() -> None:
     assert ReadCall.model_validate({"view": "system"}).view == "system"
-    assert (
-        ReadCall.model_validate({"view": "weekly_review"}).view
-        == "weekly_review"
-    )
-    assert ReadCall.model_validate(
-        {"view": "weekly_review", "category": "someday"}
-    ).category == "someday"
-    with pytest.raises(ValueError, match="signals_any needs view audit"):
-        ReadCall.model_validate(
-            {"view": "weekly_review", "signals_any": ["someday", "waiting"]}
-        )
-    with pytest.raises(ValidationError):
-        ReadCall.model_validate(
-            {"view": "weekly_review", "category": "not_a_category"}
-        )
     assert ReadCall.model_validate(
         {"view": "audit", "signals_any": ["someday", "waiting"]}
     ).signals_any == ["someday", "waiting"]
     for signal in ("", "x" * 81):
         with pytest.raises(ValidationError):
             ReadCall.model_validate({"view": "audit", "signals_any": [signal]})
-    assert ReadCall.model_validate(
-        {"purpose": "organize", "find": "Launch"}
-    ).find == "Launch"
-    assert ReadCall.model_validate(
-        {"purpose": "recurrence", "id": "task:repeat"}
-    ).purpose == "recurrence"
-
+    with pytest.raises(ValueError, match="signals_any needs view audit"):
+        ReadCall.model_validate({"view": "today", "signals_any": ["someday"]})
     for payload in (
-        {"purpose": "change"},
-        {"purpose": "organize", "view": "today"},
-        {"purpose": "organize", "view": "system"},
-        {"purpose": "recurrence"},
-        {"purpose": "recurrence", "id": "task:repeat", "view": "today"},
-        {"purpose": "review", "cursor": "cursor_12345678"},
         {"within": "trash"},
         {"view": "today", "within": "trash"},
+        {"cursor": "cursor_12345678", "id": "task:one"},
     ):
         with pytest.raises(ValidationError):
             ReadCall.model_validate(payload)
@@ -130,52 +90,7 @@ def test_read_purpose_selects_task_oriented_context() -> None:
     assert trash.within == "trash"
 
 
-def test_change_include_is_compact_and_bounded() -> None:
-    call = ReadCall.model_validate(
-        {
-            "purpose": "change",
-            "id": "task:target",
-            "include": [
-                {"id": "task:anchor"},
-                {"find": "Anchor", "within": "project:work"},
-            ],
-        }
-    )
-    assert call.include[0].id == "task:anchor"
-    with pytest.raises(ValidationError, match="exactly one"):
-        ReadCall.model_validate(
-            {"purpose": "change", "id": "task:target", "include": [{}]}
-        )
-    review_include = ReadCall.model_validate(
-        {"purpose": "review", "view": "inbox", "include": [{"id": "area:home"}]}
-    )
-    assert review_include.include[0].id == "area:home"
-    with pytest.raises(ValidationError, match="only available"):
-        ReadCall.model_validate(
-            {"purpose": "recurrence", "id": "task:repeat", "include": [{"id": "task:anchor"}]}
-        )
-    assert (
-        ReadCall.model_validate(
-            {
-                "purpose": "organize",
-                "id": "project:source",
-                "include": [{"id": "project:destination"}],
-            }
-        ).include[0].id
-        == "project:destination"
-    )
-    with pytest.raises(ValidationError, match="cannot combine"):
-        ReadCall.model_validate(
-            {
-                "purpose": "change",
-                "id": "task:target",
-                "cursor": "cursor_12345678",
-                "include": [{"id": "task:anchor"}],
-            }
-        )
-
-
-def test_context_capacity_does_not_raise_normal_read_limit() -> None:
+def test_read_limit_stays_bounded() -> None:
     assert ReadCall(limit=40).limit == 40
     with pytest.raises(ValidationError):
         ReadCall(limit=41)
@@ -191,7 +106,7 @@ def test_context_capacity_does_not_raise_normal_read_limit() -> None:
     result = {
         "next": "done",
         "status": "ok",
-        "instruction": "Complete context.",
+        "instruction": "Current facts.",
         "items": [fact] * 120,
     }
     assert len(Result.model_validate(result).items) == 120
@@ -247,87 +162,12 @@ def test_result_keeps_exact_revisioned_facts_and_control() -> None:
     assert result.tags[0].id == "tag:focus"
 
 
-def test_result_carries_compact_context_layout_and_recovery_facts() -> None:
-    result = Result.model_validate(
-        {
-            "next": "read",
-            "status": "stale",
-            "instruction": "Read the Project again.",
-            "items": [
-                {
-                    "ref": "t1",
-                    "id": "task:one",
-                    "revision": "r_1",
-                    "kind": "task",
-                    "title": "Draft",
-                    "status": "open",
-                    "order": 1,
-                }
-            ],
-            "context": {
-                "id": "ctx_12345678",
-                "purpose": "organize",
-                "expires_at": "2026-08-16T12:00:00+00:00",
-                "complete": True,
-            },
-            "layouts": [
-                {
-                    "project_ref": "p1",
-                    "sections": [{"heading_ref": "h1", "task_refs": ["t1"]}],
-                    "complete": True,
-                }
-            ],
-            "recovery": {
-                "code": "context_conflict",
-                "retry": "read",
-                "read": {
-                    "purpose": "organize",
-                    "view": "project",
-                    "within": "project:one",
-                },
-            },
-        }
-    )
-
-    assert result.items[0].ref == "t1"
-    assert result.context and result.context.complete
-    assert result.layouts[0].sections[0].task_refs == ["t1"]
-    assert result.recovery and result.recovery.read
-
-    with pytest.raises(ValidationError, match="need context"):
-        Result.model_validate(
-            {
-                "next": "done",
-                "status": "ok",
-                "instruction": "Current fact.",
-                "items": [
-                    {
-                        "ref": "t1",
-                        "id": "task:one",
-                        "revision": "r_1",
-                        "kind": "task",
-                        "title": "Draft",
-                        "status": "open",
-                        "order": 1,
-                    }
-                ],
-            }
-        )
-
-
-def test_dump_result_keeps_complete_false() -> None:
+def test_dump_result_keeps_truncated_true() -> None:
     result = Result(
         next="read",
         status="ok",
         instruction="Continue the cursor.",
-        context=ContextFact(
-            id="ctx_abcdefgh",
-            purpose="review",
-            expires_at="2026-08-19T12:00:00+00:00",
-            complete=False,
-        ),
         truncated=True,
     )
     payload = dump_result(result)
-    assert payload["context"]["complete"] is False
     assert payload["truncated"] is True
