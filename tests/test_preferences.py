@@ -7,19 +7,17 @@ import pytest
 
 from things_orchestrator.config import (
     ConfigError,
-    load_note_style,
+    load_preferences,
     load_source_schemes,
     preferences_path,
-    save_note_style,
     save_preferences,
-    save_source_schemes,
 )
 
 
 def test_missing_preferences_mean_natural_without_creating_a_file(tmp_path: Path) -> None:
     path = tmp_path / "preferences.json"
 
-    assert load_note_style(path=path) == "natural"
+    assert load_preferences(path=path).note_style == "natural"
     assert load_source_schemes(path=path) == ()
     assert not path.exists()
 
@@ -35,10 +33,10 @@ def test_preferences_path_uses_xdg_config_home(
 def test_save_creates_the_versioned_preference_file(tmp_path: Path) -> None:
     path = tmp_path / "new/preferences.json"
 
-    save_note_style("visual", path=path)
+    save_preferences(note_style="visual", path=path)
 
     assert json.loads(path.read_text()) == {"version": 2, "note_style": "visual"}
-    assert load_note_style(path=path) == "visual"
+    assert load_preferences(path=path).note_style == "visual"
 
 
 def test_save_is_private_atomic_and_preserves_unknown_keys(tmp_path: Path) -> None:
@@ -55,10 +53,10 @@ def test_save_is_private_atomic_and_preserves_unknown_keys(tmp_path: Path) -> No
         )
     )
 
-    saved = save_note_style("visual", path=path)
+    saved = save_preferences(note_style="visual", path=path)
 
     assert saved == path
-    assert load_note_style(path=path) == "visual"
+    assert load_preferences(path=path).note_style == "visual"
     assert json.loads(path.read_text())["future_setting"] == {"kept": True}
     assert path.stat().st_mode & 0o777 == 0o600
     assert directory.stat().st_mode & 0o777 == 0o700
@@ -69,18 +67,20 @@ def test_source_schemes_are_casefolded_deduplicated_and_replaceable(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "preferences.json"
-    save_note_style("visual", path=path)
+    save_preferences(note_style="visual", path=path)
 
-    save_source_schemes(("Obsidian", "x-devonthink-item", "OBSIDIAN"), path=path)
+    save_preferences(
+        source_schemes=("Obsidian", "x-devonthink-item", "OBSIDIAN"), path=path
+    )
 
-    assert load_note_style(path=path) == "visual"
+    assert load_preferences(path=path).note_style == "visual"
     assert load_source_schemes(path=path) == ("obsidian", "x-devonthink-item")
     assert json.loads(path.read_text())["source_schemes"] == [
         "obsidian",
         "x-devonthink-item",
     ]
 
-    save_source_schemes((), path=path)
+    save_preferences(source_schemes=(), path=path)
     assert load_source_schemes(path=path) == ()
 
 
@@ -104,11 +104,11 @@ def test_source_scheme_rejects_built_in_dangerous_and_invalid_values(
     tmp_path: Path, scheme: str
 ) -> None:
     path = tmp_path / "preferences.json"
-    save_note_style("natural", path=path)
+    save_preferences(note_style="natural", path=path)
     original = path.read_text()
 
     with pytest.raises(ConfigError):
-        save_source_schemes((scheme,), path=path)
+        save_preferences(source_schemes=(scheme,), path=path)
 
     assert path.read_text() == original
 
@@ -117,7 +117,7 @@ def test_combined_preference_change_is_atomic_when_a_scheme_is_invalid(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "preferences.json"
-    save_note_style("natural", path=path)
+    save_preferences(note_style="natural", path=path)
     original = path.read_text()
 
     with pytest.raises(ConfigError):
@@ -126,7 +126,7 @@ def test_combined_preference_change_is_atomic_when_a_scheme_is_invalid(
         )
 
     assert path.read_text() == original
-    assert load_note_style(path=path) == "natural"
+    assert load_preferences(path=path).note_style == "natural"
 
 
 @pytest.mark.parametrize(
@@ -146,9 +146,9 @@ def test_invalid_preferences_raise_without_overwrite(tmp_path: Path, body: str) 
     path.write_text(body)
 
     with pytest.raises(ConfigError):
-        load_note_style(path=path)
+        load_preferences(path=path)
     with pytest.raises(ConfigError):
-        save_note_style("visual", path=path)
+        save_preferences(note_style="visual", path=path)
 
     assert path.read_text() == body
 
@@ -159,6 +159,6 @@ def test_non_utf8_preferences_raise_without_overwrite(tmp_path: Path) -> None:
     path.write_bytes(original)
 
     with pytest.raises(ConfigError):
-        save_note_style("visual", path=path)
+        save_preferences(note_style="visual", path=path)
 
     assert path.read_bytes() == original

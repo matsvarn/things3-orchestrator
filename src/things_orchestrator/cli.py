@@ -468,12 +468,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.action == "legacy-resolve":
         _legacy_resolution_command(parser, args.intent_id, args.resolution)
         return
-    if args.action.startswith("operation-"):
-        _operation_command(
-            parser,
-            action=args.action,
-            operation_id=args.operation_id,
-        )
+    if args.action == "operation-show":
+        _operation_command(parser, operation_id=args.operation_id)
+        return
+    if args.action == "operation-reconcile":
+        _operation_command(parser, operation_id=args.operation_id, reconcile=True)
         return
     try:
         credentials = load_credentials()
@@ -697,10 +696,7 @@ def _login(
     token = _mcp_token(rotate=rotate_token, path=creds)
     preferences_file = creds.with_name("preferences.json")
     try:
-        existing_url = load_mcp_url(
-            preferences_file=preferences_file,
-            credentials_file=creds,
-        )
+        existing_url = load_mcp_url(preferences_file=preferences_file)
         legacy_url = (
             None
             if public_url.strip() or existing_url is not None
@@ -751,10 +747,7 @@ def _print_config(
         url = (
             normalize_mcp_url(public_url)
             if public_url.strip()
-            else load_mcp_url(
-                preferences_file=preferences_file,
-                credentials_file=creds,
-            )
+            else load_mcp_url(preferences_file=preferences_file)
             or normalize_mcp_url("http://127.0.0.1:8787")
         )
         kind = ClientKind(client or ClientKind.CURSOR.value)
@@ -836,10 +829,7 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
         print(f"timezone: invalid ({timezone_name})")
         raise SystemExit(1) from None
     print(f"timezone: ok ({timezone_name})")
-    stored_url = load_mcp_url(
-        preferences_file=creds.with_name("preferences.json"),
-        credentials_file=creds,
-    )
+    stored_url = load_mcp_url(preferences_file=creds.with_name("preferences.json"))
     hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"
     if timezone_name == "UTC" and (public_url.strip() or hosted):
         print("timezone: warning - UTC is unusual for a hosted owner account")
@@ -1008,8 +998,8 @@ def _owner_factor(parser: argparse.ArgumentParser) -> None:
 def _operation_command(
     parser: argparse.ArgumentParser,
     *,
-    action: str,
     operation_id: str,
+    reconcile: bool = False,
 ) -> None:
     from .owner_authority import render_operation
 
@@ -1021,12 +1011,8 @@ def _operation_command(
         print(render_operation(operation))
     except ValueError as error:
         parser.error(str(error))
-    if action == "operation-show":
-        return
-    if action == "operation-reconcile":
+    if reconcile:
         print(json.dumps(workspace.host_reconcile_v2(operation_id), sort_keys=True))
-        return
-    parser.error("unsupported operation command")
 
 
 def _legacy_resolution_command(

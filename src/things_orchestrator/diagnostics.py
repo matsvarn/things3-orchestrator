@@ -435,7 +435,6 @@ def _endpoint_class(credentials_file: Path) -> EndpointClass | None:
     try:
         endpoint = load_mcp_url(
             preferences_file=credentials_file.with_name("preferences.json"),
-            credentials_file=credentials_file,
         ) or normalize_mcp_url("http://127.0.0.1:8787")
     except ConfigError:
         return None

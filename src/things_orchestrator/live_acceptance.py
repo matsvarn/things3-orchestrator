@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from secrets import token_hex
 from typing import Any, Protocol, cast
 from uuid import uuid4
+
+from .config import _atomic_replace
 
 
 class ToolClient(Protocol):
@@ -98,22 +99,10 @@ class LiveAcceptanceRunner:
         return state
 
     def _save(self, state: State) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-            0o600,
+        _atomic_replace(
+            self.state_path,
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
         )
-        try:
-            with os.fdopen(descriptor, "w") as stream:
-                json.dump(state, stream, indent=2, sort_keys=True)
-                stream.write("\n")
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-        os.replace(temporary, self.state_path)
-        self.state_path.chmod(0o600)
 
     async def _select_tags(self, state: State) -> None:
         if state["phase"] != "new":

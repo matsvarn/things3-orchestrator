@@ -51,7 +51,7 @@ def test_credentials_and_owner_preferences_have_separate_authority(
         == "Europe/Berlin"
     )
     assert str(
-        load_mcp_url(preferences_file=preferences, credentials_file=credentials)
+        load_mcp_url(preferences_file=preferences)
     ) == _url("https", "tasks.example.com/mcp")
     assert str(load_credentials(path=credentials).bearer) == "<mcp_token>"
 
@@ -75,7 +75,7 @@ def test_legacy_credentials_timezone_is_a_read_only_fallback(tmp_path: Path) -> 
         == "Europe/Berlin"
     )
     assert (
-        load_mcp_url(preferences_file=preferences, credentials_file=credentials) is None
+        load_mcp_url(preferences_file=preferences) is None
     )
     assert not preferences.exists()
 
