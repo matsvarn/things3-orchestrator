@@ -1,5 +1,10 @@
 # Revisioned workspace behind three tools
 
+## Status
+
+Superseded by ADR 0006 and ADR 0007. The three-tool design below remains
+only as a historical record and is not the current implementation contract.
+
 The model-facing Interface is `things_read`, `things_commit`, and
 `things_approve`.
 

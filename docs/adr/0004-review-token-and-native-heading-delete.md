@@ -1,5 +1,10 @@
 # Review pages are write tokens; heading delete is one native op
 
+## Status
+
+Superseded by ADR 0006 and ADR 0007. The three-tool design below remains
+only as a historical record and is not the current implementation contract.
+
 A weekly-review dogfood spent more turns on protocol than on judgment.
 Heading delete went stale because the planner rewrote every assigned
 child, including completed and trashed rows the organize layout hid.

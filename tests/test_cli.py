@@ -1194,7 +1194,7 @@ def test_readme_is_safe_to_publish() -> None:
     assert "model provider" in trust
     assert "fully private" in trust
     comparison = (ROOT / "docs/research/comparison.md").read_text()
-    assert "Reviewed on 2026-08-14" in comparison
+    assert "Recheck the linked sources" in comparison
     assert "hald/things-mcp" in comparison
     assert "thingscloudmcp.com" in comparison
     assert "wbopan/things-cloud-mcp" in comparison
