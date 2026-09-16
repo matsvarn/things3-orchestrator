@@ -11,7 +11,7 @@ import os
 import re
 import unicodedata
 from base64 import b64decode, b64encode
-from hashlib import scrypt, sha256
+from hashlib import scrypt
 from pathlib import Path
 from secrets import token_bytes
 
@@ -78,11 +78,6 @@ def verify_owner_factor(passphrase: str, *, path: Path | None = None) -> bool:
     salt = b64decode(payload["salt"], validate=True)
     verifier = b64decode(payload["verifier"], validate=True)
     return hmac.compare_digest(_digest(passphrase, salt), verifier)
-
-
-def authorization_binding(operation: V2Operation, *, action: str) -> str:
-    canonical = owner_authorization_binding_json(operation, action=action)
-    return "sha256:v1:" + sha256(canonical.encode()).hexdigest()
 
 
 def verified_authorization(
