@@ -149,14 +149,6 @@ class Journal(Protocol):
 
     def get(self, intent_id: str) -> IntentRecord | None: ...
 
-    def get_by_plan_id(self, plan_id: str) -> IntentRecord | None: ...
-
-    def save(self, record: IntentRecord) -> None: ...
-
-    def reserve(self, record: IntentRecord) -> IntentRecord: ...
-
-    def transition(self, record: IntentRecord, *, expected: IntentState) -> bool: ...
-
     def get_v2_request(self, account_id: str, api_version: str, request_id: str) -> V2Operation | None: ...
     def get_v2_operation(self, operation_id: str) -> V2Operation | None: ...
     def blocking_v2_operations(self, account_id: str) -> list[str]: ...
@@ -276,47 +268,6 @@ class MemoryJournal:
     def get(self, intent_id: str) -> IntentRecord | None:
         with self._lock:
             return _copy(self._records.get(intent_id))
-
-    def get_by_plan_id(self, plan_id: str) -> IntentRecord | None:
-        with self._lock:
-            return next(
-                (
-                    _copy(record)
-                    for record in self._records.values()
-                    if record.plan_id == plan_id
-                ),
-                None,
-            )
-
-    def save(self, record: IntentRecord) -> None:
-        with self._lock:
-            copied = _copy(record)
-            if copied.plan_id is not None and any(
-                other.intent_id != copied.intent_id and other.plan_id == copied.plan_id
-                for other in self._records.values()
-            ):
-                raise ValueError(f"plan ID already exists: {copied.plan_id}")
-            self._records[copied.intent_id] = copied
-
-    def reserve(self, record: IntentRecord) -> IntentRecord:
-        with self._lock:
-            existing = self._records.get(record.intent_id)
-            if existing is not None:
-                return _copy(existing)
-            self.save(record)
-            return _copy(record)
-
-    def transition(self, record: IntentRecord, *, expected: IntentState) -> bool:
-        with self._lock:
-            current = self._records.get(record.intent_id)
-            if (
-                current is None
-                or current.state != expected
-                or current.fingerprint != record.fingerprint
-            ):
-                return False
-            self.save(record)
-            return True
 
     def get_v2_request(
         self, account_id: str, api_version: str, request_id: str
@@ -764,101 +715,6 @@ class SQLiteJournal:
                 "SELECT * FROM intents WHERE intent_id = ?", (intent_id,)
             ).fetchone()
         return _from_row(row)
-
-    def get_by_plan_id(self, plan_id: str) -> IntentRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM intents WHERE plan_id = ?", (plan_id,)
-            ).fetchone()
-        return _from_row(row)
-
-    def save(self, record: IntentRecord) -> None:
-        plan_json = _json(record.plan)
-        result_json = _json(record.result) if record.result is not None else None
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO intents (
-                        intent_id, fingerprint, state, plan_json,
-                        plan_id, expires_at, result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(intent_id) DO UPDATE SET
-                        fingerprint = excluded.fingerprint,
-                        state = excluded.state,
-                        plan_json = excluded.plan_json,
-                        plan_id = excluded.plan_id,
-                        expires_at = excluded.expires_at,
-                        result_json = excluded.result_json
-                    """,
-                    (
-                        record.intent_id,
-                        record.fingerprint,
-                        record.state,
-                        plan_json,
-                        record.plan_id,
-                        record.expires_at,
-                        result_json,
-                    ),
-                )
-        except sqlite3.IntegrityError as error:
-            if record.plan_id is not None:
-                raise ValueError(f"plan ID already exists: {record.plan_id}") from error
-            raise
-
-    def reserve(self, record: IntentRecord) -> IntentRecord:
-        plan_json = _json(record.plan)
-        result_json = _json(record.result) if record.result is not None else None
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO intents (
-                        intent_id, fingerprint, state, plan_json,
-                        plan_id, expires_at, result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record.intent_id,
-                        record.fingerprint,
-                        record.state,
-                        plan_json,
-                        record.plan_id,
-                        record.expires_at,
-                        result_json,
-                    ),
-                )
-        except sqlite3.IntegrityError:
-            existing = self.get(record.intent_id)
-            if existing is None:
-                raise
-            return existing
-        return record
-
-    def transition(self, record: IntentRecord, *, expected: IntentState) -> bool:
-        plan_json = _json(record.plan)
-        result_json = _json(record.result) if record.result is not None else None
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE intents SET
-                    fingerprint = ?, state = ?, plan_json = ?, plan_id = ?,
-                    expires_at = ?, result_json = ?
-                WHERE intent_id = ? AND state = ? AND fingerprint = ?
-                """,
-                (
-                    record.fingerprint,
-                    record.state,
-                    plan_json,
-                    record.plan_id,
-                    record.expires_at,
-                    result_json,
-                    record.intent_id,
-                    expected,
-                    record.fingerprint,
-                ),
-            )
-            return cursor.rowcount == 1
 
     def get_v2_request(
         self, account_id: str, api_version: str, request_id: str
