@@ -378,7 +378,7 @@ class MemoryLibrary:
             matches = [
                 candidate
                 for candidate in self.records.values()
-                if candidate.uuid.startswith(value) or candidate.id == value
+                if candidate.id == value
             ]
             return matches[0] if len(matches) == 1 else None
         if kind is not None and item.public_kind != kind:
@@ -411,12 +411,12 @@ class MemoryLibrary:
         )
         return [item for _, item in ranked]
 
-    def inbox(self, limit: int = 15) -> list[Record]:
+    def inbox(self) -> list[Record]:
         hits = [item for item in self._open() if item.inbox and item.kind != "area"]
         hits.sort(key=lambda item: (item.sort_index, item.title))
-        return hits[:limit]
+        return hits
 
-    def week(self, *, today: date, limit: int = 15) -> list[Record]:
+    def week(self, *, today: date) -> list[Record]:
         end = today + timedelta(days=7)
         hits = [
             item
@@ -430,7 +430,7 @@ class MemoryLibrary:
         hits.sort(
             key=lambda item: (item.deadline or item.start or date.max, item.sort_index)
         )
-        return hits[:limit]
+        return hits
 
     def trash(self) -> list[Record]:
         hits = [item for item in self.records.values() if item.trashed]

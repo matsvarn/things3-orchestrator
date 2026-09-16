@@ -9,6 +9,7 @@ from starlette.testclient import TestClient
 
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.server import ThingsMCPServer, bearer_matches
+from things_orchestrator.tools import CLIENT_BUNDLE_FORMAT_VERSION
 from things_orchestrator.v2 import PublicResult
 from things_orchestrator.workspace import ThingsWorkspace
 
@@ -149,6 +150,10 @@ def test_health_is_public_liveness_and_authenticated_deployment_detail() -> None
     assert authenticated.json()["tool_schema_hash"].startswith("sha256:")
     assert authenticated.json()["tool_discovery_hash"].startswith("sha256:")
     assert authenticated.json()["client_bundle"]["path"] == "/client/bundle"
+    assert (
+        authenticated.json()["client_bundle"]["format_version"]
+        == CLIENT_BUNDLE_FORMAT_VERSION
+    )
     assert "client_bundle" not in public.json()
     assert "capabilities" in authenticated.json()
     assert rejected.status_code == 401

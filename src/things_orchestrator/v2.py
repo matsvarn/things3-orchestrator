@@ -15,7 +15,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from .interface import ReadCall, StrictModel, TruncatedField, Weekday
 from .journal import AmbiguousV2Request, same_account_id
-from .tools import ITEM_ID as ITEM_ID
+from .tools import ITEM_ID
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -861,7 +861,7 @@ class ThingsV2:
         self._within_pages: dict[str, _WithinPage] = {}
         self._last_prune_date: date | None = None
 
-    def dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
+    def dispatch(self, name: str, arguments: dict[str, Any] | BaseModel) -> PublicResult:
         current = self.workspace._clock()
         if self._last_prune_date != current.date():
             try:
@@ -872,7 +872,8 @@ class ThingsV2:
                 pass
             else:
                 self._last_prune_date = current.date()
-        call = MODELS[name].model_validate(arguments)
+        expected = MODELS[name]
+        call = arguments if isinstance(arguments, expected) else expected.model_validate(arguments)
         if isinstance(call, ViewCall):
             return self._view(call)
         if isinstance(call, FindCall):
