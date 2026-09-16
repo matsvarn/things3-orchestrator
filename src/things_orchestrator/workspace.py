@@ -16,15 +16,16 @@ from .cloud import CloudError, CloudWriteRejected
 from .config import Preferences
 from .consistency import item_conflicts
 from .interface import (
+    BULK_ID_LIMIT,
     DETAIL_FIELDS,
     ChecklistFact,
+    CursorView,
     ItemFact,
     ReadCall,
     RecurrenceFact,
     RecurrenceKind,
     RepeatOnFact,
     Result,
-    ReviewSection,
     TagFact,
     TruncatedField,
     View,
@@ -341,10 +342,9 @@ class _ItemCursor:
     snapshot_revision: str
     public_scope_revision: str
     full: bool
-    view: View | None
+    view: CursorView | None
     detail: tuple[str, ...]
     expires_at: datetime
-    signals_any: tuple[str, ...] = ()
     membership_revision: str | None = None
 
 
@@ -409,29 +409,6 @@ class ThingsWorkspace:
                 return self._needs_input(
                     "I could not find that exact item. Read or search again."
                 )
-            if item.kind in {"area", "project"} and not item.heading:
-                if item.kind == "project":
-                    records = self._library.project(item.id)
-                    return self._page(
-                        records,
-                        call.limit,
-                        full=False,
-                        instruction="This Project and its contents.",
-                        view="project",
-                        membership_revision=self._scope_revision(records),
-                        call=call,
-                    )
-                return self._page(
-                    self._library.area(item.id),
-                    call.limit,
-                    full=False,
-                    instruction=(
-                        "This Area, its loose tasks, and its Projects. "
-                        "Read a Project for its layout and contents."
-                    ),
-                    view="area",
-                    call=call,
-                )
             return self._detail_page(
                 item,
                 row_offset=0,
@@ -456,7 +433,6 @@ class ThingsWorkspace:
                         else "No Trash item matched that find."
                     ),
                     view="trash",
-                    call=call,
                 )
             within = self._exact_item(call.within) if call.within else None
             if call.within and within is None:
@@ -472,7 +448,6 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction="These matches. Name one to open or stop.",
-                    call=call,
                 )
             closed = [
                 item
@@ -493,14 +468,12 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction=instruction,
-                    call=call,
                 )
             return self._page(
                 matches,
                 call.limit,
                 full=False,
                 instruction="No match. Try a shorter title token.",
-                call=call,
             )
 
         if view == "tags":
@@ -513,35 +486,12 @@ class ThingsWorkspace:
             ]
             return self._tag_page(rows, offset=0, limit=call.limit)
 
-        visible = self._view_items(call)
-        if isinstance(visible, Result):
-            return visible
-        membership_revision = (
-            self._scope_revision(visible) if view in {"audit", "project"} else None
-        )
-        if view == "audit":
-            visible = self._filter_audit_items(visible, call.signals_any)
+        visible = self._view_items(view)
         instruction = "Use this review as current evidence."
         if view in {"today", "inbox", "week"}:
             instruction = (
                 "Each into_id is the Area or Project home. Titles are on into_title."
             )
-        elif view == "system":
-            instruction = (
-                "This registry is grouped by Area only as prose. "
-                "Send this scope_revision only when creating or renaming an Area."
-            )
-        elif view == "audit":
-            instruction = (
-                "This audit lists each active item once. Continue the cursor for the rest."
-            )
-        elif view == "area":
-            instruction = (
-                "This Area, its loose tasks, and its Projects. "
-                "Read a Project for its layout and contents."
-            )
-        elif view == "project":
-            instruction = "This Project and its contents."
         elif view == "trash":
             instruction = "This is Trash. Read an item to restore or purge."
         return self._page(
@@ -550,11 +500,6 @@ class ThingsWorkspace:
             full=False,
             instruction=instruction,
             view=view,
-            public_scope=(
-                self._area_scope_revision() if view in {"system", "audit"} else None
-            ),
-            membership_revision=membership_revision,
-            call=call,
         )
 
     def read_v2_registry(
@@ -565,20 +510,28 @@ class ThingsWorkspace:
         failed = self._refresh()
         if failed is not None:
             return failed
-        view: View = "audit" if kind == "project" else "system"
-        source = self._library.audit() if kind == "project" else self._library.system()
-        visible = [item for item in source if item.public_kind == kind]
+        visible = self._registry_items(kind)
+        cursor_view: CursorView = "projects" if kind == "project" else "areas"
         return self._page(
             visible,
             limit,
             full=False,
             instruction=f"Current Things {kind}s.",
-            view=view,
+            view=cursor_view,
             public_scope=self._area_scope_revision(),
             membership_revision=(
-                self._scope_revision(source) if view == "audit" else None
+                self._scope_revision(visible) if kind == "project" else None
             ),
         )
+
+    def _registry_items(self, kind: Literal["project", "area"]) -> list[Record]:
+        if kind == "project":
+            return [
+                item
+                for item in self._library.audit()
+                if item.public_kind == "project"
+            ]
+        return list(self._library.areas())
 
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
@@ -602,7 +555,7 @@ class ThingsWorkspace:
             )
         result = self._page(
             items,
-            call.limit,
+            len(items) or 1,
             full=True,
             instruction=(
                 "Use these exact facts."
@@ -613,11 +566,7 @@ class ThingsWorkspace:
                 )
             ),
             missing_ids=missing,
-            detail=(
-                tuple(call.fields)
-                if "fields" in call.model_fields_set
-                else DETAIL_FIELDS
-            ),
+            detail=DETAIL_FIELDS,
         )
         if missing:
             return result.model_copy(
@@ -628,9 +577,7 @@ class ThingsWorkspace:
             )
         return result
 
-    def _logbook_range(self, call: ReadCall) -> tuple[date, date]:
-        if call.from_date is not None and call.to_date is not None:
-            return date.fromisoformat(call.from_date), date.fromisoformat(call.to_date)
+    def _logbook_range(self) -> tuple[date, date]:
         end = self._clock().date()
         return end - timedelta(days=_LOGBOOK_DAYS - 1), end
 
@@ -2691,8 +2638,7 @@ class ThingsWorkspace:
             "until": until,
         }
 
-    def _view_items(self, call: ReadCall) -> list[Record] | Result:
-        view = call.view or "today"
+    def _view_items(self, view: View) -> list[Record]:
         today = self._clock().date()
         if view == "today":
             return self._library.today(today=today)
@@ -2719,26 +2665,8 @@ class ThingsWorkspace:
             )
         if view == "trash":
             return self._library.trash()
-        if view == "system":
-            return self._library.system()
-        if view == "area":
-            container = call.within or call.id
-            assert container is not None
-            area = self._exact_item(container)
-            if area is None or area.kind != "area":
-                return self._needs_input("I could not find that exact Area.")
-            return self._library.area(area.id)
-        if view == "audit":
-            return self._library.audit()
-        if view == "project":
-            container = call.within or call.id
-            assert container is not None
-            project = self._exact_item(container)
-            if project is None or project.kind != "project":
-                return self._needs_input("I could not find that exact Project.")
-            return self._library.project(project.id)
         if view == "logbook":
-            start, end = self._logbook_range(call)
+            start, end = self._logbook_range()
             return sorted(
                 [
                     item
@@ -2833,25 +2761,6 @@ class ThingsWorkspace:
             and item.recurrence.role != "template"
         )
 
-    def _filter_audit_items(
-        self, items: Sequence[Record], signals_any: Sequence[str]
-    ) -> list[Record]:
-        if not signals_any:
-            return list(items)
-        wanted = set(signals_any)
-        return [
-            item
-            for item in items
-            if wanted.intersection(
-                self._item_signals(
-                    item,
-                    checklist_truncated=False,
-                    tags_truncated=False,
-                    notes_truncated=False,
-                )
-            )
-        ]
-
     def _page(
         self,
         items: list[Record],
@@ -2859,16 +2768,14 @@ class ThingsWorkspace:
         *,
         full: bool,
         instruction: str,
-        view: View | None = None,
+        view: CursorView | None = None,
         public_scope: str | None = None,
         result_signals: list[str] | None = None,
-        extra_truncated: bool = False,
         missing_ids: list[str] | None = None,
         detail: tuple[str, ...] = DETAIL_FIELDS,
         membership_revision: str | None = None,
-        call: ReadCall | None = None,
     ) -> Result:
-        limit = min(limit, _READ_LIMIT)
+        limit = min(limit, BULK_ID_LIMIT if full else _READ_LIMIT)
         page_records = items[:limit]
         facts = [
             self._fact(item, full=full, detail=detail) for item in page_records
@@ -2886,13 +2793,8 @@ class ThingsWorkspace:
                 full,
                 view,
                 detail,
-                signals_any=call.signals_any if call is not None else (),
                 membership_revision=membership_revision,
             )
-        sections = self._sections(view, facts) if view is not None else []
-        extra_truncated = extra_truncated or (
-            view == "audit" and self._audit_sections_truncated(facts)
-        )
         empty = {
             "today": "Nothing on Today.",
             "week": "Nothing on the week.",
@@ -2900,8 +2802,8 @@ class ThingsWorkspace:
             "logbook": "Nothing in the Logbook for that range.",
         }.get(view or "", "No matching work is visible. Search with find and one title token.")
         visible = bool(facts or result_signals)
-        if view == "logbook" and visible and call is not None:
-            start, end = self._logbook_range(call)
+        if view == "logbook" and visible:
+            start, end = self._logbook_range()
             instruction = (
                 f"{instruction.rstrip('.')} from {start.isoformat()} to "
                 f"{end.isoformat()}."
@@ -2911,12 +2813,11 @@ class ThingsWorkspace:
             status="ok",
             instruction=instruction if visible else empty,
             items=facts,
-            sections=sections,
             signals=result_signals or [],
             scope_revision=scope,
             cursor=cursor,
             missing_ids=missing_ids or [],
-            truncated=cursor is not None or extra_truncated,
+            truncated=cursor is not None,
         )
         if full:
             result = self._enforce_bulk_result(
@@ -2973,18 +2874,12 @@ class ThingsWorkspace:
             len(items) != len(saved.ids)
             or self._scope_revision(items) != saved.snapshot_revision
             or (
-                saved.view == "audit"
-                and self._scope_revision(self._library.audit())
+                saved.view == "projects"
+                and self._scope_revision(self._registry_items("project"))
                 != saved.membership_revision
             )
             or (
-                saved.view == "project"
-                and saved.ids
-                and self._scope_revision(self._library.project(saved.ids[0]))
-                != saved.membership_revision
-            )
-            or (
-                saved.view in {"system", "audit"}
+                saved.view in {"projects", "areas"}
                 and self._area_scope_revision() != saved.public_scope_revision
             )
         ):
@@ -3000,7 +2895,6 @@ class ThingsWorkspace:
                 saved.full,
                 saved.view,
                 saved.detail,
-                signals_any=saved.signals_any,
                 membership_revision=saved.membership_revision,
             )
             if next_offset < len(items)
@@ -3010,19 +2904,14 @@ class ThingsWorkspace:
             self._fact(item, full=saved.full, detail=saved.detail)
             for item in page_items
         ]
-        sections = self._sections(saved.view, facts) if saved.view is not None else []
-        extra_truncated = (
-            saved.view == "audit" and self._audit_sections_truncated(facts)
-        )
         result = Result(
             next="done",
             status="ok",
             instruction="Continue with these current facts.",
             items=facts,
-            sections=sections,
             scope_revision=saved.public_scope_revision,
             cursor=next_cursor,
-            truncated=next_cursor is not None or extra_truncated,
+            truncated=next_cursor is not None,
         )
         if saved.full:
             result = self._enforce_bulk_result(
@@ -3040,7 +2929,7 @@ class ThingsWorkspace:
     def _cursor_view_error(
         requested: View | None,
         *,
-        expected: View | None,
+        expected: CursorView | None,
         repeatable: bool = True,
     ) -> str | None:
         if requested is None or (repeatable and requested == expected):
@@ -3056,10 +2945,9 @@ class ThingsWorkspace:
         snapshot_revision: str,
         public_scope_revision: str,
         full: bool,
-        view: View | None,
+        view: CursorView | None,
         detail: tuple[str, ...] = (),
         *,
-        signals_any: Sequence[str] = (),
         membership_revision: str | None = None,
     ) -> str:
         self._prune_cursors()
@@ -3073,7 +2961,6 @@ class ThingsWorkspace:
             view=view,
             detail=detail,
             expires_at=self._clock() + timedelta(minutes=10),
-            signals_any=tuple(signals_any),
             membership_revision=membership_revision,
         )
         return token
@@ -3233,93 +3120,6 @@ class ThingsWorkspace:
             elif self._detail_cursors:
                 del self._detail_cursors[next(iter(self._detail_cursors))]
 
-    def _sections(self, view: str, items: list[ItemFact]) -> list[ReviewSection]:
-        if not items:
-            return []
-        if view == "today":
-            groups = [
-                ("overdue", "Overdue"),
-                ("evening", "Evening"),
-                ("today", "Today"),
-                ("waiting", "Waiting"),
-            ]
-            sections = []
-            used: set[str] = set()
-            for signal, title in groups:
-                selected = [
-                    item
-                    for item in items
-                    if signal in item.signals and item.id not in used
-                ]
-                if selected:
-                    sections.append(
-                        ReviewSection(
-                            key=signal,
-                            title=title,
-                        )
-                    )
-                    used.update(item.id for item in selected)
-            return sections
-        if view == "system":
-            return [
-                ReviewSection(
-                    key="system",
-                    title="Areas and Projects",
-                )
-            ]
-        if view == "audit":
-            homes: dict[str, list[str]] = {}
-            home_titles: dict[str, str] = {}
-            for item in items:
-                if item.kind in {"area", "project"}:
-                    home = item.id
-                    home_titles[home] = item.title
-                else:
-                    home = item.into_id or "unfiled"
-                    if home not in home_titles:
-                        home_titles[home] = self._audit_home_title(home)
-                homes.setdefault(home, []).append(item.id)
-            return [
-                ReviewSection(
-                    key=home[:80],
-                    title=home_titles[home][:200],
-                    item_ids=ids[:40],
-                )
-                for home, ids in homes.items()
-            ][:40]
-        titles = {
-            "area": next(
-                (item.title[:200] for item in items if item.kind == "area"),
-                "Area",
-            ),
-            "audit": "Active items",
-            "trash": "Trash",
-            "inbox": "Inbox",
-            "week": "Week",
-            "logbook": "Logbook",
-            "tags": "Tags",
-            "project": "Project",
-        }
-        return [
-            ReviewSection(
-                key=view,
-                title=titles.get(view, view.title()),
-            )
-        ]
-
-    def _audit_home_title(self, home: str) -> str:
-        if home == "unfiled":
-            return "Unfiled"
-        item = self._exact_item(home)
-        return item.title if item is not None else home
-
-    def _audit_sections_truncated(self, facts: list[ItemFact]) -> bool:
-        homes = {
-            item.id if item.kind in {"area", "project"} else item.into_id or "unfiled"
-            for item in facts
-        }
-        return len(homes) > 40
-
     def _enforce_bulk_result(
         self,
         result: Result,
@@ -3328,7 +3128,7 @@ class ThingsWorkspace:
         page_start: int,
         snapshot: str,
         scope: str,
-        view: View | None,
+        view: CursorView | None,
         detail: tuple[str, ...] = DETAIL_FIELDS,
     ) -> Result:
         facts = list(result.items)
@@ -4233,10 +4033,6 @@ class ThingsWorkspace:
     @staticmethod
     def _rejected(instruction: str) -> Result:
         return Result(next="stop", status="rejected", instruction=instruction)
-
-    @staticmethod
-    def _unsupported(instruction: str) -> Result:
-        return Result(next="stop", status="unsupported", instruction=instruction)
 
 
 def _bounded_tag_title(title: str) -> str:

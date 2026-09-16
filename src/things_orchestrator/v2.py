@@ -1076,20 +1076,13 @@ class ThingsV2:
         )
 
     def _get(self, ids: list[str]) -> PublicResult:
-        items: list[Any] = []
-        for offset in range(0, len(ids), 10):
-            result = self.workspace.read(
-                ReadCall(
-                    ids=ids[offset : offset + 10],
-                    fields=["notes", "checklist", "tags", "recurrence"],
-                )
+        result = self.workspace.read(ReadCall(ids=ids))
+        if result.status == "unavailable":
+            return PublicResult(
+                state="rejected", code="read_unavailable", next_action="retry_same",
+                instruction="Things Cloud is unavailable; no IDs were classified as missing.",
             )
-            if result.status == "unavailable":
-                return PublicResult(
-                    state="rejected", code="read_unavailable", next_action="retry_same",
-                    instruction="Things Cloud is unavailable; no IDs were classified as missing.",
-                )
-            items.extend(result.items)
+        items = result.items
         found = {item.id for item in items}
         missing = [item_id for item_id in ids if item_id not in found]
         return PublicResult(

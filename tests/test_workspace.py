@@ -33,13 +33,7 @@ def detail(module: ThingsWorkspace, item_id: str):
     return result.items[0]
 
 
-def system_scope(module: ThingsWorkspace) -> str:
-    result = module.read(ReadCall(view="system"))
-    assert result.scope_revision is not None
-    return result.scope_revision
-
-
-def test_empty_read_returns_bounded_today_sections() -> None:
+def test_empty_read_returns_bounded_today() -> None:
     module = workspace(
         [
             Record(
@@ -62,9 +56,7 @@ def test_empty_read_returns_bounded_today_sections() -> None:
     result = module.read(ReadCall())
 
     assert result.status == "ok"
-    assert [section.key for section in result.sections] == ["overdue", "evening"]
     assert [item.id for item in result.items] == ["task:late", "task:tonight"]
-    assert [section.item_ids for section in result.sections] == [[], []]
     inbox = module.read(ReadCall(view="inbox"))
     assert [item.id for item in inbox.items] == ["task:box"]
     assert result.scope_revision and result.scope_revision.startswith("s_")
@@ -572,7 +564,7 @@ def test_detail_cursor_rejects_a_repeated_view() -> None:
     first = module.read(ReadCall(id=task.id))
     assert first.cursor is not None
     continued = module.read(
-        ReadCall.model_validate({"cursor": first.cursor, "view": "audit"})
+        ReadCall.model_validate({"cursor": first.cursor, "view": "today"})
     )
 
     assert continued.status == "needs_input"
@@ -743,7 +735,6 @@ def test_tag_catalog_pages_with_stable_opaque_cursors() -> None:
     assert [tag.id for tag in second.tags] == [
         f"tag:tag{index}" for index in range(20, 25)
     ]
-    assert first.sections == []
     assert second.truncated is False
 
 
@@ -779,7 +770,6 @@ def test_thirty_today_items_page_without_loss() -> None:
     ids: list[str] = []
     while True:
         ids.extend(item.id for item in result.items)
-        assert result.sections[0].item_ids == []
         if result.cursor is None:
             break
         result = module.read(ReadCall(cursor=result.cursor, limit=10))
@@ -817,7 +807,7 @@ def test_today_matches_native_scheduling_and_excludes_waiting_only() -> None:
     assert {item.id for item in result.items} == {"task:past", "task:today"}
 
 
-def test_system_pages_keep_one_scope_revision_and_section_shape() -> None:
+def test_area_registry_pages_keep_one_scope_revision() -> None:
     records = [
         Record(
             uuid=f"area-{index}",
@@ -838,169 +828,51 @@ def test_system_pages_keep_one_scope_revision_and_section_shape() -> None:
     ]
     module = workspace(records)
 
-    result = module.read(ReadCall(view="system", limit=10))
+    result = module.read_v2_registry(kind="area", limit=10)
     revision = result.scope_revision
     ids: list[str] = []
     while True:
         ids.extend(item.id for item in result.items)
         assert result.scope_revision == revision
-        assert [section.key for section in result.sections] == ["system"]
-        assert result.sections[0].item_ids == []
+        assert all(item.kind == "area" for item in result.items)
         if result.cursor is None:
             break
         result = module.read(ReadCall(cursor=result.cursor, limit=10))
 
-    assert len(ids) == 25
-    assert len(set(ids)) == 25
+    assert ids == [f"area:area-{index}" for index in range(12)]
 
 
-def _repeating_pair() -> tuple[ThingsWorkspace, Record, Record]:
-    template = Record(
-        uuid="report-template",
-        kind="task",
-        title="Weekly report",
-        recurrence=RecurrenceState(
-            role="template",
-            repeat_type="fixed",
-            rule={"tp": 0, "fu": 8, "fa": 1, "of": []},
-        ),
-        recurrence_next_on=NOW.date() + timedelta(days=7),
-    )
-    current = Record(
-        uuid="report-current",
-        kind="task",
-        title="Weekly report",
-        recurrence=RecurrenceState(
-            role="instance",
-            repeat_type="fixed",
-            template_uuid=template.uuid,
-            links=(template.uuid,),
-        ),
-    )
-    return workspace([template, current]), template, current
-
-
-def test_area_view_returns_the_area_loose_tasks_and_projects() -> None:
-    area = Record(uuid="home", kind="area", title="Home")
-    project = Record(
-        uuid="kitchen",
-        kind="project",
-        title="Kitchen",
-        area_uuid=area.uuid,
-    )
-    loose = Record(uuid="buy-milk", kind="task", title="Buy milk", area_uuid=area.uuid)
-    nested = Record(
-        uuid="tap",
-        kind="task",
-        title="Replace tap",
-        parent_uuid=project.uuid,
-    )
-    other = Record(uuid="work", kind="area", title="Work")
-    module = workspace([area, project, loose, nested, other])
-
-    result = module.read(ReadCall(view="area", within=area.id))
-
-    assert result.status == "ok"
-    assert {item.id for item in result.items} == {area.id, project.id, loose.id}
-    assert result.items[0].id == area.id
-    assert nested.id not in {item.id for item in result.items}
-    assert result.sections[0].title == "Home"
-    assert result.sections[0].item_ids == []
-    assert any(
-        item.id == project.id and item.into_title == "Home" for item in result.items
-    )
-    assert any(
-        item.id == loose.id and item.into_title == "Home" for item in result.items
-    )
-
-
-def test_area_and_project_ids_expand_to_children_on_review() -> None:
-    area = Record(uuid="home", kind="area", title="Home")
-    project = Record(
-        uuid="kitchen",
-        kind="project",
-        title="Kitchen",
-        area_uuid=area.uuid,
-    )
-    loose = Record(uuid="buy-milk", kind="task", title="Buy milk", area_uuid=area.uuid)
-    nested = Record(
-        uuid="tap",
-        kind="task",
-        title="Replace tap",
-        parent_uuid=project.uuid,
-    )
-    module = workspace([area, project, loose, nested])
-
-    by_id = module.read(ReadCall(id=area.id))
-    by_view = module.read(ReadCall(view="area", id=area.id))
-
-    assert {item.id for item in by_id.items} == {area.id, project.id, loose.id}
-    assert {item.id for item in by_view.items} == {area.id, project.id, loose.id}
-
-    project_read = module.read(ReadCall(id=project.id))
-    assert {item.id for item in project_read.items} == {project.id, nested.id}
-    by_view_project = module.read(ReadCall(view="project", id=project.id))
-    assert {item.id for item in by_view_project.items} == {project.id, nested.id}
-
-
-def test_project_cursor_stales_when_a_child_is_added() -> None:
-    project = Record(uuid="kitchen", kind="project", title="Kitchen")
-    tasks = [
-        Record(
-            uuid=f"task-{index:02d}",
-            kind="task",
-            title=f"Task {index:02d}",
-            parent_uuid=project.uuid,
-        )
-        for index in range(50)
-    ]
-    module = workspace([project, *tasks])
-
-    first = module.read(ReadCall(id=project.id, limit=40))
-    assert first.status == "ok"
-    assert first.cursor is not None
-    assert len(first.items) == 40
-
-    module._library.records["new-child"] = Record(  # noqa: SLF001
-        uuid="new-child",
-        kind="task",
-        title="New child",
-        parent_uuid=project.uuid,
-    )
-
-    continued = module.read(ReadCall(cursor=first.cursor, limit=40))
-
-    assert continued.status == "stale"
-    assert continued.next == "read"
-    assert continued.items == []
-
-
-def test_truncated_audit_pages_without_accumulating_write_context() -> None:
+def test_project_registry_pages_only_projects() -> None:
     records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
+        Record(uuid=f"project-{index:02d}", kind="project", title=f"Project {index:02d}")
+        for index in range(13)
+    ] + [
+        Record(uuid=f"task-{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(5)
     ]
     module = workspace(records)
-    page = module.read(ReadCall(view="audit", limit=10))
-    seen = []
+
+    page = module.read_v2_registry(kind="project", limit=10)
+    seen: list[str] = []
     while True:
         assert page.status == "ok"
         assert page.truncated == (page.cursor is not None)
+        assert all(item.kind == "project" for item in page.items)
         seen.extend(item.id for item in page.items)
         if page.cursor is None:
             break
         page = module.read(ReadCall(cursor=page.cursor, limit=10))
-    assert seen == [record.id for record in records]
+    assert seen == [f"project:project-{index:02d}" for index in range(13)]
 
 
-def test_truncated_audit_cursor_stales_after_area_registry_changes() -> None:
+def test_project_registry_cursor_stales_after_area_registry_changes() -> None:
     records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
+        Record(uuid=f"project-{index:02d}", kind="project", title=f"Project {index:02d}")
+        for index in range(13)
     ]
     module = workspace(records)
 
-    first = module.read(ReadCall(view="audit", limit=10))
+    first = module.read_v2_registry(kind="project", limit=10)
     assert first.cursor is not None
     module._library.records["new-area"] = Record(  # noqa: SLF001
         uuid="new-area",
@@ -1015,19 +887,19 @@ def test_truncated_audit_cursor_stales_after_area_registry_changes() -> None:
     assert continued.items == []
 
 
-def test_truncated_audit_cursor_stales_after_active_item_is_added() -> None:
+def test_project_registry_cursor_stales_after_a_project_is_added() -> None:
     records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
+        Record(uuid=f"project-{index:02d}", kind="project", title=f"Project {index:02d}")
+        for index in range(13)
     ]
     module = workspace(records)
 
-    first = module.read(ReadCall(view="audit", limit=10))
+    first = module.read_v2_registry(kind="project", limit=10)
     assert first.cursor is not None
-    module._library.records["new-task"] = Record(  # noqa: SLF001
-        uuid="new-task",
-        kind="task",
-        title="New Task",
+    module._library.records["new-project"] = Record(  # noqa: SLF001
+        uuid="new-project",
+        kind="project",
+        title="New Project",
     )
 
     continued = module.read(ReadCall(cursor=first.cursor, limit=10))
@@ -1037,76 +909,31 @@ def test_truncated_audit_cursor_stales_after_active_item_is_added() -> None:
     assert continued.items == []
 
 
-def test_truncated_filtered_audit_continues_without_changes() -> None:
+def test_registry_cursor_continues_without_repeating_view() -> None:
     records = [
-        Record(
-            uuid=f"someday-{index:02d}",
-            kind="task",
-            title=f"Someday {index:02d}",
-            someday=True,
-        )
-        for index in range(25)
+        Record(uuid=f"project-{index:02d}", kind="project", title=f"Project {index:02d}")
+        for index in range(13)
     ]
-    records.extend(
-        Record(
-            uuid=f"inbox-{index:02d}",
-            kind="task",
-            title=f"Inbox {index:02d}",
-            inbox=True,
-        )
-        for index in range(5)
-    )
     module = workspace(records)
-
-    first = module.read(
-        ReadCall(view="audit", signals_any=["someday"], limit=10)
-    )
+    first = module.read_v2_registry(kind="project", limit=10)
     assert first.cursor is not None
 
     continued = module.read(ReadCall(cursor=first.cursor, limit=10))
 
     assert continued.status == "ok"
-    assert continued.next == "read"
-    assert continued.cursor is not None
-    assert all("someday" in item.signals for item in continued.items)
-
-    final = module.read(ReadCall(cursor=continued.cursor, limit=10))
-
-    assert final.status == "ok"
-    assert final.cursor is None
-    assert len(first.items) + len(continued.items) + len(final.items) == 25
-    assert all("someday" in item.signals for item in final.items)
-
-
-def test_audit_cursor_accepts_the_repeated_view() -> None:
-    records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
-    ]
-    module = workspace(records)
-    first = module.read(ReadCall(view="audit", limit=10))
-    assert first.cursor is not None
-
-    continued = module.read(
-        ReadCall.model_validate(
-            {"cursor": first.cursor, "view": "audit", "limit": 10}
-        )
-    )
-
-    assert continued.status == "ok"
-    assert continued.cursor is not None
+    assert continued.cursor is None
     assert [item.id for item in continued.items] == [
-        f"task:item-{index:02d}" for index in range(10, 20)
+        f"project:project-{index:02d}" for index in range(10, 13)
     ]
 
 
-def test_audit_cursor_rejects_a_different_view() -> None:
+def test_registry_cursor_rejects_a_named_list_view() -> None:
     records = [
-        Record(uuid=f"item-{index:02d}", kind="task", title=f"Task {index:02d}")
-        for index in range(25)
+        Record(uuid=f"project-{index:02d}", kind="project", title=f"Project {index:02d}")
+        for index in range(13)
     ]
     module = workspace(records)
-    first = module.read(ReadCall(view="audit", limit=10))
+    first = module.read_v2_registry(kind="project", limit=10)
     assert first.cursor is not None
 
     continued = module.read(
@@ -1118,6 +945,29 @@ def test_audit_cursor_rejects_a_different_view() -> None:
     assert continued.status == "needs_input"
     assert continued.next == "ask"
     assert continued.items == []
+
+
+def test_exact_container_id_returns_the_item_not_membership() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(
+        uuid="kitchen",
+        kind="project",
+        title="Kitchen",
+        area_uuid=area.uuid,
+    )
+    nested = Record(
+        uuid="tap",
+        kind="task",
+        title="Replace tap",
+        parent_uuid=project.uuid,
+    )
+    module = workspace([area, project, nested])
+
+    by_id = module.read(ReadCall(id=area.id))
+    assert [item.id for item in by_id.items] == [area.id]
+
+    project_read = module.read(ReadCall(id=project.id))
+    assert [item.id for item in project_read.items] == [project.id]
 
 
 def test_logbook_defaults_to_the_last_fourteen_days() -> None:
@@ -1143,35 +993,6 @@ def test_logbook_defaults_to_the_last_fourteen_days() -> None:
     assert [item.id for item in result.items] == [recent.id]
     assert "2026-08-02" in result.instruction
     assert "2026-08-15" in result.instruction
-
-
-def test_audit_view_lists_each_active_item_once() -> None:
-    area = Record(uuid="home", kind="area", title="Home")
-    project = Record(
-        uuid="kitchen",
-        kind="project",
-        title="Kitchen",
-        area_uuid=area.uuid,
-    )
-    task = Record(
-        uuid="milk",
-        kind="task",
-        title="Buy milk",
-        notes="semi",
-        area_uuid=area.uuid,
-        tag_uuids=["errand"],
-    )
-    trashed = Record(uuid="old", kind="task", title="Old", trashed=True)
-    module = workspace([area, project, task, trashed])
-    module._library.tags["errand"] = "Errand"  # noqa: SLF001
-
-    result = module.read(ReadCall(view="audit", limit=40))
-
-    assert result.status == "ok"
-    assert [item.id for item in result.items] == [area.id, project.id, task.id]
-    assert "has_notes" in result.items[2].signals
-    assert result.items[2].direct_tag_ids == ["tag:errand"]
-
 
 
 
@@ -1534,16 +1355,6 @@ def test_bulk_tag_registry_caps_unique_tags_without_crashing() -> None:
 
 
 
-def test_audit_can_filter_by_signal() -> None:
-    later = Record(uuid="later", kind="task", title="Later", someday=True)
-    inbox = Record(uuid="box", kind="task", title="Inbox", inbox=True)
-    module = workspace([later, inbox])
-
-    result = module.read(ReadCall(view="audit", signals_any=["someday"]))
-
-    assert [item.id for item in result.items] == [later.id]
-
-
 def test_all_missing_bulk_ids_name_every_missing_id() -> None:
     module = workspace()
 
@@ -1578,46 +1389,15 @@ def test_bulk_ids_return_full_exact_facts() -> None:
     assert result.items[1].notes_markdown == "second note"
 
 
-def test_bulk_ids_can_omit_unrequested_detail_fields() -> None:
-    task = Record(
-        uuid="one",
-        kind="task",
-        title="One",
-        notes="secret note",
-        checklists=[ChecklistLine("row", "Check")],
-        tag_uuids=["focus"],
-    )
-    library = MemoryLibrary([task])
-    library.tags["focus"] = "Focus"
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    result = module.read(ReadCall(ids=[task.id], fields=[]))
+def test_bulk_ids_accept_more_than_the_old_ten_id_chunk() -> None:
+    tasks = [
+        Record(uuid=f"item{index:02d}", kind="task", title=f"Item {index:02d}")
+        for index in range(11)
+    ]
+    result = workspace(tasks).read(ReadCall(ids=[task.id for task in tasks]))
 
     assert result.status == "ok"
-    item = result.items[0]
-    assert item.notes_markdown is None
-    assert item.checklist == []
-    assert item.direct_tag_ids == []
-    assert item.direct_tags == []
-    assert result.tags == []
-    assert item.recurrence is None
-
-
-def test_bulk_empty_fields_survive_a_continuation_page() -> None:
-    tasks = [
-        Record(uuid=f"item{index}", kind="task", title=f"Item {index}", notes="n" * 800)
-        for index in range(3)
-    ]
-    module = workspace(tasks)
-
-    first = module.read(ReadCall(ids=[task.id for task in tasks], fields=[], limit=1))
-    assert first.cursor is not None
-    assert first.items[0].notes_markdown is None
-    second = module.read(ReadCall(cursor=first.cursor, limit=1))
-
-    assert second.status == "ok"
-    assert second.items[0].notes_markdown is None
-    assert second.items[0].checklist == []
+    assert [item.id for item in result.items] == [task.id for task in tasks]
 
 
 def test_links_only_instance_resolves_repeat_type_after_apply() -> None:
@@ -1793,8 +1573,6 @@ def test_compact_today_names_homes_and_omits_inert_defaults() -> None:
     assert dumped["into_title"] == "Kitchen"
     assert "order" not in dumped
     assert "recurrence" not in dumped
-    assert result.sections[0].item_ids == []
-    assert "item_ids" not in payload["sections"][0]
 
 
 def test_exact_id_keeps_order_and_omits_none_recurrence() -> None:
@@ -1821,21 +1599,3 @@ def test_tags_page_instruction_is_the_catalog() -> None:
     assert "catalog" in result.instruction
     assert "tag_ids" in result.instruction
     assert "change_tags" in result.instruction
-
-
-def test_system_review_copy_names_area_scope() -> None:
-    area = Record(uuid="home", kind="area", title="Home")
-    project = Record(
-        uuid="kitchen",
-        kind="project",
-        title="Kitchen",
-        area_uuid=area.uuid,
-    )
-    module = workspace([area, project])
-
-    result = module.read(ReadCall(view="system"))
-
-    assert "scope_revision" in result.instruction
-    assert "Area" in result.instruction
-    kitchen = next(item for item in result.items if item.id == project.id)
-    assert kitchen.into_title == "Home"

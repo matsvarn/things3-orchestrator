@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Trim unpublished internal ReadCall language after the three-tool read
+  surface retired: drop audit/system/project/area views, `signals_any`,
+  logbook from/to, ReviewSection, and unused Result.receipt. Registries
+  page through their own cursor tag. Bulk exact IDs accept up to 50.
 - The Codex plugin wrapper only launches `serve`. Owner and recovery commands
   stay on the uv tool.
 - Delete leftover owner-approval host methods and unused internal Result
