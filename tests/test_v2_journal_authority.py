@@ -131,13 +131,13 @@ def test_sqlite_creation_and_fence_claim_are_one_transaction(tmp_path: Path) -> 
         "op_first",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert first.create_v2(operation, claim_fence=True)[0] == "created"
+    assert first.create_v2(operation)[0] == "created"
 
     blocked = _operation(
         "op_second",
         request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
     )
-    outcome, stored, blockers = second.create_v2(blocked, claim_fence=True)
+    outcome, stored, blockers = second.create_v2(blocked)
     assert outcome == "blocked"
     assert stored is None
     assert blockers == ["op_first"]
@@ -161,13 +161,13 @@ def test_case_only_relogin_preserves_v2_idempotency_and_pending_fence(
         account_id="Owner@Example.com",
     )
     original = _with_manifest(original)
-    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    assert journal.create_v2(original)[0] == "created"
 
     retry = _operation(
         "op_duplicate",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    outcome, stored, blockers = journal.create_v2(retry, claim_fence=True)
+    outcome, stored, blockers = journal.create_v2(retry)
 
     assert outcome == "existing"
     assert stored == original
@@ -181,7 +181,7 @@ def test_case_only_relogin_preserves_v2_idempotency_and_pending_fence(
         "op_blocked",
         request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
     )
-    outcome, stored, blockers = journal.create_v2(different, claim_fence=True)
+    outcome, stored, blockers = journal.create_v2(different)
 
     assert outcome == "blocked"
     assert stored is None
@@ -205,7 +205,7 @@ def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
         account_id="Owner@Example.com",
     )
     original = _with_manifest(original)
-    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    assert journal.create_v2(original)[0] == "created"
     conflicting = replace(
         _operation(
             "op_conflicting",
@@ -232,7 +232,7 @@ def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
     with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
-        journal.create_v2(retry, claim_fence=True)
+        journal.create_v2(retry)
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
@@ -256,8 +256,8 @@ def test_operation_state_counts_are_aggregate_and_account_scoped(
         account_id="other@example.com",
     )
     other_account = _with_manifest(other_account, account_id="other@example.com")
-    journal.create_v2(pending, claim_fence=True)
-    journal.create_v2(other_account, claim_fence=True)
+    journal.create_v2(pending)
+    journal.create_v2(other_account)
     journal.save(
         IntentRecord(
             intent_id="private-legacy-id",
@@ -302,7 +302,7 @@ def test_sqlite_terminal_settlement_rolls_back_state_and_receipts_together(tmp_p
     path = tmp_path / "journal.sqlite3"
     journal = SQLiteJournal(path)
     operation = _operation("op_atomic", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735")
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     with sqlite3.connect(path) as connection:
         connection.execute(
             """CREATE TRIGGER crash_receipt BEFORE INSERT ON owner_receipts_v2
@@ -328,7 +328,7 @@ def test_sqlite_unchanged_settlement_rolls_back_state_with_receipts(tmp_path: Pa
     operation = _operation(
         "op_unchanged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"
     )
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     with sqlite3.connect(path) as connection:
         connection.execute(
             """CREATE TRIGGER crash_unchanged_receipt BEFORE INSERT ON owner_receipts_v2
@@ -359,7 +359,7 @@ def test_unchanged_settlement_is_immediately_terminal_for_retention(tmp_path: Pa
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
     rows = [{"sequence": 1, "action": "update", "target_id": "task:a", "desired": {}, "observed": {}, "result": "unchanged"}]
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     assert journal.settle_v2(
         operation.operation_id,
         expected="pending",
@@ -394,7 +394,7 @@ def test_partial_settlement_is_terminal_receipted_and_nonblocking(tmp_path: Path
             "observed": {"title": "Different"},
             "result": "not_applied",
         }]
-        assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+        assert journal.create_v2(operation)[0] == "created"
         assert journal.settle_v2(
             operation.operation_id,
             expected="pending",
@@ -433,7 +433,7 @@ def test_legacy_awaiting_owner_rows_retire_without_replay_for_both_journals(
             ),
             state="awaiting_owner",
         )
-        assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+        _inject_v2_operation(journal, operation)
         if cutover:
             journal.cutover_v1()
             journal.cutover_v1()
@@ -450,42 +450,10 @@ def test_legacy_awaiting_owner_rows_retire_without_replay_for_both_journals(
         assert "fresh request" in instruction
 
 
-def test_only_legal_v2_transitions_are_accepted() -> None:
-    journal = MemoryJournal()
-    awaiting = _operation(
-        "op_awaiting",
-        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        state="awaiting_owner",
-    )
-    journal.create_v2(awaiting, claim_fence=False)
-    assert not journal.transition_v2(
-        awaiting.operation_id, expected="awaiting_owner", state="pending"
-    )
-    assert not journal.transition_v2(
-        awaiting.operation_id, expected="awaiting_owner", state="declined"
-    )
-    assert journal.transition_v2(
-        awaiting.operation_id,
-        expected="awaiting_owner",
-        state="stale",
-        response={"state": "stale"},
-    )
-    assert journal.get_v2_operation(awaiting.operation_id).state == "stale"  # type: ignore[union-attr]
-
-    operation = _operation(
-        "op_pending",
-        request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67",
-    )
-    journal.create_v2(operation, claim_fence=True)
-    rows = [{"sequence": 1, "action": "create", "target_id": "task:a", "desired": {}, "observed": {}, "result": "applied"}]
-    assert journal.settle_v2("op_pending", expected="pending", state="applied", response={"state": "applied"}, rows=rows)
-    assert not journal.transition_v2("op_pending", expected="applied", state="pending")
-
-
-def test_settlement_cannot_bypass_approval_or_fence(tmp_path: Path) -> None:
+def test_settlement_cannot_bypass_leftover_awaiting_owner(tmp_path: Path) -> None:
     for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
         operation = _operation("op_awaiting", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735", state="awaiting_owner")
-        journal.create_v2(operation, claim_fence=False)
+        _inject_v2_operation(journal, operation)
         assert not journal.settle_v2(
             operation.operation_id,
             expected="awaiting_owner",
@@ -500,20 +468,27 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
     for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
         invalid = replace(_operation("op_invalid", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"), state="applied")
         try:
-            journal.create_v2(invalid, claim_fence=False)
+            journal.create_v2(invalid)
         except ValueError:
             pass
         else:
             raise AssertionError("terminal initial state was accepted")
         unchanged = replace(invalid, state="unchanged")
         try:
-            journal.create_v2(unchanged, claim_fence=False)
+            journal.create_v2(unchanged)
         except ValueError:
             pass
         else:
             raise AssertionError("unchanged without atomic receipts was accepted")
+        awaiting = replace(invalid, state="awaiting_owner")
+        try:
+            journal.create_v2(awaiting)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("awaiting_owner initial state was accepted")
         pending = _operation("op_pending_owned", request_id="0198f0ef-3923-79b6-96a8-2bf28eac0d67")
-        journal.create_v2(pending, claim_fence=True)
+        journal.create_v2(pending)
         with pytest.raises(ValueError, match="one receipt row per manifest write"):
             journal.settle_v2(
                 pending.operation_id, expected="pending", state="applied",
@@ -525,7 +500,6 @@ def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
                 response={"state": "applied"},
                 rows=[{"sequence": 1}, {"sequence": 2}],
             )
-        assert not journal.transition_v2(pending.operation_id, expected="pending", state="applied")
         assert journal.get_v2_operation(pending.operation_id).state == "pending"  # type: ignore[union-attr]
 
 
@@ -535,7 +509,7 @@ def test_unchanged_settlement_requires_one_receipt_per_manifest_write(tmp_path: 
             f"op_unchanged_{index}",
             request_id=f"0198f0ee-98d4-7bd5-91ba-8e76019b273{index}",
         )
-        assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+        assert journal.create_v2(operation)[0] == "created"
         for rows in ([], [{"sequence": 1}, {"sequence": 2}]):
             with pytest.raises(ValueError, match="one receipt row per manifest write"):
                 journal.settle_v2(
@@ -557,11 +531,10 @@ def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> 
     operation = _operation(
         "op_signed",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        state="awaiting_owner",
     )
     authorization = verified_authorization(
         operation,
-        action="approve",
+        action="settle_not_applied",
         passphrase="correct horse battery staple",
         path=first,
     )
@@ -572,23 +545,23 @@ def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> 
     wrong = MemoryJournal(
         owner_public_key=second.with_name("owner-public-key.ed25519").read_bytes()
     )
-    assert correct.verify_v2_authorization(operation, "approve", authorization)
-    assert wrong.verify_v2_authorization(operation, "approve", authorization) is None
-    assert correct.verify_v2_authorization(operation, "decline", authorization) is None
+    assert correct.verify_v2_authorization(operation, "settle_not_applied", authorization)
+    assert wrong.verify_v2_authorization(operation, "settle_not_applied", authorization) is None
+    assert correct.verify_v2_authorization(operation, "legacy_accepted_as_is", authorization) is None
     assert correct.verify_v2_authorization(
         replace(operation, manifest_hash="sha256:v1:changed"),
-        "approve",
+        "settle_not_applied",
         authorization,
     ) is None
     assert correct.verify_v2_authorization(
         replace(operation, expires_at="2026-08-29T13:01:00+00:00"),
-        "approve",
+        "settle_not_applied",
         authorization,
     ) is None
-    assert correct.verify_v2_authorization(operation, "approve", object()) is None
+    assert correct.verify_v2_authorization(operation, "settle_not_applied", object()) is None
 
 
-def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None:
+def test_sqlite_settlement_rejects_manifest_json_tampering(tmp_path: Path) -> None:
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
     journal_path = tmp_path / "journal.sqlite3"
@@ -600,21 +573,18 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
         _operation(
             "op_manifest_tamper",
             request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
         ),
-        expires_at="2099-01-01T00:00:00+00:00",
         tool="things_trash",
         writes=[{"action": "trash", "uuid": "a", "kind": "task"}],
         before=[{"id": "task:a", "trashed": False}],
         touched=[["trashed"]],
         preconditions={},
         display_titles=["A"],
-        requires_owner=True,
     )
-    assert journal.create_v2(operation, claim_fence=False)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     authorization = verified_authorization(
         operation,
-        action="approve",
+        action="settle_not_applied",
         passphrase="correct horse battery staple",
         path=factor,
     )
@@ -650,7 +620,7 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
     assert not v2_manifest_is_valid(stored)
     with pytest.raises(ValueError, match="integrity"):
         render_operation(stored)
-    assert journal.verify_v2_authorization(stored, "approve", authorization) is None
+    assert journal.verify_v2_authorization(stored, "settle_not_applied", authorization) is None
     direct_apply = workspace._apply_v2(stored)  # noqa: SLF001
     reconcile = workspace.host_reconcile_v2(operation.operation_id)
 
@@ -660,7 +630,7 @@ def test_sqlite_approval_rejects_manifest_json_tampering(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("mutation", ["transition", "settle"])
+@pytest.mark.parametrize("mutation", ["prune", "settle"])
 def test_every_journal_mutation_rechecks_canonical_ambiguity(
     journal_kind: str, mutation: str, tmp_path: Path
 ) -> None:
@@ -669,7 +639,7 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
         if journal_kind == "memory"
         else SQLiteJournal(tmp_path / f"{mutation}.sqlite3")
     )
-    state = "awaiting_owner" if mutation == "transition" else "pending"
+    state = "awaiting_owner" if mutation == "prune" else "pending"
     original = _with_manifest(
         replace(
             _operation(
@@ -680,9 +650,10 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
             account_id="Owner@Example.com",
         )
     )
-    assert journal.create_v2(
-        original, claim_fence=state == "pending"
-    )[0] == "created"
+    if mutation == "prune":
+        _inject_v2_operation(journal, original)
+    else:
+        assert journal.create_v2(original)[0] == "created"
     conflicting = _with_manifest(
         replace(
             _operation(
@@ -695,15 +666,11 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
     )
     _inject_v2_operation(journal, conflicting)
 
-    if mutation == "transition":
-        changed = journal.transition_v2(
-            original.operation_id,
-            expected="awaiting_owner",
-            state="stale",
-            response={"state": "stale"},
-        )
+    if mutation == "prune":
+        with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+            journal.prune_v2(now="2026-09-01T00:00:00+00:00")
     else:
-        changed = journal.settle_v2(
+        assert not journal.settle_v2(
             original.operation_id,
             expected="pending",
             state="applied",
@@ -711,7 +678,6 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
             rows=[{"sequence": 1, "result": "applied"}],
         )
 
-    assert changed is False
     assert journal.get_v2_operation(original.operation_id) == original
     assert journal.get_v2_operation(conflicting.operation_id) == conflicting
 
@@ -734,7 +700,7 @@ def test_prune_preserves_active_tombstone_ambiguity_without_mutation(
             account_id="Owner@Example.com",
         )
     )
-    assert journal.create_v2(original, claim_fence=True)[0] == "created"
+    assert journal.create_v2(original)[0] == "created"
     assert journal.settle_v2(
         original.operation_id,
         expected="pending",
@@ -1078,7 +1044,7 @@ from things_orchestrator.journal import SQLiteJournal, V2Operation
 
 operation = V2Operation(**json.loads(sys.argv[2]))
 journal = SQLiteJournal(Path(sys.argv[1]))
-with journal.create_apply_session_v2(operation, claim_fence=True) as start:
+with journal.create_apply_session_v2(operation) as start:
     assert start.outcome == "created"
     assert start.session is not None
     os._exit(0)
@@ -1123,7 +1089,7 @@ def test_dispatch_marker_survives_apply_session_without_settlement(
         "op_dispatch_marker",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
 
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
@@ -1254,9 +1220,7 @@ from pathlib import Path
 from things_orchestrator.journal import SQLiteJournal, V2Operation
 
 operation = V2Operation(**json.loads(sys.argv[2]))
-with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
-    operation, claim_fence=True
-) as start:
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(operation) as start:
     assert start.session is not None
     assert start.session.mark_dispatched()
     os._exit(0)
@@ -1333,9 +1297,7 @@ from things_orchestrator.journal import SQLiteJournal, V2Operation
 operation = V2Operation(**json.loads(sys.argv[2]))
 ready = Path(sys.argv[3])
 release = Path(sys.argv[4])
-with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
-    operation, claim_fence=True
-) as start:
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(operation) as start:
     assert start.outcome == "created"
     ready.write_text("ready")
     while not release.exists():
@@ -1430,9 +1392,7 @@ from things_orchestrator.journal import SQLiteJournal, V2Operation
 operation = V2Operation(**json.loads(sys.argv[2]))
 ready = Path(sys.argv[3])
 release = Path(sys.argv[4])
-with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(
-    operation, claim_fence=True
-) as start:
+with SQLiteJournal(Path(sys.argv[1])).create_apply_session_v2(operation) as start:
     assert start.outcome == "created"
     ready.write_text("ready")
     while not release.exists():
@@ -1531,8 +1491,8 @@ def test_sqlite_journal_pins_symlink_target_before_owned_connections(
     original_path = tmp_path / "original.sqlite3"
     original = SQLiteJournal(original_path)
     replacement = SQLiteJournal(replacement_path)
-    assert original.create_v2(operation, claim_fence=True)[0] == "created"
-    assert replacement.create_v2(operation, claim_fence=True)[0] == "created"
+    assert original.create_v2(operation)[0] == "created"
+    assert replacement.create_v2(operation)[0] == "created"
     alias_path.symlink_to(original_path)
     journal = RetargetingJournal()
     journal.arm_retarget()
@@ -1587,7 +1547,7 @@ def test_apply_session_cannot_settle_after_context_exit(
         f"op_late_settle_{journal_kind}",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
 
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
@@ -1626,7 +1586,7 @@ def test_apply_session_rejects_foreign_thread_while_context_is_active(
         f"op_foreign_thread_{journal_kind}",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     rows = [
         {
             "sequence": 1,
@@ -1674,7 +1634,7 @@ def test_apply_session_rejects_forked_process_while_context_is_active(
         f"op_foreign_process_{journal_kind}",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     rows = [
         {
             "sequence": 1,
@@ -1736,7 +1696,7 @@ def test_apply_session_close_waits_for_started_owner_settlement(
         f"op_close_race_{journal_kind}",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert journal.create_v2(operation, claim_fence=True)[0] == "created"
+    assert journal.create_v2(operation)[0] == "created"
     rows = [
         {
             "sequence": 1,
@@ -1809,7 +1769,7 @@ def test_receipt_cursor_is_bound_to_account_operation_hash_and_version() -> None
         before=[None, None, None],
         display_titles=[str(index) for index in range(1, 4)],
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
     rows = [
         {"sequence": index, "action": "create", "target_id": f"task:{index}", "desired": {"title": str(index)}, "observed": {"title": str(index)}, "result": "applied"}
         for index in range(1, 4)
@@ -1857,19 +1817,18 @@ def test_authorization_binding_covers_action_and_operation_contract() -> None:
     operation = _operation(
         "op_approval",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        state="awaiting_owner",
     )
-    assert authorization_binding(operation, action="approve") != authorization_binding(
-        operation, action="decline"
+    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
+        operation, action="legacy_accepted_as_is"
     )
-    assert authorization_binding(operation, action="approve") != authorization_binding(
-        replace(operation, manifest_hash="sha256:v1:other"), action="approve"
+    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
+        replace(operation, manifest_hash="sha256:v1:other"), action="settle_not_applied"
     )
-    assert authorization_binding(operation, action="approve") != authorization_binding(
-        replace(operation, api_version="legacy-v1"), action="approve"
+    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
+        replace(operation, api_version="legacy-v1"), action="settle_not_applied"
     )
-    assert authorization_binding(operation, action="approve") != authorization_binding(
-        replace(operation, tool="things_complete"), action="approve"
+    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
+        replace(operation, tool="things_complete"), action="settle_not_applied"
     )
 
 
@@ -1883,7 +1842,6 @@ def test_host_rendering_escapes_control_ansi_newline_and_delimiter() -> None:
         _operation(
             "op_render",
             request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-            state="awaiting_owner",
         ),
         writes=[
             {
@@ -1963,8 +1921,8 @@ def test_host_operation_lookup_is_scoped_to_workspace_account() -> None:
         ),
         account_id="other@example.com",
     ))
-    journal.create_v2(owned, claim_fence=True)
-    journal.create_v2(foreign, claim_fence=True)
+    journal.create_v2(owned)
+    journal.create_v2(foreign)
     workspace = ThingsWorkspace(
         MemoryLibrary(), journal=journal, account_id=owned.account_id
     )
@@ -2201,7 +2159,7 @@ def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tm
         preconditions={"task:a": "frozen"},
         display_titles=["Old"],
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
     workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Old")]), journal=journal, account_id=operation.account_id)
     forged = workspace.host_settle_not_applied_v2(operation.operation_id, "forged")
     authorization = verified_authorization(operation, action="settle_not_applied", passphrase="correct horse battery staple", path=factor)
@@ -2237,7 +2195,7 @@ def test_host_not_applied_settlement_rejects_nonowned_pending_target(
                 replace(operation, account_id="other@example.com")
             )
         operation_id = operation.operation_id
-        journal.create_v2(operation, claim_fence=True)
+        journal.create_v2(operation)
         if target_kind == "nonpending":
             assert journal.settle_v2(
                 operation_id,
@@ -2295,7 +2253,7 @@ def test_dispatched_pending_refuses_signed_not_applied_settlement(
         preconditions={"task:a": "frozen"},
         display_titles=["Old"],
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
     with journal.apply_session_v2(operation.operation_id) as session:
         assert session is not None
         assert session.mark_dispatched() is True
@@ -2333,7 +2291,7 @@ def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> No
         before=[{"id": "task:a", "title": "Before"}],
         touched=[["title"]], preconditions={"task:a": "frozen"}, display_titles=["Before"],
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
     workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Applied then overwritten")]), journal=journal, account_id=operation.account_id)
     authorization = verified_authorization(operation, action="settle_not_applied", passphrase="correct horse battery staple", path=factor)
     assert authorization is not None
@@ -2367,7 +2325,7 @@ def test_sqlite_retention_replaces_terminal_content_with_permanent_tombstone(tmp
         "op_retained",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    journal.create_v2(operation, claim_fence=True)
+    journal.create_v2(operation)
     journal.settle_v2(
         "op_retained", expected="pending", state="applied",
         response={"state": "applied", "owner_text": "private"},
@@ -2382,7 +2340,7 @@ def test_sqlite_retention_replaces_terminal_content_with_permanent_tombstone(tmp
     assert tombstone.state == "applied"
     assert tombstone.manifest == {}
     retry = replace(operation, state="pending", response=None)
-    assert journal.create_v2(retry, claim_fence=True)[0] == "existing"
+    assert journal.create_v2(retry)[0] == "existing"
     with journal._connect() as connection:  # noqa: SLF001
         stored = connection.execute("SELECT * FROM owner_tombstones_v2").fetchone()
         assert stored is not None

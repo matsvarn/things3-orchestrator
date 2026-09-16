@@ -717,10 +717,7 @@ class ThingsWorkspace:
             expires_at=None,
         )
         try:
-            ownership = journal.create_apply_session_v2(
-                operation,
-                claim_fence=True,
-            )
+            ownership = journal.create_apply_session_v2(operation)
             with ownership as start:
                 outcome = start.outcome
                 stored = start.operation

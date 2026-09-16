@@ -1175,7 +1175,7 @@ def test_receipt_next_action_follows_operation_state() -> None:
 
     for state, next_action in (("pending", "retry_same"), ("partial", "read_receipt"), ("applied", "read_receipt"), ("stale", "read_fresh")):
         journal = MemoryJournal()
-        initial_state = state if state in {"awaiting_owner", "pending"} else "awaiting_owner" if state == "stale" else "pending"
+        initial_state = "awaiting_owner" if state == "stale" else "pending"
         request_hash = "sha256:test"
         manifest = {
             "version": "v1",
@@ -1202,14 +1202,17 @@ def test_receipt_next_action_follows_operation_state() -> None:
             manifest=manifest,
             manifest_hash=v2_manifest_hash(manifest), safety_policy_digest="sha256:test",
         )
-        journal.create_v2(operation, claim_fence=initial_state == "pending")
-        if state in {"partial", "applied"}:
-            journal.settle_v2(
-                operation.operation_id, expected="pending", state=state,
-                response={"state": state}, rows=[{"sequence": 1, "result": state}],
-            )
-        elif state == "stale":
-            journal.transition_v2(operation.operation_id, expected="awaiting_owner", state="stale", response={"state": "stale", "instruction": "stale", "operation_id": operation.operation_id})
+        if state == "stale":
+            journal._v2_operations[operation.operation_id] = operation  # noqa: SLF001
+            journal._v2_times[operation.operation_id] = (NOW.isoformat(), None)  # noqa: SLF001
+            journal.prune_v2(now=NOW.isoformat())
+        else:
+            journal.create_v2(operation)
+            if state in {"partial", "applied"}:
+                journal.settle_v2(
+                    operation.operation_id, expected="pending", state=state,
+                    response={"state": state}, rows=[{"sequence": 1, "result": state}],
+                )
         result = asyncio.run(_server(journal=journal).call_tool("things_receipt", {"operation_id": operation.operation_id}))
         assert result.structured_content["next_action"] == next_action
 
@@ -1271,7 +1274,8 @@ def test_stale_mutation_projection_requires_fresh_read() -> None:
         safety_policy_digest="sha256:legacy",
         expires_at="2099-01-01T00:00:00+00:00",
     )
-    journal.create_v2(operation, claim_fence=False)
+    journal._v2_operations[operation.operation_id] = operation  # noqa: SLF001
+    journal._v2_times[operation.operation_id] = (NOW.isoformat(), None)  # noqa: SLF001
     journal.prune_v2(now=NOW.isoformat())
     server = _server(Record(uuid="a", kind="task", title="A"), journal=journal)
     receipt = asyncio.run(
@@ -1477,18 +1481,13 @@ def test_unchanged_result_rechecks_after_claiming_the_fence() -> None:
         def create_v2(
             self,
             operation: V2Operation,
-            *,
-            claim_fence: bool,
         ) -> tuple[
             Literal["created", "existing", "conflict", "blocked"],
             V2Operation | None,
             list[str],
         ]:
             library.records["a"].notes = "Concurrent change"
-            return super().create_v2(
-                operation,
-                claim_fence=claim_fence,
-            )
+            return super().create_v2(operation)
 
     journal = RacingJournal()
     result = ThingsV2(

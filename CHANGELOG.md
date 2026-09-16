@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Journal `create_v2` only inserts `pending` and always claims the fence.
+  Leftover `awaiting_owner` rows still retire as stale during prune/cutover.
 - The Codex plugin wrapper only launches `serve`. Owner and recovery commands
   stay on the uv tool.
 - Delete leftover owner-approval host methods and unused internal Result
