@@ -120,7 +120,12 @@ async def probe_target(url: McpUrl, bearer: McpBearer) -> TargetReceipt:
         ) from None
     headers = {"Authorization": f"Bearer {bearer.reveal()}"}
     try:
-        async with httpx2.AsyncClient(headers=headers, timeout=10.0) as client:
+        async with httpx2.AsyncClient(
+            headers=headers,
+            timeout=10.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             detailed_response = await client.get(url.health)
             if detailed_response.status_code == 401:
                 raise DoctorFailure(f"{url}: stored bearer was rejected")

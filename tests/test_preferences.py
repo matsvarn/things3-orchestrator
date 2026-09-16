@@ -7,8 +7,8 @@ import pytest
 
 from things_orchestrator.config import (
     ConfigError,
+    launcher_path,
     load_preferences,
-    load_source_schemes,
     preferences_path,
     save_preferences,
 )
@@ -18,7 +18,7 @@ def test_missing_preferences_mean_natural_without_creating_a_file(tmp_path: Path
     path = tmp_path / "preferences.json"
 
     assert load_preferences(path=path).note_style == "natural"
-    assert load_source_schemes(path=path) == ()
+    assert load_preferences(path=path).source_schemes == ()
     assert not path.exists()
 
 
@@ -28,6 +28,14 @@ def test_preferences_path_uses_xdg_config_home(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     assert preferences_path() == tmp_path / "things-orchestrator/preferences.json"
+
+
+def test_launcher_path_uses_xdg_state_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    assert launcher_path() == tmp_path / "things-orchestrator/launcher"
 
 
 def test_save_creates_the_versioned_preference_file(tmp_path: Path) -> None:
@@ -74,14 +82,14 @@ def test_source_schemes_are_casefolded_deduplicated_and_replaceable(
     )
 
     assert load_preferences(path=path).note_style == "visual"
-    assert load_source_schemes(path=path) == ("obsidian", "x-devonthink-item")
+    assert load_preferences(path=path).source_schemes == ("obsidian", "x-devonthink-item")
     assert json.loads(path.read_text())["source_schemes"] == [
         "obsidian",
         "x-devonthink-item",
     ]
 
     save_preferences(source_schemes=(), path=path)
-    assert load_source_schemes(path=path) == ()
+    assert load_preferences(path=path).source_schemes == ()
 
 
 @pytest.mark.parametrize(
