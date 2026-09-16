@@ -7,11 +7,6 @@ You do not need to combine it with the generic setup prompt or install a skill.
 These examples use the current eight-tool Things MCP. They are proposed
 workflows with acceptance examples, not a claim that each has been tested in
 your receiver. All four prompts are currently unverified in live receiver runs.
-Before publishing this catalog, verify task enrichment and at least one
-scheduled report through an actual Grok or Hermes run. Record the receiver,
-prompt tested, observed result, and coverage limits; keep the remaining
-examples labeled unverified. Start with a test run and inspect its actual
-tool calls and result.
 
 ## Choose a routine
 
