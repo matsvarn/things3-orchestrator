@@ -76,7 +76,6 @@ class V2Operation:
     expires_at: str | None = None
     response: JsonDict | None = None
     authorization: str | None = None
-    resolution: Literal["accepted_as_is", "superseded"] | None = None
     receipt_hash: str | None = None
     dispatch_started: bool = False
 
@@ -154,13 +153,12 @@ class Journal(Protocol):
     def get_v2_operation(self, operation_id: str) -> V2Operation | None: ...
     def blocking_v2_operations(self, account_id: str) -> list[str]: ...
     def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]: ...
-    def create_v2(self, operation: V2Operation, *, claim_fence: bool) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
-    def transition_v2(self, operation_id: str, *, expected: V2State, state: V2State, response: JsonDict | None = None) -> bool: ...
+    def create_v2(self, operation: V2Operation) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def apply_session_v2(
         self, operation_id: str
     ) -> ContextManager[V2ApplySession | None]: ...
     def create_apply_session_v2(
-        self, operation: V2Operation, *, claim_fence: bool
+        self, operation: V2Operation
     ) -> ContextManager[V2CreateApplyStart]: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2ApplyState, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
@@ -326,13 +324,13 @@ class MemoryJournal:
             return tuple(sorted(counts.items()))
 
     def create_v2(
-        self, operation: V2Operation, *, claim_fence: bool
+        self, operation: V2Operation
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
         with self._lock:
             if not v2_manifest_is_valid(operation):
                 raise ValueError("v2 manifest hash does not match its persisted content")
-            if operation.state not in {"pending", "awaiting_owner"}:
-                raise ValueError("v2 operation must start pending or awaiting_owner")
+            if operation.state != "pending":
+                raise ValueError("v2 operation must start pending")
             existing = self.get_v2_request(
                 operation.account_id, operation.api_version, operation.request_id
             )
@@ -342,16 +340,11 @@ class MemoryJournal:
             blockers = self.blocking_v2_operations(operation.account_id)
             if blockers:
                 return "blocked", None, blockers
-            if claim_fence and operation.state != "pending":
-                raise ValueError("routine operation creation must enter pending")
             copied = _copy_v2(operation)
             assert copied is not None
             self._v2_operations[operation.operation_id] = copied
             created_at = _utc_now()
-            self._v2_times[operation.operation_id] = (
-                created_at,
-                None if operation.state in {"awaiting_owner", "pending"} else created_at,
-            )
+            self._v2_times[operation.operation_id] = (created_at, None)
             return "created", _copy_v2(copied), []
 
     def settle_v2(
@@ -424,10 +417,7 @@ class MemoryJournal:
             authorization=authorization_record,
         )
         created, _ = self._v2_times.get(operation_id, (_utc_now(), None))
-        self._v2_times[operation_id] = (
-            created,
-            None if state in {"awaiting_owner", "pending"} else _utc_now(),
-        )
+        self._v2_times[operation_id] = (created, _utc_now())
         return True
 
     def _mark_v2_dispatched_locked(self, operation_id: str) -> bool:
@@ -439,27 +429,6 @@ class MemoryJournal:
                 current, dispatch_started=True
             )
         return True
-
-    def transition_v2(
-        self,
-        operation_id: str,
-        *,
-        expected: V2State,
-        state: V2State,
-        response: JsonDict | None = None,
-    ) -> bool:
-        with self._lock:
-            current = self._v2_operation_for_mutation_locked(operation_id)
-            if current is None or current.state != expected or not _legal_v2_transition(expected, state):
-                return False
-            self._v2_operations[operation_id] = replace(
-                current,
-                state=state,
-                response=_copy_json(response),
-            )
-            created, _settled = self._v2_times.get(operation_id, (_utc_now(), None))
-            self._v2_times[operation_id] = (created, _utc_now())
-            return True
 
     def _v2_operation_for_mutation_locked(
         self, operation_id: str
@@ -501,12 +470,10 @@ class MemoryJournal:
 
     @contextmanager
     def create_apply_session_v2(
-        self, operation: V2Operation, *, claim_fence: bool
+        self, operation: V2Operation
     ) -> Iterator[V2CreateApplyStart]:
         with self._lock:
-            outcome, stored, blockers = self.create_v2(
-                operation, claim_fence=claim_fence
-            )
+            outcome, stored, blockers = self.create_v2(operation)
             session = (
                 self._owned_apply_session(stored)
                 if outcome in {"created", "existing"}
@@ -552,13 +519,7 @@ class MemoryJournal:
                     raise AmbiguousV2Request()
             for operation_id, operation in list(self._v2_operations.items()):
                 if operation.state == "awaiting_owner":
-                    self.transition_v2(
-                        operation_id,
-                        expected="awaiting_owner",
-                        state="stale",
-                        response=_retired_awaiting_owner_response(operation_id),
-                    )
-                    operation = self._v2_operations[operation_id]
+                    operation = self._store_retired_awaiting_owner(operation)
                 _created, settled = self._v2_times.get(operation_id, (_utc_now(), None))
                 if operation.state in {"awaiting_owner", "pending"} or settled is None or datetime.fromisoformat(settled) >= threshold:
                     continue
@@ -572,14 +533,12 @@ class MemoryJournal:
 
     def cutover_v1(self) -> JsonDict:
         with self._lock:
+            for operation_id in self._v2_operations:
+                if self._v2_operation_for_mutation_locked(operation_id) is None:
+                    raise AmbiguousV2Request()
             for operation_id, operation in list(self._v2_operations.items()):
                 if operation.state == "awaiting_owner":
-                    self.transition_v2(
-                        operation_id,
-                        expected="awaiting_owner",
-                        state="stale",
-                        response=_retired_awaiting_owner_response(operation_id),
-                    )
+                    self._store_retired_awaiting_owner(operation)
             quarantined: list[str] = []
             unresolved: list[str] = []
             partial_like: list[str] = []
@@ -608,6 +567,15 @@ class MemoryJournal:
                         result=_legacy_terminal_result(record.state, record.result),
                     )
             return _legacy_report(quarantined, unresolved, terminal, partial_like)
+
+    def _store_retired_awaiting_owner(self, operation: V2Operation) -> V2Operation:
+        retired = _retire_awaiting_owner(operation)
+        self._v2_operations[retired.operation_id] = retired
+        created, _settled = self._v2_times.get(
+            retired.operation_id, (_utc_now(), None)
+        )
+        self._v2_times[retired.operation_id] = (created, _utc_now())
+        return retired
 
     def annotate_v1_pending(self, intent_id: str, *, result: JsonDict) -> bool:
         with self._lock:
@@ -790,30 +758,25 @@ class SQLiteJournal:
     def create_v2(
         self,
         operation: V2Operation,
-        *,
-        claim_fence: bool,
     ) -> tuple[
         Literal["created", "existing", "conflict", "blocked"],
         V2Operation | None,
         list[str],
     ]:
         with self._apply_owner():
-            return self._create_v2_owned(
-                operation,
-                claim_fence=claim_fence,
-            )
+            return self._create_v2_owned(operation)
 
     def _create_v2_owned(
-        self, operation: V2Operation, *, claim_fence: bool
+        self, operation: V2Operation
     ) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]:
         if not v2_manifest_is_valid(operation):
             raise ValueError("v2 manifest hash does not match its persisted content")
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            if operation.state not in {"pending", "awaiting_owner"}:
+            if operation.state != "pending":
                 connection.rollback()
-                raise ValueError("v2 operation must start pending or awaiting_owner")
+                raise ValueError("v2 operation must start pending")
             found = _sqlite_v2_request(
                 connection,
                 operation.account_id,
@@ -828,9 +791,6 @@ class SQLiteJournal:
             if blockers:
                 connection.rollback()
                 return "blocked", None, blockers
-            if claim_fence and operation.state != "pending":
-                connection.rollback()
-                raise ValueError("routine operation creation must enter pending")
             connection.execute(
                 """INSERT INTO owner_operations_v2 VALUES (
                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
@@ -838,92 +798,12 @@ class SQLiteJournal:
                 _v2_sql_values(operation),
             )
             created_at = _utc_now()
-            settled_at = (
-                None
-                if operation.state in {"awaiting_owner", "pending"}
-                else created_at
-            )
             connection.execute(
                 "INSERT INTO owner_operation_times_v2 VALUES (?,?,?)",
-                (operation.operation_id, created_at, settled_at),
+                (operation.operation_id, created_at, None),
             )
             connection.commit()
             return "created", operation, []
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
-        finally:
-            connection.close()
-
-    def transition_v2(
-        self,
-        operation_id: str,
-        *,
-        expected: V2State,
-        state: V2State,
-        response: JsonDict | None = None,
-    ) -> bool:
-        with self._apply_owner():
-            return self._transition_v2_owned(
-                operation_id,
-                expected=expected,
-                state=state,
-                response=response,
-            )
-
-    def _transition_v2_owned(
-        self,
-        operation_id: str,
-        *,
-        expected: V2State,
-        state: V2State,
-        response: JsonDict | None = None,
-    ) -> bool:
-        if not _legal_v2_transition(expected, state):
-            return False
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM owner_operations_v2 WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            operation = _v2_from_row(row)
-            if operation is None or operation.state != expected:
-                connection.rollback()
-                return False
-            try:
-                request = _sqlite_v2_request(
-                    connection,
-                    operation.account_id,
-                    operation.api_version,
-                    operation.request_id,
-                )
-            except AmbiguousV2Request:
-                connection.rollback()
-                return False
-            if request is None or request.operation_id != operation_id:
-                connection.rollback()
-                return False
-            cursor = connection.execute(
-                """UPDATE owner_operations_v2 SET state=?, response_json=?
-                   WHERE operation_id=? AND state=?""",
-                (
-                    state,
-                    _json(response) if response is not None else None,
-                    operation_id,
-                    expected,
-                ),
-            )
-            changed = cursor.rowcount == 1
-            if changed:
-                connection.execute(
-                    "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
-                    (_utc_now(), operation_id),
-                )
-            connection.commit()
-            return changed
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()
@@ -967,12 +847,10 @@ class SQLiteJournal:
 
     @contextmanager
     def create_apply_session_v2(
-        self, operation: V2Operation, *, claim_fence: bool
+        self, operation: V2Operation
     ) -> Iterator[V2CreateApplyStart]:
         with self._apply_owner():
-            outcome, stored, blockers = self._create_v2_owned(
-                operation, claim_fence=claim_fence
-            )
+            outcome, stored, blockers = self._create_v2_owned(operation)
             session = (
                 self._owned_apply_session(stored)
                 if outcome in {"created", "existing"}
@@ -1212,21 +1090,7 @@ class SQLiteJournal:
                 )
                 if request is None or request.operation_id != operation.operation_id:
                     raise AmbiguousV2Request()
-            awaiting_owner = connection.execute(
-                """SELECT operation_id FROM owner_operations_v2
-                   WHERE state='awaiting_owner'""",
-            ).fetchall()
-            for row in awaiting_owner:
-                operation_id = str(row["operation_id"])
-                connection.execute(
-                    """UPDATE owner_operations_v2 SET state='stale', response_json=?
-                       WHERE operation_id=? AND state='awaiting_owner'""",
-                    (_json(_retired_awaiting_owner_response(operation_id)), operation_id),
-                )
-                connection.execute(
-                    "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
-                    (now_value.isoformat(), operation_id),
-                )
+            _sqlite_retire_awaiting_owner(connection, now=now_value.isoformat())
             rows = connection.execute(
                 """SELECT o.*, t.settled_at FROM owner_operations_v2 o
                    JOIN owner_operation_times_v2 t USING(operation_id)
@@ -1257,20 +1121,21 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            awaiting_owner = connection.execute(
-                "SELECT operation_id FROM owner_operations_v2 WHERE state='awaiting_owner'"
+            active = connection.execute(
+                "SELECT * FROM owner_operations_v2"
             ).fetchall()
-            for row in awaiting_owner:
-                operation_id = str(row["operation_id"])
-                connection.execute(
-                    """UPDATE owner_operations_v2 SET state='stale', response_json=?
-                       WHERE operation_id=? AND state='awaiting_owner'""",
-                    (_json(_retired_awaiting_owner_response(operation_id)), operation_id),
+            for row in active:
+                operation = _v2_from_row(row)
+                assert operation is not None
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
                 )
-                connection.execute(
-                    "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
-                    (_utc_now(), operation_id),
-                )
+                if request is None or request.operation_id != operation.operation_id:
+                    raise AmbiguousV2Request()
+            _sqlite_retire_awaiting_owner(connection, now=_utc_now())
             rows = connection.execute(
                 "SELECT intent_id, state, result_json FROM intents ORDER BY intent_id"
             ).fetchall()
@@ -1683,7 +1548,7 @@ def _v2_sql_values(operation: V2Operation) -> tuple[object, ...]:
         operation.expires_at,
         _json(operation.response) if operation.response is not None else None,
         operation.authorization,
-        operation.resolution,
+        None,
         operation.receipt_hash,
         int(operation.dispatch_started),
     )
@@ -1710,7 +1575,6 @@ def _v2_from_row(row: sqlite3.Row | None) -> V2Operation | None:
             else None
         ),
         authorization=cast(str | None, row["authorization"]),
-        resolution=cast(Literal["accepted_as_is", "superseded"] | None, row["resolution"]),
         receipt_hash=cast(str | None, row["receipt_hash"]),
         dispatch_started=bool(row["dispatch_started"]),
     )
@@ -1866,8 +1730,31 @@ def _sqlite_blockers(connection: sqlite3.Connection, account_id: str) -> list[st
     )
 
 
-def _legal_v2_transition(before: V2State, after: V2State) -> bool:
-    return before == "awaiting_owner" and after == "stale"
+def _retire_awaiting_owner(operation: V2Operation) -> V2Operation:
+    return replace(
+        operation,
+        state="stale",
+        response=_retired_awaiting_owner_response(operation.operation_id),
+    )
+
+
+def _sqlite_retire_awaiting_owner(connection: sqlite3.Connection, *, now: str) -> None:
+    rows = connection.execute(
+        "SELECT * FROM owner_operations_v2 WHERE state='awaiting_owner'"
+    ).fetchall()
+    for row in rows:
+        operation = _v2_from_row(row)
+        assert operation is not None
+        retired = _retire_awaiting_owner(operation)
+        connection.execute(
+            """UPDATE owner_operations_v2 SET state=?, response_json=?
+               WHERE operation_id=? AND state='awaiting_owner'""",
+            (retired.state, _json(retired.response), retired.operation_id),
+        )
+        connection.execute(
+            "UPDATE owner_operation_times_v2 SET settled_at=? WHERE operation_id=?",
+            (now, retired.operation_id),
+        )
 
 
 def _v2_dispatch_allows_settlement(
