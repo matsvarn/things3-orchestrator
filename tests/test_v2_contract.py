@@ -1134,18 +1134,23 @@ def test_completion_receipt_uses_public_status_values() -> None:
     assert row["observed"]["status"] == "completed"
 
 
-def test_get_chunk_outage_is_not_reported_as_missing_ids() -> None:
-    class SecondRefreshFails(MemoryLibrary):
-        refreshes = 0
-
+def test_get_outage_is_not_reported_as_missing_ids() -> None:
+    class RefreshFails(MemoryLibrary):
         def refresh(self, *, force: bool = False) -> None:
-            self.refreshes += 1
-            if self.refreshes == 2:
-                raise CloudError("unavailable")
+            raise CloudError("unavailable")
 
-    library = SecondRefreshFails([Record(uuid=str(i), kind="task", title=str(i)) for i in range(11)])
-    workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
-    result = ThingsV2(workspace).dispatch("things_get", {"ids": [f"task:{i}" for i in range(11)]})
+    library = RefreshFails(
+        [Record(uuid=str(i), kind="task", title=str(i)) for i in range(11)]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    result = ThingsV2(workspace).dispatch(
+        "things_get", {"ids": [f"task:{i}" for i in range(11)]}
+    )
     assert result.state == "rejected"
     assert result.code == "read_unavailable"
     assert result.items == [] and result.missing_ids == []
