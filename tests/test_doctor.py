@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import anyio
 import pytest
 from mcp.types import Implementation
 
-from things_orchestrator.config import McpUrl, normalize_mcp_url
+from things_orchestrator.config import McpBearer, McpUrl, normalize_mcp_url
 from things_orchestrator.deployment import DeploymentIdentity
 from things_orchestrator.doctor import (
     DoctorFailure,
     DoctorUnavailable,
     TargetReceipt,
     curl_tool_count_command,
+    probe_target,
     validate_target,
 )
 from things_orchestrator.tools import (
@@ -137,6 +139,52 @@ def test_validate_target_rejects_unknown_local_commit() -> None:
     identity = replace(_identity(), commit=None, source="unknown")
     with pytest.raises(DoctorFailure, match="installed commit is unknown"):
         validate_target(_receipt(), identity)
+
+
+def test_authenticated_probe_does_not_trust_env_or_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen.append(kwargs)
+            self._headers = kwargs.get("headers")
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+        async def get(self, url: str) -> FakeResponse:
+            if self._headers:
+                raise RuntimeError("stop after capturing authenticated bounds")
+            return FakeResponse()
+
+    monkeypatch.setattr("things_orchestrator.doctor.httpx2.AsyncClient", FakeClient)
+
+    with pytest.raises(DoctorFailure):
+        anyio.run(
+            probe_target,
+            normalize_mcp_url("http://127.0.0.1:8787"),
+            McpBearer("token"),
+        )
+
+    authenticated = [kwargs for kwargs in seen if kwargs.get("headers")]
+    assert authenticated
+    for kwargs in authenticated:
+        assert kwargs.get("follow_redirects") is False
+        assert kwargs.get("trust_env") is False
 
 
 def test_curl_command_uses_environment_bearer_and_returns_tool_count() -> None:

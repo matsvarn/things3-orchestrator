@@ -91,16 +91,9 @@ def render_client_config(
                 "Grok configuration rejects HTTP and known local or private MCP "
                 "endpoints. Verify that the HTTPS endpoint is publicly reachable"
             )
-        body = json.dumps(
-            {
-                "url": str(endpoint.url),
-                "headers": {"Authorization": authorization},
-            },
-            indent=2,
-        ) + "\n"
         return RenderedClientConfig(
             client,
-            body,
+            _http_json_body(endpoint.url, authorization),
             "At grok.com/connectors, choose New Connector, then Custom. "
             "xAI requires an HTTPS MCP URL that the public internet can reach. "
             "This command rejects known local or private addresses, but it cannot "
@@ -114,13 +107,6 @@ def render_client_config(
                 "Grok Bot configuration rejects HTTP, Tailscale MagicDNS, and known "
                 "local or private MCP endpoints. Use a public HTTPS origin"
             )
-        body = json.dumps(
-            {
-                "url": str(endpoint.url),
-                "headers": {"Authorization": authorization},
-            },
-            indent=2,
-        ) + "\n"
         secondary = json.dumps(
             {
                 "command": "npx",
@@ -139,7 +125,7 @@ def render_client_config(
         ) + "\n"
         return RenderedClientConfig(
             client,
-            body,
+            _http_json_body(endpoint.url, authorization),
             "Prefer this native HTTPS MCP URL on the ephemeral agent host. "
             "Use the stdio mcp-remote recipe only if that host cannot speak "
             "Streamable HTTP. Do not install Tailscale; Update Computer wipes "
@@ -229,6 +215,19 @@ def render_client_config(
             "Install this as /etc/caddy/Caddyfile, then reload Caddy through systemd.",
         )
     raise AssertionError(f"Unhandled client: {client}")
+
+
+def _http_json_body(url: McpUrl, authorization: str) -> str:
+    return (
+        json.dumps(
+            {
+                "url": str(url),
+                "headers": {"Authorization": authorization},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def _is_https_without_known_local_host(url: McpUrl) -> bool:

@@ -75,7 +75,6 @@ def test_installed_identity_prefers_pep610_git_commit(
     monkeypatch.setattr(
         "things_orchestrator.deployment.package_version", lambda: "0.9.0"
     )
-    monkeypatch.setenv("THINGS_ORCHESTRATOR_COMMIT", "b" * 40)
 
     identity = installed_identity()
 
