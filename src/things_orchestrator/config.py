@@ -86,14 +86,18 @@ def preferences_path() -> Path:
 
 
 def launcher_path() -> Path:
-    root = os.environ.get("XDG_STATE_HOME")
-    base = Path(root) if root else Path.home() / ".local" / "state"
-    return base / "things-orchestrator" / "launcher"
+    return _state_dir() / "launcher"
 
 
 def _config_dir() -> Path:
     root = os.environ.get("XDG_CONFIG_HOME")
     base = Path(root) if root else Path.home() / ".config"
+    return base / "things-orchestrator"
+
+
+def _state_dir() -> Path:
+    root = os.environ.get("XDG_STATE_HOME")
+    base = Path(root) if root else Path.home() / ".local" / "state"
     return base / "things-orchestrator"
 
 
@@ -206,10 +210,6 @@ def load_preferences(*, path: Path | None = None) -> Preferences:
         timezone=cast(str | None, payload.get("timezone")),
         mcp_url=normalize_mcp_url(raw_url) if isinstance(raw_url, str) else None,
     )
-
-
-def load_source_schemes(*, path: Path | None = None) -> tuple[str, ...]:
-    return load_preferences(path=path).source_schemes
 
 
 def load_timezone(

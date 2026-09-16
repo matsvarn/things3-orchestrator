@@ -37,7 +37,6 @@ from .config import (
     load_legacy_mcp_url,
     load_mcp_url,
     load_preferences,
-    load_source_schemes,
     load_timezone,
     normalize_mcp_url,
     save_credentials,
@@ -258,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument(
         "--client",
         choices=tuple(client.value for client in ClientKind),
+        required=True,
         help="client whose configuration to render",
     )
     show.add_argument(
@@ -382,7 +382,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
                 mcp_url=args.public_url,
             )
             saved_schemes = (
-                load_source_schemes(path=path)
+                load_preferences(path=path).source_schemes
                 if args.source_schemes is not None
                 else None
             )
@@ -483,15 +483,18 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             parser, credentials=credentials, routines=RoutineHTTPComposition.disabled()
         ).run()
         return
-    bearer = credentials.bearer
-    if bearer is None:
-        parser.error("serve-http needs mcp_token from login")
-    routines = _routine_http_composition(
-        credentials, service_managed=bool(args.service_managed)
-    )
-    _server(parser, credentials=credentials, routines=routines).run_http(
-        port=args.port, token=bearer.reveal()
-    )
+    if args.action == "serve-http":
+        bearer = credentials.bearer
+        if bearer is None:
+            parser.error("serve-http needs mcp_token from login")
+        routines = _routine_http_composition(
+            credentials, service_managed=bool(args.service_managed)
+        )
+        _server(parser, credentials=credentials, routines=routines).run_http(
+            port=args.port, token=bearer.reveal()
+        )
+        return
+    raise AssertionError(f"Unhandled action: {args.action}")
 
 
 def _routines_command(
@@ -732,7 +735,7 @@ def _print_config(
     parser: argparse.ArgumentParser,
     *,
     public_url: str,
-    client: str | None,
+    client: str,
     show_secrets: bool,
 ) -> None:
     creds = credentials_path()
@@ -750,7 +753,7 @@ def _print_config(
             else load_mcp_url(preferences_file=preferences_file)
             or normalize_mcp_url("http://127.0.0.1:8787")
         )
-        kind = ClientKind(client or ClientKind.CURSOR.value)
+        kind = ClientKind(client)
         rendered = render_client_config(
             kind,
             Endpoint(url, credentials.bearer),
@@ -758,11 +761,6 @@ def _print_config(
         )
     except ConfigError as error:
         parser.error(str(error))
-    if client is None:
-        print(
-            "No --client selected; rendering generic HTTP JSON (deprecated default).",
-            file=sys.stderr,
-        )
     print(rendered.guidance, file=sys.stderr)
     if kind is ClientKind.HERMES and show_secrets:
         print(
@@ -823,11 +821,6 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
     if not timezone_name:
         print("timezone: missing - run login --timezone Europe/Berlin")
         raise SystemExit(1)
-    try:
-        ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
-        print(f"timezone: invalid ({timezone_name})")
-        raise SystemExit(1) from None
     print(f"timezone: ok ({timezone_name})")
     stored_url = load_mcp_url(preferences_file=creds.with_name("preferences.json"))
     hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"

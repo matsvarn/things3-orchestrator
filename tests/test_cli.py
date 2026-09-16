@@ -35,6 +35,11 @@ def test_parser_rejects_abbreviated_client_option(abbreviation: str) -> None:
         build_parser().parse_args(["print-config", abbreviation, "codex"])
 
 
+def test_print_config_requires_client() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["print-config"])
+
+
 class _TTYBuffer(StringIO):
     def isatty(self) -> bool:
         return True
@@ -288,7 +293,7 @@ def test_login_updates_only_host_preferences_and_preserves_other_keys(
 
     main(["login", "--timezone", "Europe/Berlin"])
     main(["login", "--rotate-token", "--timezone", "Europe/Berlin"])
-    main(["print-config"])
+    main(["print-config", "--client", "cursor"])
 
     assert json.loads(preferences.read_text()) == {
         "version": 2,
@@ -532,7 +537,7 @@ def test_print_config_renders_without_writing_and_hides_token(
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
-    main(["print-config", "--url", "https://tasks.example.com"])
+    main(["print-config", "--client", "cursor", "--url", "https://tasks.example.com"])
     captured = capsys.readouterr()
     out = captured.out
     assert "secret" not in out
@@ -540,7 +545,7 @@ def test_print_config_renders_without_writing_and_hides_token(
     assert "Bearer" in out
     assert "https://tasks.example.com/mcp" in out
     assert "Bearer <mcp_token>" in out
-    assert "deprecated default" in captured.err
+    assert "deprecated default" not in captured.err
     assert not list(tmp_path.glob("mcp.*"))
 
 
@@ -781,7 +786,7 @@ def test_print_config_without_credentials_points_at_login(
         "things_orchestrator.cli.credentials_path", lambda: tmp_path / "missing.json"
     )
     with pytest.raises(SystemExit) as caught:
-        main(["print-config"])
+        main(["print-config", "--client", "cursor"])
     assert caught.value.code == 2
     assert "uv run things-orchestrator login" in capsys.readouterr().err
 
