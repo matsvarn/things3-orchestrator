@@ -70,6 +70,33 @@ def test_empty_read_returns_bounded_today_sections() -> None:
     assert result.scope_revision and result.scope_revision.startswith("s_")
 
 
+def test_library_get_matches_exact_id_or_uuid_only() -> None:
+    library = MemoryLibrary([Record(uuid="abcdef", kind="task", title="A")])
+    assert library.get("task:abcdef") is not None
+    assert library.get("abcdef") is not None
+    assert library.get("abc") is None
+
+
+def test_inbox_and_week_return_all_matching_records() -> None:
+    today = NOW.date()
+    records = [
+        Record(uuid=f"in{i}", kind="task", title=str(i), inbox=True)
+        for i in range(16)
+    ]
+    records.extend(
+        Record(
+            uuid=f"wk{i}",
+            kind="task",
+            title=f"W{i}",
+            start=today + timedelta(days=1),
+        )
+        for i in range(16)
+    )
+    library = MemoryLibrary(records)
+    assert len(library.inbox()) == 16
+    assert len(library.week(today=today)) == 16
+
+
 def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     task = Record(
         uuid="task1",

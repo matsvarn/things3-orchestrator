@@ -24,7 +24,7 @@ from mcp.types import (
     TextContent,
     Tool,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -33,7 +33,7 @@ from starlette.types import Receive, Scope, Send
 
 from .client_bundle import encode_client_bundle
 from .deployment import health_payload, package_version
-from .tools import CLIENT_BUNDLE_PATH, ITEM_ID, advertised_tools
+from .tools import CLIENT_BUNDLE_FORMAT_VERSION, CLIENT_BUNDLE_PATH, ITEM_ID, advertised_tools
 from .v2 import (
     MODELS,
     PublicIssue,
@@ -118,7 +118,7 @@ class ThingsMCPServer:
             self._client_bundle_bytes = encode_client_bundle()
         return self._client_bundle_bytes
 
-    def _dispatch(self, name: str, arguments: dict[str, Any]) -> PublicResult:
+    def _dispatch(self, name: str, arguments: dict[str, Any] | BaseModel) -> PublicResult:
         return self._interface.dispatch(name, arguments)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
@@ -128,7 +128,7 @@ class ThingsMCPServer:
                     state="rejected", code="unknown_tool", next_action="correct_request",
                     instruction="That tool is not part of the bounded v2 interface.",
                 ))
-            MODELS[name].model_validate(arguments)
+            parsed = MODELS[name].model_validate(arguments)
         except ValidationError as error:
             instruction = _safe_validation_error(error)
             return _domain_result(PublicResult(
@@ -137,7 +137,7 @@ class ThingsMCPServer:
             ))
         try:
             async with self._lock:
-                result = await anyio.to_thread.run_sync(self._dispatch, name, arguments)
+                result = await anyio.to_thread.run_sync(self._dispatch, name, parsed)
         except Exception as error:
             correlation_id = f"err_{token_urlsafe(9)}"
             _LOGGER.exception(
@@ -224,7 +224,7 @@ class ThingsMCPServer:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             payload = health_payload(authenticated=True)
             payload["client_bundle"] = {
-                "format_version": 1,
+                "format_version": CLIENT_BUNDLE_FORMAT_VERSION,
                 "path": CLIENT_BUNDLE_PATH,
                 "bundle_checksum": json.loads(self._client_bundle())["bundle_checksum"],
             }

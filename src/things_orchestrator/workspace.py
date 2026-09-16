@@ -2156,12 +2156,12 @@ class ThingsWorkspace:
                 return self._resume_v2_session(operation.operation_id, session)
         if operation.state == "awaiting_owner":
             return {
-                "state": "awaiting_owner",
-                "code": "awaiting_owner",
-                "next_action": "run_cli",
+                "state": "stale",
+                "code": "stale",
+                "next_action": "read_fresh",
                 "instruction": (
-                    "This immutable operation still awaits CLI-only owner review. "
-                    "It does not block unrelated writes; do not replay it."
+                    "This legacy awaiting-owner operation was retired without Cloud I/O. "
+                    "Never replay it; read current Things state and send a fresh request."
                 ),
                 "operation_id": operation.operation_id,
             }
@@ -2697,9 +2697,9 @@ class ThingsWorkspace:
         if view == "today":
             return self._library.today(today=today)
         if view == "inbox":
-            return self._library.inbox(limit=10_000)
+            return self._library.inbox()
         if view == "week":
-            return self._library.week(today=today, limit=10_000)
+            return self._library.week(today=today)
         if view == "repeating":
             return sorted(
                 [
@@ -4233,10 +4233,6 @@ class ThingsWorkspace:
     @staticmethod
     def _rejected(instruction: str) -> Result:
         return Result(next="stop", status="rejected", instruction=instruction)
-
-    @staticmethod
-    def _unsupported(instruction: str) -> Result:
-        return Result(next="stop", status="unsupported", instruction=instruction)
 
 
 def _bounded_tag_title(title: str) -> str:

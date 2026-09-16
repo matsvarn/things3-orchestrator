@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Remove leftover core-runtime helpers: unused `_unsupported`, UUID prefix
+  lookup, inbox/week limit-15 defaults, a test-only authorization wrapper, and
+  a duplicate v2 model validate. Health advertises `CLIENT_BUNDLE_FORMAT_VERSION`.
+  Leftover `awaiting_owner` resume maps to stale/`read_fresh`.
 - The Codex plugin wrapper only launches `serve`. Owner and recovery commands
   stay on the uv tool.
 - Delete leftover owner-approval host methods and unused internal Result
