@@ -582,13 +582,12 @@ class MemoryJournal:
 
     def cutover_v1(self) -> JsonDict:
         with self._lock:
+            for operation_id in self._v2_operations:
+                if self._v2_operation_for_mutation_locked(operation_id) is None:
+                    raise AmbiguousV2Request()
             for operation_id, operation in list(self._v2_operations.items()):
-                if operation.state != "awaiting_owner":
-                    continue
-                current = self._v2_operation_for_mutation_locked(operation_id)
-                if current is None:
-                    continue
-                self._store_retired_awaiting_owner(current)
+                if operation.state == "awaiting_owner":
+                    self._store_retired_awaiting_owner(operation)
             quarantined: list[str] = []
             unresolved: list[str] = []
             partial_like: list[str] = []
@@ -1266,6 +1265,20 @@ class SQLiteJournal:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                "SELECT * FROM owner_operations_v2"
+            ).fetchall()
+            for row in active:
+                operation = _v2_from_row(row)
+                assert operation is not None
+                request = _sqlite_v2_request(
+                    connection,
+                    operation.account_id,
+                    operation.api_version,
+                    operation.request_id,
+                )
+                if request is None or request.operation_id != operation.operation_id:
+                    raise AmbiguousV2Request()
             _sqlite_retire_awaiting_owner(connection, now=_utc_now())
             rows = connection.execute(
                 "SELECT intent_id, state, result_json FROM intents ORDER BY intent_id"

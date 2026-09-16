@@ -630,7 +630,7 @@ def test_sqlite_settlement_rejects_manifest_json_tampering(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("mutation", ["prune", "settle"])
+@pytest.mark.parametrize("mutation", ["prune", "cutover", "settle"])
 def test_every_journal_mutation_rechecks_canonical_ambiguity(
     journal_kind: str, mutation: str, tmp_path: Path
 ) -> None:
@@ -639,7 +639,7 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
         if journal_kind == "memory"
         else SQLiteJournal(tmp_path / f"{mutation}.sqlite3")
     )
-    state = "awaiting_owner" if mutation == "prune" else "pending"
+    state = "pending" if mutation == "settle" else "awaiting_owner"
     original = _with_manifest(
         replace(
             _operation(
@@ -650,10 +650,10 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
             account_id="Owner@Example.com",
         )
     )
-    if mutation == "prune":
-        _inject_v2_operation(journal, original)
-    else:
+    if mutation == "settle":
         assert journal.create_v2(original)[0] == "created"
+    else:
+        _inject_v2_operation(journal, original)
     conflicting = _with_manifest(
         replace(
             _operation(
@@ -666,10 +666,7 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
     )
     _inject_v2_operation(journal, conflicting)
 
-    if mutation == "prune":
-        with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
-            journal.prune_v2(now="2026-09-01T00:00:00+00:00")
-    else:
+    if mutation == "settle":
         assert not journal.settle_v2(
             original.operation_id,
             expected="pending",
@@ -677,6 +674,12 @@ def test_every_journal_mutation_rechecks_canonical_ambiguity(
             response={"state": "applied"},
             rows=[{"sequence": 1, "result": "applied"}],
         )
+    else:
+        with pytest.raises(RuntimeError, match="ambiguous stored v2 request"):
+            if mutation == "prune":
+                journal.prune_v2(now="2026-09-01T00:00:00+00:00")
+            else:
+                journal.cutover_v1()
 
     assert journal.get_v2_operation(original.operation_id) == original
     assert journal.get_v2_operation(conflicting.operation_id) == conflicting
