@@ -1077,20 +1077,25 @@ class ThingsV2:
         )
 
     def _get(self, ids: list[str]) -> PublicResult:
-        items: list[Any] = []
-        for offset in range(0, len(ids), 10):
-            result = self.workspace.read(
-                ReadCall(
-                    ids=ids[offset : offset + 10],
-                    fields=["notes", "checklist", "tags", "recurrence"],
-                )
+        result = self.workspace.read(ReadCall(ids=ids))
+        if result.status == "unavailable":
+            return PublicResult(
+                state="rejected", code="read_unavailable", next_action="retry_same",
+                instruction="Things Cloud is unavailable; no IDs were classified as missing.",
             )
+        items = list(result.items)
+        cursor = result.cursor
+        while cursor is not None:
+            result = self.workspace.read(ReadCall(cursor=cursor, limit=40))
             if result.status == "unavailable":
                 return PublicResult(
                     state="rejected", code="read_unavailable", next_action="retry_same",
                     instruction="Things Cloud is unavailable; no IDs were classified as missing.",
                 )
+            if result.status not in {"ok", "needs_input"}:
+                return self._read_failure(result)
             items.extend(result.items)
+            cursor = result.cursor
         found = {item.id for item in items}
         missing = [item_id for item_id in ids if item_id not in found]
         return PublicResult(
@@ -1104,7 +1109,7 @@ class ThingsV2:
 
     def _mutation(self, result: dict[str, object]) -> PublicResult:
         item_ids = cast(list[str], result.pop("item_ids", []))
-        fresh_items = result.pop("_fresh_items", False) is True
+        result.pop("_fresh_items", False)
         items = [
             self._item(
                 self.workspace._fact(
@@ -1116,7 +1121,7 @@ class ThingsV2:
             )
             for item_id in item_ids
             if (item := self.workspace._exact_item(item_id)) is not None
-        ] if fresh_items else self._get(item_ids).items if item_ids else []
+        ]
         effects: list[PublicEffect] = []
         issues = [
             PublicIssue.model_validate(issue)

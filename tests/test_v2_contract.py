@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from things_orchestrator.cloud import CloudError, CloudWriteRejected
+from things_orchestrator.interface import ReadCall
 from things_orchestrator.journal import (
     MemoryJournal,
     SQLiteJournal,
@@ -312,7 +313,7 @@ def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
     )
     assert retried.operation_id == result.operation_id
     assert retried.items == result.items
-    assert library.refreshes == 4
+    assert library.refreshes == 3
 
 
 def test_adapter_verified_read_back_skips_a_duplicate_post_write_refresh() -> None:
@@ -1134,21 +1135,81 @@ def test_completion_receipt_uses_public_status_values() -> None:
     assert row["observed"]["status"] == "completed"
 
 
-def test_get_chunk_outage_is_not_reported_as_missing_ids() -> None:
-    class SecondRefreshFails(MemoryLibrary):
-        refreshes = 0
-
+def test_get_outage_is_not_reported_as_missing_ids() -> None:
+    class RefreshFails(MemoryLibrary):
         def refresh(self, *, force: bool = False) -> None:
-            self.refreshes += 1
-            if self.refreshes == 2:
-                raise CloudError("unavailable")
+            raise CloudError("unavailable")
 
-    library = SecondRefreshFails([Record(uuid=str(i), kind="task", title=str(i)) for i in range(11)])
-    workspace = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW, account_id="owner@example.com")
-    result = ThingsV2(workspace).dispatch("things_get", {"ids": [f"task:{i}" for i in range(11)]})
+    library = RefreshFails(
+        [Record(uuid=str(i), kind="task", title=str(i)) for i in range(11)]
+    )
+    workspace = ThingsWorkspace(
+        library,
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    result = ThingsV2(workspace).dispatch(
+        "things_get", {"ids": [f"task:{i}" for i in range(11)]}
+    )
     assert result.state == "rejected"
     assert result.code == "read_unavailable"
     assert result.items == [] and result.missing_ids == []
+
+
+def test_mutation_retry_hydrates_more_than_fifty_result_ids() -> None:
+    records = [
+        Record(uuid=f"{index:02d}", kind="task", title=f"Task {index:02d}")
+        for index in range(51)
+    ]
+    workspace = ThingsWorkspace(
+        MemoryLibrary(records),
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    interface = ThingsV2(workspace)
+    arguments = {
+        "request_id": REQUEST,
+        "ids": [record.id for record in records],
+    }
+    first = interface.dispatch("things_complete", arguments)
+    assert first.state == "applied"
+    assert len(first.items) == 51
+
+    second = interface.dispatch("things_complete", arguments)
+    assert second.state == "applied"
+    assert second.operation_id == first.operation_id
+    assert {item.id for item in second.items} == {record.id for record in records}
+
+
+def test_get_follows_internal_wire_budget_pages_before_missing_ids() -> None:
+    title = "😀" * 1000
+    project = Record(uuid="home", kind="project", title=title)
+    tasks = [
+        Record(
+            uuid=f"{index:02d}",
+            kind="task",
+            title=title,
+            parent_uuid=project.uuid,
+        )
+        for index in range(50)
+    ]
+    workspace = ThingsWorkspace(
+        MemoryLibrary([project, *tasks]),
+        journal=MemoryJournal(),
+        clock=lambda: NOW,
+        account_id="owner@example.com",
+    )
+    ids = [task.id for task in tasks]
+    internal = workspace.read(ReadCall(ids=ids))
+    assert internal.cursor is not None
+    assert len(internal.items) < 50
+
+    result = ThingsV2(workspace).dispatch("things_get", {"ids": ids})
+    assert result.state == "ok"
+    assert result.missing_ids == []
+    assert {item.id for item in result.items} == set(ids)
 
 
 def test_output_and_flattened_capture_schemas_are_closed() -> None:

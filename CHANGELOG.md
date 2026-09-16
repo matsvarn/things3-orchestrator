@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Trim unpublished internal ReadCall language after the three-tool read
+  surface retired: drop audit/system/project/area views, `signals_any`,
+  logbook from/to, ReviewSection, and unused Result.receipt. Registries
+  page through their own cursor tag. Bulk exact IDs accept up to 50.
 - Remove leftover core-runtime helpers: unused `_unsupported`, UUID prefix
   lookup, inbox/week limit-15 defaults, a test-only authorization wrapper, and
   a duplicate v2 model validate. Health advertises `CLIENT_BUNDLE_FORMAT_VERSION`.
