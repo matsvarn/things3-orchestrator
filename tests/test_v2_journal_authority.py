@@ -22,13 +22,13 @@ from things_orchestrator.journal import (
     V2Operation,
     _json,
     _v2_sql_values,
+    owner_authorization_binding_json,
     read_operation_state_counts,
     v2_manifest_hash,
     v2_manifest_is_valid,
 )
 from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Write
 from things_orchestrator.owner_authority import (
-    authorization_binding,
     enroll_owner_factor,
     host_escape,
     render_operation,
@@ -481,6 +481,23 @@ def test_legacy_awaiting_owner_rows_retire_without_replay_for_both_journals(
         assert "without Cloud I/O" in instruction
         assert "Never replay" in instruction
         assert "fresh request" in instruction
+
+
+def test_resume_maps_leftover_awaiting_owner_to_stale_without_cloud_io() -> None:
+    operation = _operation(
+        "op_awaiting_resume",
+        request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+        state="awaiting_owner",
+    )
+    assert v2_manifest_is_valid(operation)
+    workspace = ThingsWorkspace(
+        MemoryLibrary(), journal=MemoryJournal(), account_id=operation.account_id
+    )
+    result = workspace._resume_v2(operation)  # noqa: SLF001
+    assert result["state"] == "stale"
+    assert result["code"] == "stale"
+    assert result["next_action"] == "read_fresh"
+    assert "without Cloud I/O" in str(result["instruction"])
 
 
 def test_settlement_cannot_bypass_leftover_awaiting_owner(tmp_path: Path) -> None:
@@ -1854,17 +1871,23 @@ def test_authorization_binding_covers_action_and_operation_contract() -> None:
         "op_approval",
         request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
     )
-    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
-        operation, action="legacy_accepted_as_is"
+    assert owner_authorization_binding_json(operation, action="approve") != (
+        owner_authorization_binding_json(operation, action="decline")
     )
-    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
-        replace(operation, manifest_hash="sha256:v1:other"), action="settle_not_applied"
+    assert owner_authorization_binding_json(operation, action="approve") != (
+        owner_authorization_binding_json(
+            replace(operation, manifest_hash="sha256:v1:other"), action="approve"
+        )
     )
-    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
-        replace(operation, api_version="legacy-v1"), action="settle_not_applied"
+    assert owner_authorization_binding_json(operation, action="approve") != (
+        owner_authorization_binding_json(
+            replace(operation, api_version="legacy-v1"), action="approve"
+        )
     )
-    assert authorization_binding(operation, action="settle_not_applied") != authorization_binding(
-        replace(operation, tool="things_complete"), action="settle_not_applied"
+    assert owner_authorization_binding_json(operation, action="approve") != (
+        owner_authorization_binding_json(
+            replace(operation, tool="things_complete"), action="approve"
+        )
     )
 
 
