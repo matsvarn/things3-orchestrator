@@ -20,6 +20,7 @@ from things_orchestrator.journal import (
     SQLiteJournal,
     V2ApplySession,
     V2Operation,
+    _json,
     _v2_sql_values,
     read_operation_state_counts,
     v2_manifest_hash,
@@ -96,6 +97,38 @@ def _with_manifest(operation: V2Operation, **changes: object) -> V2Operation:
         manifest=manifest,
         manifest_hash=v2_manifest_hash(manifest),
     )
+
+
+def _inject_v1_intent(
+    journal: MemoryJournal | SQLiteJournal, record: IntentRecord
+) -> None:
+    if isinstance(journal, MemoryJournal):
+        journal._records[record.intent_id] = record  # noqa: SLF001
+        return
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(
+            """INSERT INTO intents (
+                intent_id, fingerprint, state, plan_json,
+                plan_id, expires_at, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(intent_id) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                state = excluded.state,
+                plan_json = excluded.plan_json,
+                plan_id = excluded.plan_id,
+                expires_at = excluded.expires_at,
+                result_json = excluded.result_json
+            """,
+            (
+                record.intent_id,
+                record.fingerprint,
+                record.state,
+                _json(record.plan),
+                record.plan_id,
+                record.expires_at,
+                None if record.result is None else _json(record.result),
+            ),
+        )
 
 
 def _inject_v2_operation(
@@ -258,7 +291,7 @@ def test_operation_state_counts_are_aggregate_and_account_scoped(
     other_account = _with_manifest(other_account, account_id="other@example.com")
     journal.create_v2(pending, claim_fence=True)
     journal.create_v2(other_account, claim_fence=True)
-    journal.save(
+    _inject_v1_intent(journal,
         IntentRecord(
             intent_id="private-legacy-id",
             fingerprint="private-fingerprint",
@@ -1910,7 +1943,7 @@ def test_legacy_resolution_render_contains_complete_escaped_signed_plan() -> Non
             "preconditions": {"task:a": "r_1"},
         },
     )
-    journal.save(record)
+    _inject_v1_intent(journal, record)
     workspace = ThingsWorkspace(MemoryLibrary(), journal=journal, account_id="owner@example.com")
     operation = workspace.host_get_legacy_resolution_v1(record.intent_id)
     assert operation is not None
@@ -1933,7 +1966,7 @@ def test_legacy_resolution_rejects_a_substituted_owner_envelope() -> None:
             ]
         },
     )
-    journal.save(record)
+    _inject_v1_intent(journal, record)
     workspace = ThingsWorkspace(
         MemoryLibrary(), journal=journal, account_id="owner@example.com"
     )
@@ -1988,7 +2021,7 @@ def test_sqlite_cutover_quarantines_old_approvals_and_reports_every_fence(tmp_pa
         ("pending-b", "pending"),
         ("applied-old", "applied"),
     ):
-        journal.save(
+        _inject_v1_intent(journal,
             IntentRecord(
                 intent_id=intent_id,
                 fingerprint=intent_id,
@@ -2012,7 +2045,7 @@ def test_retained_v1_none_matched_stays_fenced_until_signed_resolution(tmp_path:
     factor = tmp_path / "owner-factor.json"
     enroll_owner_factor("correct horse battery staple", path=factor)
     journal = SQLiteJournal(tmp_path / "journal.sqlite3")
-    journal.save(IntentRecord(
+    _inject_v1_intent(journal, IntentRecord(
         intent_id="legacy-pending",
         fingerprint="sha256:legacy",
         state="pending",
@@ -2049,7 +2082,7 @@ def test_retained_v1_none_matched_stays_fenced_until_signed_resolution(tmp_path:
 
 def test_malformed_all_none_v1_update_remains_fenced(tmp_path: Path) -> None:
     journal = SQLiteJournal(tmp_path / "journal.sqlite3")
-    journal.save(IntentRecord(
+    _inject_v1_intent(journal, IntentRecord(
         intent_id="legacy-malformed", fingerprint="sha256:legacy", state="pending",
         plan={"writes": [{"action": "update", "uuid": "a", "kind": "task"}]},
     ))
@@ -2067,7 +2100,7 @@ def test_unknown_action_and_invalid_or_missing_kind_are_malformed_in_both_journa
             {"action": "update", "uuid": "a", "title": "B"},
         )):
             intent_id = f"legacy-invalid-{type(journal).__name__}-{index}"
-            journal.save(IntentRecord(intent_id=intent_id, fingerprint="sha256:legacy", state="pending", plan={"writes": [write]}))
+            _inject_v1_intent(journal, IntentRecord(intent_id=intent_id, fingerprint="sha256:legacy", state="pending", plan={"writes": [write]}))
             workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="A")]), journal=journal, account_id="owner@example.com")
             result = workspace.host_reconcile_v1_pending(intent_id)
             assert result["classification"] == "malformed"
@@ -2076,7 +2109,7 @@ def test_unknown_action_and_invalid_or_missing_kind_are_malformed_in_both_journa
 
 def test_retained_v1_partial_evidence_remains_fenced(tmp_path: Path) -> None:
     journal = SQLiteJournal(tmp_path / "journal.sqlite3")
-    journal.save(IntentRecord(
+    _inject_v1_intent(journal, IntentRecord(
         intent_id="legacy-partial", fingerprint="sha256:legacy", state="pending",
         plan={"writes": [
             {"action": "update", "uuid": "a", "kind": "task", "title": "Applied"},
@@ -2102,13 +2135,13 @@ def test_signed_legacy_resolution_cannot_release_replaced_plan(tmp_path: Path) -
     public_key = factor.with_name("owner-public-key.ed25519").read_bytes()
     for journal in (MemoryJournal(owner_public_key=public_key), SQLiteJournal(tmp_path / "journal.sqlite3", owner_public_key=public_key)):
         record = IntentRecord(intent_id=f"legacy-race-{type(journal).__name__}", fingerprint="sha256:original", state="pending", plan={"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "B"}]})
-        journal.save(record)
+        _inject_v1_intent(journal, record)
         workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="A")]), journal=journal, account_id="owner@example.com")
         operation = workspace.host_get_legacy_resolution_v1(record.intent_id)
         assert operation is not None
         authorization = verified_authorization(operation, action="legacy_accepted_as_is", passphrase="correct horse battery staple", path=factor)
         assert authorization is not None
-        journal.save(replace(record, plan={"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "C"}]}))
+        _inject_v1_intent(journal, replace(record, plan={"writes": [{"action": "update", "uuid": "a", "kind": "task", "title": "C"}]}))
         assert not workspace.host_resolve_legacy_v1(record.intent_id, "accepted_as_is", authorization)
         assert not journal.resolve_v1_pending(
             record.intent_id,
@@ -2123,9 +2156,9 @@ def test_signed_legacy_resolution_cannot_release_replaced_plan(tmp_path: Path) -
 def test_v1_cutover_scrubs_terminal_owner_content_but_keeps_pending_evidence(tmp_path: Path) -> None:
     for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
         prefix = type(journal).__name__
-        journal.save(IntentRecord(f"{prefix}-approval", "fp-a", "needs_approval", plan={"summary": "owner secret"}))
-        journal.save(IntentRecord(f"{prefix}-applied", "fp-b", "applied", plan={"summary": "owner terminal"}, result={"owner": "text"}))
-        journal.save(IntentRecord(f"{prefix}-pending", "fp-c", "pending", plan={"summary": "needed evidence"}))
+        _inject_v1_intent(journal, IntentRecord(f"{prefix}-approval", "fp-a", "needs_approval", plan={"summary": "owner secret"}))
+        _inject_v1_intent(journal, IntentRecord(f"{prefix}-applied", "fp-b", "applied", plan={"summary": "owner terminal"}, result={"owner": "text"}))
+        _inject_v1_intent(journal, IntentRecord(f"{prefix}-pending", "fp-c", "pending", plan={"summary": "needed evidence"}))
         journal.cutover_v1()
         assert journal.get(f"{prefix}-approval").plan == {}  # type: ignore[union-attr]
         assert journal.get(f"{prefix}-applied").plan == {}  # type: ignore[union-attr]
@@ -2136,7 +2169,7 @@ def test_v1_cutover_scrubs_terminal_owner_content_but_keeps_pending_evidence(tmp
 def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: Path) -> None:
     for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
         prefix = type(journal).__name__
-        journal.save(IntentRecord(
+        _inject_v1_intent(journal, IntentRecord(
             f"{prefix}-signed", "fp-signed", "stale", plan={"summary": "owner secret"},
             result={
                 "status": "owner_resolved_no_replay", "classification": "partial",
@@ -2144,7 +2177,7 @@ def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: P
                 "owner_text": "must disappear",
             },
         ))
-        journal.save(IntentRecord(
+        _inject_v1_intent(journal, IntentRecord(
             f"{prefix}-auto", "fp-auto", "applied", plan={"summary": "owner secret"},
             result={
                 "status": "reconciled_no_replay", "classification": "applied",
@@ -2176,7 +2209,7 @@ def test_repeated_v1_cutover_preserves_only_safe_resolution_evidence(tmp_path: P
 ])
 def test_action_incomplete_legacy_plan_remains_fenced(write: dict[str, object]) -> None:
     journal = MemoryJournal()
-    journal.save(IntentRecord(
+    _inject_v1_intent(journal, IntentRecord(
         intent_id="legacy-incomplete", fingerprint="sha256:legacy", state="pending",
         plan={"writes": [{"uuid": "a", "kind": "task", **write}]},
     ))

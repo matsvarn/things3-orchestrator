@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import subprocess
 import tomllib
 from contextlib import contextmanager
@@ -22,7 +23,7 @@ from things_orchestrator.cli import (
 )
 from things_orchestrator.config import ConfigError, Credentials, McpBearer
 from things_orchestrator.doctor import DoctorFailure
-from things_orchestrator.journal import IntentRecord, SQLiteJournal, V2Operation
+from things_orchestrator.journal import SQLiteJournal, V2Operation, _json
 from things_orchestrator.library import MemoryLibrary, Record
 
 ROOT = Path(__file__).parents[1]
@@ -467,9 +468,18 @@ def test_migration_report_quarantines_and_reads_disposable_sqlite(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "journal.sqlite3"
-    journal = SQLiteJournal(path)
-    journal.save(IntentRecord("old-approval", "a", "needs_approval"))
-    journal.save(IntentRecord("old-pending", "b", "pending"))
+    SQLiteJournal(path)
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            """INSERT INTO intents (
+                intent_id, fingerprint, state, plan_json,
+                plan_id, expires_at, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                ("old-approval", "a", "needs_approval", _json({}), None, None, None),
+                ("old-pending", "b", "pending", _json({}), None, None, None),
+            ),
+        )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
         lambda: Credentials("owner@example.com", "unused", None),
