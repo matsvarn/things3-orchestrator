@@ -35,7 +35,6 @@ from .config import (
     launcher_path,
     load_credentials,
     load_legacy_mcp_url,
-    load_mcp_url,
     load_preferences,
     load_timezone,
     normalize_mcp_url,
@@ -699,7 +698,7 @@ def _login(
     token = _mcp_token(rotate=rotate_token, path=creds)
     preferences_file = creds.with_name("preferences.json")
     try:
-        existing_url = load_mcp_url(preferences_file=preferences_file)
+        existing_url = load_preferences(path=preferences_file).mcp_url
         legacy_url = (
             None
             if public_url.strip() or existing_url is not None
@@ -750,7 +749,7 @@ def _print_config(
         url = (
             normalize_mcp_url(public_url)
             if public_url.strip()
-            else load_mcp_url(preferences_file=preferences_file)
+            else load_preferences(path=preferences_file).mcp_url
             or normalize_mcp_url("http://127.0.0.1:8787")
         )
         kind = ClientKind(client)
@@ -822,7 +821,7 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
         print("timezone: missing - run login --timezone Europe/Berlin")
         raise SystemExit(1)
     print(f"timezone: ok ({timezone_name})")
-    stored_url = load_mcp_url(preferences_file=creds.with_name("preferences.json"))
+    stored_url = load_preferences(path=creds.with_name("preferences.json")).mcp_url
     hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"
     if timezone_name == "UTC" and (public_url.strip() or hosted):
         print("timezone: warning - UTC is unusual for a hosted owner account")
@@ -880,14 +879,9 @@ def _workspace(
     email = credentials.email
     library = CloudLibrary(CloudClient(email, credentials.password))
     timezone_name = load_timezone()
-    try:
-        timezone = (
-            ZoneInfo(timezone_name)
-            if timezone_name
-            else datetime.now().astimezone().tzinfo
-        )
-    except ZoneInfoNotFoundError:
-        parser.error("Stored timezone is invalid. Run login --timezone Europe/Berlin.")
+    timezone = (
+        ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
+    )
 
     def clock() -> datetime:
         return datetime.now(timezone)

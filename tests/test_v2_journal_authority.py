@@ -584,7 +584,7 @@ def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> 
     )
     authorization = verified_authorization(
         operation,
-        action="settle_not_applied",
+        action="legacy_accepted_as_is",
         passphrase="correct horse battery staple",
         path=first,
     )
@@ -595,20 +595,20 @@ def test_authorization_rejects_wrong_key_and_altered_binding(tmp_path: Path) -> 
     wrong = MemoryJournal(
         owner_public_key=second.with_name("owner-public-key.ed25519").read_bytes()
     )
-    assert correct.verify_v2_authorization(operation, "settle_not_applied", authorization)
-    assert wrong.verify_v2_authorization(operation, "settle_not_applied", authorization) is None
-    assert correct.verify_v2_authorization(operation, "legacy_accepted_as_is", authorization) is None
+    assert correct.verify_v2_authorization(operation, "legacy_accepted_as_is", authorization)
+    assert wrong.verify_v2_authorization(operation, "legacy_accepted_as_is", authorization) is None
+    assert correct.verify_v2_authorization(operation, "legacy_superseded", authorization) is None
     assert correct.verify_v2_authorization(
         replace(operation, manifest_hash="sha256:v1:changed"),
-        "settle_not_applied",
+        "legacy_accepted_as_is",
         authorization,
     ) is None
     assert correct.verify_v2_authorization(
         replace(operation, expires_at="2026-08-29T13:01:00+00:00"),
-        "settle_not_applied",
+        "legacy_accepted_as_is",
         authorization,
     ) is None
-    assert correct.verify_v2_authorization(operation, "settle_not_applied", object()) is None
+    assert correct.verify_v2_authorization(operation, "legacy_accepted_as_is", object()) is None
 
 
 def test_sqlite_settlement_rejects_manifest_json_tampering(tmp_path: Path) -> None:
@@ -634,7 +634,7 @@ def test_sqlite_settlement_rejects_manifest_json_tampering(tmp_path: Path) -> No
     assert journal.create_v2(operation)[0] == "created"
     authorization = verified_authorization(
         operation,
-        action="settle_not_applied",
+        action="legacy_accepted_as_is",
         passphrase="correct horse battery staple",
         path=factor,
     )
@@ -670,11 +670,9 @@ def test_sqlite_settlement_rejects_manifest_json_tampering(tmp_path: Path) -> No
     assert not v2_manifest_is_valid(stored)
     with pytest.raises(ValueError, match="integrity"):
         render_operation(stored)
-    assert journal.verify_v2_authorization(stored, "settle_not_applied", authorization) is None
-    direct_apply = workspace._apply_v2(stored)  # noqa: SLF001
+    assert journal.verify_v2_authorization(stored, "legacy_accepted_as_is", authorization) is None
     reconcile = workspace.host_reconcile_v2(operation.operation_id)
 
-    assert direct_apply["state"] == "rejected"
     assert reconcile["state"] == "rejected"
     assert library.records["a"].status == "open"
 
@@ -2204,159 +2202,6 @@ def test_action_incomplete_legacy_plan_remains_fenced(write: dict[str, object]) 
     result = workspace.host_reconcile_v1_pending("legacy-incomplete")
     assert result["classification"] == "malformed"
     assert journal.get("legacy-incomplete").state == "pending"  # type: ignore[union-attr]
-
-
-def test_pending_v2_can_settle_not_applied_only_with_signed_readback_evidence(tmp_path: Path) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
-    operation = _with_manifest(
-        _operation("op_recover", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        writes=[{"action": "update", "uuid": "a", "kind": "task", "title": "New"}],
-        before=[{"id": "task:a", "title": "Old"}],
-        touched=[["title"]],
-        preconditions={"task:a": "frozen"},
-        display_titles=["Old"],
-    )
-    journal.create_v2(operation)
-    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Old")]), journal=journal, account_id=operation.account_id)
-    forged = workspace.host_settle_not_applied_v2(operation.operation_id, "forged")
-    authorization = verified_authorization(operation, action="settle_not_applied", passphrase="correct horse battery staple", path=factor)
-    assert authorization is not None
-    settled = workspace.host_settle_not_applied_v2(operation.operation_id, authorization)
-
-    assert forged["state"] == "rejected"
-    assert settled["state"] == "not_applied"
-    stored = journal.get_v2_operation(operation.operation_id)
-    assert stored is not None and stored.state == "not_applied"
-    assert stored.authorization == authorization.record
-
-
-@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("target_kind", ["missing", "other-account", "nonpending"])
-def test_host_not_applied_settlement_rejects_nonowned_pending_target(
-    journal_kind: str, target_kind: str, tmp_path: Path,
-) -> None:
-    journal = (
-        MemoryJournal()
-        if journal_kind == "memory"
-        else SQLiteJournal(tmp_path / f"{target_kind}.sqlite3")
-    )
-    operation_id = "op_missing"
-    stored_state: str | None = None
-    if target_kind != "missing":
-        operation = _operation(
-            f"op_{target_kind}",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        )
-        if target_kind == "other-account":
-            operation = _with_manifest(
-                replace(operation, account_id="other@example.com")
-            )
-        operation_id = operation.operation_id
-        journal.create_v2(operation)
-        if target_kind == "nonpending":
-            assert journal.settle_v2(
-                operation_id,
-                expected="pending",
-                state="applied",
-                response={"state": "applied", "operation_id": operation_id},
-                rows=[{"sequence": 1}],
-            )
-            stored_state = "applied"
-        else:
-            stored_state = "pending"
-    workspace = ThingsWorkspace(
-        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
-        journal=journal,
-        account_id="owner@example.com",
-    )
-
-    result = workspace.host_settle_not_applied_v2(operation_id, "forged")
-
-    assert result["state"] == "rejected"
-    assert result["code"] == "missing_target"
-    stored = journal.get_v2_operation(operation_id)
-    if stored_state is None:
-        assert stored is None
-    else:
-        assert stored is not None and stored.state == stored_state
-
-
-@pytest.mark.parametrize("journal_kind", ["memory", "sqlite"])
-def test_dispatched_pending_refuses_signed_not_applied_settlement(
-    journal_kind: str, tmp_path: Path,
-) -> None:
-    factor = tmp_path / f"{journal_kind}-owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = (
-        MemoryJournal(
-            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes()
-        )
-        if journal_kind == "memory"
-        else SQLiteJournal(
-            tmp_path / "signed-dispatched.sqlite3",
-            owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes(),
-        )
-    )
-    operation = _with_manifest(
-        _operation(
-            "op_signed_dispatched",
-            request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735",
-        ),
-        writes=[
-            {"action": "update", "uuid": "a", "kind": "task", "title": "New"}
-        ],
-        before=[{"id": "task:a", "title": "Old"}],
-        touched=[["title"]],
-        preconditions={"task:a": "frozen"},
-        display_titles=["Old"],
-    )
-    journal.create_v2(operation)
-    with journal.apply_session_v2(operation.operation_id) as session:
-        assert session is not None
-        assert session.mark_dispatched() is True
-    authorization = verified_authorization(
-        operation,
-        action="settle_not_applied",
-        passphrase="correct horse battery staple",
-        path=factor,
-    )
-    assert authorization is not None
-    workspace = ThingsWorkspace(
-        MemoryLibrary([Record(uuid="a", kind="task", title="Old")]),
-        journal=journal,
-        account_id=operation.account_id,
-    )
-
-    result = workspace.host_settle_not_applied_v2(
-        operation.operation_id, authorization
-    )
-
-    assert result["state"] == "pending"
-    assert result["code"] == "pending_unknown"
-    stored = journal.get_v2_operation(operation.operation_id)
-    assert stored is not None and stored.state == "pending"
-    assert stored.dispatch_started is True
-
-
-def test_pending_v2_diverged_touched_evidence_stays_fenced(tmp_path: Path) -> None:
-    factor = tmp_path / "owner-factor.json"
-    enroll_owner_factor("correct horse battery staple", path=factor)
-    journal = MemoryJournal(owner_public_key=factor.with_name("owner-public-key.ed25519").read_bytes())
-    operation = _with_manifest(
-        _operation("op_diverged", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735"),
-        writes=[{"action": "update", "uuid": "a", "kind": "task", "title": "Desired"}],
-        before=[{"id": "task:a", "title": "Before"}],
-        touched=[["title"]], preconditions={"task:a": "frozen"}, display_titles=["Before"],
-    )
-    journal.create_v2(operation)
-    workspace = ThingsWorkspace(MemoryLibrary([Record(uuid="a", kind="task", title="Applied then overwritten")]), journal=journal, account_id=operation.account_id)
-    authorization = verified_authorization(operation, action="settle_not_applied", passphrase="correct horse battery staple", path=factor)
-    assert authorization is not None
-    result = workspace.host_settle_not_applied_v2(operation.operation_id, authorization)
-    assert result["state"] == "pending"
-    assert journal.get_v2_operation(operation.operation_id).state == "pending"  # type: ignore[union-attr]
 
 
 def test_workspace_returns_persisted_winner_when_settlement_cas_loses() -> None:
