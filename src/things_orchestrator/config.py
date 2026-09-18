@@ -233,10 +233,6 @@ def load_timezone(
     return _normalize_timezone(legacy)
 
 
-def load_mcp_url(*, preferences_file: Path | None = None) -> McpUrl | None:
-    return load_preferences(path=preferences_file).mcp_url
-
-
 def load_legacy_mcp_url(*, path: Path) -> McpUrl | None:
     if not path.exists():
         return None
