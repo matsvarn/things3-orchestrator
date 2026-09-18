@@ -26,6 +26,7 @@ RECEIVER_INSTRUCTION_PATH = "routines/receiver-instruction.txt"
 CATALOG_POLICY = "additive_output_v1"
 CATALOG_EPOCH = 1
 RESERVED_PREFIX = ".things-orchestrator-"
+MAX_BUNDLE_BYTES = 1_048_576
 _KNOWN_KEYS = frozenset(
     {
         "advertised_tools",
@@ -122,7 +123,7 @@ def is_named_routine_template(path: str) -> bool:
 
 
 def encode_client_bundle() -> bytes:
-    from .deployment import git_commit, package_version
+    from .deployment import installed_identity, package_version
 
     tools = advertised_tools()
     files = _installed_files()
@@ -130,7 +131,7 @@ def encode_client_bundle() -> bytes:
         package=PackageIdentity(
             name=PACKAGE_NAME,
             version=package_version(),
-            commit=git_commit(),
+            commit=installed_identity().commit,
         ),
         tools=tools,
         files=files,
@@ -142,7 +143,6 @@ def encode_client_bundle_from(
     package: PackageIdentity,
     tools: tuple[Tool, ...],
     files: tuple[BundleFile, ...],
-    client_impact: dict[str, object] | None = None,
 ) -> bytes:
     _reject_file_path_collisions(item.path for item in files)
     for item in files:
@@ -164,7 +164,7 @@ def encode_client_bundle_from(
             "tool_discovery_hash": tool_discovery_hash(tools),
         },
         "component_hashes": components.as_dict(),
-        "client_impact": client_impact if client_impact is not None else _client_impact(),
+        "client_impact": _client_impact(),
         "files": [
             {"path": item.path, "sha256": item.sha256, "content": item.content}
             for item in files
@@ -176,7 +176,7 @@ def encode_client_bundle_from(
 
 
 def parse_client_bundle(raw: bytes) -> ClientBundle:
-    if not raw or len(raw) > 1_048_576:
+    if not raw or len(raw) > MAX_BUNDLE_BYTES:
         raise BundleError("client bundle is empty or exceeds the size bound")
     try:
         payload: object = json.loads(raw.decode("utf-8"))

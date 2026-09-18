@@ -48,8 +48,6 @@ def _identity() -> DeploymentIdentity:
     return DeploymentIdentity(
         version="0.8.0",
         commit="a" * 40,
-        requested_revision="v0.8.0",
-        source="pep610",
     )
 
 
@@ -136,7 +134,7 @@ def test_validate_target_rejects_tools_list_fingerprint_drift() -> None:
 
 
 def test_validate_target_rejects_unknown_local_commit() -> None:
-    identity = replace(_identity(), commit=None, source="unknown")
+    identity = replace(_identity(), commit=None)
     with pytest.raises(DoctorFailure, match="installed commit is unknown"):
         validate_target(_receipt(), identity)
 
