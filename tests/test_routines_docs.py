@@ -153,10 +153,11 @@ def test_portable_receiver_setup_includes_mcp_readiness_and_authority() -> None:
 
 
 def test_install_and_operations_do_not_use_the_hermes_test_event_as_mcp_proof() -> None:
-    for path in (INSTALL, OPERATIONS):
+    routines = " ".join(ROUTINES.read_text().split())
+    assert '"toolsets": ["mcp-things"]' in routines
+    assert "positive selected-task smoke test" in routines
+    for path in (INSTALL, OPERATIONS, ROUTINES):
         text = " ".join(path.read_text().split())
-        assert '"toolsets": ["mcp-things"]' in text
-        assert "positive selected-task smoke test" in text
         assert "hermes webhook test" not in text
 
 

@@ -91,7 +91,7 @@ live acceptance workflow from `docs/capability-proof.md` to a `cleaned` result.
 An unresolved pending or partial outcome blocks the release. Tag and
 build assets only from the commit that passed this gate.
 
-Do not expose v1 tools or add advanced scopes during this cutover. Keep
+Do not re-expose v1 tools or add advanced scopes. Keep
 discovery schemas flat because some model clients
 reject union schemas. Keep results bounded. Batch Cloud writes. Coalesce each
 UUID. Treat post timeouts as unknown until a Cloud read proves the state.

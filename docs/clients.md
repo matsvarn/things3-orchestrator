@@ -35,21 +35,9 @@ For Hermes, the secret form prints the bearer separately from the two native
 commands and warns not to paste it into a shell. Paste only that bearer at the
 private Hermes prompt.
 
-For Grok, use an HTTPS endpoint that the public internet can reach. Run this
-command in a private terminal:
-
-```console
-things-orchestrator print-config --client grok --show-secrets
-```
-
-The [official xAI connector guide](https://docs.x.ai/grok/connectors) says to
-open `grok.com/connectors`, choose **New Connector**, then choose **Custom**.
-Provide the URL and required authentication from the command output. The guide
-does not document exact form-field names. The command rejects known local and
-private addresses but cannot verify DNS or public reachability. Verify the
-endpoint, then confirm that Grok discovers exactly these eight tools:
-`things_view`, `things_find`, `things_get`, `things_capture`, `things_update`,
-`things_complete`, `things_trash`, and `things_receipt`.
+For Grok Custom connectors, finish the [public HTTPS client](install.md) path
+on the serving host, then the Grok Bot steps in
+[Run the built-in AI task routine](routines.md).
 
 ## Ephemeral agent host
 
