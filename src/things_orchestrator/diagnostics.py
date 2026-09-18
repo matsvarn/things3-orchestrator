@@ -23,7 +23,7 @@ from .config import (
     McpUrl,
     credentials_path,
     load_credentials,
-    load_mcp_url,
+    load_preferences,
     normalize_mcp_url,
 )
 from .deployment import (
@@ -433,9 +433,9 @@ def _credentials(*, path: Path | None = None) -> Credentials | None:
 
 def _endpoint_class(credentials_file: Path) -> EndpointClass | None:
     try:
-        endpoint = load_mcp_url(
-            preferences_file=credentials_file.with_name("preferences.json"),
-        ) or normalize_mcp_url("http://127.0.0.1:8787")
+        endpoint = load_preferences(
+            path=credentials_file.with_name("preferences.json"),
+        ).mcp_url or normalize_mcp_url("http://127.0.0.1:8787")
     except ConfigError:
         return None
     return classify_endpoint(endpoint)
