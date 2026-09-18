@@ -80,8 +80,6 @@ def test_installed_identity_prefers_pep610_git_commit(
 
     assert identity.version == "0.9.0"
     assert identity.commit == commit
-    assert identity.requested_revision == "v0.9.0"
-    assert identity.source == "pep610"
 
 
 def test_installed_identity_rejects_malformed_pep610_commit(
@@ -104,4 +102,3 @@ def test_installed_identity_rejects_malformed_pep610_commit(
     identity = installed_identity()
 
     assert identity.commit is None
-    assert identity.source == "unknown"

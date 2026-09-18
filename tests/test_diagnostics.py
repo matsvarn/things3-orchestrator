@@ -239,8 +239,6 @@ def test_unreadable_credentials_have_a_fixed_value_free_diagnostic_status(
         lambda: DeploymentIdentity(
             version="0.9.1",
             commit="a" * 40,
-            requested_revision=None,
-            source="pep610",
         ),
     )
     monkeypatch.setattr(diagnostics, "_service_status", lambda: None)
@@ -264,8 +262,6 @@ def test_support_report_serialization_is_value_free_and_deterministic(
         identity=DeploymentIdentity(
             version="0.9.1",
             commit="a" * 40,
-            requested_revision="private tag",
-            source="pep610",
         ),
         platform_name="darwin",
         python_version="3.12.11",

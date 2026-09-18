@@ -8,11 +8,9 @@ import subprocess
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
-from typing import Literal
 from urllib.parse import unquote, urlsplit
 
-from . import PACKAGE_NAME as PACKAGE_NAME
-from .cloud import _CACHE_VERSION
+from . import PACKAGE_NAME
 from .tools import (
     CLIENT_BUNDLE_FORMAT_VERSION,
     CLIENT_BUNDLE_PATH,
@@ -21,7 +19,6 @@ from .tools import (
     tool_schema_hash,
 )
 
-CACHE_VERSION = _CACHE_VERSION
 _GIT_COMMIT = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 CAPABILITIES = {
     "bounded_v2": True,
@@ -56,8 +53,6 @@ def package_version() -> str:
 class DeploymentIdentity:
     version: str
     commit: str | None
-    requested_revision: str | None
-    source: Literal["pep610", "checkout", "unknown"]
 
 
 def _git_commit_at(root: Path) -> str | None:
@@ -112,25 +107,16 @@ def installed_identity() -> DeploymentIdentity:
     vcs = payload.get("vcs_info")
     if isinstance(vcs, dict) and vcs.get("vcs") == "git":
         commit = vcs.get("commit_id")
-        requested = vcs.get("requested_revision")
         if isinstance(commit, str) and _GIT_COMMIT.fullmatch(commit):
             return DeploymentIdentity(
                 version=package_version(),
                 commit=commit.lower(),
-                requested_revision=requested if isinstance(requested, str) else None,
-                source="pep610",
             )
     commit = _direct_url_checkout_commit(payload) or _checkout_commit()
     return DeploymentIdentity(
         version=package_version(),
         commit=commit,
-        requested_revision=None,
-        source="checkout" if commit is not None else "unknown",
     )
-
-
-def git_commit() -> str | None:
-    return installed_identity().commit
 
 
 def skill_path() -> Path:
@@ -143,10 +129,12 @@ def skill_path() -> Path:
 def health_payload(*, authenticated: bool = False) -> dict[str, object]:
     if not authenticated:
         return {"ok": True}
+    from .cloud import _CACHE_VERSION
+
     payload: dict[str, object] = {
         "ok": True,
         "version": package_version(),
-        "cache_version": CACHE_VERSION,
+        "cache_version": _CACHE_VERSION,
         "tool_schema_hash": tool_schema_hash(),
         "tool_contract_hash": tool_contract_hash(),
         "tool_discovery_hash": tool_discovery_hash(),
@@ -156,7 +144,7 @@ def health_payload(*, authenticated: bool = False) -> dict[str, object]:
         },
         "capabilities": dict(CAPABILITIES),
     }
-    commit = git_commit()
+    commit = installed_identity().commit
     if commit is not None:
         payload["commit"] = commit
     return payload

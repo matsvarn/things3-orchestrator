@@ -8,10 +8,10 @@ import shlex
 import socket
 from dataclasses import dataclass
 from enum import Enum
-from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urlsplit
 
 from .config import ConfigError, McpBearer, McpUrl
+from .deployment import package_version
 
 
 class ClientKind(str, Enum):
@@ -46,10 +46,7 @@ def render_client_config(
     show_secrets: bool,
 ) -> RenderedClientConfig:
     if client is ClientKind.HERMES:
-        try:
-            release = version("things-orchestrator")
-        except PackageNotFoundError:
-            release = "unknown"
+        release = package_version()
         add_server = " ".join(
             shlex.quote(part)
             for part in (
