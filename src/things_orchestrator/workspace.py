@@ -647,7 +647,7 @@ class ThingsWorkspace:
         prepared = self._prepare_v2_manifest(draft)
         if isinstance(prepared, dict):
             return prepared
-        manifest, writes, before = prepared
+        manifest = prepared
         operation_id = f"op_{token_urlsafe(18)}"
         initial_state: V2State = "pending"
         operation = V2Operation(
@@ -713,9 +713,7 @@ class ThingsWorkspace:
             ),
         }
 
-    def _prepare_v2_manifest(
-        self, draft: object
-    ) -> tuple[Any, list[Write], list[JsonDict | None]] | JsonDict:
+    def _prepare_v2_manifest(self, draft: object) -> Any | JsonDict:
         from .v2 import OperationDraft, OperationManifest
 
         assert isinstance(draft, OperationDraft)
@@ -1392,7 +1390,7 @@ class ThingsWorkspace:
                 "next_action": "correct_request",
                 "instruction": "The operation must compile to at least one explicit write.",
             }
-        manifest = OperationManifest.build(
+        return OperationManifest.build(
             account_id=self._account_id,
             draft=draft,
             preconditions=preconditions,
@@ -1402,7 +1400,6 @@ class ThingsWorkspace:
             display_titles=display_titles,
             result_ids=result_ids,
         )
-        return manifest, writes, before
 
     def _append_v2_repeat_change(
         self,
@@ -1865,17 +1862,6 @@ class ThingsWorkspace:
         display_titles.append(template.title)
         return None
 
-    def _apply_v2(
-        self,
-        operation: V2Operation,
-        *,
-        writes: list[Write] | None = None,
-        before: list[JsonDict | None] | None = None,
-    ) -> JsonDict:
-        del writes, before
-        with self._journal.apply_session_v2(operation.operation_id) as session:
-            return self._apply_v2_session(operation.operation_id, session)
-
     def _apply_v2_session(
         self, operation_id: str, session: V2ApplySession | None
     ) -> JsonDict:
@@ -2179,59 +2165,6 @@ class ThingsWorkspace:
             return self._resume_v2(operation)
         with self._journal.apply_session_v2(operation_id) as session:
             return self._resume_v2_session(operation_id, session)
-
-    def host_settle_not_applied_v2(self, operation_id: str, authorization: object) -> JsonDict:
-        """Settle pending only when forced evidence proves no frozen write landed."""
-
-        try:
-            operation = self._unambiguous_host_operation_v2(operation_id)
-        except AmbiguousV2Request:
-            operation = None
-        if operation is None or operation.state != "pending":
-            return self._missing_pending_v2_target()
-        with self._journal.apply_session_v2(operation_id) as session:
-            if session is None:
-                return self._missing_pending_v2_target()
-            try:
-                guarded = self._unambiguous_host_operation_v2(operation_id)
-            except AmbiguousV2Request:
-                guarded = None
-            if (
-                guarded is None
-                or guarded.state != "pending"
-                or guarded.operation_id != session.operation.operation_id
-            ):
-                return self._missing_pending_v2_target()
-            operation = session.operation
-            if self._journal.verify_v2_authorization(operation, "settle_not_applied", authorization) is None:
-                return {"state": "rejected", "code": "validation_error", "next_action": "run_cli", "instruction": "Verified CLI authorization is required.", "operation_id": operation_id}
-            failed = self._refresh(force=True)
-            if failed is not None:
-                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Cloud evidence is unavailable.", "operation_id": operation_id}
-            writes = [_write_from_json(cast(dict[str, object], row)) for row in cast(list[object], operation.manifest["writes"])]
-            before = cast(list[JsonDict | None], operation.manifest.get("before", [None] * len(writes)))
-            if any(self._writes_match([write]) for write in writes):
-                return self._reconcile_v2(
-                    operation, writes, before, session=session
-                )
-            if not self._v2_current_equals_before(operation, writes, before):
-                return {"state": "pending", "code": "pending_unknown", "next_action": "run_cli", "instruction": "Current touched fields differ from both the frozen before and desired observations; nothing was replayed.", "operation_id": operation_id}
-            response: JsonDict = {"state": "not_applied", "code": "not_applied_precondition", "next_action": "read_receipt", "instruction": "Forced read-back proved that no frozen write landed; nothing was replayed.", "operation_id": operation_id}
-            rows = self._v2_receipt_rows(operation, writes, before, "not_applied")
-            settled = session.settle(
-                state="not_applied", response=response, rows=rows,
-                authorization=authorization, action="settle_not_applied",
-            )
-            return response if settled else self._persisted_v2_outcome(operation_id)
-
-    @staticmethod
-    def _missing_pending_v2_target() -> JsonDict:
-        return {
-            "state": "rejected",
-            "code": "missing_target",
-            "next_action": "correct_request",
-            "instruction": "That pending operation does not belong to this account.",
-        }
 
     def _v2_current_equals_before(
         self,
