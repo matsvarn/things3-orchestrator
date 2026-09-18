@@ -397,10 +397,14 @@ class LiveAcceptanceRunner:
             )
         if outcome != "applied":
             raise AcceptanceFailure(f"cleanup settled as {outcome}; inspect its receipt")
-        if not receipt.get("receipt_hash") or not receipt.get("rows"):
+        rows = cast(list[dict[str, object]], receipt.get("rows", []))
+        if not receipt.get("receipt_hash") or not rows:
             raise AcceptanceFailure("applied cleanup has no immutable receipt evidence")
-        trash_ids = await self._read_view_ids("trash")
         created = set(cast(list[str], state["created_ids"]))
+        receipt_ids = await self._read_receipt_target_ids(operation_id, receipt)
+        if not created.issubset(receipt_ids):
+            raise AcceptanceFailure("cleanup receipt omitted a disposable acceptance item")
+        trash_ids = await self._read_view_ids("trash")
         if not created.issubset(trash_ids):
             raise AcceptanceFailure("not every disposable acceptance item reached Trash")
         state["phase"] = "cleaned"
@@ -454,6 +458,23 @@ class LiveAcceptanceRunner:
             if cursor is None:
                 return ids
             arguments = {"cursor": str(cursor), "limit": 40}
+
+    async def _read_receipt_target_ids(
+        self, operation_id: str, receipt: dict[str, Any]
+    ) -> set[str]:
+        ids: set[str] = set()
+        while True:
+            rows = cast(list[dict[str, object]], receipt.get("rows", []))
+            ids.update(str(row.get("target_id")) for row in rows)
+            cursor = receipt.get("cursor")
+            if cursor is None:
+                return ids
+            receipt = await self.client.call_tool(
+                "things_receipt",
+                {"operation_id": operation_id, "cursor": str(cursor), "limit": 100},
+            )
+            if str(receipt.get("state")) != "applied" or not receipt.get("rows"):
+                raise AcceptanceFailure("applied cleanup has no immutable receipt evidence")
 
     @staticmethod
     def _title(item: dict[str, object]) -> str:

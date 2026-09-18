@@ -451,3 +451,63 @@ def test_live_acceptance_requires_every_created_id_in_trash_after_approval(
         }
         assert json.loads(state_path.read_text())["phase"] == "cleaned"
     assert client.calls == ["things_receipt", "things_view"]
+
+
+def test_live_acceptance_rejects_cleanup_receipt_that_omits_a_created_id(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "acceptance.json"
+    created = ["project:one", "task:two"]
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": {"url": "memory://test", "commit": "abc"},
+                "phase": "cleanup_staged",
+                "cleanup_operation_id": "op_cleanup123",
+                "created_ids": created,
+                "roles": {},
+                "titles": {},
+                "request_ids": {},
+            }
+        )
+    )
+    state_path.chmod(0o600)
+
+    class IncompleteReceiptClient:
+        calls: list[str] = []
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, object]
+        ) -> dict[str, Any]:
+            self.calls.append(name)
+            if name == "things_receipt":
+                return {
+                    "state": "applied",
+                    "code": "applied",
+                    "next_action": "read_receipt",
+                    "operation_id": "op_cleanup123",
+                    "instruction": "Immutable receipt rows.",
+                    "receipt_hash": "sha256:test",
+                    "rows": [{"target_id": created[0]}],
+                }
+            assert name == "things_view"
+            return {
+                "state": "ok",
+                "code": "ok",
+                "next_action": "none",
+                "instruction": "Current Things facts.",
+                "items": [{"id": item_id} for item_id in created],
+            }
+
+    client = IncompleteReceiptClient()
+    with pytest.raises(AcceptanceFailure, match="cleanup receipt omitted"):
+        asyncio.run(
+            LiveAcceptanceRunner(
+                client,
+                state_path,
+                target={"url": "memory://test", "commit": "abc"},
+            ).run()
+        )
+    assert json.loads(state_path.read_text())["phase"] == "cleanup_staged"
+    assert client.calls == ["things_receipt"]
