@@ -211,6 +211,97 @@ def test_live_acceptance_retries_exact_pending_cleanup_for_read_back(
     )
 
 
+def test_live_acceptance_stages_cleanup_so_a_pending_trash_can_resume(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "acceptance.json"
+    created = ["project:one", "project:two"]
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": {"url": "memory://test", "commit": "abc"},
+                "phase": "within_paging_proved",
+                "created_ids": created,
+                "roles": {
+                    "primary_project": created[0],
+                    "secondary_project": created[1],
+                },
+                "titles": {},
+                "request_ids": {"cleanup": "0198f0ee-98d4-7bd5-91ba-8e76019b2735"},
+            }
+        )
+    )
+    state_path.chmod(0o600)
+
+    class PendingThenAppliedClient:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, object]
+        ) -> dict[str, Any]:
+            self.calls.append((name, arguments))
+            if name == "things_trash":
+                if sum(call[0] == "things_trash" for call in self.calls) == 1:
+                    return {"state": "pending", "operation_id": "op_cleanup123"}
+                return {"state": "applied", "operation_id": "op_cleanup123"}
+            if name == "things_receipt":
+                if sum(call[0] == "things_trash" for call in self.calls) == 1:
+                    return {"state": "pending"}
+                return {
+                    "state": "applied",
+                    "receipt_hash": "sha256:test",
+                    "rows": [{"target_id": item_id} for item_id in created],
+                }
+            assert name == "things_view"
+            return {"state": "ok", "items": [{"id": item_id} for item_id in created]}
+
+    class CrashAfterCleanupStaged(LiveAcceptanceRunner):
+        async def _resume_cleanup(self, state: dict[str, Any]) -> dict[str, object]:
+            raise RuntimeError("simulated crash after cleanup_staged")
+
+    client = PendingThenAppliedClient()
+    with pytest.raises(RuntimeError, match="simulated crash after cleanup_staged"):
+        asyncio.run(
+            CrashAfterCleanupStaged(
+                client,
+                state_path,
+                target={"url": "memory://test", "commit": "abc"},
+            ).run()
+        )
+
+    saved = json.loads(state_path.read_text())
+    assert saved["phase"] == "cleanup_staged"
+    assert saved["cleanup_operation_id"] == "op_cleanup123"
+    assert client.calls == [
+        (
+            "things_trash",
+            {
+                "request_id": "0198f0ee-98d4-7bd5-91ba-8e76019b2735",
+                "ids": created,
+            },
+        )
+    ]
+
+    resumed = asyncio.run(
+        LiveAcceptanceRunner(
+            client,
+            state_path,
+            target={"url": "memory://test", "commit": "abc"},
+        ).run()
+    )
+
+    assert resumed == {"state": "cleaned", "passed": True, "next_action": "none"}
+    assert json.loads(state_path.read_text())["phase"] == "cleaned"
+    assert [name for name, _arguments in client.calls] == [
+        "things_trash",
+        "things_receipt",
+        "things_trash",
+        "things_receipt",
+        "things_view",
+    ]
+
+
 def test_live_acceptance_recovers_after_capture_response_before_state_save(
     tmp_path: Path,
 ) -> None:

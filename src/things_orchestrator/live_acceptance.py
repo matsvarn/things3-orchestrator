@@ -347,33 +347,13 @@ class LiveAcceptanceRunner:
                 "ids": [roles["primary_project"], roles["secondary_project"]],
             },
         )
-        self._expect(result, state="applied", code="applied", label="cleanup")
         operation_id = result.get("operation_id")
         if not isinstance(operation_id, str):
             raise AcceptanceFailure("cleanup omitted its operation ID")
         state["cleanup_operation_id"] = operation_id
-        receipt = await self.client.call_tool(
-            "things_receipt", {"operation_id": operation_id, "limit": 100}
-        )
-        self._expect(
-            receipt,
-            state="applied",
-            code="applied",
-            label="cleanup receipt",
-        )
-        rows = cast(list[dict[str, object]], receipt.get("rows", []))
-        if not receipt.get("receipt_hash") or not rows:
-            raise AcceptanceFailure("applied cleanup has no immutable receipt evidence")
-        created = set(cast(list[str], state["created_ids"]))
-        receipt_ids = {str(row.get("target_id")) for row in rows}
-        if not created.issubset(receipt_ids):
-            raise AcceptanceFailure("cleanup receipt omitted a disposable acceptance item")
-        trash_ids = await self._read_view_ids("trash")
-        if not created.issubset(trash_ids):
-            raise AcceptanceFailure("not every disposable acceptance item reached Trash")
-        state["phase"] = "cleaned"
+        state["phase"] = "cleanup_staged"
         self._save(state)
-        return {"state": "cleaned", "passed": True, "next_action": "none"}
+        return await self._resume_cleanup(state)
 
     async def _resume_cleanup(self, state: State) -> dict[str, object]:
         operation_id = str(state["cleanup_operation_id"])
