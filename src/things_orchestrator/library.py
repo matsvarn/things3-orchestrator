@@ -436,12 +436,6 @@ class MemoryLibrary:
         hits = [item for item in self.records.values() if item.trashed]
         return sorted(hits, key=lambda item: (item.kind, item.sort_index, item.title))
 
-    def area(self, value: str) -> list[Record]:
-        root = self.get(value)
-        if root is None or root.kind != "area":
-            return []
-        return [root, *self.children_in_area(root.uuid)]
-
     def audit(self) -> list[Record]:
         kind_order = {"area": 0, "project": 1, "heading": 2, "task": 3}
         items = [
@@ -460,32 +454,6 @@ class MemoryLibrary:
             )
         )
         return items
-
-    def project(self, value: str) -> list[Record]:
-        root = self.get(value)
-        if root is None or root.kind != "project":
-            return []
-        children = [
-            item
-            for item in self.records.values()
-            if item.parent_uuid == root.uuid
-            and not item.trashed
-            and item.status == "open"
-            and item.recurrence.role != "template"
-        ]
-        children.sort(
-            key=lambda item: (
-                self.records[item.heading_uuid].sort_index
-                if item.heading_uuid and item.heading_uuid in self.records
-                else item.sort_index
-                if item.heading
-                else -1,
-                0 if item.heading else 1,
-                item.sort_index,
-                item.title,
-            )
-        )
-        return [root, *children]
 
     def heading_title(self, item: Record) -> str | None:
         if item.heading_uuid and item.heading_uuid in self.records:
@@ -543,12 +511,6 @@ class MemoryLibrary:
         if not siblings:
             return 1024
         return max(1024, max(item.sort_index for item in siblings) + 1024)
-
-    def system(self) -> list[Record]:
-        areas = self.areas()
-        projects = [item for item in self._open() if item.kind == "project"]
-        projects.sort(key=lambda item: (item.sort_index, item.title))
-        return [*areas, *projects]
 
     def areas(self) -> list[Record]:
         return sorted(
