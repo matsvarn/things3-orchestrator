@@ -12,7 +12,7 @@ from things_orchestrator.config import (
     McpUrl,
     load_credentials,
     load_legacy_mcp_url,
-    load_mcp_url,
+    load_preferences,
     load_timezone,
     normalize_mcp_url,
     save_credentials,
@@ -51,7 +51,7 @@ def test_credentials_and_owner_preferences_have_separate_authority(
         == "Europe/Berlin"
     )
     assert str(
-        load_mcp_url(preferences_file=preferences)
+        load_preferences(path=preferences).mcp_url
     ) == _url("https", "tasks.example.com/mcp")
     assert str(load_credentials(path=credentials).bearer) == "<mcp_token>"
 
@@ -74,9 +74,7 @@ def test_legacy_credentials_timezone_is_a_read_only_fallback(tmp_path: Path) -> 
         load_timezone(preferences_file=preferences, credentials_file=credentials)
         == "Europe/Berlin"
     )
-    assert (
-        load_mcp_url(preferences_file=preferences) is None
-    )
+    assert load_preferences(path=preferences).mcp_url is None
     assert not preferences.exists()
 
 

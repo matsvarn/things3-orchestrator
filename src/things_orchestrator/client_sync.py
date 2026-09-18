@@ -23,6 +23,7 @@ from mcp.types import ListToolsResult, Tool
 from .client_bundle import (
     CATALOG_EPOCH,
     CATALOG_POLICY,
+    MAX_BUNDLE_BYTES,
     RESERVED_PREFIX,
     BundleError,
     ClientBundle,
@@ -44,7 +45,6 @@ PENDING_NAME = ".things-orchestrator-client.pending.json"
 STAGING_NAME = ".things-orchestrator-staging"
 LOCK_NAME = ".things-orchestrator-client.lock"
 DEFAULT_TOKEN_ENV = "THINGS_MCP_TOKEN"
-MAX_BUNDLE_BYTES = 1_048_576
 _STATE_NAMES = frozenset({MARKER_NAME, PENDING_NAME, STAGING_NAME, LOCK_NAME})
 
 BundleFetcher = Callable[[McpUrl, McpBearer], bytes]
