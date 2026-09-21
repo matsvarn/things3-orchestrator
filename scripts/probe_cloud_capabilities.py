@@ -17,15 +17,6 @@ from things_orchestrator.journal import MemoryJournal
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
 
-V2_CAPABILITY_KEYS = (
-    "exact default eight",
-    "bounded reads",
-    "immutable private manifests",
-    "signed host authorization",
-    "receipt HMAC cursors",
-    "content-minimized tombstones",
-)
-
 
 def bare_uuid(public_id: str) -> str:
     return public_id.partition(":")[2]
