@@ -359,24 +359,14 @@ class PublicResult(StrictModel):
 
     @model_validator(mode="after")
     def coherent_outcome(self) -> Self:
-        state_codes = {
-            "ok": "ok", "pending": "pending_unknown",
-            "applied": "applied", "unchanged": "unchanged",
-            "not_applied": "not_applied_precondition", "partial": "partial",
-            "partial_resolved": "partial_resolved", "stale": "stale", "declined": "declined",
-        }
-        if self.state in state_codes and self.code != state_codes[self.state]:
+        if self.state != "rejected" and self.code != _result_code(self.state):
             raise ValueError("state and code disagree")
-        state_actions = {
-            "ok": "none",
-            "pending": "retry_same",
-            "applied": "read_receipt", "unchanged": "read_receipt",
-            "not_applied": "read_receipt", "partial": "read_receipt",
-            "partial_resolved": "none", "stale": "read_fresh", "declined": "none",
-        }
         if self.state == "ok" and self.next_action == "continue_read":
             pass
-        elif self.state in state_actions and self.next_action != state_actions[self.state]:
+        elif (
+            self.state != "rejected"
+            and self.next_action != _result_next_action(self.state)
+        ):
             raise ValueError("state and next_action disagree")
         if self.state == "rejected" and self.code == "ok":
             raise ValueError("rejected needs a rejection code")
@@ -1279,24 +1269,26 @@ class ThingsV2:
         )
 
 
+_RESULT_OUTCOME = {
+    "ok": ("ok", "none"),
+    "pending": ("pending_unknown", "retry_same"),
+    "applied": ("applied", "read_receipt"),
+    "unchanged": ("unchanged", "read_receipt"),
+    "not_applied": ("not_applied_precondition", "read_receipt"),
+    "partial": ("partial", "read_receipt"),
+    "partial_resolved": ("partial_resolved", "none"),
+    "stale": ("stale", "read_fresh"),
+    "declined": ("declined", "none"),
+}
+
+
 def _result_code(state: str) -> str:
-    return {
-        "pending": "pending_unknown",
-        "applied": "applied",
-        "unchanged": "unchanged",
-        "not_applied": "not_applied_precondition",
-        "partial": "partial",
-        "partial_resolved": "partial_resolved",
-        "stale": "stale",
-        "declined": "declined",
-    }.get(state, "validation_error" if state == "rejected" else "ok")
+    if state in _RESULT_OUTCOME:
+        return _RESULT_OUTCOME[state][0]
+    return "validation_error" if state == "rejected" else "ok"
 
 
 def _result_next_action(state: str) -> str:
-    if state == "stale":
-        return "read_fresh"
-    if state == "pending":
-        return "retry_same"
-    if state in {"applied", "unchanged", "not_applied", "partial"}:
-        return "read_receipt"
+    if state in _RESULT_OUTCOME:
+        return _RESULT_OUTCOME[state][1]
     return "correct_request" if state == "rejected" else "none"

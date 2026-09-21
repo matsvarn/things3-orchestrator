@@ -44,6 +44,7 @@ from .journal import (
     V2ApplyState,
     V2Operation,
     V2State,
+    _legacy_plan_digest,
     same_account_id,
     v2_manifest_is_valid,
 )
@@ -4518,11 +4519,6 @@ _LEGACY_WRITE_ACTIONS = frozenset({
     "repeat", "repeat_link", "repeat_progress", "repeat_next",
 })
 _LEGACY_WRITE_KINDS = frozenset({"task", "project", "area"})
-
-
-def _legacy_plan_digest(plan: JsonDict) -> str:
-    canonical = json.dumps(plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return "sha256:v1:" + sha256(canonical.encode()).hexdigest()
 
 
 def _taint_things_text(value: object) -> object:
