@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias, assert_never
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from .config import ConfigError, _atomic_write
+from .config import (
+    ConfigError,
+    _atomic_write,
+    _config_dir,
+    _state_dir,
+    _valid_network_host,
+)
 
 ROUTINE_ID = "things-ai-task-created-v1"
 ROUTINE_EVENT_TYPE = "task.created"
@@ -124,15 +128,11 @@ def account_digest(email: str) -> str:
 
 
 def routines_config_path() -> Path:
-    root = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "things-orchestrator" / "routines.json"
+    return _config_dir() / "routines.json"
 
 
 def routines_state_dir() -> Path:
-    root = os.environ.get("XDG_STATE_HOME")
-    base = Path(root) if root else Path.home() / ".local" / "state"
-    return base / "things-orchestrator" / "routines"
+    return _state_dir() / "routines"
 
 
 def configure_routines(
@@ -336,7 +336,7 @@ def _normalize_hermes_url(raw: str) -> str:
     if parsed.username is not None or parsed.password is not None:
         raise ConfigError("The receiver URL must not contain credentials")
     host = parsed.hostname
-    if host is None or not _valid_host(host):
+    if host is None or not _valid_network_host(host):
         raise ConfigError("The receiver URL needs a valid host")
     try:
         parsed.port
@@ -390,23 +390,6 @@ def _split_receiver_url(value: str) -> SplitResult:
         return urlsplit(value)
     except ValueError:
         raise ConfigError("The receiver URL is invalid") from None
-
-
-def _valid_host(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        labels = host.removesuffix(".").split(".")
-        return bool(labels) and all(
-            label
-            and label.isascii()
-            and len(label) <= 63
-            and label[0].isalnum()
-            and label[-1].isalnum()
-            and all(char.isalnum() or char == "-" for char in label)
-            for label in labels
-        )
-    return True
 
 
 def _hex_digest(value: object) -> str:
