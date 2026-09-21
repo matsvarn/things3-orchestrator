@@ -71,7 +71,6 @@ class Conflict:
     signals: tuple[str, ...]
     repair: str | None = None
     repair_kind: str | None = None
-    repairs: tuple[tuple[str, str], ...] = ()
 
 
 def remind_is_valid(value: str) -> bool:
@@ -203,20 +202,17 @@ def _area_home_conflict(item: Record, area: Record | None) -> str | None:
 
 def _conflict(item_id: str, signals: list[str]) -> Conflict:
     hints = [_REPAIR[name][0] for name in signals if name in _REPAIR]
-    repairs = tuple(
-        (name, _REPAIR[name][1]) for name in signals if name in _REPAIR
-    )
+    kinds = [_REPAIR[name][1] for name in signals if name in _REPAIR]
     return Conflict(
         item_id=item_id,
         signals=tuple(signals),
         repair=_legacy_repair(hints),
-        repair_kind=repairs[0][1] if len(repairs) == 1 else None,
-        repairs=repairs,
+        repair_kind=kinds[0] if len(kinds) == 1 else None,
     )
 
 
 def _legacy_repair(hints: list[str]) -> str | None:
-    """Keep singular prose only when it fits; repairs[] is the complete answer."""
+    """Keep singular prose only when it fits."""
 
     text = "; ".join(dict.fromkeys(hints))
     if not text or len(text) > 400:

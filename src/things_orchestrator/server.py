@@ -34,7 +34,6 @@ from starlette.types import Receive, Scope, Send
 from .client_bundle import encode_client_bundle
 from .deployment import health_payload, package_version
 from .tools import (
-    CLIENT_BUNDLE_FORMAT_VERSION,
     CLIENT_BUNDLE_PATH,
     ITEM_ID,
     advertised_tools,
@@ -77,22 +76,21 @@ RoutineLifecycleFactory = Callable[[], RoutineLifecycle]
 
 @dataclass(frozen=True, slots=True)
 class RoutineHTTPComposition:
-    state: Literal["disabled", "initializing"]
     factory: RoutineLifecycleFactory | None = None
 
-    def __post_init__(self) -> None:
-        if (self.state == "disabled") != (self.factory is None):
-            raise ValueError("Routines HTTP composition is inconsistent")
+    @property
+    def state(self) -> Literal["disabled", "initializing"]:
+        return "disabled" if self.factory is None else "initializing"
 
     @classmethod
     def disabled(cls) -> RoutineHTTPComposition:
-        return cls("disabled")
+        return cls()
 
     @classmethod
     def enabled(
         cls, factory: RoutineLifecycleFactory
     ) -> RoutineHTTPComposition:
-        return cls("initializing", factory)
+        return cls(factory)
 
 
 class ThingsMCPServer:
@@ -173,33 +171,31 @@ class ThingsMCPServer:
     ) -> CallToolResult:
         return await self.call_tool(params.name, params.arguments or {})
 
-    async def run_stdio_async(self) -> None:
-        async with stdio_server() as (read_stream, write_stream):
-            await self._tools_only_server.run(
-                read_stream,
-                write_stream,
-                self._tools_only_server.create_initialization_options(),
-            )
-
     def run(self) -> None:
-        anyio.run(self.run_stdio_async)
+        async def run_stdio() -> None:
+            async with stdio_server() as (read_stream, write_stream):
+                await self._tools_only_server.run(
+                    read_stream,
+                    write_stream,
+                    self._tools_only_server.create_initialization_options(),
+                )
+
+        anyio.run(run_stdio)
 
     def build_http_app(
         self,
         *,
         token: str,
-        security_settings: TransportSecuritySettings | None = None,
         readiness: ReadinessGate | None = None,
     ) -> Starlette:
         if not token:
             raise ValueError("serve-http needs a bearer token")
-        settings = security_settings or TransportSecuritySettings(
-            enable_dns_rebinding_protection=False,
-        )
         manager = StreamableHTTPSessionManager(
             app=self._tools_only_server,
             stateless=True,
-            security_settings=settings,
+            security_settings=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            ),
         )
         if self._routines.factory is not None and readiness is None:
             raise ValueError("Enabled routines need an explicit HTTP readiness gate")
@@ -228,11 +224,9 @@ class ThingsMCPServer:
             if not bearer_matches(authorization, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             payload = health_payload(authenticated=True)
-            payload["client_bundle"] = {
-                "format_version": CLIENT_BUNDLE_FORMAT_VERSION,
-                "path": CLIENT_BUNDLE_PATH,
-                "bundle_checksum": json.loads(self._client_bundle())["bundle_checksum"],
-            }
+            client_bundle = payload["client_bundle"]
+            assert isinstance(client_bundle, dict)
+            client_bundle["bundle_checksum"] = json.loads(self._client_bundle())["bundle_checksum"]
             payload["routines"] = (
                 active_routine.snapshot()
                 if active_routine is not None
@@ -325,11 +319,6 @@ def _safe_validation_error(error: ValidationError) -> str:
                 if key in _FIELD_REPAIR:
                     field_repair = _FIELD_REPAIR[key]
                     break
-            if field_repair is None:
-                for key, text in _FIELD_REPAIR.items():
-                    if key in location or key in message:
-                        field_repair = text
-                        break
     if field_repair is not None:
         message = (
             f"Invalid tool request. {field_repair}. Details: " + "; ".join(details)
