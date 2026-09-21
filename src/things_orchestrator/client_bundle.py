@@ -149,7 +149,7 @@ def encode_client_bundle_from(
         if not _safe_relative_path(item.path):
             raise BundleError("client bundle file path is unsafe")
     payloads = tuple(advertised_tool_payload(tool) for tool in tools)
-    components = component_hashes_for(tools, files)
+    components = component_hashes_for_payloads(tool_discovery_hash(tools), files)
     document: dict[str, object] = {
         "format_version": CLIENT_BUNDLE_FORMAT_VERSION,
         "package": {
@@ -228,12 +228,6 @@ def parse_client_bundle(raw: bytes) -> ClientBundle:
 def bundle_file(path: str, content: str) -> BundleFile:
     encoded = content.encode("utf-8")
     return BundleFile(path=path, sha256=content_sha256(encoded), content=content)
-
-
-def component_hashes_for(
-    tools: tuple[Tool, ...], files: tuple[BundleFile, ...]
-) -> ComponentHashes:
-    return component_hashes_for_payloads(tool_discovery_hash(tools), files)
 
 
 def component_hashes_for_payloads(
