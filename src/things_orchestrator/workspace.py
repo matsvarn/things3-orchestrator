@@ -1904,7 +1904,7 @@ class ThingsWorkspace:
                 state="not_applied", response=response, rows=rows
             )
             return response if settled else self._persisted_v2_outcome(operation.operation_id)
-        if self._writes_match(writes):
+        if self._library.matches(writes):
             response = {
                 "state": "unchanged",
                 "code": "unchanged",
@@ -1973,7 +1973,7 @@ class ThingsWorkspace:
     ) -> JsonDict:
         if not v2_manifest_is_valid(operation):
             return self._invalid_v2_manifest(operation.operation_id)
-        matched = [self._writes_match([write]) for write in writes]
+        matched = [self._library.matches([write]) for write in writes]
         state: V2ApplyState
         if all(matched):
             state = "applied"
@@ -2193,7 +2193,7 @@ class ThingsWorkspace:
         failed = self._refresh(force=True)
         if failed is not None:
             return {"status": "pending", "code": "pending_unknown", "instruction": "Cloud read-back is unavailable; nothing was replayed."}
-        matched = [self._writes_match([write]) for write in writes]
+        matched = [self._library.matches([write]) for write in writes]
         classification = "applied" if all(matched) else "partial" if any(matched) else "unknown"
         result: JsonDict = {
             "status": "reconciled_no_replay" if classification == "applied" else "pending_unknown",
@@ -2288,7 +2288,7 @@ class ThingsWorkspace:
             observed = self._v2_observed_write(write, touched[index - 1])
             result = outcome
             if outcome == "partial":
-                result = "applied" if self._writes_match([write]) else "not_applied"
+                result = "applied" if self._library.matches([write]) else "not_applied"
             desired = self._v2_desired(write, touched[index - 1])
             rows.append({"sequence": index, "action": write.action, "target_id": _write_public_id(write), "before": _taint_things_text(before[index - 1]), "desired": desired, "observed": _taint_things_text(observed), "result": result})
         return rows
@@ -3499,9 +3499,6 @@ class ThingsWorkspace:
         raw = cast(list[object], plan.get("writes", []))
         return [_write_from_json(cast(dict[str, object], value)) for value in raw]
 
-    def _writes_match(self, writes: list[Write]) -> bool:
-        return self._library.matches(writes)
-
     def _refresh(self, *, force: bool = False) -> Result | None:
         try:
             self._library.refresh(force=force)
@@ -3600,10 +3597,6 @@ class ThingsWorkspace:
                 for item_id, item in sorted(unique.items())
             ]
         )
-
-    def _workspace_revision(self) -> str:
-        items = sorted(self._library.records.values(), key=lambda item: item.id)
-        return self._scope_revision(items)
 
     def _tag_revision(self) -> str:
         rows = [
@@ -3914,28 +3907,6 @@ class ThingsWorkspace:
                 items.extend(self._project_descendants(instance.uuid))
         return self._scope_revision(items)
 
-    def _recurrence_relationship_is_valid(self, target: Record) -> bool:
-        """Check the native one-way link before exposing repeat mutation facts."""
-        recurrence = target.recurrence
-        if recurrence.role == "none":
-            return not self._library.recurrence_instances(target.uuid)
-        if recurrence.role == "template":
-            return all(
-                candidate.recurrence.role == "instance"
-                and candidate.kind == target.kind
-                for candidate in self._library.recurrence_instances(target.uuid)
-            )
-        template_uuid = template_uuid_of(target)
-        if recurrence.role != "instance" or template_uuid is None:
-            return False
-        template = self._library.records.get(template_uuid)
-        return (
-            template is not None
-            and template.recurrence.role == "template"
-            and template.recurrence.rule is not None
-            and template.kind == target.kind
-        )
-
     def _recurrence_kind(self, item: Record) -> RecurrenceKind:
         if item.recurrence.role == "template":
             return "template"
@@ -3967,15 +3938,6 @@ class ThingsWorkspace:
 
 def _bounded_tag_title(title: str) -> str:
     return title if len(title) <= 1000 else title[:999] + "…"
-
-
-def _tag_cost(tag: TagFact) -> int:
-    return (
-        len(tag.id)
-        + len(tag.title)
-        + sum(len(parent) for parent in tag.parent_ids)
-        + len(tag.from_id or "")
-    )
 
 
 def _take_budget[T](
