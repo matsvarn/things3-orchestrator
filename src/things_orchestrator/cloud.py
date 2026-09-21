@@ -84,10 +84,6 @@ def _note(text: str) -> dict[str, Any]:
     return {"_t": "tx", "ch": zlib.crc32(text.encode()) & 0xFFFFFFFF, "v": text, "t": 1}
 
 
-def _empty_note() -> dict[str, Any]:
-    return {"_t": "tx", "ch": 0, "v": "", "t": 1}
-
-
 def _now() -> float:
     return datetime.now(timezone.utc).timestamp()
 
@@ -1621,7 +1617,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
             if write.title is not None:
                 payload["tt"] = write.title
             if write.notes is not None:
-                payload["nt"] = _note(write.notes) if write.notes else _empty_note()
+                payload["nt"] = _note(write.notes) if write.notes else _note("")
             if write.tag_uuids is not None:
                 payload["tg"] = write.tag_uuids
             if write.sort_index is not None:

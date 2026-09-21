@@ -734,23 +734,7 @@ class SQLiteJournal:
 
     def blocking_v2_operations(self, account_id: str) -> list[str]:
         with self._connect() as connection:
-            current = connection.execute(
-                """SELECT account_id, operation_id FROM owner_operations_v2
-                   WHERE state='pending'""",
-            ).fetchall()
-            legacy = connection.execute(
-                "SELECT intent_id FROM intents WHERE state='pending'"
-            ).fetchall()
-        return sorted(
-            {
-                *[
-                    str(row["operation_id"])
-                    for row in current
-                    if same_account_id(str(row["account_id"]), account_id)
-                ],
-                *[str(row["intent_id"]) for row in legacy],
-            }
-        )
+            return _sqlite_blockers(connection, account_id)
 
     def operation_state_counts(self, account_id: str) -> tuple[tuple[str, int], ...]:
         return read_operation_state_counts(self.path, account_id)
