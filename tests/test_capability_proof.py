@@ -2,9 +2,18 @@ from pathlib import Path
 
 import pytest
 
-from scripts.probe_cloud_capabilities import V2_CAPABILITY_KEYS, _unique_ids, bare_uuid
+from scripts.probe_cloud_capabilities import _unique_ids, bare_uuid
 
 ROOT = Path(__file__).parents[1]
+
+V2_CAPABILITY_KEYS = (
+    "exact default eight",
+    "bounded reads",
+    "immutable private manifests",
+    "signed host authorization",
+    "receipt HMAC cursors",
+    "content-minimized tombstones",
+)
 
 
 def test_native_parity_compares_the_uuid_independent_of_public_kind() -> None:

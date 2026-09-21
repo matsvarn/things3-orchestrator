@@ -1,7 +1,5 @@
 # Capability proof
 
-Created: 2026-08-16
-
 This document records the proof level for each public capability. A row is
 complete only when its model contract, memory behavior, Cloud envelope, and
 read-back behavior agree.
@@ -60,7 +58,7 @@ native RT2 write deltas.
 
 ## v0.6.0 owner-safe interface gate
 
-The current public proof target is the exact default eight: bounded reads,
+The v0.6.0 public proof target was the exact default eight: bounded reads,
 Task/Project capture, ordinary explicit-field updates, completion, recoverable
 Trash, and immutable receipts. Focused regression tests cover opaque
 idempotency keys, immutable private manifests, cross-process fencing, signed
@@ -70,9 +68,9 @@ content-minimized tombstones. The v0.6.0 migration did not make live Things
 Cloud calls; retained Cloud fixtures and earlier live probes establish only the
 private batch and read-back primitives.
 
-Advanced Project scopes, mutation coaching, registries, recurrence, checklist
-editing, rich-note replacement, and permanent deletion are not public v0.6.0
-capabilities. They require a later safety gate.
+Advanced Project scopes, mutation coaching, registries, and permanent deletion
+were not public v0.6.0 capabilities. Recurrence, checklist editing, and
+rich-note replacement shipped in later gates.
 
 ## Live evidence
 
