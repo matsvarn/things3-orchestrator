@@ -20,7 +20,7 @@ class StrictModel(BaseModel):
 Kind = Literal["task", "project", "area", "heading"]
 Status = Literal["open", "completed", "canceled"]
 TruncatedField = Literal["notes", "checklist", "tags", "recurrence"]
-DetailField = Literal["notes", "checklist", "tags", "recurrence"]
+DetailField = TruncatedField
 DETAIL_FIELDS: tuple[DetailField, ...] = ("notes", "checklist", "tags", "recurrence")
 Next = Literal["done", "ask", "read", "stop"]
 ResultStatus = Literal["ok", "needs_input", "stale", "rejected", "unavailable"]
@@ -256,6 +256,6 @@ class Result(StrictModel):
 
 
 def dump_result(result: Result) -> dict[str, Any]:
-    """Compact JSON for MCP and the wire budget. Required fields still emit."""
+    """Compact JSON for the internal wire budget. Required fields still emit."""
 
     return result.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
