@@ -13,7 +13,7 @@ disable an account. Read [Security](../SECURITY.md) before login.
 Install an exact Git tag:
 
 ```console
-uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.11.0"
+uv tool install "git+https://github.com/matsvarn/things3-orchestrator.git@v0.12.0"
 ```
 
 Run the next commands in a private terminal. `login` verifies the Things Cloud

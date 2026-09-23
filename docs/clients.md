@@ -102,7 +102,7 @@ on one host. Install and log in to Things Orchestrator first. Then add this Git
 repository as a marketplace and install its plugin:
 
 ```console
-codex plugin marketplace add matsvarn/things3-orchestrator --ref v0.11.0
+codex plugin marketplace add matsvarn/things3-orchestrator --ref v0.12.0
 codex plugin add things-orchestrator@things-orchestrator
 ```
 

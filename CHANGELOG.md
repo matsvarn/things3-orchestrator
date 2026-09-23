@@ -25,6 +25,29 @@
   MagicDNS and known private endpoints are rejected. Doctor reports origin
   unreachable from public `/health` without exception secrets.
 
+## 0.12.0 - 2026-09-23
+
+- Add `print-config --client grokbot` for Grok Bot computers and other
+  ephemeral hosts that reach the server over public HTTPS with the MCP bearer,
+  without joining a tailnet.
+- Require an explicit `print-config --client`. Remove the no-op
+  `login --show-secrets` flag; it is now rejected.
+- Authenticated `doctor` and live-acceptance HTTP clients ignore environment
+  proxies and do not follow redirects, matching `client-sync`.
+- Compare `things_view` Logbook ranges as dates, so mixed calendar and
+  week-date bounds validate in the right order.
+- Keep `client-sync` state writes off shared skill directories and recoverable
+  on Windows with Python 3.12.
+- The Codex plugin launcher now only starts `serve`. Run owner commands through
+  the installed `things-orchestrator` tool.
+- New v2 operations start as `pending` and never as `awaiting_owner`. Leftover
+  `awaiting_owner` rows are retired only during prune and cutover.
+- Live acceptance persists its staged cleanup as soon as Trash returns, so a
+  restart resumes cleanup instead of failing.
+- Remove retired v1 write APIs, owner-approval leftovers, the unpublished
+  change, organize, weekly-review, and diagnostics read surface, and unused
+  helpers. The eight public tools and their schemas are unchanged.
+
 ## 0.11.0 - 2026-09-05
 
 - Advertise additive-tolerant tool output schemas so extra properties on
