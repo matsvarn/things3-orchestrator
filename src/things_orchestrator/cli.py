@@ -13,7 +13,7 @@ from functools import partial
 from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any, TextIO, cast
+from typing import Any, Literal, TextIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
@@ -38,6 +38,7 @@ from .config import (
     load_preferences,
     load_timezone,
     normalize_mcp_url,
+    preferences_path,
     save_credentials,
     save_launcher,
     save_preferences,
@@ -194,6 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="show the convergent service effects without applying them",
             )
+        else:
+            service_command.set_defaults(dry_run=False)
     http = commands.add_parser("serve-http", help="MCP on loopback HTTP")
     http.add_argument("--port", type=int, default=8787)
     http.add_argument("--service-managed", action="store_true", help=argparse.SUPPRESS)
@@ -255,7 +258,9 @@ def build_parser() -> argparse.ArgumentParser:
     show = commands.add_parser("print-config", help="render one client configuration")
     show.add_argument(
         "--client",
-        choices=tuple(client.value for client in ClientKind),
+        type=ClientKind,
+        choices=ClientKind,
+        metavar="{%s}" % ",".join(client.value for client in ClientKind),
         required=True,
         help="client whose configuration to render",
     )
@@ -343,6 +348,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(error))
 
 
+def _require_credentials(parser: argparse.ArgumentParser) -> Credentials:
+    try:
+        return load_credentials(path=credentials_path())
+    except ConfigError:
+        parser.error(_LOGIN)
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.action == "login":
         _login(
@@ -373,20 +385,17 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
             parser.error(
                 "configure needs --note-style, --source-schemes, --timezone, or --url"
             )
-        try:
-            path = save_preferences(
-                note_style=args.note_style,
-                source_schemes=args.source_schemes,
-                timezone=args.timezone,
-                mcp_url=args.public_url,
-            )
-            saved_schemes = (
-                load_preferences(path=path).source_schemes
-                if args.source_schemes is not None
-                else None
-            )
-        except ConfigError as error:
-            parser.error(str(error))
+        path = save_preferences(
+            note_style=args.note_style,
+            source_schemes=args.source_schemes,
+            timezone=args.timezone,
+            mcp_url=args.public_url,
+        )
+        saved_schemes = (
+            load_preferences(path=path).source_schemes
+            if args.source_schemes is not None
+            else None
+        )
         if args.note_style is not None:
             print(f"Note style: {args.note_style}")
         if saved_schemes is not None:
@@ -429,7 +438,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         run_client_sync_command(args)
         return
     if args.action == "service":
-        dry_run = getattr(args, "dry_run", False)
+        dry_run = args.dry_run
         try:
             result = service_action(args.service_action, dry_run=dry_run)
         except ServiceApplyError as error:
@@ -473,10 +482,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.action == "operation-reconcile":
         _operation_command(parser, operation_id=args.operation_id, reconcile=True)
         return
-    try:
-        credentials = load_credentials()
-    except ConfigError:
-        parser.error(_LOGIN)
+    credentials = _require_credentials(parser)
     if args.action == "serve":
         _server(
             parser, credentials=credentials, routines=RoutineHTTPComposition.disabled()
@@ -499,10 +505,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
 def _routines_command(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
-    try:
-        credentials = load_credentials()
-    except ConfigError:
-        parser.error(_LOGIN)
+    credentials = _require_credentials(parser)
     action = args.routines_action
     if action in {"configure", "setup"}:
         with _routine_secret_tty(parser) as terminal:
@@ -696,26 +699,23 @@ def _login(
         parser.error(str(error))
     creds = credentials_path()
     token = _mcp_token(rotate=rotate_token, path=creds)
-    preferences_file = creds.with_name("preferences.json")
-    try:
-        existing_url = load_preferences(path=preferences_file).mcp_url
-        legacy_url = (
-            None
-            if public_url.strip() or existing_url is not None
-            else load_legacy_mcp_url(path=creds.with_name("mcp.http.json"))
-        )
-        mcp_url = select_login_mcp_url(
-            explicit=public_url,
-            saved=existing_url,
-            legacy=legacy_url,
-        )
-        save_preferences(
-            timezone=timezone_name,
-            mcp_url=mcp_url,
-            path=preferences_file,
-        )
-    except ConfigError as error:
-        parser.error(str(error))
+    preferences_file = preferences_path()
+    existing_url = load_preferences(path=preferences_file).mcp_url
+    legacy_url = (
+        None
+        if public_url.strip() or existing_url is not None
+        else load_legacy_mcp_url(path=creds.with_name("mcp.http.json"))
+    )
+    mcp_url = select_login_mcp_url(
+        explicit=public_url,
+        saved=existing_url,
+        legacy=legacy_url,
+    )
+    save_preferences(
+        timezone=timezone_name,
+        mcp_url=mcp_url,
+        path=preferences_file,
+    )
     path = save_credentials(email, password, McpBearer(token), path=creds)
     launcher = save_launcher(resolve_console_script(), path=launcher_path())
     print(f"Stored credentials in {path} (mode 0600, plaintext password).")
@@ -734,34 +734,25 @@ def _print_config(
     parser: argparse.ArgumentParser,
     *,
     public_url: str,
-    client: str,
+    client: ClientKind,
     show_secrets: bool,
 ) -> None:
-    creds = credentials_path()
-    try:
-        credentials = load_credentials(path=creds)
-    except ConfigError:
-        parser.error(_LOGIN)
+    credentials = _require_credentials(parser)
     if credentials.bearer is None:
         parser.error(_LOGIN)
-    preferences_file = creds.with_name("preferences.json")
-    try:
-        url = (
-            normalize_mcp_url(public_url)
-            if public_url.strip()
-            else load_preferences(path=preferences_file).mcp_url
-            or normalize_mcp_url("http://127.0.0.1:8787")
-        )
-        kind = ClientKind(client)
-        rendered = render_client_config(
-            kind,
-            Endpoint(url, credentials.bearer),
-            show_secrets=show_secrets,
-        )
-    except ConfigError as error:
-        parser.error(str(error))
+    url = (
+        normalize_mcp_url(public_url)
+        if public_url.strip()
+        else load_preferences(path=preferences_path()).mcp_url
+        or normalize_mcp_url("http://127.0.0.1:8787")
+    )
+    rendered = render_client_config(
+        client,
+        Endpoint(url, credentials.bearer),
+        show_secrets=show_secrets,
+    )
     print(rendered.guidance, file=sys.stderr)
-    if kind is ClientKind.HERMES and show_secrets:
+    if client is ClientKind.HERMES and show_secrets:
         print(
             "MCP bearer for the private Hermes prompt "
             f"(do not paste this into a shell): {credentials.bearer.reveal()}",
@@ -771,7 +762,7 @@ def _print_config(
     if rendered.secondary_body is not None:
         print("Alternative JSON:", file=sys.stderr)
         print(rendered.secondary_body, end="")
-    if not show_secrets and kind is not ClientKind.CADDY:
+    if not show_secrets and client is not ClientKind.CADDY:
         print(
             "Token is hidden. Add --show-secrets only in a private terminal.",
             file=sys.stderr,
@@ -805,23 +796,20 @@ def _mcp_token(*, rotate: bool, path: Path) -> str:
 
 
 def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> None:
-    creds = credentials_path()
-    try:
-        credentials = load_credentials(path=creds)
-    except ConfigError:
-        parser.error(_LOGIN)
+    credentials = _require_credentials(parser)
     if credentials.bearer is None:
         parser.error(_LOGIN)
     print(f"credentials: ok ({credentials.email})")
+    preferences_file = preferences_path()
     timezone_name = load_timezone(
-        preferences_file=creds.with_name("preferences.json"),
-        credentials_file=creds,
+        preferences_file=preferences_file,
+        credentials_file=credentials_path(),
     )
     if not timezone_name:
         print("timezone: missing - run login --timezone Europe/Berlin")
         raise SystemExit(1)
     print(f"timezone: ok ({timezone_name})")
-    stored_url = load_preferences(path=creds.with_name("preferences.json")).mcp_url
+    stored_url = load_preferences(path=preferences_file).mcp_url
     hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"
     if timezone_name == "UTC" and (public_url.strip() or hosted):
         print("timezone: warning - UTC is unusual for a hosted owner account")
@@ -872,10 +860,7 @@ def _workspace(
     parser: argparse.ArgumentParser, *, credentials: Credentials | None = None
 ) -> ThingsWorkspace:
     if credentials is None:
-        try:
-            credentials = load_credentials()
-        except ConfigError:
-            parser.error(_LOGIN)
+        credentials = _require_credentials(parser)
     email = credentials.email
     library = CloudLibrary(CloudClient(email, credentials.password))
     timezone_name = load_timezone()
@@ -929,10 +914,7 @@ def _routine_http_composition(
 
 
 def _migration_report(parser: argparse.ArgumentParser) -> None:
-    try:
-        email = load_credentials().email
-    except ConfigError:
-        parser.error(_LOGIN)
+    email = _require_credentials(parser).email
     journal = SQLiteJournal(journal_path(email))
     print(json.dumps(journal.cutover_v1(), sort_keys=True))
 
@@ -1005,7 +987,7 @@ def _operation_command(
 def _legacy_resolution_command(
     parser: argparse.ArgumentParser,
     intent_id: str,
-    resolution: str,
+    resolution: Literal["accepted_as_is", "superseded"],
 ) -> None:
     from .owner_authority import render_operation, verified_authorization
 
@@ -1027,7 +1009,7 @@ def _legacy_resolution_command(
     if authorization is None:
         parser.error("owner factor did not match")
     if not workspace.host_resolve_legacy_v1(
-        intent_id, cast(Any, resolution), authorization
+        intent_id, resolution, authorization
     ):
         parser.error("retained v1 operation cannot be resolved")
     print(f"legacy_resolved: {resolution}")
@@ -1048,7 +1030,3 @@ def _login_timezone(parser: argparse.ArgumentParser, explicit: str | None) -> st
     except ZoneInfoNotFoundError:
         parser.error("--timezone needs an IANA name such as Europe/Berlin")
     return candidate
-
-
-if __name__ == "__main__":
-    main()
