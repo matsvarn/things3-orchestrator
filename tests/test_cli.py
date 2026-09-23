@@ -511,7 +511,7 @@ def test_migration_report_quarantines_and_reads_disposable_sqlite(
         )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("owner@example.com", "unused", None),
+        lambda **_kwargs: Credentials("owner@example.com", "unused", None),
     )
     monkeypatch.setattr("things_orchestrator.cli.journal_path", lambda _email: path)
 
@@ -1591,7 +1591,7 @@ def test_serve_http_without_token(
 ) -> None:
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("user@example.com", "secret", None),
+        lambda **_kwargs: Credentials("user@example.com", "secret", None),
     )
     monkeypatch.setattr(
         "things_orchestrator.cli._server",
@@ -1620,7 +1620,7 @@ def test_serve_http_uses_only_the_stored_bearer(
     )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("user@example.com", "secret", McpBearer("stored-bearer")),
+        lambda **_kwargs: Credentials("user@example.com", "secret", McpBearer("stored-bearer")),
     )
     monkeypatch.setenv("THINGS_MCP_TOKEN", "stale-environment-bearer")
 
