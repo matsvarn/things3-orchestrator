@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from things_orchestrator.cloud import CloudError, CloudWriteRejected
 from things_orchestrator.interface import ReadCall
 from things_orchestrator.journal import (
+    AmbiguousV2Request,
     MemoryJournal,
     SQLiteJournal,
     V2Operation,
@@ -280,6 +281,31 @@ def test_retention_maintenance_runs_once_per_day_not_once_per_read() -> None:
     interface.dispatch("things_view", {"view": "today"})
 
     assert journal.prune_calls == 1
+
+
+def test_ambiguous_prune_surfaces_internal_error() -> None:
+    class AmbiguousJournal(MemoryJournal):
+        def prune_v2(self, *, now: str, retention_days: int = 7) -> int:
+            raise AmbiguousV2Request()
+
+    interface = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary(),
+            journal=AmbiguousJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    )
+
+    result = interface.dispatch("things_view", {"view": "today"})
+    retried = interface.dispatch("things_view", {"view": "today"})
+
+    assert (result.state, result.code, result.next_action) == (
+        "rejected",
+        "internal_error",
+        "contact_operator",
+    )
+    assert retried.code == "internal_error"
 
 
 def test_successful_mutation_reuses_verified_post_write_snapshot() -> None:
@@ -1445,6 +1471,38 @@ def test_v2_project_completion_completes_open_actions_atomically() -> None:
     assert library.records["p"].status == "done"
     assert library.records["a"].status == "done"
     assert journal.get_v2_request("owner@example.com", "2", REQUEST) is not None
+
+
+def test_complete_of_cyclic_project_is_rejected() -> None:
+    result = ThingsV2(
+        ThingsWorkspace(
+            MemoryLibrary(
+                [
+                    Record(
+                        uuid="project",
+                        kind="project",
+                        title="Loop",
+                        parent_uuid="child",
+                    ),
+                    Record(
+                        uuid="child",
+                        kind="task",
+                        title="Child",
+                        parent_uuid="project",
+                    ),
+                ]
+            ),
+            journal=MemoryJournal(),
+            clock=lambda: NOW,
+            account_id="owner@example.com",
+        )
+    ).dispatch(
+        "things_complete", {"request_id": REQUEST, "ids": ["project:project"]}
+    )
+
+    assert result.state == "rejected"
+    assert result.code == "validation_error"
+    assert "cycle" in result.instruction
 
 
 def test_v2_project_completion_skips_headings_and_hidden_repeat_templates() -> None:

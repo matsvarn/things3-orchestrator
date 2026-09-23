@@ -1579,7 +1579,15 @@ def test_today_clears_evening_and_inbox_clears_start(tmp_path: Path) -> None:
         entity="Task6",
     )
     library.apply(
-        [Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))]
+        [
+            Write(
+                action="update",
+                uuid="abc",
+                kind="task",
+                start=date(2026, 8, 13),
+                owner_today=date(2026, 8, 13),
+            )
+        ]
     )
     payload = client.committed[0].payload
     assert payload["sb"] == 0
@@ -1589,6 +1597,47 @@ def test_today_clears_evening_and_inbox_clears_start(tmp_path: Path) -> None:
     assert inbox["sr"] is None
     assert inbox["tir"] is None
     assert inbox["agr"] == []
+
+
+def test_tonight_schedule_uses_owner_today(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
+    today = date(2026, 8, 15)
+
+    library.apply(
+        [
+            Write(
+                action="update",
+                uuid="abc",
+                kind="task",
+                tonight=True,
+                owner_today=today,
+            )
+        ]
+    )
+
+    payload = client.committed[0].payload
+    stamp = int(datetime(2026, 8, 15, tzinfo=timezone.utc).timestamp())
+    assert payload["st"] == 1
+    assert payload["sr"] == stamp
+    assert payload["tir"] == stamp
+    assert payload["sb"] == 1
+
+
+def test_schedule_write_without_owner_today_is_rejected(tmp_path: Path) -> None:
+    client = _CaptureClient()
+    library = CloudLibrary(client, cache=tmp_path / "state.json")  # type: ignore[arg-type]
+    library.records["abc"] = Record(
+        uuid="abc", kind="task", title="Call", entity="Task6"
+    )
+
+    with pytest.raises(CloudError, match="owner timezone date"):
+        library.apply(
+            [Write(action="update", uuid="abc", kind="task", start=date(2026, 8, 13))]
+        )
 
 
 def test_scheduled_creates_keep_their_project_or_area(tmp_path: Path) -> None:
@@ -3052,6 +3101,7 @@ def test_project_create_next_emits_native_count_and_leavable_copy(
                 kind="project",
                 title="Release train",
                 start=date(2026, 8, 30),
+                owner_today=date(2026, 8, 30),
                 recurrence_links=["template-project"],
                 leavable=True,
             ),

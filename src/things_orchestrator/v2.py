@@ -13,9 +13,11 @@ from typing import Annotated, Any, Literal, Self, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .interface import ReadCall, StrictModel, TruncatedField, Weekday
+from .interface import ItemFact, ReadCall, Result, StrictModel, TruncatedField, Weekday
 from .journal import AmbiguousV2Request, same_account_id
+from .library import Record
 from .tools import ITEM_ID
+from .workspace import ThingsWorkspace
 
 API_VERSION = "2"
 SCHEMA_VERSION = "v2.0"
@@ -845,7 +847,7 @@ class _WithinPage:
 
 
 class ThingsV2:
-    def __init__(self, workspace: Any) -> None:
+    def __init__(self, workspace: ThingsWorkspace) -> None:
         self.workspace = workspace
         self._cursor_routes: dict[str, str] = {}
         self._within_pages: dict[str, _WithinPage] = {}
@@ -859,7 +861,15 @@ class ThingsV2:
                     now=current.isoformat(), retention_days=7
                 )
             except AmbiguousV2Request:
-                pass
+                return PublicResult(
+                    state="rejected",
+                    code="internal_error",
+                    next_action="contact_operator",
+                    instruction=(
+                        "The persisted operation journal failed its integrity check; "
+                        "no write was made."
+                    ),
+                )
             else:
                 self._last_prune_date = current.date()
         expected = MODELS[name]
@@ -952,7 +962,7 @@ class ThingsV2:
 
     def _within_membership(
         self, within: str
-    ) -> tuple[list[Any], str] | PublicResult:
+    ) -> tuple[list[Record], str] | PublicResult:
         failed = self.workspace._refresh(force=True)
         if failed is not None:
             return PublicResult(
@@ -1044,7 +1054,7 @@ class ThingsV2:
         return cursor
 
     def _within_result(
-        self, records: list[Any], cursor: str | None
+        self, records: list[Record], cursor: str | None
     ) -> PublicResult:
         return PublicResult(
             state="ok",
@@ -1161,9 +1171,9 @@ class ThingsV2:
 
     def _project_read(
         self,
-        result: Any,
+        result: Result,
         *,
-        items: list[Any] | None = None,
+        items: list[ItemFact] | None = None,
         route: str | None = None,
     ) -> PublicResult:
         ok = result.status == "ok"
@@ -1184,7 +1194,7 @@ class ThingsV2:
         )
 
     @staticmethod
-    def _read_failure(result: Any) -> PublicResult:
+    def _read_failure(result: Result) -> PublicResult:
         if result.status == "stale":
             return PublicResult(
                 state="rejected",
@@ -1223,7 +1233,7 @@ class ThingsV2:
             instruction="That read cursor is invalid or belongs to another tool.",
         )
 
-    def _item(self, item: Any) -> PublicItem:
+    def _item(self, item: ItemFact) -> PublicItem:
         record = self.workspace._library.records.get(item.id.partition(":")[2])
         start = item.start
         if (

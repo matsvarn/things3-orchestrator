@@ -366,12 +366,6 @@ class _DetailCursor:
     expires_at: datetime
 
 
-class _Abort(Exception):
-    def __init__(self, result: Result) -> None:
-        super().__init__(result.instruction)
-        self.result = result
-
-
 class ThingsWorkspace:
     """Model and test Interface for one owner's Things library."""
 
@@ -776,6 +770,9 @@ class ThingsWorkspace:
                     start=start,
                     tonight=tonight,
                     someday=someday,
+                    owner_today=self._clock().date()
+                    if start is not None or tonight
+                    else None,
                     deadline=date.fromisoformat(cast(str, capture_item["deadline"]))
                     if capture_item.get("deadline")
                     else None,
@@ -924,15 +921,25 @@ class ThingsWorkspace:
                         "next_action": "correct_request",
                         "instruction": "Mutation targets must be exact Tasks or Projects.",
                     }
+                project_children: list[Record] = []
                 if draft.tool in {"things_complete", "things_trash"} and target.kind == "project":
-                    preconditions[f"scope:project:{target.uuid}"] = (
-                        self._project_scope_revision(target.uuid)
-                    )
+                    try:
+                        preconditions[f"scope:project:{target.uuid}"] = (
+                            self._project_scope_revision(target.uuid)
+                        )
+                        project_children = self._project_descendants(target.uuid)
+                    except ValueError as error:
+                        return {
+                            "state": "rejected",
+                            "code": "validation_error",
+                            "next_action": "correct_request",
+                            "instruction": str(error),
+                        }
                 candidates = (
                     [
                         *(
                             child
-                            for child in self._project_descendants(target.uuid)
+                            for child in project_children
                             if draft.tool != "things_complete"
                             or (
                                 child.status == "open"
@@ -1305,6 +1312,9 @@ class ThingsWorkspace:
                         and fields.get("remind_at") is None,
                         anytime=anytime_to_top_level,
                         public_start_anytime=public_start_anytime,
+                        owner_today=self._clock().date()
+                        if start is not None or tonight
+                        else None,
                     )
                     repeat = fields.get("repeat")
                     if isinstance(repeat, dict):
@@ -2701,7 +2711,6 @@ class ThingsWorkspace:
         instruction: str,
         view: CursorView | None = None,
         public_scope: str | None = None,
-        result_signals: list[str] | None = None,
         missing_ids: list[str] | None = None,
         detail: tuple[str, ...] = DETAIL_FIELDS,
         membership_revision: str | None = None,
@@ -2732,7 +2741,7 @@ class ThingsWorkspace:
             "inbox": "Inbox is empty.",
             "logbook": "Nothing in the Logbook for that range.",
         }.get(view or "", "No matching work is visible. Search with find and one title token.")
-        visible = bool(facts or result_signals)
+        visible = bool(facts)
         if view == "logbook" and visible:
             start, end = self._logbook_range()
             instruction = (
@@ -2744,7 +2753,6 @@ class ThingsWorkspace:
             status="ok",
             instruction=instruction if visible else empty,
             items=facts,
-            signals=result_signals or [],
             scope_revision=scope,
             cursor=cursor,
             missing_ids=missing_ids or [],
@@ -3645,9 +3653,7 @@ class ThingsWorkspace:
                 key=lambda item: (item.sort_index, item.uuid),
             ):
                 if child.uuid in path:
-                    raise _Abort(
-                        self._rejected("The Project structure contains a cycle.")
-                    )
+                    raise ValueError("The Project structure contains a cycle.")
                 visit(child.uuid, path | {child.uuid})
                 ordered.append(child)
 
@@ -3931,10 +3937,6 @@ class ThingsWorkspace:
     @staticmethod
     def _stale(instruction: str) -> Result:
         return Result(next="read", status="stale", instruction=instruction)
-
-    @staticmethod
-    def _rejected(instruction: str) -> Result:
-        return Result(next="stop", status="rejected", instruction=instruction)
 
 
 def _bounded_tag_title(title: str) -> str:

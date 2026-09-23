@@ -1647,14 +1647,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                     }
                 )
             elif write.tonight:
+                today = _owner_today(write)
                 payload.update(
-                    _schedule(
-                        write.start
-                        or write.owner_today
-                        or datetime.now().astimezone().date(),
-                        write.remind,
-                        today=write.owner_today,
-                    )
+                    _schedule(write.start or today, write.remind, today=today)
                 )
                 payload["sb"] = 1
             elif write.clear_start:
@@ -1670,7 +1665,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                 )
             elif write.start is not None:
                 payload.update(
-                    _schedule(write.start, write.remind, today=write.owner_today)
+                    _schedule(
+                        write.start, write.remind, today=_owner_today(write)
+                    )
                 )
                 payload["sb"] = 1 if write.tonight else 0
             if write.clear_deadline:
@@ -1681,7 +1678,9 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                 payload.update({"ato": None, "rmd": None})
             elif write.remind is not None and write.start is not None:
                 payload.update(
-                    _schedule(write.start, write.remind, today=write.owner_today)
+                    _schedule(
+                        write.start, write.remind, today=_owner_today(write)
+                    )
                 )
             if (
                 write.into_uuid is not None
@@ -1761,10 +1760,15 @@ def _placement(write: Write, current: Record | None = None) -> dict[str, Any]:
     return payload
 
 
-def _schedule(
-    start: date, remind: str | None, *, today: date | None = None
-) -> dict[str, Any]:
-    today = today or datetime.now().astimezone().date()
+def _owner_today(write: Write) -> date:
+    if write.owner_today is None:
+        raise CloudError(
+            "Things Cloud schedule writes need the owner timezone date"
+        )
+    return write.owner_today
+
+
+def _schedule(start: date, remind: str | None, *, today: date) -> dict[str, Any]:
     stamp = day_ts(start)
     if start <= today:
         payload: dict[str, Any] = {"st": 1, "sr": stamp, "tir": stamp}
@@ -1807,7 +1811,9 @@ def _create_payload(write: Write) -> dict[str, Any]:
         st = 1
     schedule: dict[str, Any] = {}
     if write.start is not None:
-        schedule = _schedule(write.start, write.remind, today=write.owner_today)
+        schedule = _schedule(
+            write.start, write.remind, today=_owner_today(write)
+        )
         st = int(schedule["st"])
         sr = schedule.get("sr")
         tir = schedule.get("tir")
