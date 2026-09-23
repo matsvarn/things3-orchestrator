@@ -2059,7 +2059,8 @@ def test_ambiguous_casefolded_requests_reject_before_cloud_io() -> None:
         ).dispatch("things_update", arguments)
 
         assert result.state == "rejected"
-        assert result.code == "request_conflict"
+        assert result.code == "internal_error"
+        assert result.next_action == "contact_operator"
         assert result.operation_id is None
         assert library.refreshes == 0
         assert library.apply_calls == 0
