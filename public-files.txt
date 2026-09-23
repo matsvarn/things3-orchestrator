@@ -1,4 +1,5 @@
 .agents/plugins/marketplace.json
+.github/dependabot.yml
 .github/workflows/ci.yml
 .gitignore
 .python-version
@@ -22,7 +23,6 @@ docs/dogfood.md
 docs/install.md
 docs/maintainer.md
 docs/operations.md
-docs/owner.md
 docs/recovery.md
 docs/research/comparison.md
 docs/research/things3-cloud.md
