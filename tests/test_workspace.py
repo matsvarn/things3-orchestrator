@@ -1626,3 +1626,20 @@ def test_tags_page_instruction_is_the_catalog() -> None:
     assert "catalog" in result.instruction
     assert "tag_ids" in result.instruction
     assert "change_tags" in result.instruction
+
+
+def test_cyclic_project_graph_raises_value_error() -> None:
+    module = workspace(
+        [
+            Record(
+                uuid="project",
+                kind="project",
+                title="Loop",
+                parent_uuid="child",
+            ),
+            Record(uuid="child", kind="task", title="Child", parent_uuid="project"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        module._project_descendants("project")
