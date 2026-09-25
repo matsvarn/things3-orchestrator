@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 NoteStyle = Literal["natural", "visual"]
@@ -105,26 +105,37 @@ def normalize_mcp_url(raw: str) -> McpUrl:
     value = raw.strip().rstrip("/")
     if not value or "YOUR-HOST" in value.upper():
         raise ConfigError("The MCP URL needs a real host")
-    parsed = urlsplit(value)
-    if parsed.username is not None or parsed.password is not None:
-        raise ConfigError("The MCP URL must not contain credentials")
+    parsed = _credential_free_split(value, label="MCP URL")
     if parsed.query or parsed.fragment or parsed.path not in {"", "/mcp"}:
         raise ConfigError("The MCP URL needs an origin or an /mcp path")
     host = parsed.hostname
     if host is None or not _valid_network_host(host):
         raise ConfigError("The MCP URL host must be a DNS name or IP address")
-    try:
-        parsed.port
-    except ValueError as error:
-        raise ConfigError("The MCP URL port is invalid") from error
-    if parsed.scheme == "https" and host:
-        pass
-    elif parsed.scheme == "http" and host in _LOOPBACK_HOSTS:
-        pass
-    else:
+    if not _https_or_loopback_http(parsed.scheme, host):
         raise ConfigError("The MCP URL needs HTTPS or loopback HTTP")
     origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     return McpUrl(origin)
+
+
+def _credential_free_split(raw: str, *, label: str) -> SplitResult:
+    value = raw.strip()
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise ConfigError(f"The {label} is invalid") from None
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError(f"The {label} must not contain credentials")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ConfigError(f"The {label} port is invalid") from error
+    return parsed
+
+
+def _https_or_loopback_http(scheme: str, host: str) -> bool:
+    return scheme == "https" or (
+        scheme == "http" and host.casefold().removesuffix(".") in _LOOPBACK_HOSTS
+    )
 
 
 def _valid_network_host(host: str) -> bool:
@@ -390,17 +401,15 @@ def _chmod(path: Path, mode: int, *, descriptor: int | None = None) -> None:
         if fchmod is not None:
             fchmod(descriptor, mode)
             return
-    chmod = getattr(os, "chmod", None)
-    if chmod is not None:
-        chmod(path, mode)
+    os.chmod(path, mode)
 
 
 def _atomic_write(path: Path, data: str | bytes) -> None:
     _ensure_private_dir(path.parent)
-    _atomic_replace(path, data)
+    atomic_replace(path, data)
 
 
-def _atomic_replace(
+def atomic_replace(
     path: Path, data: str | bytes, *, prefix: str | None = None
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
