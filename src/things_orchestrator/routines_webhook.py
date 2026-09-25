@@ -1,3 +1,5 @@
+"""Hermes and Grok webhook delivery for settled routine events."""
+
 from __future__ import annotations
 
 import hashlib

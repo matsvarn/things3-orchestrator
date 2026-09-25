@@ -119,8 +119,6 @@ def routine_database_path(account_digest: str) -> Path:
 
 
 class RoutineStore:
-    """Owns a path and opens and closes one SQLite connection per operation."""
-
     def __init__(
         self,
         profile: RoutineProfile,
@@ -312,17 +310,21 @@ class RoutineStore:
         self._require_open()
         with closing(self._connect()) as connection, connection:
             meta = self._meta(connection)
-            tag_count = _count(connection, "ai_tags")
-            candidate_count = _count(connection, "candidates")
             states = dict(
                 connection.execute("SELECT state, COUNT(*) FROM events GROUP BY state")
             )
             last_delivery_at = _last_delivery_at(connection)
+            ai_tags = int(
+                connection.execute("SELECT COUNT(*) FROM ai_tags").fetchone()[0]
+            )
+            candidates = int(
+                connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+            )
         return StoreCounts(
             phase=str(meta[3]),
             cursor=int(meta[5]),
-            ai_tags=tag_count,
-            candidates=candidate_count,
+            ai_tags=ai_tags,
+            candidates=candidates,
             pending=int(states.get("pending", 0)),
             delivered=int(states.get("delivered", 0)),
             dead=int(states.get("dead", 0)),
@@ -542,8 +544,12 @@ def read_routine_counts(path: Path, account_digest: str) -> StoreCounts | None:
             return StoreCounts(
                 phase=str(row[0]),
                 cursor=int(row[1]),
-                ai_tags=_count(connection, "ai_tags"),
-                candidates=_count(connection, "candidates"),
+                ai_tags=int(
+                    connection.execute("SELECT COUNT(*) FROM ai_tags").fetchone()[0]
+                ),
+                candidates=int(
+                    connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+                ),
                 pending=int(states.get("pending", 0)),
                 delivered=int(states.get("delivered", 0)),
                 dead=int(states.get("dead", 0)),
@@ -553,28 +559,16 @@ def read_routine_counts(path: Path, account_digest: str) -> StoreCounts | None:
         return None
 
 
+_TASK_KINDS = {0: "task", 1: "project", 2: "heading"}
+_LIFECYCLES = {0: "open", 2: "dropped", 3: "done"}
+
+
 def _task_kind(value: object) -> str:
-    return (
-        "task"
-        if value == 0
-        else "project"
-        if value == 1
-        else "heading"
-        if value == 2
-        else "unknown"
-    )
+    return _TASK_KINDS.get(value, "unknown") if isinstance(value, int) else "unknown"
 
 
 def _lifecycle(value: object) -> str:
-    return (
-        "open"
-        if value == 0
-        else "done"
-        if value == 3
-        else "dropped"
-        if value == 2
-        else "unknown"
-    )
+    return _LIFECYCLES.get(value, "unknown") if isinstance(value, int) else "unknown"
 
 
 def _is_task(entity: str) -> bool:
@@ -583,14 +577,6 @@ def _is_task(entity: str) -> bool:
 
 def _is_tag(entity: str) -> bool:
     return entity in {"Tag", "Tag3", "Tag4"}
-
-
-def _count(connection: sqlite3.Connection, table: str) -> int:
-    allowed = {"ai_tags", "candidates"}
-    if table not in allowed:
-        raise RoutineStoreError("Unsupported count table")
-    row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-    return int(row[0]) if row is not None else 0
 
 
 def _last_delivery_at(connection: sqlite3.Connection) -> int | None:

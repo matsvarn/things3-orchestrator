@@ -10,11 +10,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NoReturn
 
 from .config import ConfigError
 
@@ -264,18 +264,21 @@ def _wait_for_plan_result(
     home: Path,
     timeout: float,
 ) -> ServiceStatus:
-    deadline = time.monotonic() + timeout
-    while True:
-        observed = service_status(platform=platform, uid=uid, home=home)
-        if observed is plan.result_status:
-            return observed
-        if time.monotonic() >= deadline:
-            raise ServiceApplyError(
-                f"Service {plan.action} did not reach {plan.result_status.value} "
-                f"(observed {observed.value}). The operation may be partially applied; "
-                "rerun the same command safely."
-            )
-        time.sleep(0.05)
+    def on_timeout(observed: ServiceStatus) -> NoReturn:
+        raise ServiceApplyError(
+            f"Service {plan.action} did not reach {plan.result_status.value} "
+            f"(observed {observed.value}). The operation may be partially applied; "
+            "rerun the same command safely."
+        )
+
+    return _poll_status(
+        (plan.result_status,),
+        timeout,
+        on_timeout,
+        platform=platform,
+        uid=uid,
+        home=home,
+    )
 
 
 def resolve_console_script() -> Path:
@@ -554,22 +557,49 @@ def _wait_for_service_status(
     if expected is None:
         raise AssertionError("settling effect has no expected status")
     accepted = (expected, *effect.settles_also)
+
+    def on_timeout(observed: ServiceStatus) -> NoReturn:
+        del observed
+        command_failure = ""
+        if command_result.returncode != 0:
+            stderr = command_result.stderr.strip()
+            detail = f"exit {command_result.returncode}"
+            if stderr:
+                detail = f"{detail}: {stderr}"
+            command_failure = f" ({_command_text(effect.argv)}; {detail})"
+        expected_label = " or ".join(status.value for status in accepted)
+        raise ServiceApplyError(
+            f"Service effect failed: {effect.description} did not reach "
+            f"{expected_label}{command_failure}. The operation may be partially "
+            "applied; rerun the same command safely."
+        )
+
+    _poll_status(
+        accepted,
+        timeout,
+        on_timeout,
+        platform=platform,
+        uid=uid,
+        home=home,
+    )
+
+
+def _poll_status(
+    accepted: tuple[ServiceStatus, ...],
+    timeout: float,
+    on_timeout: Callable[[ServiceStatus], NoReturn],
+    *,
+    platform: Literal["darwin", "linux"],
+    uid: int,
+    home: Path,
+) -> ServiceStatus:
     deadline = time.monotonic() + timeout
-    while service_status(platform=platform, uid=uid, home=home) not in accepted:
+    while True:
+        observed = service_status(platform=platform, uid=uid, home=home)
+        if observed in accepted:
+            return observed
         if time.monotonic() >= deadline:
-            command_failure = ""
-            if command_result.returncode != 0:
-                stderr = command_result.stderr.strip()
-                detail = f"exit {command_result.returncode}"
-                if stderr:
-                    detail = f"{detail}: {stderr}"
-                command_failure = f" ({_command_text(effect.argv)}; {detail})"
-            expected_label = " or ".join(status.value for status in accepted)
-            raise ServiceApplyError(
-                f"Service effect failed: {effect.description} did not reach "
-                f"{expected_label}{command_failure}. The operation may be partially "
-                "applied; rerun the same command safely."
-            )
+            on_timeout(observed)
         time.sleep(0.05)
 
 

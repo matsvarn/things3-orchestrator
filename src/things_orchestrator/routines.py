@@ -15,7 +15,6 @@ from .cloud import HistoryBatch, HistoryIdentityChanged
 from .routines_config import (
     EnabledRoutineConfig,
     RoutineProfile,
-    account_digest,
     load_routines_config,
 )
 from .routines_store import (
@@ -26,7 +25,6 @@ from .routines_webhook import DeliveryResult, Webhook
 
 RuntimeState = Literal["disabled", "initializing", "running", "backing_off", "stopped"]
 T = TypeVar("T")
-WaitForStop = Callable[[float, anyio.Event], Awaitable[None]]
 
 
 async def _wait_for_stop(delay: float, stop: anyio.Event) -> None:
@@ -94,7 +92,6 @@ class RoutineWorker:
     def __init__(
         self,
         *,
-        email: str,
         profile: RoutineProfile,
         cloud: GroupedHistoryClient,
         store: RoutineStoreProtocol,
@@ -103,9 +100,8 @@ class RoutineWorker:
         monotonic: Callable[[], float] = time.monotonic,
         jitter: Callable[[float], float] = lambda upper: random.uniform(0, upper),
         config_loader: Callable[[], object] = load_routines_config,
-        wait_for_stop: WaitForStop = _wait_for_stop,
+        wait_for_stop: Callable[[float, anyio.Event], Awaitable[None]] = _wait_for_stop,
     ) -> None:
-        self._email = email
         self._profile = profile
         self._cloud = cloud
         self._store = store
@@ -134,7 +130,7 @@ class RoutineWorker:
         next_poll = self._monotonic()
         next_delivery = self._monotonic()
         next_config = self._monotonic() + self._profile.poll_interval_seconds
-        self._snapshot = self._active_snapshot(cloud_failures, delivery_failures)
+        self._set_active(cloud_failures, delivery_failures)
         try:
             while not stop.is_set():
                 now_mono = self._monotonic()
@@ -157,31 +153,23 @@ class RoutineWorker:
                             next_poll = self._monotonic() + self._cloud_delay(
                                 cloud_failures
                             )
-                            self._snapshot = self._active_snapshot(
-                                cloud_failures, delivery_failures
-                            )
+                            self._set_active(cloud_failures, delivery_failures)
                         else:
                             cloud_failures = 0
                             next_poll = self._monotonic()
-                            self._snapshot = self._active_snapshot(
-                                cloud_failures, delivery_failures
-                            )
+                            self._set_active(cloud_failures, delivery_failures)
                     except Exception:
                         cloud_failures += 1
                         next_poll = self._monotonic() + self._cloud_delay(
                             cloud_failures
                         )
-                        self._snapshot = self._active_snapshot(
-                            cloud_failures, delivery_failures
-                        )
+                        self._set_active(cloud_failures, delivery_failures)
                     else:
                         cloud_failures = 0
                         next_poll = self._monotonic() + (
                             self._profile.poll_interval_seconds if caught_up else 0
                         )
-                        self._snapshot = self._active_snapshot(
-                            cloud_failures, delivery_failures
-                        )
+                        self._set_active(cloud_failures, delivery_failures)
                     continue
 
                 if now_mono >= next_delivery:
@@ -199,15 +187,11 @@ class RoutineWorker:
                         next_delivery = self._monotonic() + self._delivery_delay(
                             delivery_failures
                         )
-                        self._snapshot = self._active_snapshot(
-                            cloud_failures, delivery_failures
-                        )
+                        self._set_active(cloud_failures, delivery_failures)
                     else:
                         delivery_failures = delivery_failures + failed if failed else 0
                         next_delivery = self._monotonic() + (1 if attempted else 5)
-                        self._snapshot = self._active_snapshot(
-                            cloud_failures, delivery_failures
-                        )
+                        self._set_active(cloud_failures, delivery_failures)
                     continue
 
                 delay = max(
@@ -271,15 +255,21 @@ class RoutineWorker:
             next_attempt = None
         else:
             state = "pending"
-            ceiling = min(
-                self._profile.retry.max_delay_seconds,
-                self._profile.retry.initial_delay_seconds
-                * (2 ** min(event.attempt_count, 30)),
+            delay = int(
+                self._jittered_backoff(
+                    attempts,
+                    float(self._profile.retry.initial_delay_seconds),
+                    float(self._profile.retry.max_delay_seconds),
+                )
             )
-            delay = int(self._jitter(float(ceiling)))
             if result.retry_after_seconds is not None:
+                ceiling = min(
+                    self._profile.retry.max_delay_seconds,
+                    self._profile.retry.initial_delay_seconds
+                    * (2 ** min(event.attempt_count, 30)),
+                )
                 delay = max(delay, min(result.retry_after_seconds, ceiling))
-            next_attempt = now + max(delay, 1)
+            next_attempt = now + delay
         await self._sync(
             partial(
                 self._store.record_attempt,
@@ -299,24 +289,26 @@ class RoutineWorker:
             config = await self._sync(self._config_loader)
         except Exception:
             return False
-        return (
-            isinstance(config, EnabledRoutineConfig)
-            and config.profile.account_digest == account_digest(self._email)
-            and config.profile == self._profile
-        )
+        return isinstance(config, EnabledRoutineConfig) and config.profile == self._profile
 
     async def _sync(self, function: Callable[[], T]) -> T:
         return await anyio.to_thread.run_sync(function, limiter=self._limiter)
 
     def _cloud_delay(self, failures: int) -> float:
-        ceiling = min(900.0, 5.0 * (2 ** min(max(failures - 1, 0), 30)))
-        return max(1.0, self._jitter(ceiling))
+        return self._jittered_backoff(failures, 5.0, 900.0)
 
     def _delivery_delay(self, failures: int) -> float:
-        ceiling = min(
+        return self._jittered_backoff(
+            failures,
+            float(self._profile.retry.initial_delay_seconds),
             float(self._profile.retry.max_delay_seconds),
-            float(self._profile.retry.initial_delay_seconds)
-            * (2 ** min(max(failures - 1, 0), 30)),
+        )
+
+    def _jittered_backoff(
+        self, failures_or_attempts: int, initial: float, cap: float
+    ) -> float:
+        ceiling = min(
+            cap, initial * (2 ** min(max(failures_or_attempts - 1, 0), 30))
         )
         return max(1.0, self._jitter(ceiling))
 
@@ -334,10 +326,8 @@ class RoutineWorker:
             self._last_delivery_at,
         )
 
-    def _active_snapshot(
-        self, cloud_failures: int, delivery_failures: int
-    ) -> RuntimeSnapshot:
-        return self._snapshot_for(
+    def _set_active(self, cloud_failures: int, delivery_failures: int) -> None:
+        self._snapshot = self._snapshot_for(
             "backing_off" if cloud_failures or delivery_failures else "running",
             cloud_failures,
             delivery_failures,

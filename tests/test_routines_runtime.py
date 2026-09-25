@@ -464,7 +464,6 @@ def test_blocked_routines_cloud_call_does_not_delay_health_or_mcp_tools() -> Non
 
     def factory() -> RoutineWorker:
         return RoutineWorker(
-            email="owner@example.com",
             profile=profile,
             cloud=Cloud(),
             store=Store(),
@@ -540,7 +539,6 @@ def test_retry_policy_persists_backoff_and_dead_letters_at_attempt_bound() -> No
             raise AssertionError(start_index)
 
     worker = RoutineWorker(
-        email="owner@example.com",
         profile=_profile(),
         cloud=Cloud(),
         store=Store(),
@@ -587,7 +585,6 @@ def test_retry_policy_dead_letters_at_maximum_event_age() -> None:
             recorded.append((state, next_attempt_at))
 
     worker = RoutineWorker(
-        email="owner@example.com",
         profile=_profile(retry=RetryPolicy(max_age_seconds=60)),
         cloud=_UnusedCloud(),
         store=Store(),
@@ -690,7 +687,6 @@ def test_accepted_then_crashed_delivery_retries_same_event_as_duplicate(
             raise RuntimeError("simulated crash before delivery commit")
 
     first = RoutineWorker(
-        email="owner@example.com",
         profile=profile,
         cloud=_UnusedCloud(),
         store=CrashBeforeCommitStore(),
@@ -720,7 +716,6 @@ def test_accepted_then_crashed_delivery_retries_same_event_as_duplicate(
 
         now = 123
         second = RoutineWorker(
-            email="owner@example.com",
             profile=profile,
             cloud=_UnusedCloud(),
             store=restarted,
@@ -806,7 +801,6 @@ def test_timeout_after_send_retries_same_event_identity_and_body(
                 return DeliveryResult("delivered", "duplicate", 200)
 
         worker = RoutineWorker(
-            email="owner@example.com",
             profile=profile,
             cloud=_UnusedCloud(),
             store=store,
@@ -884,7 +878,6 @@ def test_idle_caught_up_worker_polls_at_most_once_per_interval() -> None:
         await anyio.lowlevel.checkpoint()
 
     worker = RoutineWorker(
-        email="owner@example.com",
         profile=profile,
         cloud=Cloud(),
         store=Store(),
@@ -986,7 +979,6 @@ def test_runtime_status_combines_poll_and_delivery_failure_state() -> None:
         await anyio.lowlevel.checkpoint()
 
     worker = RoutineWorker(
-        email="owner@example.com",
         profile=profile,
         cloud=Cloud(),
         store=Store(),
@@ -1035,7 +1027,6 @@ def test_store_open_failure_stops_worker_without_escaping_into_http_lifecycle() 
             raise AssertionError(start_index)
 
     worker = RoutineWorker(
-        email="owner@example.com",
         profile=_profile(),
         cloud=Cloud(),
         store=Store(),

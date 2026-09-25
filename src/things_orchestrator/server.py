@@ -1,10 +1,12 @@
+"""Bounded MCP stdio and authenticated loopback HTTP server."""
+
 from __future__ import annotations
 
 import hmac
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from secrets import token_urlsafe
@@ -244,7 +246,7 @@ class ThingsMCPServer:
             )
 
         @asynccontextmanager
-        async def lifespan(_app: Starlette) -> Any:
+        async def lifespan(_app: Starlette) -> AsyncIterator[None]:
             nonlocal active_routine
             async with manager.run():
                 if self._routines.factory is None:
