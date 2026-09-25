@@ -16,7 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from .config import ConfigError
+from .config import ConfigError, _atomic_replace
 
 _LABEL = "com.matsvarnskuhler.things-orchestrator-http"
 _UNIT = "things-orchestrator-http.service"
@@ -528,17 +528,9 @@ def _apply_unchecked(
                 check=True,
             )
         return
-    effect.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=effect.path.parent, delete=False
-    ) as staged:
-        staged.write(effect.content)
-        staged_path = Path(staged.name)
-    try:
-        staged_path.chmod(effect.mode)
-        staged_path.replace(effect.path)
-    finally:
-        staged_path.unlink(missing_ok=True)
+    if effect.mode != 0o600:
+        raise AssertionError("unelevated writes go through the owner-only atomic helper")
+    _atomic_replace(effect.path, effect.content)
 
 
 def _wait_for_service_status(
