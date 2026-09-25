@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 
 import anyio
 import pytest
@@ -14,6 +15,7 @@ from things_orchestrator.doctor import (
     TargetReceipt,
     curl_tool_count_command,
     probe_target,
+    run_doctor,
     validate_target,
 )
 from things_orchestrator.tools import (
@@ -139,7 +141,7 @@ def test_validate_target_rejects_unknown_local_commit() -> None:
         validate_target(_receipt(), identity)
 
 
-def test_authenticated_probe_does_not_trust_env_or_follow_redirects(
+def test_probe_clients_do_not_trust_env_or_follow_redirects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[dict[str, object]] = []
@@ -178,11 +180,57 @@ def test_authenticated_probe_does_not_trust_env_or_follow_redirects(
             McpBearer("token"),
         )
 
-    authenticated = [kwargs for kwargs in seen if kwargs.get("headers")]
-    assert authenticated
-    for kwargs in authenticated:
+    assert seen
+    public = seen[0]
+    assert not public.get("headers")
+    for kwargs in seen:
         assert kwargs.get("follow_redirects") is False
         assert kwargs.get("trust_env") is False
+
+
+def test_wait_retries_folded_loopback_and_not_hosted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    async def probe(url: McpUrl, _bearer: McpBearer) -> TargetReceipt:
+        attempts.append(url.origin)
+        if attempts.count(url.origin) == 1:
+            raise DoctorUnavailable(f"{url}: origin unreachable (public /health)")
+        return _receipt()
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("things_orchestrator.doctor.anyio.sleep", no_sleep)
+    monkeypatch.setattr("things_orchestrator.doctor.installed_identity", _identity)
+    monkeypatch.setattr(
+        "things_orchestrator.doctor.validate_target", lambda *_args: None
+    )
+
+    anyio.run(
+        partial(
+            run_doctor,
+            [McpUrl("http://LocalHost:8787")],
+            McpBearer("token"),
+            wait=True,
+            probe=probe,
+        )
+    )
+    assert attempts == ["http://LocalHost:8787", "http://LocalHost:8787"]
+
+    attempts.clear()
+    with pytest.raises(DoctorUnavailable):
+        anyio.run(
+            partial(
+                run_doctor,
+                [normalize_mcp_url("https://tasks.example.com")],
+                McpBearer("token"),
+                wait=True,
+                probe=probe,
+            )
+        )
+    assert attempts == ["https://tasks.example.com"]
 
 
 def test_curl_command_uses_environment_bearer_and_returns_tool_count() -> None:

@@ -30,7 +30,14 @@ from .client_bundle import (
     ComponentHashes,
     parse_client_bundle,
 )
-from .config import ConfigError, McpBearer, McpUrl, _atomic_replace, normalize_mcp_url
+from .config import (
+    ConfigError,
+    McpBearer,
+    McpUrl,
+    _atomic_replace,
+    is_loopback_http,
+    normalize_mcp_url,
+)
 from .tools import (
     CLIENT_BUNDLE_PATH,
     ITEM_ID,
@@ -577,7 +584,7 @@ def _read_result(
 
 
 def _catalog_refresh_action(url: McpUrl) -> str:
-    if url.origin.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:")):
+    if is_loopback_http(url):
         return (
             "Reconnect the HTTP MCP session so the client repeats tools/list. "
             "Same-host stdio serve is a separate server; restart that process "

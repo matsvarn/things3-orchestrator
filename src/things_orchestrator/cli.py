@@ -37,6 +37,7 @@ from .config import (
     load_legacy_mcp_url,
     load_preferences,
     load_timezone,
+    loopback_mcp_url,
     normalize_mcp_url,
     save_credentials,
     save_launcher,
@@ -77,7 +78,8 @@ _LOGIN = (
     "Run `things-orchestrator login` in a private terminal. "
     "Clone development may use `uv run things-orchestrator login`."
 )
-_LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
+
+
 class _ExactArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs["allow_abbrev"] = False
@@ -750,7 +752,7 @@ def _print_config(
             normalize_mcp_url(public_url)
             if public_url.strip()
             else load_preferences(path=preferences_file).mcp_url
-            or normalize_mcp_url("http://127.0.0.1:8787")
+            or loopback_mcp_url()
         )
         kind = ClientKind(client)
         rendered = render_client_config(
@@ -822,12 +824,12 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
         raise SystemExit(1)
     print(f"timezone: ok ({timezone_name})")
     stored_url = load_preferences(path=creds.with_name("preferences.json")).mcp_url
-    hosted = stored_url is not None and stored_url.origin != "http://127.0.0.1:8787"
+    hosted = stored_url is not None and stored_url.origin != loopback_mcp_url().origin
     if timezone_name == "UTC" and (public_url.strip() or hosted):
         print("timezone: warning - UTC is unusual for a hosted owner account")
 
     try:
-        targets = [normalize_mcp_url(_LOOPBACK_URL)]
+        targets = [loopback_mcp_url()]
         if stored_url is not None and stored_url not in targets:
             targets.append(stored_url)
         if public_url.strip():
@@ -971,10 +973,10 @@ def _owner_factor(parser: argparse.ArgumentParser) -> None:
     from .owner_authority import enroll_owner_factor
 
     with _private_tty(parser) as terminal:
-        passphrase = getpass("New owner approval passphrase: ", stream=terminal)
-        confirm = getpass("Confirm owner approval passphrase: ", stream=terminal)
+        passphrase = getpass("New owner-factor passphrase: ", stream=terminal)
+        confirm = getpass("Confirm owner-factor passphrase: ", stream=terminal)
     if passphrase != confirm:
-        parser.error("owner passphrase confirmation did not match")
+        parser.error("owner-factor passphrase confirmation did not match")
     try:
         path = enroll_owner_factor(passphrase)
     except ValueError as error:
@@ -1015,7 +1017,7 @@ def _legacy_resolution_command(
         parser.error("retained v1 operation is not pending")
     print(render_operation(operation))
     with _private_tty(parser) as terminal:
-        passphrase = getpass("Owner approval passphrase: ", stream=terminal)
+        passphrase = getpass("Legacy-recovery passphrase: ", stream=terminal)
     try:
         authorization = verified_authorization(
             operation,

@@ -10,10 +10,12 @@ from things_orchestrator.config import (
     ConfigError,
     McpBearer,
     McpUrl,
+    is_loopback_http,
     load_credentials,
     load_legacy_mcp_url,
     load_preferences,
     load_timezone,
+    loopback_mcp_url,
     normalize_mcp_url,
     save_credentials,
     save_launcher,
@@ -155,8 +157,36 @@ def test_login_url_selection_uses_explicit_saved_legacy_then_loopback() -> None:
     assert select_login_mcp_url(explicit="", saved=saved, legacy=legacy) == saved
     assert select_login_mcp_url(explicit="", saved=None, legacy=legacy) == legacy
     assert select_login_mcp_url(explicit="", saved=None, legacy=None) == (
-        normalize_mcp_url(_url("http", "127.0.0.1:8787"))
+        loopback_mcp_url()
     )
+
+
+def test_loopback_mcp_url_is_the_default_origin_with_mcp_and_health() -> None:
+    url = loopback_mcp_url()
+    assert url.origin == "http://127.0.0.1:8787"
+    assert url.mcp == "http://127.0.0.1:8787/mcp"
+    assert url.health == "http://127.0.0.1:8787/health"
+    assert str(url) == url.mcp
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    (
+        ("http://127.0.0.1:8787", True),
+        ("http://localhost:8787", True),
+        ("http://[::1]:8787", True),
+        ("http://LocalHost:8787", True),
+        ("http://localhost.:8787", True),
+        ("http://127.0.0.1", True),
+        ("https://127.0.0.1:8787", False),
+        ("https://mcp.example.com", False),
+        ("http://127.0.0.1.example.com:8787", False),
+    ),
+)
+def test_is_loopback_http_matches_folded_and_trailing_dot_hosts(
+    origin: str, expected: bool
+) -> None:
+    assert is_loopback_http(McpUrl(origin)) is expected
 
 
 def test_launcher_binding_is_exact_private_and_executable(tmp_path: Path) -> None:

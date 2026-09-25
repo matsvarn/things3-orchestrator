@@ -11,7 +11,7 @@ import pytest
 
 import things_orchestrator.diagnostics as diagnostics
 from things_orchestrator.cloud import CloudError
-from things_orchestrator.config import Credentials, normalize_mcp_url
+from things_orchestrator.config import Credentials, McpUrl, normalize_mcp_url
 from things_orchestrator.deployment import DeploymentIdentity
 from things_orchestrator.diagnostics import (
     CloudCheck,
@@ -363,8 +363,8 @@ def test_runtime_probe_ignores_environment_proxy_and_keeps_bearer_local(
     proxy_thread.start()
     monkeypatch.setattr(
         diagnostics,
-        "_ROUTINE_HEALTH_URL",
-        f"http://127.0.0.1:{target.server_port}/health",
+        "loopback_mcp_url",
+        lambda: McpUrl(f"http://127.0.0.1:{target.server_port}"),
     )
     monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
     monkeypatch.setenv("no_proxy", "")
@@ -409,8 +409,8 @@ def test_runtime_probe_does_not_follow_redirects(
     thread.start()
     monkeypatch.setattr(
         diagnostics,
-        "_ROUTINE_HEALTH_URL",
-        f"http://127.0.0.1:{server.server_port}/health",
+        "loopback_mcp_url",
+        lambda: McpUrl(f"http://127.0.0.1:{server.server_port}"),
     )
     try:
         result = diagnostics.probe_routine_runtime("private-bearer")
