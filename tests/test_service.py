@@ -858,3 +858,97 @@ def test_linux_install_writes_reloads_and_starts_the_supervisor() -> None:
         "restart",
         "things-orchestrator-http.service",
     )
+
+
+def test_unelevated_write_reuses_the_owner_only_atomic_helper(tmp_path: Path) -> None:
+    parent = tmp_path / "LaunchAgents"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    target = parent / "com.matsvarnskuhler.things-orchestrator-http.plist"
+    effect = ServiceEffect(
+        "write",
+        f"install {target}",
+        path=target,
+        content="plist-body\n",
+        mode=0o600,
+    )
+
+    _apply(effect, platform="darwin", uid=501, home=tmp_path)
+
+    assert target.read_text() == "plist-body\n"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert parent.stat().st_mode & 0o777 == 0o755
+    assert list(parent.glob(f".{target.name}.*")) == []
+
+
+def test_unelevated_write_wraps_helper_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "LaunchAgents" / "agent.plist"
+
+    def fail_replace(_source: object, _target: object) -> None:
+        raise OSError("simulated atomic replace failure")
+
+    monkeypatch.setattr("things_orchestrator.config.os.replace", fail_replace)
+    effect = ServiceEffect(
+        "write",
+        f"install {target}",
+        path=target,
+        content="plist-body\n",
+        mode=0o600,
+    )
+
+    with pytest.raises(ServiceApplyError, match="simulated atomic replace failure"):
+        _apply(effect, platform="darwin", uid=501, home=tmp_path)
+
+    assert not target.exists()
+    assert list(tmp_path.glob("**/*.tmp")) == []
+
+
+def test_unelevated_write_rejects_a_non_owner_mode(tmp_path: Path) -> None:
+    target = tmp_path / "agent.plist"
+    effect = ServiceEffect(
+        "write",
+        f"install {target}",
+        path=target,
+        content="plist-body\n",
+        mode=0o644,
+    )
+
+    with pytest.raises(AssertionError, match="owner-only atomic helper"):
+        _apply(effect, platform="darwin", uid=501, home=tmp_path)
+
+    assert not target.exists()
+
+
+def test_elevated_write_still_installs_through_sudo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "things-orchestrator-http.service"
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> object:
+        calls.append(argv)
+        Path(argv[-1]).write_text(Path(argv[-2]).read_text())
+        return SimpleNamespace(returncode=0)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("systemd units must not use the owner-only atomic helper")
+
+    monkeypatch.setattr("things_orchestrator.service.subprocess.run", run)
+    monkeypatch.setattr("things_orchestrator.service._atomic_replace", boom)
+    effect = ServiceEffect(
+        "write",
+        f"install {target}",
+        path=target,
+        content="unit\n",
+        mode=0o644,
+        elevated=True,
+    )
+
+    _apply(effect, platform="linux", uid=1000, home=tmp_path)
+
+    assert len(calls) == 1
+    assert calls[0][:4] == ("sudo", "install", "-m", "644")
+    assert calls[0][-1] == str(target)
+    assert target.read_text() == "unit\n"
