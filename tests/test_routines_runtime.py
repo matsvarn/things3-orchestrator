@@ -237,7 +237,7 @@ def test_stdio_never_reads_routines_configuration(
 
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("owner@example.com", "password", None),
+        lambda **_kwargs: Credentials("owner@example.com", "password", None),
     )
     monkeypatch.setattr(
         "things_orchestrator.cli._server",

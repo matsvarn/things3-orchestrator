@@ -25,6 +25,7 @@ from .config import (
     load_credentials,
     load_preferences,
     normalize_mcp_url,
+    preferences_path,
 )
 from .deployment import (
     DeploymentIdentity,
@@ -385,7 +386,7 @@ def collect_support_report() -> SupportReport:
             if credentials is None
             else _fresh_cloud_check(credentials)
         )
-    endpoint = _endpoint_class(credentials_file)
+    endpoint = _endpoint_class()
     operations = _operation_counts(credentials)
     service = _service_status()
     return build_support_report(
@@ -431,11 +432,11 @@ def _credentials(*, path: Path | None = None) -> Credentials | None:
     return load_credentials(path=target)
 
 
-def _endpoint_class(credentials_file: Path) -> EndpointClass | None:
+def _endpoint_class() -> EndpointClass | None:
     try:
-        endpoint = load_preferences(
-            path=credentials_file.with_name("preferences.json"),
-        ).mcp_url or normalize_mcp_url("http://127.0.0.1:8787")
+        endpoint = load_preferences(path=preferences_path()).mcp_url or (
+            normalize_mcp_url("http://127.0.0.1:8787")
+        )
     except ConfigError:
         return None
     return classify_endpoint(endpoint)

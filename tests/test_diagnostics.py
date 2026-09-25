@@ -242,7 +242,7 @@ def test_unreadable_credentials_have_a_fixed_value_free_diagnostic_status(
         ),
     )
     monkeypatch.setattr(diagnostics, "_service_status", lambda: None)
-    monkeypatch.setattr(diagnostics, "_endpoint_class", lambda _path: None)
+    monkeypatch.setattr(diagnostics, "_endpoint_class", lambda: None)
 
     cloud = diagnostics.collect_cloud_check()
     report = diagnostics.collect_support_report()

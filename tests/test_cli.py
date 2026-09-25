@@ -216,6 +216,10 @@ def test_login_stores_credentials_and_preferences_without_snippets(
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     monkeypatch.setattr(
@@ -266,6 +270,10 @@ def test_login_keeps_mcp_token_unless_rotated(
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "new-token")
@@ -284,6 +292,10 @@ def test_login_updates_only_host_preferences_and_preserves_other_keys(
     preferences.write_text(original)
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -315,6 +327,10 @@ def test_login_migrates_the_pre_09_hosted_http_endpoint(
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     monkeypatch.setattr("things_orchestrator.cli.token_urlsafe", lambda _n: "token")
@@ -333,6 +349,10 @@ def test_login_explicit_url_bypasses_a_corrupt_legacy_snippet(
     (tmp_path / "mcp.http.json").write_text("broken")
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -361,6 +381,10 @@ def test_login_reports_corrupt_preferences_without_a_traceback(
     (tmp_path / "preferences.json").write_text("broken")
     _fake_cloud(monkeypatch)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     with pytest.raises(SystemExit) as caught:
         main(["login", "--timezone", "Europe/Berlin"])
@@ -487,7 +511,7 @@ def test_migration_report_quarantines_and_reads_disposable_sqlite(
         )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("owner@example.com", "unused", None),
+        lambda **_kwargs: Credentials("owner@example.com", "unused", None),
     )
     monkeypatch.setattr("things_orchestrator.cli.journal_path", lambda _email: path)
 
@@ -535,6 +559,10 @@ def test_print_config_renders_without_writing_and_hides_token(
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     main(["print-config", "--client", "cursor", "--url", "https://tasks.example.com"])
@@ -560,6 +588,10 @@ def test_print_config_show_secrets_prints_bearer(
         + "\n"
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -599,6 +631,10 @@ def test_grok_print_config_uses_saved_public_endpoint_and_bearer(
         '{"version":2,"note_style":"natural","mcp_url":"https://tasks.example.com/mcp"}\n'
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     main(["print-config", "--client", "grok", "--show-secrets"])
 
@@ -628,6 +664,10 @@ def test_grokbot_print_config_uses_saved_public_endpoint_and_stdio_bridge(
         '{"version":2,"note_style":"natural","mcp_url":"https://tasks.example.com/mcp"}\n'
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     main(["print-config", "--client", "grokbot", "--show-secrets"])
 
@@ -667,6 +707,10 @@ def test_grokbot_print_config_rejects_saved_magicdns_and_accepts_public_url(
         '"mcp_url":"https://cloud-agent-01.tail56995b.ts.net/mcp"}\n'
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     with pytest.raises(SystemExit) as caught:
         main(["print-config", "--client", "grokbot", "--show-secrets"])
@@ -699,6 +743,10 @@ def test_hermes_print_config_keeps_the_bearer_out_of_commands(
 ) -> None:
     creds = _seed_credentials(tmp_path, token="private-bearer")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     argv = ["print-config", "--client", "hermes"]
     if show_secrets:
         argv.append("--show-secrets")
@@ -732,6 +780,10 @@ def test_caddy_config_stdout_is_directly_pipeable(
         + "\n"
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     main(
         [
@@ -772,6 +824,10 @@ def test_print_config_uses_saved_url_without_mutating_preferences(
     before = preferences.read_text()
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     main(["print-config", "--client", "cursor"])
@@ -811,6 +867,10 @@ def test_doctor_reports_corrupt_preferences_without_a_traceback(
     creds = _seed_credentials(tmp_path)
     (tmp_path / "preferences.json").write_text("broken")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
 
     with pytest.raises(SystemExit) as caught:
         main(["doctor"])
@@ -848,6 +908,10 @@ def test_doctor_without_server_exits_nonzero(
     _seed_preferences(tmp_path)
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
 
@@ -872,6 +936,10 @@ def test_doctor_without_url_checks_loopback_and_saved_endpoint(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -902,6 +970,10 @@ def test_doctor_passes_wait_to_authenticated_round_trip(
     _seed_preferences(tmp_path, url="https://tasks.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
     monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
+    monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
     seen_wait: list[bool] = []
@@ -925,6 +997,10 @@ def test_doctor_url_probes_loopback_and_remote_mcp(
     creds = _seed_credentials(tmp_path)
     _seed_preferences(tmp_path, url="https://saved.example.com/mcp")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -964,6 +1040,10 @@ def test_doctor_warns_for_utc_when_saved_endpoint_is_hosted(
         timezone="UTC",
     )
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
@@ -1511,7 +1591,7 @@ def test_serve_http_without_token(
 ) -> None:
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("user@example.com", "secret", None),
+        lambda **_kwargs: Credentials("user@example.com", "secret", None),
     )
     monkeypatch.setattr(
         "things_orchestrator.cli._server",
@@ -1540,7 +1620,7 @@ def test_serve_http_uses_only_the_stored_bearer(
     )
     monkeypatch.setattr(
         "things_orchestrator.cli.load_credentials",
-        lambda: Credentials("user@example.com", "secret", McpBearer("stored-bearer")),
+        lambda **_kwargs: Credentials("user@example.com", "secret", McpBearer("stored-bearer")),
     )
     monkeypatch.setenv("THINGS_MCP_TOKEN", "stale-environment-bearer")
 
@@ -1558,6 +1638,10 @@ def test_login_prompts_for_timezone_on_a_utc_host(
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     monkeypatch.setattr("things_orchestrator.cli._local_timezone_name", lambda: "UTC")
     monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.preferences_path",
+        lambda: creds.with_name("preferences.json"),
+    )
     monkeypatch.setattr(
         "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
     )
