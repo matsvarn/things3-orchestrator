@@ -145,14 +145,33 @@ class ChecklistFact(StrictModel):
     order: int = Field(ge=_ORDER_MIN, le=_ORDER_MAX)
 
 
-class RepeatOnFact(StrictModel):
+class RepeatOn(StrictModel):
+    """One semantic selected date in a regular repeat pattern."""
+
     month: int | None = Field(default=None, ge=1, le=12)
     day: int | None = None
     weekday: Weekday | None = None
     ordinal: int | None = None
 
+    @model_validator(mode="after")
+    def coherent_selector(self) -> Self:
+        if (self.day is None) == (self.weekday is None):
+            raise ValueError("on needs exactly one day or weekday")
+        if self.day is not None and self.day not in {-1, *range(1, 32)}:
+            raise ValueError("day needs 1 through 31, or -1 for the last day")
+        if self.weekday is None and self.ordinal is not None:
+            raise ValueError("ordinal needs a weekday")
+        if self.weekday is not None and self.ordinal not in {None, -1, 1, 2, 3, 4, 5}:
+            raise ValueError("ordinal needs 1 through 5, or -1 for the last weekday")
+        return self
+
 
 class RecurrenceFact(StrictModel):
+    """Semantic recurrence fact projected from an existing ItemFact."""
+
+    # Advertised output schema title. Renaming it moves tool_discovery_hash.
+    model_config = ConfigDict(extra="forbid", strict=True, title="PublicRecurrence")
+
     engine: Literal["rt1", "rt2"] = "rt1"
     kind: RecurrenceKind
     template_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
@@ -162,12 +181,12 @@ class RecurrenceFact(StrictModel):
     weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
     linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
     paused: bool | None = None
-    created_through: str | None = Field(default=None, max_length=10)
+    created_through: str | None = None
     generated_count: int | None = Field(default=None, ge=0)
-    completed_on: str | None = Field(default=None, max_length=10)
-    next_on: str | None = Field(default=None, max_length=10)
-    on: list[RepeatOnFact] = Field(default_factory=list, max_length=64)
-    until: str | None = Field(default=None, max_length=10)
+    completed_on: str | None = None
+    next_on: str | None = None
+    on: list[RepeatOn] = Field(default_factory=list, max_length=64)
+    until: str | None = None
     start_early_days: int | None = Field(default=None, ge=0, le=366)
     reminder_time: str | None = None
     adds_deadline: bool = False

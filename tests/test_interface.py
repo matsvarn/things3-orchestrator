@@ -6,9 +6,12 @@ from pydantic import ValidationError
 from things_orchestrator.interface import (
     BULK_ID_LIMIT,
     ReadCall,
+    RecurrenceFact,
+    RepeatOn,
     Result,
     dump_result,
 )
+from things_orchestrator.v2 import PublicItem, TaintedText
 
 
 def test_empty_read_means_today() -> None:
@@ -139,3 +142,36 @@ def test_dump_result_keeps_truncated_true() -> None:
     )
     payload = dump_result(result)
     assert payload["truncated"] is True
+
+
+def test_public_item_recurrence_is_the_internal_fact() -> None:
+    fact = RecurrenceFact(
+        kind="template",
+        mode="fixed",
+        unit="week",
+        interval=1,
+        weekdays=["monday"],
+    )
+    item = PublicItem(
+        id="task:repeat",
+        kind="task",
+        title=TaintedText(value="Plan week"),
+        status="open",
+        recurrence=fact,
+    )
+
+    assert item.recurrence is fact
+    assert RecurrenceFact.model_json_schema()["title"] == "PublicRecurrence"
+
+
+def test_recurrence_fact_keeps_weekday_and_selector_rules() -> None:
+    with pytest.raises(ValidationError, match="weekdays cannot contain duplicates"):
+        RecurrenceFact(kind="template", weekdays=["monday", "monday"])
+    with pytest.raises(ValidationError, match="linked_item_ids"):
+        RecurrenceFact(kind="template", linked_item_ids=["task:one", "task:one"])
+    with pytest.raises(ValidationError, match="linked_item_ids"):
+        RecurrenceFact(kind="template", linked_item_ids=["not-an-id"])
+    with pytest.raises(ValidationError, match="exactly one day or weekday"):
+        RecurrenceFact(kind="template", on=[RepeatOn()])
+    with pytest.raises(ValidationError, match="ordinal needs a weekday"):
+        RepeatOn(day=1, ordinal=1)
