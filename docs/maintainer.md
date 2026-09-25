@@ -18,8 +18,8 @@ Keep one production server and one stable model Interface.
   language is absent; only its durable journal recovery remains.
 - List and search pagination keeps read cursors only. It does not build legacy
   short-reference write contexts or persist a context database.
-- `consistency.py` owns native-state conflict detection for diagnostics
-  and review signals.
+- `consistency.py` owns native-state conflict detection for review
+  signals via `item_conflicts`.
 - `config.py` owns credentials, owner preferences, normalized MCP endpoints,
   and the exact plugin launcher binding.
 - `client_config.py` renders one client artifact from one endpoint and bearer.

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from things_orchestrator.consistency import diagnose, item_conflicts
+from datetime import date
+
+from things_orchestrator.consistency import item_conflicts
 from things_orchestrator.library import MemoryLibrary, Record
 
 
-def test_diagnose_finds_inbox_hybrids_and_tag_orphans() -> None:
+def test_item_conflicts_finds_inbox_hybrids() -> None:
     project = Record(uuid="home", kind="project", title="Home")
     hybrid = Record(
         uuid="stuck",
@@ -14,13 +16,7 @@ def test_diagnose_finds_inbox_hybrids_and_tag_orphans() -> None:
         parent_uuid=project.uuid,
     )
     library = MemoryLibrary([project, hybrid])
-    library.tags["child"] = "Child"
-    library.tag_parents["child"] = ["missing"]
 
-    conflicts = {row.item_id: row.signals for row in diagnose(library)}
-
-    assert "inbox_with_project" in conflicts["task:stuck"]
-    assert "dangling_tag_parent" in conflicts["tag:child"]
     assert item_conflicts(hybrid, library) == ["inbox_with_project"]
 
 
@@ -46,7 +42,7 @@ def test_trashed_heading_is_an_orphaned_heading_for_live_children() -> None:
     assert "orphaned_heading" in item_conflicts(child, library)
 
 
-def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None:
+def test_item_conflicts_covers_wrong_kinds_and_malformed_reminder() -> None:
     area = Record(uuid="home", kind="area", title="Home")
     heading = Record(uuid="loose-heading", kind="task", title="Loose", heading=True)
     wrong_parent = Record(
@@ -71,26 +67,19 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
         uuid="bad-remind",
         kind="task",
         title="Remind",
-        start=__import__("datetime").date(2026, 8, 20),
+        start=date(2026, 8, 20),
         remind="25:99",
     )
     library = MemoryLibrary(
         [area, heading, wrong_parent, wrong_area, no_project_heading, reminder]
     )
-    library.tags["self"] = "Self"
-    library.tag_parents["self"] = ["self"]
-    library.tags["a"] = "A"
-    library.tags["b"] = "B"
-    library.tag_parents["a"] = ["b"]
-    library.tag_parents["b"] = ["a"]
 
-    conflicts = {row.item_id: set(row.signals) for row in diagnose(library)}
+    assert "heading_entity_without_project" in item_conflicts(heading, library)
+    assert "parent_not_project" in item_conflicts(wrong_parent, library)
+    assert "area_not_area" in item_conflicts(wrong_area, library)
+    assert "heading_without_project" in item_conflicts(no_project_heading, library)
+    assert "malformed_reminder" in item_conflicts(reminder, library)
 
-    assert "heading_entity_without_project" in conflicts["heading:loose-heading"]
-    assert "parent_not_project" in conflicts["task:under-area"]
-    assert "area_not_area" in conflicts["task:area-is-project"]
-    assert "heading_without_project" in conflicts["task:headed"]
-    assert "malformed_reminder" in conflicts["task:bad-remind"]
     project_parent = Record(uuid="root-project", kind="project", title="Root")
     nested = Record(
         uuid="inner-project",
@@ -110,17 +99,13 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
         title="Misplaced area",
         parent_uuid=project_parent.uuid,
     )
-    kind_conflicts = {
-        row.item_id: set(row.signals)
-        for row in diagnose(
-            MemoryLibrary(
-                [area, project_parent, nested, area_on_area, area_on_project]
-            )
-        )
-    }
-    assert "project_with_project_parent" in kind_conflicts["project:inner-project"]
-    assert "area_with_area_home" in kind_conflicts["area:inner-area"]
-    assert "area_with_project_parent" in kind_conflicts["area:area-under-project"]
+    kind_library = MemoryLibrary(
+        [area, project_parent, nested, area_on_area, area_on_project]
+    )
+    assert "project_with_project_parent" in item_conflicts(nested, kind_library)
+    assert "area_with_area_home" in item_conflicts(area_on_area, kind_library)
+    assert "area_with_project_parent" in item_conflicts(area_on_project, kind_library)
+
     task = Record(uuid="loose-task", kind="task", title="Loose")
     area_parent_task = Record(
         uuid="area-under-task",
@@ -146,64 +131,24 @@ def test_diagnose_covers_wrong_kinds_malformed_reminder_and_tag_cycles() -> None
         title="Area home project",
         area_uuid=project_parent.uuid,
     )
-    more_rows = {
-        row.item_id: row
-        for row in diagnose(
-            MemoryLibrary(
-                [
-                    area,
-                    project_parent,
-                    task,
-                    area_parent_task,
-                    area_parent_area,
-                    area_home_task,
-                    area_home_project,
-                ]
-            )
-        )
-    }
-    more = {item_id: set(row.signals) for item_id, row in more_rows.items()}
-    assert "area_invalid_parent" in more["area:area-under-task"]
-    assert "area_invalid_parent" in more["area:area-under-area"]
-    assert "area_invalid_home" in more["area:area-home-task"]
-    assert "area_invalid_home" in more["area:area-home-project"]
-    assert more_rows["area:area-under-task"].repair_kind == "clear_area_parent"
-    assert more_rows["area:area-home-project"].repair_kind == "clear_area_home"
-    assert more_rows["area:area-under-task"].repair == "clear the invalid Area parent"
-    assert more_rows["area:area-home-project"].repair == "clear the invalid Area home"
-    assert "tag_parent_self_reference" in conflicts["tag:self"]
-    assert "tag_parent_cycle" in conflicts["tag:a"]
-    assert any(row.repair for row in diagnose(library))
-
-
-def test_diagnose_labels_probe_residue_for_one_commit_trash() -> None:
-    leftover = Record(
-        uuid="probe",
-        kind="task",
-        title="__TO_PROBE__20260819 leftover",
+    more_library = MemoryLibrary(
+        [
+            area,
+            project_parent,
+            task,
+            area_parent_task,
+            area_parent_area,
+            area_home_task,
+            area_home_project,
+        ]
     )
-    scoped = Record(
-        uuid="scoped",
-        kind="task",
-        title="Things Orchestrator scoped task A",
-    )
-    ordinary = Record(uuid="real", kind="task", title="Buy milk")
-    conflicts = {
-        row.item_id: row
-        for row in diagnose(MemoryLibrary([leftover, scoped, ordinary]))
-    }
-
-    assert "test_residue" in conflicts["task:probe"].signals
-    assert conflicts["task:probe"].repair_kind == "trash_item"
-    assert "test_residue" in conflicts["task:scoped"].signals
-    assert "task:real" not in conflicts
-    leftover.trashed = True
-    after_trash = {row.item_id: row for row in diagnose(MemoryLibrary([leftover, scoped]))}
-    assert "task:probe" not in after_trash
-    assert "test_residue" in after_trash["task:scoped"].signals
+    assert "area_invalid_parent" in item_conflicts(area_parent_task, more_library)
+    assert "area_invalid_parent" in item_conflicts(area_parent_area, more_library)
+    assert "area_invalid_home" in item_conflicts(area_home_task, more_library)
+    assert "area_invalid_home" in item_conflicts(area_home_project, more_library)
 
 
-def test_diagnose_uses_kind_aware_repairs_for_missing_and_trashed_relations() -> None:
+def test_item_conflicts_kind_aware_missing_and_trashed_relations() -> None:
     task = Record(uuid="loose", kind="task", title="Loose")
     project = Record(uuid="launch", kind="project", title="Launch", trashed=True)
     area = Record(uuid="home", kind="area", title="Home", trashed=True)
@@ -237,35 +182,23 @@ def test_diagnose_uses_kind_aware_repairs_for_missing_and_trashed_relations() ->
         title="Missing parent",
         parent_uuid="gone-project",
     )
-    rows = {
-        row.item_id: row
-        for row in diagnose(
-            MemoryLibrary(
-                [
-                    task,
-                    project,
-                    area,
-                    area_missing_parent,
-                    area_missing_home,
-                    area_trashed_parent,
-                    area_trashed_home,
-                    project_missing_parent,
-                ]
-            )
-        )
-    }
-
-    assert rows["area:area-missing-parent"].signals == ("area_missing_parent",)
-    assert rows["area:area-missing-parent"].repair_kind == "clear_area_parent"
-    assert rows["area:area-missing-home"].signals == ("area_missing_home",)
-    assert rows["area:area-missing-home"].repair_kind == "clear_area_home"
-    assert rows["area:area-trashed-parent"].signals == ("area_with_project_parent",)
-    assert rows["area:area-trashed-parent"].repair_kind == "clear_area_parent"
-    assert "trashed_parent" not in rows["area:area-trashed-parent"].signals
-    assert rows["area:area-trashed-home"].signals == ("area_with_area_home",)
-    assert rows["area:area-trashed-home"].repair_kind == "clear_area_home"
-    assert "trashed_area" not in rows["area:area-trashed-home"].signals
-    assert rows["project:project-missing-parent"].signals == (
-        "project_missing_parent",
+    library = MemoryLibrary(
+        [
+            task,
+            project,
+            area,
+            area_missing_parent,
+            area_missing_home,
+            area_trashed_parent,
+            area_trashed_home,
+            project_missing_parent,
+        ]
     )
-    assert rows["project:project-missing-parent"].repair_kind == "rehome_project"
+
+    assert item_conflicts(area_missing_parent, library) == ["area_missing_parent"]
+    assert item_conflicts(area_missing_home, library) == ["area_missing_home"]
+    assert item_conflicts(area_trashed_parent, library) == ["area_with_project_parent"]
+    assert "trashed_parent" not in item_conflicts(area_trashed_parent, library)
+    assert item_conflicts(area_trashed_home, library) == ["area_with_area_home"]
+    assert "trashed_area" not in item_conflicts(area_trashed_home, library)
+    assert item_conflicts(project_missing_parent, library) == ["project_missing_parent"]
