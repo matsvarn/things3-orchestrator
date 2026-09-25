@@ -1,76 +1,10 @@
-"""Account-wide Things consistency checks behind one diagnose() call."""
+"""Native-state conflict detection for one Things record."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import time
 
 from .library import MemoryLibrary, Record, template_uuid_of
-
-_REPAIR = {
-    "inbox_with_project": ("repeat the current Project placement", "repeat_placement"),
-    "inbox_with_area": ("repeat the current Area placement", "repeat_placement"),
-    "both_project_and_area": (
-        "ask the owner whether the Project or Area is home",
-        "owner_choice",
-    ),
-    "inbox_with_schedule": ("clear Inbox or clear the schedule", "clear_inbox_or_schedule"),
-    "someday_with_start": ("clear Someday or clear the start date", "clear_someday_or_start"),
-    "someday_with_evening": ("clear Someday or clear Evening", "clear_someday_or_evening"),
-    "reminder_without_schedule": ("clear the reminder or set a start date", "clear_reminder"),
-    "malformed_reminder": ("clear remind_at or set a valid clock time", "clear_reminder"),
-    "orphaned_heading": ("clear heading_id", "clear_heading"),
-    "heading_wrong_project": ("clear heading_id or move the heading", "clear_heading"),
-    "heading_without_project": (
-        "clear heading_id or place the Task in a Project",
-        "clear_heading",
-    ),
-    "heading_entity_without_project": ("place the heading in a Project", "rehome_heading"),
-    "missing_parent": ("place the item in an active Project", "rehome_item"),
-    "trashed_parent": ("restore the parent or move the child", "restore_or_move_child"),
-    "parent_not_project": ("place the item under a Project", "rehome_item"),
-    "area_invalid_parent": ("clear the invalid Area parent", "clear_area_parent"),
-    "area_missing_parent": ("clear the invalid Area parent", "clear_area_parent"),
-    "project_missing_parent": (
-        "move the Project to an Area or to root Anytime",
-        "rehome_project",
-    ),
-    "project_invalid_parent": (
-        "move the Project to an Area or to root Anytime",
-        "rehome_project",
-    ),
-    "missing_area": (
-        "place the item in an active Area or clear the Area home",
-        "rehome_or_clear_area",
-    ),
-    "trashed_area": ("restore the Area or move the child", "restore_or_move_child"),
-    "area_not_area": ("clear the Area home or choose an Area", "rehome_or_clear_area"),
-    "area_invalid_home": ("clear the invalid Area home", "clear_area_home"),
-    "area_missing_home": ("clear the invalid Area home", "clear_area_home"),
-    "missing_repeat_template": ("inspect recurrence before changing it", "inspect_recurrence"),
-    "malformed_repeat": ("inspect recurrence before changing it", "inspect_recurrence"),
-    "dangling_tag_parent": ("clear or repair the tag parent", "clear_or_repair_tag_parent"),
-    "tag_parent_self_reference": ("clear the tag parent", "clear_tag_parent"),
-    "tag_parent_cycle": ("clear the cyclic tag parent", "clear_tag_parent"),
-    "project_with_project_parent": (
-        "move the Project to an Area or to root Anytime",
-        "rehome_project",
-    ),
-    "area_with_area_home": ("clear the nested Area home", "clear_area_home"),
-    "area_with_project_parent": ("clear the Area parent", "clear_area_parent"),
-    "test_residue": ("trash this harness leftover", "trash_item"),
-}
-_TEST_RESIDUE_PREFIXES = ("__TO_PROBE__", "Things Orchestrator scoped")
-
-
-@dataclass(frozen=True)
-class Conflict:
-    """One record whose stored state cannot be a valid native Things item."""
-
-    item_id: str
-    signals: tuple[str, ...]
-    repair: str | None = None
-    repair_kind: str | None = None
 
 
 def remind_is_valid(value: str) -> bool:
@@ -82,18 +16,6 @@ def remind_is_valid(value: str) -> bool:
     except (TypeError, ValueError):
         return False
     return True
-
-
-def diagnose(library: MemoryLibrary) -> list[Conflict]:
-    """Return every record with a native-state contradiction, once each."""
-
-    found: list[Conflict] = []
-    for item in sorted(library.records.values(), key=lambda row: row.id):
-        signals = item_conflicts(item, library)
-        if signals:
-            found.append(_conflict(item.id, signals))
-    found.extend(_tag_conflicts(library))
-    return found
 
 
 def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
@@ -155,10 +77,6 @@ def item_conflicts(item: Record, library: MemoryLibrary) -> list[str]:
         signals.append("malformed_repeat")
     if item.recurrence.role == "instance" and item.recurrence.repeat_type == "unknown":
         signals.append("malformed_repeat")
-    if not item.trashed and any(
-        item.title.startswith(prefix) for prefix in _TEST_RESIDUE_PREFIXES
-    ):
-        signals.append("test_residue")
     return signals
 
 
@@ -198,92 +116,3 @@ def _area_home_conflict(item: Record, area: Record | None) -> str | None:
     if area.trashed and not item.trashed:
         return "trashed_area"
     return None
-
-
-def _conflict(item_id: str, signals: list[str]) -> Conflict:
-    hints = [_REPAIR[name][0] for name in signals if name in _REPAIR]
-    kinds = [_REPAIR[name][1] for name in signals if name in _REPAIR]
-    return Conflict(
-        item_id=item_id,
-        signals=tuple(signals),
-        repair=_legacy_repair(hints),
-        repair_kind=kinds[0] if len(kinds) == 1 else None,
-    )
-
-
-def _legacy_repair(hints: list[str]) -> str | None:
-    """Keep singular prose only when it fits."""
-
-    text = "; ".join(dict.fromkeys(hints))
-    if not text or len(text) > 400:
-        return None
-    return text
-
-
-def _tag_conflicts(library: MemoryLibrary) -> list[Conflict]:
-    cyclic = _cyclic_tags(library.tag_parents)
-    found: list[Conflict] = []
-    for uuid, parents in sorted(library.tag_parents.items()):
-        if uuid not in library.tags:
-            continue
-        signals: list[str] = []
-        if uuid in parents:
-            signals.append("tag_parent_self_reference")
-        if any(parent not in library.tags for parent in parents):
-            signals.append("dangling_tag_parent")
-        if uuid in cyclic:
-            signals.append("tag_parent_cycle")
-        if signals:
-            found.append(_conflict(f"tag:{uuid}", signals))
-    return found
-
-
-def _cyclic_tags(parents: dict[str, list[str]]) -> set[str]:
-    """Return every tag that participates in a parent cycle."""
-
-    nodes = set(parents)
-    reverse: dict[str, list[str]] = {node: [] for node in nodes}
-    for node, links in parents.items():
-        for parent in links:
-            if parent in reverse:
-                reverse[parent].append(node)
-
-    def postorder(graph: dict[str, list[str]]) -> list[str]:
-        seen: set[str] = set()
-        order: list[str] = []
-        for start in sorted(nodes):
-            if start in seen:
-                continue
-            stack: list[tuple[str, bool]] = [(start, False)]
-            while stack:
-                node, finished = stack.pop()
-                if finished:
-                    order.append(node)
-                    continue
-                if node in seen:
-                    continue
-                seen.add(node)
-                stack.append((node, True))
-                for nxt in reversed(graph.get(node, [])):
-                    if nxt not in seen and nxt in nodes:
-                        stack.append((nxt, False))
-        return order
-
-    cyclic: set[str] = set()
-    seen: set[str] = set()
-    for start in reversed(postorder(parents)):
-        if start in seen:
-            continue
-        component: list[str] = []
-        stack = [start]
-        seen.add(start)
-        while stack:
-            node = stack.pop()
-            component.append(node)
-            for nxt in reverse.get(node, []):
-                if nxt not in seen:
-                    seen.add(nxt)
-                    stack.append(nxt)
-        if len(component) > 1 or start in parents.get(start, []):
-            cyclic.update(component)
-    return cyclic
