@@ -90,8 +90,8 @@ first useful write is a separate event and must have a receipt and Cloud
 read-back evidence.
 
 Human dogfood records belong in `docs/dogfood.md`. Automated tests, synthetic
-model replays, the live acceptance runner, and the website simulation do not
-count as human activation evidence.
+model replays, and the live acceptance runner do not count as human activation
+evidence.
 
 ## Claim discipline
 

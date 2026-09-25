@@ -26,7 +26,6 @@ docs/owner.md
 docs/recovery.md
 docs/research/comparison.md
 docs/research/things3-cloud.md
-docs/research/weekly-review-best-practice.md
 docs/routine-examples.md
 docs/routines.md
 docs/trust.md
