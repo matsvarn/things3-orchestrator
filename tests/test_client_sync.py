@@ -25,11 +25,12 @@ from things_orchestrator.client_sync import (
     MAX_BUNDLE_BYTES,
     PENDING_NAME,
     ClientSyncError,
+    _catalog_refresh_action,
     fetch_client_bundle,
     resolve_client_token,
     run_client_sync,
 )
-from things_orchestrator.config import ConfigError, McpBearer, normalize_mcp_url
+from things_orchestrator.config import ConfigError, McpBearer, McpUrl, normalize_mcp_url
 from things_orchestrator.tools import (
     advertised_tools,
     content_sha256,
@@ -318,6 +319,19 @@ def test_observed_tools_stale_and_unknown_cache(tmp_path: Path) -> None:
         discover=lambda _url, _bearer: tools,
     )
     assert unknown.client_cache["status"] == "unknown"
+
+
+def test_catalog_refresh_treats_folded_and_trailing_dot_loopback_as_local() -> None:
+    session = "Reconnect the HTTP MCP session so the client repeats tools/list."
+    connector = "Reconnect the HTTP MCP connector so the client repeats tools/list"
+    assert session in _catalog_refresh_action(normalize_mcp_url("http://127.0.0.1:8787"))
+    assert session in _catalog_refresh_action(normalize_mcp_url("http://localhost:8787"))
+    assert session in _catalog_refresh_action(McpUrl("http://LocalHost:8787"))
+    assert session in _catalog_refresh_action(McpUrl("http://localhost.:8787"))
+    assert connector in _catalog_refresh_action(URL)
+    assert connector in _catalog_refresh_action(
+        normalize_mcp_url("https://127.0.0.1:8787")
+    )
 
 
 def test_fresh_connection_read_failure_is_not_activation_success(tmp_path: Path) -> None:

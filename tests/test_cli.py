@@ -15,6 +15,7 @@ import pytest
 
 from things_orchestrator.cli import (
     _legacy_resolution_command,
+    _owner_factor,
     _private_tty,
     _routine_secret_tty,
     _server,
@@ -979,6 +980,29 @@ def test_doctor_warns_for_utc_when_saved_endpoint_is_hosted(
     assert "UTC is unusual for a hosted owner account" in capsys.readouterr().out
 
 
+def test_doctor_does_not_treat_default_loopback_as_hosted_utc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = _seed_credentials(tmp_path, timezone="UTC")
+    _seed_preferences(tmp_path, timezone="UTC")
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
+    )
+
+    async def healthy(
+        targets: list[object], *_args: object, **_kwargs: object
+    ) -> object:
+        return _doctor_report(targets)
+
+    monkeypatch.setattr("things_orchestrator.cli.run_doctor", healthy)
+    main(["doctor"])
+
+    assert "UTC is unusual for a hosted owner account" not in capsys.readouterr().out
+
+
 def test_service_install_dry_run_prints_effects_and_doctor_last(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1478,6 +1502,7 @@ def test_legacy_resolution_renders_before_reading_passphrase(
 
     def getpass_after_render(_prompt: str, *, stream: object) -> str:
         assert stream is not None
+        assert _prompt == "Legacy-recovery passphrase: "
         rendered = capsys.readouterr().out
         assert "legacy_plan |" in rendered
         assert (
@@ -1491,6 +1516,36 @@ def test_legacy_resolution_renders_before_reading_passphrase(
         lambda *_args, **_kwargs: object(),
     )
     _legacy_resolution_command(build_parser(), "legacy", "accepted_as_is")
+
+
+def test_owner_factor_prompts_use_owner_factor_wording(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompts: list[str] = []
+
+    @contextmanager
+    def tty(_parser: object) -> object:
+        yield object()
+
+    def fake_getpass(prompt: str, *, stream: object) -> str:
+        del stream
+        prompts.append(prompt)
+        return "correct horse battery staple"
+
+    monkeypatch.setattr("things_orchestrator.cli._private_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli.getpass", fake_getpass)
+    monkeypatch.setattr(
+        "things_orchestrator.owner_authority.enroll_owner_factor",
+        lambda _passphrase: tmp_path / "owner-factor.json",
+    )
+    _owner_factor(build_parser())
+    assert prompts == [
+        "New owner-factor passphrase: ",
+        "Confirm owner-factor passphrase: ",
+    ]
+    assert "owner-factor.json" in capsys.readouterr().out
 
 
 def test_login_password_confirm_mismatch(

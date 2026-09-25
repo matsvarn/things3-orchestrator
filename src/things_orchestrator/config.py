@@ -140,6 +140,20 @@ def _valid_network_host(host: str) -> bool:
     return True
 
 
+def loopback_mcp_url() -> McpUrl:
+    return McpUrl("http://127.0.0.1:8787")
+
+
+def is_loopback_http(url: McpUrl) -> bool:
+    parsed = urlsplit(url.origin)
+    host = parsed.hostname
+    return (
+        parsed.scheme == "http"
+        and host is not None
+        and host.casefold().removesuffix(".") in _LOOPBACK_HOSTS
+    )
+
+
 def load_credentials(*, path: Path | None = None) -> Credentials:
     target = path or credentials_path()
     try:
@@ -269,7 +283,7 @@ def select_login_mcp_url(
 ) -> McpUrl:
     if explicit.strip():
         return normalize_mcp_url(explicit)
-    return saved or legacy or normalize_mcp_url("http://127.0.0.1:8787")
+    return saved or legacy or loopback_mcp_url()
 
 
 def save_preferences(

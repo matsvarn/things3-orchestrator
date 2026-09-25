@@ -13,7 +13,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation, Tool
 
-from .config import McpBearer, McpUrl
+from .config import McpBearer, McpUrl, is_loopback_http
 from .deployment import (
     DeploymentIdentity,
     installed_identity,
@@ -110,7 +110,11 @@ def validate_target(
 
 async def probe_target(url: McpUrl, bearer: McpBearer) -> TargetReceipt:
     try:
-        async with httpx2.AsyncClient(timeout=5.0) as public_client:
+        async with httpx2.AsyncClient(
+            timeout=5.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as public_client:
             public_response = await public_client.get(url.health)
             public_response.raise_for_status()
             public_payload = public_response.json()
@@ -165,7 +169,7 @@ async def run_doctor(
     identity = installed_identity()
     receipts: list[TargetReceipt] = []
     for target in targets:
-        deadline = time.monotonic() + 15 if wait and _is_loopback(target) else 0
+        deadline = time.monotonic() + 15 if wait and is_loopback_http(target) else 0
         while True:
             try:
                 receipt = await probe(target, bearer)
@@ -188,7 +192,3 @@ def curl_tool_count_command(url: McpUrl) -> str:
         "--data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}' "
         "| sed -n 's/^data: //p' | jq '.result.tools | length'"
     )
-
-
-def _is_loopback(url: McpUrl) -> bool:
-    return url.origin.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:"))

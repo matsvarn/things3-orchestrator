@@ -24,7 +24,7 @@ from .config import (
     credentials_path,
     load_credentials,
     load_preferences,
-    normalize_mcp_url,
+    loopback_mcp_url,
 )
 from .deployment import (
     DeploymentIdentity,
@@ -66,7 +66,6 @@ RoutineWorkerLiveness = Literal[
 
 _TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
-_ROUTINE_HEALTH_URL = "http://127.0.0.1:8787/health"
 
 
 class DiagnosticLibrary(Protocol):
@@ -273,7 +272,7 @@ def probe_routine_runtime(
     if not bearer or not 0 < timeout_seconds <= 5:
         return None
     request = Request(
-        _ROUTINE_HEALTH_URL,
+        loopback_mcp_url().health,
         headers={"Authorization": f"Bearer {bearer}"},
     )
     opener = _opener or proxyless_no_redirect_opener()
@@ -435,7 +434,7 @@ def _endpoint_class(credentials_file: Path) -> EndpointClass | None:
     try:
         endpoint = load_preferences(
             path=credentials_file.with_name("preferences.json"),
-        ).mcp_url or normalize_mcp_url("http://127.0.0.1:8787")
+        ).mcp_url or loopback_mcp_url()
     except ConfigError:
         return None
     return classify_endpoint(endpoint)
