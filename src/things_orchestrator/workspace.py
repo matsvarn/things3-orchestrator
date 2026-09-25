@@ -24,7 +24,7 @@ from .interface import (
     ReadCall,
     RecurrenceFact,
     RecurrenceKind,
-    RepeatOnFact,
+    RepeatOn,
     Result,
     TagFact,
     TruncatedField,
@@ -140,11 +140,11 @@ def _repeat_offsets(
     return offsets
 
 
-def _public_repeat_on(rule: RecurrenceState) -> list[RepeatOnFact]:
+def _public_repeat_on(rule: RecurrenceState) -> list[RepeatOn]:
     raw_offsets = rule.rule.get("of") if rule.rule is not None else None
     if not isinstance(raw_offsets, list):
         return []
-    values: list[RepeatOnFact] = []
+    values: list[RepeatOn] = []
     for raw in raw_offsets:
         if not isinstance(raw, dict):
             continue
@@ -152,7 +152,7 @@ def _public_repeat_on(rule: RecurrenceState) -> list[RepeatOnFact]:
         day = raw.get("dy")
         weekday = raw.get("wd")
         ordinal = raw.get("wdo")
-        fact = _safe_repeat_on_fact(
+        fact = _safe_repeat_on(
             month=month,
             day=day,
             weekday=weekday,
@@ -163,9 +163,9 @@ def _public_repeat_on(rule: RecurrenceState) -> list[RepeatOnFact]:
     return values
 
 
-def _safe_repeat_on_fact(
+def _safe_repeat_on(
     *, month: object, day: object, weekday: object, ordinal: object
-) -> RepeatOnFact | None:
+) -> RepeatOn | None:
     """Translate one native zero-based selector without trusting persisted data."""
     if isinstance(month, bool) or (
         month is not None and (not isinstance(month, int) or not 0 <= month <= 11)
@@ -189,7 +189,7 @@ def _safe_repeat_on_fact(
         return None
     if ordinal is not None and weekday is None:
         return None
-    return RepeatOnFact(
+    return RepeatOn(
         month=month + 1 if isinstance(month, int) else None,
         day=-1 if day == -1 else day + 1 if isinstance(day, int) else None,
         weekday=(
@@ -258,7 +258,7 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
         and 1 <= raw_interval <= 366
         else None
     )
-    semantic_on: list[RepeatOnFact] = []
+    semantic_on: list[RepeatOn] = []
     offsets = raw.get("po")
     if mode == "fixed" and isinstance(offsets, list):
         for offset in offsets:
@@ -268,7 +268,7 @@ def _rt2_fact(item: Record) -> RecurrenceFact | None:
             day = offset.get("d")
             weekday = offset.get("wd")
             ordinal = offset.get("wo")
-            fact = _safe_repeat_on_fact(
+            fact = _safe_repeat_on(
                 month=month,
                 day=day,
                 weekday=weekday,

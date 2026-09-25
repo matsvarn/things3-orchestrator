@@ -13,7 +13,14 @@ from typing import Annotated, Any, Literal, Self, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .interface import ReadCall, StrictModel, TruncatedField, Weekday
+from .interface import (
+    ReadCall,
+    RecurrenceFact,
+    RepeatOn,
+    StrictModel,
+    TruncatedField,
+    Weekday,
+)
 from .journal import AmbiguousV2Request, same_account_id
 from .tools import ITEM_ID
 
@@ -137,27 +144,6 @@ class TaintedText(StrictModel):
     trust: Literal["untrusted"] = "untrusted"
 
 
-class RepeatOn(StrictModel):
-    """One semantic selected date in a regular repeat pattern."""
-
-    month: int | None = Field(default=None, ge=1, le=12)
-    day: int | None = None
-    weekday: Weekday | None = None
-    ordinal: int | None = None
-
-    @model_validator(mode="after")
-    def coherent_selector(self) -> Self:
-        if (self.day is None) == (self.weekday is None):
-            raise ValueError("on needs exactly one day or weekday")
-        if self.day is not None and self.day not in {-1, *range(1, 32)}:
-            raise ValueError("day needs 1 through 31, or -1 for the last day")
-        if self.weekday is None and self.ordinal is not None:
-            raise ValueError("ordinal needs a weekday")
-        if self.weekday is not None and self.ordinal not in {None, -1, 1, 2, 3, 4, 5}:
-            raise ValueError("ordinal needs 1 through 5, or -1 for the last weekday")
-        return self
-
-
 class RepeatCreate(StrictModel):
     """Complete semantic repeat rule for a newly captured Task or Project."""
 
@@ -246,47 +232,6 @@ class RepeatEdit(StrictModel):
         return self
 
 
-class PublicRecurrence(StrictModel):
-    """Semantic recurrence fact projected from an existing ItemFact."""
-
-    kind: Literal[
-        "none", "fixed_instance", "after_completion_instance", "template", "unknown"
-    ]
-    engine: Literal["rt1", "rt2"] = "rt1"
-    template_id: str | None = Field(default=None, pattern=ITEM_ID, max_length=512)
-    mode: Literal["fixed", "after_completion"] | None = None
-    unit: Literal["day", "week", "month", "year"] | None = None
-    interval: int | None = Field(default=None, ge=1, le=366)
-    weekdays: list[Weekday] = Field(default_factory=list, max_length=7)
-    linked_item_ids: list[str] = Field(default_factory=list, max_length=40)
-    paused: bool | None = None
-    created_through: str | None = None
-    generated_count: int | None = Field(default=None, ge=0)
-    completed_on: str | None = None
-    next_on: str | None = None
-    on: list[RepeatOn] = Field(default_factory=list, max_length=64)
-    until: str | None = None
-    start_early_days: int | None = Field(default=None, ge=0, le=366)
-    reminder_time: str | None = None
-    adds_deadline: bool = False
-
-    @field_validator("weekdays")
-    @classmethod
-    def unique_weekdays(cls, value: list[Weekday]) -> list[Weekday]:
-        if len(value) != len(set(value)):
-            raise ValueError("weekdays cannot contain duplicates")
-        return value
-
-    @field_validator("linked_item_ids")
-    @classmethod
-    def valid_linked_items(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)) or any(
-            re.fullmatch(ITEM_ID, item) is None for item in value
-        ):
-            raise ValueError("linked_item_ids need unique exact item IDs")
-        return value
-
-
 class PublicChecklistRow(StrictModel):
     id: str
     title: TaintedText
@@ -308,7 +253,7 @@ class PublicItem(StrictModel):
     direct_tag_ids: list[str] = Field(default_factory=list, max_length=40)
     inherited_tag_ids: list[str] = Field(default_factory=list, max_length=40)
     truncated_fields: list[TruncatedField] = Field(default_factory=list, max_length=4)
-    recurrence: PublicRecurrence | None = None
+    recurrence: RecurrenceFact | None = None
 
 
 class PublicTag(StrictModel):
@@ -1261,11 +1206,7 @@ class ThingsV2:
             direct_tag_ids=list(item.direct_tag_ids),
             inherited_tag_ids=list(item.inherited_tag_ids),
             truncated_fields=list(item.truncated_fields),
-            recurrence=(
-                PublicRecurrence.model_validate(item.recurrence.model_dump())
-                if item.recurrence is not None
-                else None
-            ),
+            recurrence=item.recurrence,
         )
 
 
