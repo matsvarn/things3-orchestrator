@@ -905,7 +905,6 @@ def _workspace(
         journal=journal,
         clock=clock,
         account_id=email,
-        preferences=load_preferences,
     )
 
 

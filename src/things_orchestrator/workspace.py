@@ -13,7 +13,6 @@ from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
 
 from .cloud import CloudError, CloudWriteRejected
-from .config import Preferences
 from .consistency import item_conflicts
 from .interface import (
     BULK_ID_LIMIT,
@@ -382,13 +381,11 @@ class ThingsWorkspace:
         journal: Journal | None = None,
         clock: Callable[[], datetime] | None = None,
         account_id: str | None = None,
-        preferences: Callable[[], Preferences] | None = None,
     ) -> None:
         self._library = library
         self._journal = journal or MemoryJournal()
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._account_id = account_id or f"workspace:{token_urlsafe(18)}"
-        self._preferences = preferences or Preferences
         self._cursors: dict[str, _ItemCursor] = {}
         self._tag_cursors: dict[str, _TagCursor] = {}
         self._detail_cursors: dict[str, _DetailCursor] = {}
