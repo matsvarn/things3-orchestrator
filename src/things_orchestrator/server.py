@@ -31,7 +31,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from .client_bundle import encode_client_bundle
+from .client_bundle import encode_client_bundle, parse_client_bundle
 from .deployment import health_payload, package_version
 from .tools import (
     CLIENT_BUNDLE_PATH,
@@ -75,6 +75,12 @@ RoutineLifecycleFactory = Callable[[], RoutineLifecycle]
 
 
 @dataclass(frozen=True, slots=True)
+class _EncodedClientBundle:
+    raw: bytes
+    checksum: str
+
+
+@dataclass(frozen=True, slots=True)
 class RoutineHTTPComposition:
     factory: RoutineLifecycleFactory | None = None
 
@@ -105,7 +111,7 @@ class ThingsMCPServer:
         self._interface = workspace if isinstance(workspace, ThingsV2) else ThingsV2(workspace)
         self._lock = anyio.Lock()
         self._routines = routines or RoutineHTTPComposition.disabled()
-        self._client_bundle_bytes: bytes | None = None
+        self._client_bundle_cache: _EncodedClientBundle | None = None
         self._tools_only_server: Server[object] = Server(
             name=self.name,
             version=package_version(),
@@ -117,9 +123,18 @@ class ThingsMCPServer:
         return [tool.model_copy(deep=True) for tool in _TOOLS]
 
     def _client_bundle(self) -> bytes:
-        if self._client_bundle_bytes is None:
-            self._client_bundle_bytes = encode_client_bundle()
-        return self._client_bundle_bytes
+        return self._encoded_client_bundle().raw
+
+    def _encoded_client_bundle(self) -> _EncodedClientBundle:
+        cached = self._client_bundle_cache
+        if cached is None:
+            raw = encode_client_bundle()
+            cached = _EncodedClientBundle(
+                raw=raw,
+                checksum=parse_client_bundle(raw).bundle_checksum,
+            )
+            self._client_bundle_cache = cached
+        return cached
 
     def _dispatch(self, name: str, arguments: dict[str, Any] | BaseModel) -> PublicResult:
         return self._interface.dispatch(name, arguments)
@@ -226,7 +241,7 @@ class ThingsMCPServer:
             payload = health_payload(authenticated=True)
             client_bundle = payload["client_bundle"]
             assert isinstance(client_bundle, dict)
-            client_bundle["bundle_checksum"] = json.loads(self._client_bundle())["bundle_checksum"]
+            client_bundle["bundle_checksum"] = self._encoded_client_bundle().checksum
             payload["routines"] = (
                 active_routine.snapshot()
                 if active_routine is not None

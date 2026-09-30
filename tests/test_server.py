@@ -3,10 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from jsonschema import validate
 from mcp.types import TextContent, ToolAnnotations
 from starlette.testclient import TestClient
 
+from things_orchestrator.client_bundle import (
+    ClientBundle,
+    encode_client_bundle,
+    parse_client_bundle,
+)
 from things_orchestrator.library import MemoryLibrary, Record
 from things_orchestrator.server import ThingsMCPServer, bearer_matches
 from things_orchestrator.tools import CLIENT_BUNDLE_FORMAT_VERSION
@@ -161,10 +167,9 @@ def test_health_is_public_liveness_and_authenticated_deployment_detail() -> None
 
 
 def test_client_bundle_is_authenticated_and_absent_from_public_health() -> None:
-    from things_orchestrator.client_bundle import encode_client_bundle
-
     app = _server().build_http_app(token="secret")
     expected = encode_client_bundle()
+    expected_checksum = parse_client_bundle(expected).bundle_checksum
 
     with TestClient(app) as client:
         public_health = client.get("/health")
@@ -182,7 +187,50 @@ def test_client_bundle_is_authenticated_and_absent_from_public_health() -> None:
     assert rejected.status_code == 401
     assert authenticated.status_code == 200
     assert authenticated.content == expected
-    assert detailed_health.json()["client_bundle"]["bundle_checksum"] == authenticated.json()["bundle_checksum"]
+    assert detailed_health.json()["client_bundle"]["bundle_checksum"] == expected_checksum
+    assert authenticated.json()["bundle_checksum"] == expected_checksum
+
+
+def test_authenticated_health_parses_client_bundle_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from things_orchestrator import server as server_mod
+
+    raw = encode_client_bundle()
+    expected = parse_client_bundle(raw)
+    encodes = 0
+    parses = 0
+
+    def encode_once() -> bytes:
+        nonlocal encodes
+        encodes += 1
+        return raw
+
+    def parse_once(payload: bytes) -> ClientBundle:
+        nonlocal parses
+        parses += 1
+        return parse_client_bundle(payload)
+
+    monkeypatch.setattr(server_mod, "encode_client_bundle", encode_once)
+    monkeypatch.setattr(server_mod, "parse_client_bundle", parse_once)
+
+    app = _server().build_http_app(token="secret")
+    with TestClient(app) as client:
+        public = client.get("/health")
+        rejected = client.get("/health", headers={"Authorization": "Bearer wrong"})
+        assert public.json() == {"ok": True}
+        assert rejected.status_code == 401
+        assert encodes == 0
+        assert parses == 0
+        first = client.get("/health", headers={"Authorization": "Bearer secret"})
+        second = client.get("/health", headers={"Authorization": "Bearer secret"})
+        bundle = client.get("/client/bundle", headers={"Authorization": "Bearer secret"})
+
+    assert first.json()["client_bundle"]["bundle_checksum"] == expected.bundle_checksum
+    assert second.json()["client_bundle"]["bundle_checksum"] == expected.bundle_checksum
+    assert bundle.content == raw
+    assert encodes == 1
+    assert parses == 1
 
 
 def test_public_result_schema_contains_no_private_operation_controls() -> None:
