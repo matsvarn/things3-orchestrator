@@ -18,10 +18,16 @@ from things_orchestrator.cli import (
     _private_tty,
     _routine_secret_tty,
     _server,
+    _workspace,
     build_parser,
     main,
 )
-from things_orchestrator.config import ConfigError, Credentials, McpBearer
+from things_orchestrator.config import (
+    ConfigError,
+    Credentials,
+    McpBearer,
+    save_preferences,
+)
 from things_orchestrator.doctor import DoctorFailure
 from things_orchestrator.journal import SQLiteJournal, V2Operation, _json
 from things_orchestrator.library import MemoryLibrary, Record
@@ -172,21 +178,18 @@ def _seed_credentials(
     tmp_path: Path,
     *,
     token: str = "keep-me",
-    timezone: str = "Europe/Berlin",
+    timezone: str | None = "Europe/Berlin",
     password: str = "secret",
 ) -> Path:
+    payload: dict[str, object] = {
+        "email": "user@example.com",
+        "password": password,
+        "mcp_token": token,
+    }
+    if timezone is not None:
+        payload["timezone"] = timezone
     creds = tmp_path / "credentials.json"
-    creds.write_text(
-        json.dumps(
-            {
-                "email": "user@example.com",
-                "password": password,
-                "mcp_token": token,
-                "timezone": timezone,
-            }
-        )
-        + "\n"
-    )
+    creds.write_text(json.dumps(payload) + "\n")
     return creds
 
 
@@ -803,6 +806,21 @@ def test_doctor_without_credentials_points_at_login(
     assert "uv run things-orchestrator login" in capsys.readouterr().err
 
 
+def test_doctor_fail_closes_without_owner_timezone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    creds = _seed_credentials(tmp_path, timezone=None)
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+
+    with pytest.raises(SystemExit) as caught:
+        main(["doctor"])
+
+    assert caught.value.code == 1
+    out = capsys.readouterr().out
+    assert "credentials: ok" in out
+    assert "timezone: missing - run login --timezone Europe/Berlin" in out
+
+
 def test_doctor_reports_corrupt_preferences_without_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1198,6 +1216,7 @@ def test_server_reads_without_creating_a_legacy_context_database(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    save_preferences(timezone="Europe/Berlin")
     account_journal = tmp_path / "journal-accountdigest.sqlite3"
     monkeypatch.setattr(
         "things_orchestrator.cli.journal_path", lambda email: account_journal
@@ -1217,6 +1236,38 @@ def test_server_reads_without_creating_a_legacy_context_database(
     assert result.structured_content["items"][0]["id"] == "task:inbox-task"
     assert account_journal.is_file()
     assert not list(tmp_path.rglob("contexts*"))
+
+
+def test_workspace_fail_closes_without_owner_timezone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    with pytest.raises(ConfigError, match="timezone: missing - run login --timezone"):
+        _workspace(
+            build_parser(),
+            credentials=Credentials("owner@example.com", "secret", None),
+        )
+
+
+def test_serve_http_fail_closes_without_owner_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_dir = tmp_path / "things-orchestrator"
+    config_dir.mkdir()
+    _seed_credentials(config_dir, timezone=None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(SystemExit) as caught:
+        main(["serve-http"])
+
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "timezone: missing - run login --timezone Europe/Berlin" in error
+    assert "Traceback" not in error
 
 
 def test_obsolete_setup_and_hand_edited_service_template_are_removed() -> None:
@@ -1637,3 +1688,27 @@ def test_login_prompts_for_timezone_on_a_utc_host(
     assert json.loads((tmp_path / "preferences.json").read_text())["timezone"] == (
         "Europe/Berlin"
     )
+
+
+@pytest.mark.parametrize("timezone", ("", "/etc/localtime", "Not/AZone"))
+def test_login_rejects_non_iana_timezone_without_leaking_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    timezone: str,
+) -> None:
+    creds = tmp_path / "credentials.json"
+    _fake_cloud(monkeypatch)
+    monkeypatch.setattr("things_orchestrator.cli.credentials_path", lambda: creds)
+    monkeypatch.setattr(
+        "things_orchestrator.cli.launcher_path", lambda: tmp_path / "state.json"
+    )
+
+    with pytest.raises(SystemExit) as caught:
+        main(["login", "--timezone", timezone])
+
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "Timezone needs an IANA name such as Europe/Berlin" in error
+    assert "Traceback" not in error
+    assert not creds.exists()

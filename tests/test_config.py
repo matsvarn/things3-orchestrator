@@ -15,6 +15,7 @@ from things_orchestrator.config import (
     load_preferences,
     load_timezone,
     normalize_mcp_url,
+    normalize_timezone,
     save_credentials,
     save_launcher,
     save_preferences,
@@ -83,6 +84,8 @@ def test_timezone_rejects_empty_and_absolute_names_without_leaking_value_error(
     tmp_path: Path,
     timezone: str,
 ) -> None:
+    with pytest.raises(ConfigError, match="IANA name"):
+        normalize_timezone(timezone)
     with pytest.raises(ConfigError, match="IANA name"):
         save_preferences(timezone=timezone, path=tmp_path / "preferences.json")
 

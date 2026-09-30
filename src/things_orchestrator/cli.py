@@ -14,7 +14,7 @@ from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any, TextIO, cast
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 import anyio
 
@@ -39,6 +39,7 @@ from .config import (
     load_preferences,
     load_timezone,
     normalize_mcp_url,
+    normalize_timezone,
     save_credentials,
     save_launcher,
     save_preferences,
@@ -78,6 +79,7 @@ _LOGIN = (
     "Run `things-orchestrator login` in a private terminal. "
     "Clone development may use `uv run things-orchestrator login`."
 )
+_TIMEZONE_MISSING = "timezone: missing - run login --timezone Europe/Berlin"
 _LOOPBACK_URL = "http://127.0.0.1:8787/mcp"
 class _ExactArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -691,7 +693,7 @@ def _login(
         parser.error("email and password are required")
     if password != confirm:
         parser.error("password confirmation did not match")
-    timezone_name = _login_timezone(parser, timezone_name)
+    timezone_name = _login_timezone(timezone_name)
     try:
         CloudClient(email, password).verify()
     except CloudError as error:
@@ -820,7 +822,7 @@ def _doctor(parser: argparse.ArgumentParser, *, wait: bool, public_url: str) -> 
         credentials_file=creds,
     )
     if not timezone_name:
-        print("timezone: missing - run login --timezone Europe/Berlin")
+        print(_TIMEZONE_MISSING)
         raise SystemExit(1)
     print(f"timezone: ok ({timezone_name})")
     stored_url = load_preferences(path=creds.with_name("preferences.json")).mcp_url
@@ -886,12 +888,12 @@ def _workspace(
             credentials = load_credentials()
         except ConfigError:
             parser.error(_LOGIN)
+    timezone_name = load_timezone()
+    if not timezone_name:
+        raise ConfigError(_TIMEZONE_MISSING)
     email = credentials.email
     library = CloudLibrary(CloudClient(email, credentials.password))
-    timezone_name = load_timezone()
-    timezone = (
-        ZoneInfo(timezone_name) if timezone_name else datetime.now().astimezone().tzinfo
-    )
+    timezone = ZoneInfo(timezone_name)
 
     def clock() -> datetime:
         return datetime.now(timezone)
@@ -1049,15 +1051,13 @@ def _local_timezone_name() -> str:
     return str(key) if key else "UTC"
 
 
-def _login_timezone(parser: argparse.ArgumentParser, explicit: str | None) -> str:
-    candidate = explicit or _local_timezone_name()
-    if explicit is None and candidate == "UTC":
+def _login_timezone(explicit: str | None) -> str:
+    if explicit is not None:
+        return normalize_timezone(explicit)
+    candidate = _local_timezone_name()
+    if candidate == "UTC":
         candidate = input("Owner timezone (IANA, for example Europe/Berlin): ").strip()
-    try:
-        ZoneInfo(candidate)
-    except ZoneInfoNotFoundError:
-        parser.error("--timezone needs an IANA name such as Europe/Berlin")
-    return candidate
+    return normalize_timezone(candidate)
 
 
 if __name__ == "__main__":

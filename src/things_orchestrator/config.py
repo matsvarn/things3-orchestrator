@@ -240,7 +240,7 @@ def load_timezone(
     legacy = raw.get("timezone")
     if not isinstance(legacy, str):
         return None
-    return _normalize_timezone(legacy)
+    return normalize_timezone(legacy)
 
 
 def load_legacy_mcp_url(*, path: Path) -> McpUrl | None:
@@ -300,7 +300,7 @@ def save_preferences(
         else None
     )
     normalized_timezone = (
-        _normalize_timezone(timezone) if timezone is not None else None
+        normalize_timezone(timezone) if timezone is not None else None
     )
     normalized_url = (
         (mcp_url if isinstance(mcp_url, McpUrl) else normalize_mcp_url(mcp_url))
@@ -324,7 +324,7 @@ def save_preferences(
     return target
 
 
-def _normalize_timezone(value: str) -> str:
+def normalize_timezone(value: str) -> str:
     try:
         ZoneInfo(value)
     except (ValueError, ZoneInfoNotFoundError) as error:
@@ -380,7 +380,7 @@ def _load_preferences_payload(path: Path) -> dict[str, object]:
         timezone = payload["timezone"]
         if not isinstance(timezone, str):
             raise ConfigError(f"Preferences timezone is invalid: {path}")
-        _normalize_timezone(timezone)
+        normalize_timezone(timezone)
     if "mcp_url" in payload:
         raw_url = payload["mcp_url"]
         if not isinstance(raw_url, str):
