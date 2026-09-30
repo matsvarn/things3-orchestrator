@@ -178,11 +178,17 @@ def test_operations_describes_health_support_and_setup_recovery_truthfully() -> 
         "enabled configuration already contains the receiver values",
         "things-orchestrator service install",
         "Do not re-enter one-time receiver values",
+        "things-orchestrator configure --timezone",
+        "things-orchestrator configure --url",
+        "URL changes apply to the next command",
     ):
         assert fact in text
     assert "adds only" not in text
     assert "receiver details" not in text
     assert "converge after a partial setup" not in text
+    assert "configure --note-style" not in text
+    assert "--source-schemes" not in text
+    assert "Note style, source scheme" not in text
 
 
 def test_maintainer_docs_describe_endpoint_free_status_and_current_proof_gates() -> None:

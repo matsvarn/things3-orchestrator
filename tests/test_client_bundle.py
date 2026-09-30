@@ -20,8 +20,6 @@ from things_orchestrator.tools import (
     tool_discovery_hash,
 )
 
-ROOT = Path(__file__).parents[1]
-
 
 def test_client_bundle_is_deterministic_and_complete() -> None:
     first = encode_client_bundle()

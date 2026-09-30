@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document `configure` timezone and URL only. Historical dogfood owner prompts
+  live beside the register; the recorded full-reorg request is not a next run.
 - Trim unpublished internal ReadCall language after the three-tool read
   surface retired: drop audit/system/project/area views, `signals_any`,
   logbook from/to, ReviewSection, and unused Result.receipt. Registries

@@ -1,1 +1,1 @@
-"""Acceptance and contract tests for the Things Orchestrator MVP."""
+"""Acceptance and contract tests for Things Orchestrator."""

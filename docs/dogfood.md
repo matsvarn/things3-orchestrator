@@ -130,7 +130,7 @@ history, but they do not prove current-client activation.
 ### Source-heavy Project capture: round 1 complete
 
 The Mats Mode request in
-[`tests/fixtures/mats_mode_owner_prompt.txt`](../tests/fixtures/mats_mode_owner_prompt.txt)
+[`docs/dogfood/mats_mode_owner_prompt.txt`](dogfood/mats_mode_owner_prompt.txt)
 ran several times. It covered source research, a finite Project, later Tasks,
 native headings, checklists, Task-local sources, and both note styles.
 
@@ -144,14 +144,16 @@ contract.
 ### Full reorganization: round 1 complete
 
 The request in
-[`tests/fixtures/full_reorg_owner_prompt.txt`](../tests/fixtures/full_reorg_owner_prompt.txt)
+[`docs/dogfood/full_reorg_owner_prompt.txt`](dogfood/full_reorg_owner_prompt.txt)
 ran against the owner's live system. It exposed excess reads and narration,
 incomplete write context, stale retries, unstable references, incompatible
 cursor syntax, wrong heading homes, missing native Project order, and unresolved
 Project quality.
 
-Status: **Repeat required**, after unsupported broad reorganization actions are
-removed from the prompt.
+Status: **Deferred**. The recorded prompt asked for new Areas, useful tags, and
+Project redesign. Those remain outside the current eight-tool contract. Do not
+rerun that prompt. Use the supported queue for bounded next runs: Inbox
+processing, Daily focus, and Exact changes and scheduling.
 
 ### Weekly review: round 1 complete
 

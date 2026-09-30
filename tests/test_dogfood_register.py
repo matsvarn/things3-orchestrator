@@ -2,7 +2,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOGFOOD = ROOT / "docs" / "dogfood.md"
+DOGFOOD_PROMPTS = ROOT / "docs" / "dogfood"
 WEEKLY_REVIEW_PROMPT = ROOT / "tests" / "fixtures" / "weekly_review_owner_prompt.txt"
+HISTORICAL_PROMPTS = (
+    DOGFOOD_PROMPTS / "full_reorg_owner_prompt.txt",
+    DOGFOOD_PROMPTS / "mats_mode_owner_prompt.txt",
+)
 
 
 def test_dogfood_register_queues_only_currently_supported_workflows() -> None:
@@ -47,6 +52,23 @@ def test_dogfood_register_preserves_historical_runs() -> None:
 
     for workflow in historical:
         assert workflow in text
+    for prompt in HISTORICAL_PROMPTS:
+        assert prompt.is_file()
+        assert prompt.relative_to(ROOT).as_posix() in text
+        assert not (ROOT / "tests" / "fixtures" / prompt.name).exists()
+
+
+def test_full_reorg_prompt_stays_historical_and_out_of_the_next_run() -> None:
+    text = " ".join(DOGFOOD.read_text().split())
+    prompt = (DOGFOOD_PROMPTS / "full_reorg_owner_prompt.txt").read_text()
+
+    assert "more fitting Areas" in prompt
+    assert "useful tags" in prompt
+    assert "rework or restructure existing Projects" in prompt
+    assert "Status: **Deferred**." in text
+    assert "Do not rerun that prompt." in text
+    assert "unsupported broad reorganization actions are" not in text
+    assert "Repeat required**, after unsupported" not in text
 
 
 def test_dogfood_register_keeps_human_and_automated_proof_separate() -> None:

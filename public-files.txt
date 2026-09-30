@@ -19,6 +19,8 @@ docs/adr/0008-opt-in-routines-worker.md
 docs/capability-proof.md
 docs/clients.md
 docs/dogfood.md
+docs/dogfood/full_reorg_owner_prompt.txt
+docs/dogfood/mats_mode_owner_prompt.txt
 docs/install.md
 docs/maintainer.md
 docs/operations.md
@@ -87,8 +89,6 @@ src/things_orchestrator/tools.py
 src/things_orchestrator/v2.py
 src/things_orchestrator/workspace.py
 tests/__init__.py
-tests/fixtures/full_reorg_owner_prompt.txt
-tests/fixtures/mats_mode_owner_prompt.txt
 tests/fixtures/v0.10.5-closed-public-result.schema.json
 tests/fixtures/weekly_review_owner_prompt.txt
 tests/test_capability_proof.py
@@ -103,6 +103,7 @@ tests/test_deployment.py
 tests/test_diagnostics.py
 tests/test_doctor.py
 tests/test_dogfood_register.py
+tests/test_dogfood_ux.py
 tests/test_interface.py
 tests/test_journal.py
 tests/test_live_acceptance.py
@@ -121,7 +122,6 @@ tests/test_routines_webhook.py
 tests/test_server.py
 tests/test_service.py
 tests/test_tools.py
-tests/test_v07_dogfood_ux.py
 tests/test_v2_contract.py
 tests/test_v2_journal_authority.py
 tests/test_v2_recurrence.py

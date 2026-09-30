@@ -190,14 +190,13 @@ real installation with the two-part smoke test in
 ## Configure owner preferences
 
 ```console
-things-orchestrator configure --note-style natural
 things-orchestrator configure --timezone Europe/Berlin
 things-orchestrator configure --url https://mcp.example.com
 ```
 
-Note style, source scheme, and URL changes apply to the next command. A timezone
-change requires `things-orchestrator service install` because the running
-server captures its timezone at startup.
+URL changes apply to the next command. A timezone change requires
+`things-orchestrator service install` because the running server captures its
+timezone at startup.
 
 ## Uninstall
 
