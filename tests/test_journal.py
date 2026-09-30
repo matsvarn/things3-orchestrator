@@ -5,11 +5,13 @@ from pathlib import Path
 
 import pytest
 
+from things_orchestrator.config import credentials_path, launcher_path
 from things_orchestrator.journal import (
     IntentRecord,
     SQLiteJournal,
     _json,
     journal_path,
+    owner_public_key_path,
 )
 
 
@@ -56,3 +58,13 @@ def test_journal_path_is_private_to_one_normalized_account(
     assert alice == journal_path(" alice@example.COM ")
     assert alice != journal_path("bob@example.com")
     assert "alice" not in alice.name.casefold()
+    assert journal_path() == launcher_path().with_name("journal.sqlite3")
+
+
+def test_owner_public_key_path_shares_the_owner_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert owner_public_key_path() == credentials_path().with_name(
+        "owner-public-key.ed25519"
+    )

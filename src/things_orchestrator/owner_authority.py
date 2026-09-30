@@ -24,7 +24,6 @@ from .journal import (
     V2Operation,
     owner_authorization_binding_json,
     owner_operation_is_valid,
-    owner_public_key_path,
 )
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)")
@@ -61,12 +60,7 @@ def enroll_owner_factor(passphrase: str, *, path: Path | None = None) -> Path:
         target,
         json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
     )
-    public_target = (
-        target.with_name("owner-public-key.ed25519")
-        if path is not None
-        else owner_public_key_path()
-    )
-    _atomic_write(public_target, public_key)
+    _atomic_write(target.with_name("owner-public-key.ed25519"), public_key)
     return target
 
 

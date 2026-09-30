@@ -23,6 +23,7 @@ from things_orchestrator.journal import (
     _json,
     _v2_sql_values,
     owner_authorization_binding_json,
+    owner_public_key_path,
     read_operation_state_counts,
     v2_manifest_hash,
     v2_manifest_is_valid,
@@ -31,6 +32,7 @@ from things_orchestrator.library import ApplyResult, MemoryLibrary, Record, Writ
 from things_orchestrator.owner_authority import (
     enroll_owner_factor,
     host_escape,
+    owner_factor_path,
     render_operation,
     verified_authorization,
     verify_owner_factor,
@@ -1862,6 +1864,17 @@ def test_owner_factor_stores_only_scrypt_verifier(tmp_path: Path) -> None:
     public_key = path.with_name("owner-public-key.ed25519")
     assert len(public_key.read_bytes()) == 32
     assert public_key.stat().st_mode & 0o777 == 0o600
+
+
+def test_enroll_owner_factor_writes_public_key_beside_default_factor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    factor = enroll_owner_factor("correct horse battery staple")
+    public_key = factor.with_name("owner-public-key.ed25519")
+    assert factor == owner_factor_path()
+    assert public_key == owner_public_key_path()
+    assert len(public_key.read_bytes()) == 32
 
 
 def test_authorization_binding_covers_action_and_operation_contract() -> None:

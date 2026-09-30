@@ -20,7 +20,7 @@ from typing import Callable, ContextManager, Iterator, Literal, Protocol, cast, 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .config import _ensure_private_dir
+from .config import _config_dir, _ensure_private_dir, _state_dir
 
 IntentState = Literal[
     "prepared",
@@ -1304,19 +1304,15 @@ def read_operation_state_counts(
 def journal_path(account: str | None = None) -> Path:
     """Return the journal path beside the existing XDG state cache."""
 
-    root = os.environ.get("XDG_STATE_HOME")
-    base = Path(root) if root else Path.home() / ".local" / "state"
     name = "journal.sqlite3"
     if account:
         digest = sha256(account_id_key(account).encode()).hexdigest()[:16]
         name = f"journal-{digest}.sqlite3"
-    return base / "things-orchestrator" / name
+    return _state_dir() / name
 
 
 def owner_public_key_path() -> Path:
-    root = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "things-orchestrator" / "owner-public-key.ed25519"
+    return _config_dir() / "owner-public-key.ed25519"
 
 
 def owner_authorization_binding_json(operation: V2Operation, *, action: str) -> str:
