@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import re
 import unicodedata
 from base64 import b64decode, b64encode
@@ -18,7 +17,7 @@ from secrets import token_bytes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .config import _atomic_write
+from .config import _atomic_write, _config_dir
 from .journal import (
     OwnerAuthorization,
     V2Operation,
@@ -31,9 +30,7 @@ _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)")
 
 
 def owner_factor_path() -> Path:
-    root = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(root) if root else Path.home() / ".config"
-    return base / "things-orchestrator" / "owner-factor.json"
+    return _config_dir() / "owner-factor.json"
 
 
 def enroll_owner_factor(passphrase: str, *, path: Path | None = None) -> Path:

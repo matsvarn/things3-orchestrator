@@ -30,7 +30,7 @@ from .client_bundle import (
     ComponentHashes,
     parse_client_bundle,
 )
-from .config import ConfigError, McpBearer, McpUrl, _atomic_replace, normalize_mcp_url
+from .config import ConfigError, McpBearer, McpUrl, atomic_replace, normalize_mcp_url
 from .tools import (
     CLIENT_BUNDLE_PATH,
     ITEM_ID,
@@ -725,7 +725,7 @@ def _write_state(path: Path, bundle: ClientBundle) -> None:
         "package_name": bundle.package.name,
         "package_version": bundle.package.version,
     }
-    _atomic_replace(
+    atomic_replace(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         prefix=f"{RESERVED_PREFIX}state-",

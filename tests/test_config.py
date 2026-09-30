@@ -10,6 +10,7 @@ from things_orchestrator.config import (
     ConfigError,
     McpBearer,
     McpUrl,
+    credentials_path,
     load_credentials,
     load_legacy_mcp_url,
     load_preferences,
@@ -20,6 +21,7 @@ from things_orchestrator.config import (
     save_preferences,
     select_login_mcp_url,
 )
+from things_orchestrator.owner_authority import owner_factor_path
 
 
 def _url(scheme: str, remainder: str) -> str:
@@ -118,6 +120,19 @@ def test_mcp_url_accepts_https_and_loopback_http() -> None:
     assert str(normalize_mcp_url(_url("http", "127.0.0.1:8787"))) == (
         _url("http", "127.0.0.1:8787/mcp")
     )
+    assert str(normalize_mcp_url(_url("http", "LocalHost:8787"))) == (
+        _url("http", "LocalHost:8787/mcp")
+    )
+    assert str(normalize_mcp_url(_url("http", "localhost.:8787"))) == (
+        _url("http", "localhost.:8787/mcp")
+    )
+
+
+def test_owner_factor_path_shares_the_owner_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert owner_factor_path() == credentials_path().with_name("owner-factor.json")
 
 
 def test_legacy_mcp_url_loads_the_pre_09_http_snippet(tmp_path: Path) -> None:
