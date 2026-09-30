@@ -928,7 +928,6 @@ def _routine_http_composition(
 
     def create() -> RoutineWorker:
         return RoutineWorker(
-            email=credentials.email,
             profile=profile,
             cloud=CloudClient(credentials.email, credentials.password),
             store=RoutineStore(profile),

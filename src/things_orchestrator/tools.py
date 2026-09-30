@@ -29,16 +29,12 @@ _IDEMPOTENT_WRITE = ToolAnnotations(
 
 
 def advertised_output_schema() -> dict[str, Any]:
-    """Flattened PublicResult schema that tolerates additive object properties."""
-
     from .v2 import PublicResult, flat_schema
 
     return cast(dict[str, Any], _allow_additional_object_properties(flat_schema(PublicResult)))
 
 
 def advertised_tools() -> tuple[Tool, ...]:
-    """Exact tools/list contract: discovery inputs, additive outputs, annotations."""
-
     from .v2 import DESCRIPTIONS, DISCOVERY_MODELS, MODELS, flat_schema
 
     output_schema = advertised_output_schema()
@@ -82,22 +78,14 @@ def content_sha256(data: bytes) -> str:
 
 def tool_schema_hash(tools: tuple[Tool, ...] | None = None) -> str:
     selected = tools if tools is not None else advertised_tools()
-    return hash_payload(
-        {
-            "version": "v2",
-            "inputs": {tool.name: tool.input_schema for tool in selected},
-            "output": selected[0].output_schema if selected else {},
-        }
-    )
+    return hash_payload(_input_output_body(selected))
 
 
 def tool_contract_hash(tools: tuple[Tool, ...] | None = None) -> str:
     selected = tools if tools is not None else advertised_tools()
     return hash_payload(
         {
-            "version": "v2",
-            "inputs": {tool.name: tool.input_schema for tool in selected},
-            "output": selected[0].output_schema if selected else {},
+            **_input_output_body(selected),
             "descriptions": {tool.name: tool.description for tool in selected},
         }
     )
@@ -106,6 +94,14 @@ def tool_contract_hash(tools: tuple[Tool, ...] | None = None) -> str:
 def tool_discovery_hash(tools: tuple[Tool, ...] | None = None) -> str:
     selected = tools if tools is not None else advertised_tools()
     return hash_payload([advertised_tool_payload(tool) for tool in selected])
+
+
+def _input_output_body(selected: tuple[Tool, ...]) -> dict[str, object]:
+    return {
+        "version": "v2",
+        "inputs": {tool.name: tool.input_schema for tool in selected},
+        "output": selected[0].output_schema if selected else {},
+    }
 
 
 def _allow_additional_object_properties(value: object) -> object:

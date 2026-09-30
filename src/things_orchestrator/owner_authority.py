@@ -14,6 +14,7 @@ from base64 import b64decode, b64encode
 from hashlib import scrypt
 from pathlib import Path
 from secrets import token_bytes
+from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -71,13 +72,7 @@ def enroll_owner_factor(passphrase: str, *, path: Path | None = None) -> Path:
 
 
 def verify_owner_factor(passphrase: str, *, path: Path | None = None) -> bool:
-    target = path or owner_factor_path()
-    payload = json.loads(target.read_text())
-    if payload.get("version") != 1:
-        raise ValueError("unsupported owner factor version")
-    salt = b64decode(payload["salt"], validate=True)
-    verifier = b64decode(payload["verifier"], validate=True)
-    return hmac.compare_digest(_digest(passphrase, salt), verifier)
+    return _passphrase_matches(_load_factor(path or owner_factor_path()), passphrase)
 
 
 def verified_authorization(
@@ -87,12 +82,9 @@ def verified_authorization(
     passphrase: str,
     path: Path | None = None,
 ) -> OwnerAuthorization | None:
-    """Return a sealed authorization only after host-factor verification."""
-
-    target = path or owner_factor_path()
-    if not verify_owner_factor(passphrase, path=target):
+    payload = _load_factor(path or owner_factor_path())
+    if not _passphrase_matches(payload, passphrase):
         return None
-    payload = json.loads(target.read_text())
     encrypted = b64decode(payload["encrypted_private_key"], validate=True)
     private_key = serialization.load_pem_private_key(
         encrypted,
@@ -156,6 +148,20 @@ def host_escape(value: str) -> str:
         else:
             pieces.append(character)
     return "".join(pieces)
+
+
+def _load_factor(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("unsupported owner factor version")
+    return payload
+
+
+def _passphrase_matches(payload: dict[str, Any], passphrase: str) -> bool:
+    return hmac.compare_digest(
+        _digest(passphrase, b64decode(payload["salt"], validate=True)),
+        b64decode(payload["verifier"], validate=True),
+    )
 
 
 def _digest(passphrase: str, salt: bytes) -> bytes:
