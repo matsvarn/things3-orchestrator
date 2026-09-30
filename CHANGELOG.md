@@ -2,29 +2,6 @@
 
 ## Unreleased
 
-- Trim unpublished internal ReadCall language after the three-tool read
-  surface retired: drop audit/system/project/area views, `signals_any`,
-  logbook from/to, ReviewSection, and unused Result.receipt. Registries
-  page through their own cursor tag. Bulk exact IDs accept up to 50.
-- Remove leftover core-runtime helpers: unused `_unsupported`, UUID prefix
-  lookup, inbox/week limit-15 defaults, a test-only authorization wrapper, and
-  a duplicate v2 model validate. Health advertises `CLIENT_BUNDLE_FORMAT_VERSION`.
-  Leftover `awaiting_owner` resume maps to stale/`read_fresh`.
-- Journal `create_v2` only inserts `pending` and always claims the fence.
-  Leftover `awaiting_owner` rows still retire as stale during prune/cutover.
-- The Codex plugin wrapper only launches `serve`. Owner and recovery commands
-  stay on the uv tool.
-- Delete leftover owner-approval host methods and unused internal Result
-  surface. New v2 manifests always emit `requires_owner=False` with
-  `expires_at=None`. Bearer still authorizes bounded writes; leftover
-  `awaiting_owner` rows retire as stale with no Cloud I/O.
-- Remove the unused SQLite context adapter. Workspace always mints in-memory
-  read contexts; the service does not persist a context database.
-- `print-config --client grokbot` renders a public HTTPS MCP URL and bearer for
-  ephemeral agent hosts, plus a Tailscale-free `mcp-remote` stdio recipe.
-  MagicDNS and known private endpoints are rejected. Doctor reports origin
-  unreachable from public `/health` without exception secrets.
-
 ## 0.12.0 - 2026-09-23
 
 - Add `print-config --client grokbot` for Grok Bot computers and other
