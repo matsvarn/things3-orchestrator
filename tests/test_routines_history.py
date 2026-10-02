@@ -142,3 +142,55 @@ def test_unchanged_history_404_retries_same_index_once() -> None:
     batch = client.history_groups(7)
     assert batch.caught_up is True
     assert client.starts == [7, 7]
+
+
+def test_items_flattens_the_history_groups_batch() -> None:
+    client = _client(
+        {
+            "current-item-index": 4,
+            "end-total-content-size": 9,
+            "latest-total-content-size": 12,
+            "items": [
+                {},
+                {
+                    "task": {
+                        "t": 0,
+                        "e": "Task7",
+                        "p": {"tt": "Call", "tp": 0, "tg": ["tag-1"]},
+                    }
+                },
+            ],
+        }
+    )
+
+    batch = client.history_groups(2)
+    page = client.items(2)
+
+    assert page.current == batch.current_head == 4
+    assert page.groups == len(batch.groups) == 2
+    assert page.end_size == batch.end_size == 9
+    assert page.latest_size == batch.latest_size == 12
+    assert page.events == [
+        {
+            "uuid": "task",
+            "t": 0,
+            "e": "Task7",
+            "p": {"tt": "Call", "tp": 0, "tg": ["tag-1"]},
+        }
+    ]
+    assert type(page.events[0]["p"]) is dict
+    assert type(page.events[0]["p"]["tg"]) is list
+
+
+def test_items_fails_closed_on_malformed_group_instead_of_skipping() -> None:
+    client = _client(
+        {
+            "current-item-index": 2,
+            "items": [
+                {"task": {"t": 0, "e": "Task7", "p": {"tt": "Keep"}}},
+                "bad-group",
+            ],
+        }
+    )
+    with pytest.raises(CloudError, match="group"):
+        client.items(0)

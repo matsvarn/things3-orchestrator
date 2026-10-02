@@ -216,6 +216,9 @@ class HistoryBatch:
     current_head: int
     groups: tuple[HistoryGroup, ...]
     caught_up: bool
+    # Library pagination only; routines ignore these and omit them on the wire.
+    end_size: int = 0
+    latest_size: int = 0
 
 
 class HistoryIdentityChanged(CloudError):
@@ -243,6 +246,24 @@ def _freeze_mapping(value: dict[str, Any]) -> dict[str, object]:
     if not all(isinstance(key, str) for key in value):
         raise CloudError("Things Cloud history payload was malformed")
     return {str(key): freeze(item) for key, item in value.items()}
+
+
+def _thaw_mapping(value: Mapping[str, object]) -> dict[str, Any]:
+    def thaw(item: object) -> Any:
+        if isinstance(item, Mapping):
+            return {str(key): thaw(nested) for key, nested in item.items()}
+        if isinstance(item, tuple):
+            return [thaw(nested) for nested in item]
+        return item
+
+    return {str(key): thaw(item) for key, item in value.items()}
+
+
+def _page_size(value: object) -> int:
+    """Library pagination sizes; malformed values stay 0 so routines still decode."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def _validate_grouped_payload(entity: str, payload: dict[str, Any]) -> None:
@@ -370,40 +391,45 @@ class CloudClient:
         return self.history_id
 
     def items(self, start_index: int, *, retried: bool = False) -> HistoryPage:
-        """Return the legacy flattened, permissive history view."""
+        """Flatten one history_groups() batch for library pull and commit-visible.
 
-        if not self.history_id:
-            self.verify()
+        `_pull` and `_commit_visible` use this flatten rather than a second
+        decoder. Skipping malformed groups is gone: history_groups already
+        fails the page, so production pull fails closed instead of advancing
+        `loaded_index` over a partial fold. Live Cloud history is dict groups
+        of dict events; the skip was never a proven success path.
+        """
+
         try:
-            data = self._history_data(start_index, retried=retried)
+            batch = self.history_groups(start_index, retried=retried)
         except HistoryIdentityChanged:
+            if retried:
+                raise
             return self.items(self.loaded_index, retried=True)
-        if not isinstance(data, dict):
-            raise CloudError("Things Cloud history was unreadable")
-        current = int(data.get("current-item-index") or 0)
-        raw_items = data.get("items") or []
-        events: list[dict[str, Any]] = []
-        groups = 0
-        if isinstance(raw_items, list):
-            groups = len(raw_items)
-            for group in raw_items:
-                if not isinstance(group, dict):
-                    continue
-                for uuid, item in group.items():
-                    if isinstance(item, dict):
-                        events.append({"uuid": uuid, **item})
         return HistoryPage(
-            events=events,
-            current=current,
-            groups=groups,
-            end_size=int(data.get("end-total-content-size") or 0),
-            latest_size=int(data.get("latest-total-content-size") or 0),
+            events=[
+                {
+                    "uuid": event.uuid,
+                    "t": event.action,
+                    "e": event.entity,
+                    "p": _thaw_mapping(event.payload),
+                }
+                for group in batch.groups
+                for event in group.events
+            ],
+            current=batch.current_head,
+            groups=len(batch.groups),
+            end_size=batch.end_size,
+            latest_size=batch.latest_size,
         )
 
     def history_groups(
         self, start_index: int, *, retried: bool = False
     ) -> HistoryBatch:
-        """Read one fully validated history page without flattening group positions."""
+        """Read one fully validated history page without flattening group positions.
+
+        This is the only history decoder. `items()` flattens the returned batch.
+        """
 
         if (
             isinstance(start_index, bool)
@@ -481,6 +507,8 @@ class CloudClient:
             current_head=current,
             groups=tuple(groups),
             caught_up=caught_up,
+            end_size=_page_size(data.get("end-total-content-size")),
+            latest_size=_page_size(data.get("latest-total-content-size")),
         )
 
     def _history_data(self, start_index: int, *, retried: bool) -> Any:

@@ -2127,6 +2127,39 @@ def test_timeout_reconciliation_error_remains_outcome_unknown() -> None:
     assert posts == 1
 
 
+def test_timeout_malformed_group_is_outcome_unknown_not_skipped() -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+    client.server_index = 2
+    posts = 0
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            raise CloudError("Things Cloud timed out")
+        return {
+            "items": [
+                {"x": {"t": 0, "e": "Task6", "p": {"tt": "Hi"}}},
+                "bad-group",
+            ],
+            "current-item-index": 4,
+            "end-total-content-size": 2,
+            "latest-total-content-size": 2,
+        }
+
+    client._request = request  # noqa: SLF001
+    with pytest.raises(CloudError, match="outcome is unknown"):
+        client.commit([Envelope("x", 0, "Task6", {"tt": "Hi"})])
+    assert posts == 1
+
+
 def test_post_commit_pull_failure_is_an_unknown_outcome(tmp_path: Path) -> None:
     class ReadbackFailureClient:
         def __init__(self) -> None:
@@ -2338,6 +2371,36 @@ def test_stale_history_key_re_verifies() -> None:
     assert client.history_id == "new"
     assert client.loaded_index == 0
     assert any("/history/new/" in path for path in paths)
+
+
+def test_library_pull_fails_closed_on_malformed_history_group(tmp_path: Path) -> None:
+    client = CloudClient("a@b.c", "pw")
+    client.history_id = "h"
+
+    def request(
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        body: bytes | None = None,
+        retry: bool = True,
+    ):
+        del method, path, query, body, retry
+        return {
+            "items": [
+                {"task": {"t": 0, "e": "Task7", "p": {"tt": "Keep"}}},
+                "bad-group",
+            ],
+            "current-item-index": 2,
+            "end-total-content-size": 1,
+            "latest-total-content-size": 1,
+        }
+
+    client._request = request  # noqa: SLF001
+    library = CloudLibrary(client, cache=tmp_path / "state.json")
+    with pytest.raises(CloudError, match="group"):
+        library.refresh(force=True)
+    assert library.records == {}
+    assert client.loaded_index == 0
 
 
 def test_history_404_retries_the_requested_index_when_key_is_unchanged() -> None:
