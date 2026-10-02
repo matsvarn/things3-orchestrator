@@ -27,11 +27,9 @@ from things_orchestrator.library import (
     MemoryLibrary,
     Record,
     Write,
-    day_ts,
-    from_ts,
     new_uuid,
 )
-from things_orchestrator.recurrence import RecurrenceState
+from things_orchestrator.recurrence import RecurrenceState, day_ts, from_ts
 from things_orchestrator.v2 import ThingsV2
 from things_orchestrator.workspace import ThingsWorkspace
 
@@ -1027,13 +1025,13 @@ def test_fold_appends_checklist_lines() -> None:
         library=library,
     )
     assert library.records["task"].checklists[0].title == "passport"
-    assert library.records["task"].checklists[0].done is False
+    assert library.records["task"].checklists[0].status == "open"
     fold_events(
         [{"uuid": "box", "e": "ChecklistItem3", "t": 1, "p": {"ss": 3}}],
         library=library,
     )
     assert library.records["task"].checklists[0].title == "passport"
-    assert library.records["task"].checklists[0].done is True
+    assert library.records["task"].checklists[0].status == "done"
 
 
 def test_checklist_event_before_parent_in_the_same_page() -> None:

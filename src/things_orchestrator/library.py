@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
@@ -39,19 +39,6 @@ def new_uuid() -> str:
     return "".join(reversed(chars))
 
 
-def day_ts(day: date) -> int:
-    return int(datetime.combine(day, time.min, tzinfo=timezone.utc).timestamp())
-
-
-def from_ts(value: object) -> date | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        return datetime.fromtimestamp(value, timezone.utc).date() if value > 0 else None
-    except (OverflowError, OSError, ValueError):
-        return None
-
-
 def remind_from_offset(seconds: int | None) -> str | None:
     if seconds is None:
         return None
@@ -69,14 +56,8 @@ def offset_from_remind(value: str) -> int:
 class ChecklistLine:
     uuid: str
     title: str
-    done: bool = False
     status: Status = "open"
     sort_index: int = 0
-
-    def __post_init__(self) -> None:
-        if self.done and self.status == "open":
-            self.status = "done"
-        self.done = self.status == "done"
 
 
 @dataclass

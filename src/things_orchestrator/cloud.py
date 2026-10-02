@@ -38,12 +38,10 @@ from .library import (
     _MutationHandler,
     _RecurrenceMutation,
     _TagMutation,
-    day_ts,
-    from_ts,
     offset_from_remind,
     remind_from_offset,
 )
-from .recurrence import RecurrenceState
+from .recurrence import RecurrenceState, day_ts, from_ts
 
 ENDPOINT = "https://cloud.culturedcode.com"
 USER_AGENT = "ThingsMac/32209501"
@@ -1899,7 +1897,7 @@ def _record_to_json(item: Record) -> dict[str, Any]:
             {
                 "uuid": line.uuid,
                 "title": line.title,
-                "done": line.done,
+                "done": line.status == "done",
                 "status": line.status,
                 "sort_index": line.sort_index,
             }
@@ -2028,7 +2026,6 @@ def _record_from_json(payload: dict[str, Any]) -> Record:
             ChecklistLine(
                 uuid=str(line["uuid"]),
                 title=str(line.get("title") or ""),
-                done=bool(line.get("done")),
                 status=line.get("status", "done" if line.get("done") else "open"),
                 sort_index=int(line.get("sort_index") or 0),
             )

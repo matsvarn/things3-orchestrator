@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Share one UTC day stamp, timestamp decode, and never-sentinel in
+  recurrence. Workspace until display is decode plus a never filter. Optional
+  item-detail trim uses one ordered table. Checklist cache `done` is derived
+  from `status` on write. Capture and discovery share the 120-write expansion
+  check.
 - Trim unpublished internal ReadCall language after the three-tool read
   surface retired: drop audit/system/project/area views, `signals_any`,
   logbook from/to, ReviewSection, and unused Result.receipt. Registries

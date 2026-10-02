@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
@@ -474,19 +475,23 @@ class ProjectCapture(_CaptureBase):
 CaptureItem = Annotated[TaskCapture | ProjectCapture, Field(discriminator="kind")]
 
 
+def _bounded_capture_expansion(items: Sequence[Any]) -> None:
+    total = sum(
+        (1 + len(item.tasks) if item.kind == "project" else 1)
+        * (2 if item.repeat is not None else 1)
+        for item in items
+    )
+    if total > 120:
+        raise ValueError("capture expands to at most 120 writes")
+
+
 class CaptureCall(StrictModel):
     request_id: str = Field(pattern=REQUEST_ID)
     items: list[CaptureItem] = Field(min_length=1, max_length=40)
 
     @model_validator(mode="after")
     def bounded_expansion(self) -> Self:
-        total = sum(
-            (1 + len(item.tasks) if isinstance(item, ProjectCapture) else 1)
-            * (2 if item.repeat is not None else 1)
-            for item in self.items
-        )
-        if total > 120:
-            raise ValueError("capture expands to at most 120 writes")
+        _bounded_capture_expansion(self.items)
         return self
 
 
@@ -518,13 +523,7 @@ class CaptureDiscoveryCall(StrictModel):
 
     @model_validator(mode="after")
     def bounded_expansion(self) -> Self:
-        total = sum(
-            (1 + len(item.tasks) if item.kind == "project" else 1)
-            * (2 if item.repeat is not None else 1)
-            for item in self.items
-        )
-        if total > 120:
-            raise ValueError("capture expands to at most 120 writes")
+        _bounded_capture_expansion(self.items)
         return self
 
 

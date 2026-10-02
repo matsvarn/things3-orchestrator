@@ -7,7 +7,7 @@ import re
 from calendar import monthrange
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Any, Callable, Literal, cast
@@ -62,7 +62,14 @@ from .library import (
     public_id,
     template_uuid_of,
 )
-from .recurrence import RecurrenceReadError, RecurrenceState, RepeatMode, new_rule
+from .recurrence import (
+    _NEVER,
+    RecurrenceReadError,
+    RecurrenceState,
+    RepeatMode,
+    from_ts,
+    new_rule,
+)
 
 _READ_LIMIT = 40
 _BULK_TEXT_BUDGET = 100_000
@@ -90,7 +97,6 @@ _WEEKDAY_CODES = {
     "saturday": 6,
 }
 _WEEKDAY_NAMES = {code: name for name, code in _WEEKDAY_CODES.items()}
-_REPEAT_NEVER = 64_092_211_200
 
 
 def _after_completion_next(anchor: date, unit: str, interval: int) -> date:
@@ -203,15 +209,13 @@ def _safe_repeat_on_fact(
 
 def _repeat_timestamp_date(raw: object) -> str | None:
     if (
-        isinstance(raw, bool)
-        or not isinstance(raw, (int, float))
-        or not 0 < raw < _REPEAT_NEVER
+        isinstance(raw, (int, float))
+        and not isinstance(raw, bool)
+        and raw >= _NEVER
     ):
         return None
-    try:
-        return datetime.fromtimestamp(raw, timezone.utc).date().isoformat()
-    except (OSError, OverflowError, ValueError):
-        return None
+    day = from_ts(raw)
+    return None if day is None else day.isoformat()
 
 
 def _repeat_end(rule: RecurrenceState) -> str | None:
@@ -4106,72 +4110,39 @@ def _trim_optional_detail(result: Result) -> Result | None:
             if fact.recurrence is not None
             else []
         )
-        if len(notes) > _NOTE_RESERVE:
-            next_fact = _with_completeness(
-                fact,
-                notes=notes[:_NOTE_RESERVE],
-                checklist=list(fact.checklist),
-                direct=list(fact.direct_tags),
-                inherited=list(fact.inherited_tags),
-                truncated=[*fact.truncated_fields, "notes"],
-            )
-        elif fact.checklist:
-            next_fact = _with_completeness(
-                fact,
-                notes=fact.notes_markdown,
-                checklist=[],
-                direct=list(fact.direct_tags),
-                inherited=list(fact.inherited_tags),
-                truncated=[*fact.truncated_fields, "checklist"],
-            )
-        elif links:
-            next_fact = _with_completeness(
-                fact,
-                notes=fact.notes_markdown,
-                checklist=list(fact.checklist),
-                direct=list(fact.direct_tags),
-                inherited=list(fact.inherited_tags),
-                truncated=[*fact.truncated_fields, "recurrence"],
-                linked_item_ids=[],
-            )
-        elif notes:
-            next_fact = _with_completeness(
-                fact,
-                notes=None,
-                checklist=list(fact.checklist),
-                direct=list(fact.direct_tags),
-                inherited=list(fact.inherited_tags),
-                truncated=[*fact.truncated_fields, "notes"],
-            )
-        elif fact.inherited_tag_ids:
-            next_fact = _with_completeness(
-                fact,
-                notes=fact.notes_markdown,
-                checklist=list(fact.checklist),
-                direct=list(fact.direct_tags),
-                inherited=[],
-                inherited_ids=[],
-                truncated=[*fact.truncated_fields, "tags"],
-            )
-        elif fact.direct_tag_ids:
-            next_fact = _with_completeness(
-                fact,
-                notes=fact.notes_markdown,
-                checklist=list(fact.checklist),
-                direct=[],
-                inherited=list(fact.inherited_tags),
-                direct_ids=[],
-                truncated=[*fact.truncated_fields, "tags"],
-            )
-        else:
-            continue
-        facts = _replace_item(facts, index, next_fact)
-        return result.model_copy(
-            update={
-                "items": facts,
-                "tags": _prune_unused_tags(facts, tags),
-            }
+        trims: tuple[tuple[bool, TruncatedField, dict[str, Any]], ...] = (
+            (len(notes) > _NOTE_RESERVE, "notes", {"notes": notes[:_NOTE_RESERVE]}),
+            (bool(fact.checklist), "checklist", {"checklist": []}),
+            (bool(links), "recurrence", {"linked_item_ids": []}),
+            (bool(notes), "notes", {"notes": None}),
+            (
+                bool(fact.inherited_tag_ids),
+                "tags",
+                {"inherited": [], "inherited_ids": []},
+            ),
+            (bool(fact.direct_tag_ids), "tags", {"direct": [], "direct_ids": []}),
         )
+        for hit, field, patch in trims:
+            if not hit:
+                continue
+            next_fact = _with_completeness(
+                fact,
+                notes=patch.get("notes", fact.notes_markdown),
+                checklist=patch.get("checklist", list(fact.checklist)),
+                direct=patch.get("direct", list(fact.direct_tags)),
+                inherited=patch.get("inherited", list(fact.inherited_tags)),
+                truncated=[*fact.truncated_fields, field],
+                linked_item_ids=patch.get("linked_item_ids"),
+                direct_ids=patch.get("direct_ids"),
+                inherited_ids=patch.get("inherited_ids"),
+            )
+            facts = _replace_item(facts, index, next_fact)
+            return result.model_copy(
+                update={
+                    "items": facts,
+                    "tags": _prune_unused_tags(facts, tags),
+                }
+            )
     return None
 
 

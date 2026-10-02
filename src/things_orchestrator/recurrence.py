@@ -26,6 +26,19 @@ _MAX_INTERVAL = 366
 _NEVER = 64_092_211_200
 
 
+def day_ts(day: date) -> int:
+    return int(datetime.combine(day, time.min, tzinfo=timezone.utc).timestamp())
+
+
+def from_ts(value: object) -> date | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).date() if value > 0 else None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 class RecurrenceReadError(ValueError):
     """Native recurrence bookkeeping is absent or cannot be interpreted safely."""
 
@@ -190,7 +203,7 @@ class RecurrenceState:
             changed["ed"] = _NEVER
             changed["rc"] = 0
         if until_set:
-            changed["ed"] = _day_timestamp(until) if until is not None else _NEVER
+            changed["ed"] = day_ts(until) if until is not None else _NEVER
             changed["rc"] = 0
         return replace(
             self,
@@ -320,7 +333,7 @@ def new_rule(
         selected_offsets = [{"dy": anchor.day - 1, "mo": anchor.month - 1}]
     else:
         selected_offsets = []
-    stamp = int(datetime.combine(anchor, time.min, tzinfo=timezone.utc).timestamp())
+    stamp = day_ts(anchor)
     return {
         "tp": _MODE_CODES[mode],
         "fu": _UNIT_CODES[unit],
@@ -328,33 +341,20 @@ def new_rule(
         "of": selected_offsets,
         "sr": stamp,
         "ia": stamp,
-        "ed": _day_timestamp(until) if until is not None else _NEVER,
+        "ed": day_ts(until) if until is not None else _NEVER,
         "rc": 0,
         "ts": -7 if unit == "year" else 0,
         "rrv": 4,
     }
 
 
-def _day_timestamp(value: date) -> int:
-    return int(datetime.combine(value, time.min, tzinfo=timezone.utc).timestamp())
-
-
 def _repeat_anchor(rule: dict[str, JsonValue]) -> date:
-    raw = rule.get("sr")
-    if (
-        isinstance(raw, bool)
-        or not isinstance(raw, (int, float))
-        or raw <= 0
-    ):
+    decoded = from_ts(rule.get("sr"))
+    if decoded is None:
         raise RecurrenceReadError(
             "The repeat anchor is unavailable; read it again"
         )
-    try:
-        return datetime.fromtimestamp(raw, timezone.utc).date()
-    except (OverflowError, OSError, ValueError) as error:
-        raise RecurrenceReadError(
-            "The repeat anchor is unavailable; read it again"
-        ) from error
+    return decoded
 
 
 def _offsets_for_unit(
