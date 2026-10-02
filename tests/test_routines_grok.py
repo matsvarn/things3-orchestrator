@@ -199,7 +199,7 @@ def test_cli_prompts_privately_for_grok_url_and_key(
     terminal = object()
 
     @contextmanager
-    def tty(_parser: object) -> Iterator[object]:
+    def tty(_parser: object, **_kwargs: object) -> Iterator[object]:
         yield terminal
 
     prompts: list[str] = []
@@ -210,7 +210,7 @@ def test_cli_prompts_privately_for_grok_url_and_key(
             "private-grok-key",
         )
     )
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
 
     def get_private_value(prompt: str, stream: object = None) -> str:
         prompts.append(prompt)
@@ -429,7 +429,7 @@ def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
     terminal = io.StringIO()
 
     @contextmanager
-    def tty(_parser: object) -> Iterator[io.StringIO]:
+    def tty(_parser: object, **_kwargs: object) -> Iterator[io.StringIO]:
         yield terminal
 
     prompts: list[str] = []
@@ -440,7 +440,7 @@ def test_routines_setup_grok_guides_private_prompts_and_orders_actions(
             "private-grok-key",
         )
     )
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
 
     def get_private_value(prompt: str, stream: object = None) -> str:
         prompts.append(prompt)
@@ -541,10 +541,10 @@ def test_routines_setup_service_failure_leaves_enabled_for_direct_service_recove
     terminal = io.StringIO()
 
     @contextmanager
-    def tty(_parser: object) -> Iterator[io.StringIO]:
+    def tty(_parser: object, **_kwargs: object) -> Iterator[io.StringIO]:
         yield terminal
 
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
     answers = iter(
         (
             "https://agent.example/webhooks/task",
@@ -610,7 +610,7 @@ def test_routines_setup_missing_credentials_precedes_prompt_and_service(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
-    def forbidden_tty(_parser: object) -> Never:
+    def forbidden_tty(_parser: object, **_kwargs: object) -> Never:
         pytest.fail("prompted before credentials")
 
     def forbidden_service(
@@ -619,7 +619,7 @@ def test_routines_setup_missing_credentials_precedes_prompt_and_service(
         del action, dry_run
         pytest.fail("service called before credentials")
 
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", forbidden_tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", forbidden_tty)
     monkeypatch.setattr("things_orchestrator.cli.service_action", forbidden_service)
 
     with pytest.raises(SystemExit) as caught:

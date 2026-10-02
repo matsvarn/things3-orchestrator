@@ -15,8 +15,7 @@ import pytest
 
 from things_orchestrator.cli import (
     _legacy_resolution_command,
-    _private_tty,
-    _routine_secret_tty,
+    _secret_tty,
     _server,
     build_parser,
     main,
@@ -45,8 +44,10 @@ class _TTYBuffer(StringIO):
         return True
 
 
-def test_private_tty_uses_inherited_terminal_when_dev_tty_is_unavailable(
+@pytest.mark.parametrize("prefer", ["dev_tty", "inherited"])
+def test_secret_tty_uses_inherited_terminal_when_dev_tty_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    prefer: str,
 ) -> None:
     stdin = _TTYBuffer()
     stderr = _TTYBuffer()
@@ -58,14 +59,19 @@ def test_private_tty_uses_inherited_terminal_when_dev_tty_is_unavailable(
     monkeypatch.setattr("things_orchestrator.cli.sys.stdin", stdin)
     monkeypatch.setattr("things_orchestrator.cli.sys.stderr", stderr)
 
-    with _private_tty(build_parser()) as terminal:
+    with _secret_tty(build_parser(), prefer=prefer) as terminal:
         assert terminal is stderr
+        terminal.write("private prompt")
 
+    assert stderr.getvalue() == "private prompt"
+    assert not stdin.closed
     assert not stderr.closed
 
 
-def test_private_tty_rejects_redirected_inherited_streams(
+@pytest.mark.parametrize("prefer", ["dev_tty", "inherited"])
+def test_secret_tty_rejects_redirected_inherited_streams(
     monkeypatch: pytest.MonkeyPatch,
+    prefer: str,
 ) -> None:
     def unavailable(*_args: object, **_kwargs: object) -> None:
         raise OSError("no controlling terminal")
@@ -75,35 +81,13 @@ def test_private_tty_rejects_redirected_inherited_streams(
     monkeypatch.setattr("things_orchestrator.cli.sys.stderr", StringIO())
 
     with pytest.raises(SystemExit) as caught:
-        with _private_tty(build_parser()):
+        with _secret_tty(build_parser(), prefer=prefer):
             pass
 
     assert caught.value.code == 2
 
 
-def test_routine_secret_tty_prefers_inherited_terminal_when_dev_tty_is_denied(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stdin = _TTYBuffer()
-    stderr = _TTYBuffer()
-
-    def denied(*_args: object, **_kwargs: object) -> None:
-        raise PermissionError("service account cannot reopen the terminal")
-
-    monkeypatch.setattr("things_orchestrator.cli.open", denied, raising=False)
-    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", stdin)
-    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", stderr)
-
-    with _routine_secret_tty(build_parser()) as terminal:
-        assert terminal is stderr
-        terminal.write("private prompt")
-
-    assert stderr.getvalue() == "private prompt"
-    assert not stdin.closed
-    assert not stderr.closed
-
-
-def test_routine_secret_tty_opens_dev_tty_when_stdin_is_redirected(
+def test_secret_tty_inherited_prefer_opens_dev_tty_when_stdin_is_redirected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     terminal = _TTYBuffer()
@@ -115,27 +99,10 @@ def test_routine_secret_tty_opens_dev_tty_when_stdin_is_redirected(
     monkeypatch.setattr("things_orchestrator.cli.sys.stdin", StringIO())
     monkeypatch.setattr("things_orchestrator.cli.sys.stderr", _TTYBuffer())
 
-    with _routine_secret_tty(build_parser()) as selected:
+    with _secret_tty(build_parser(), prefer="inherited") as selected:
         assert selected is terminal
 
     assert terminal.closed
-
-
-def test_routine_secret_tty_rejects_process_without_a_terminal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unavailable(*_args: object, **_kwargs: object) -> None:
-        raise OSError("no controlling terminal")
-
-    monkeypatch.setattr("things_orchestrator.cli.open", unavailable, raising=False)
-    monkeypatch.setattr("things_orchestrator.cli.sys.stdin", StringIO())
-    monkeypatch.setattr("things_orchestrator.cli.sys.stderr", StringIO())
-
-    with pytest.raises(SystemExit) as caught:
-        with _routine_secret_tty(build_parser()):
-            pass
-
-    assert caught.value.code == 2
 
 
 def test_mcp_plugin_launches_the_checkout_wrapper() -> None:
@@ -1537,13 +1504,13 @@ def test_legacy_resolution_renders_before_reading_passphrase(
             return True
 
     @contextmanager
-    def tty(_parser: object) -> object:
+    def tty(_parser: object, **_kwargs: object) -> object:
         yield object()
 
     monkeypatch.setattr(
         "things_orchestrator.cli._workspace", lambda _parser: Workspace()
     )
-    monkeypatch.setattr("things_orchestrator.cli._private_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
 
     def getpass_after_render(_prompt: str, *, stream: object) -> str:
         assert stream is not None

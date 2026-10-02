@@ -22,6 +22,7 @@ from .config import (
     Credentials,
     McpUrl,
     credentials_path,
+    is_tailscale_host,
     load_credentials,
     load_preferences,
     normalize_mcp_url,
@@ -64,8 +65,6 @@ RoutineWorkerLiveness = Literal[
     "initializing", "running", "backing_off", "stopped", "unknown"
 ]
 
-_TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
-_TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 _ROUTINE_HEALTH_URL = "http://127.0.0.1:8787/health"
 
 
@@ -207,16 +206,11 @@ def classify_endpoint(url: McpUrl) -> EndpointClass:
     if normalized == "localhost":
         return "loopback"
     try:
-        address = ipaddress.ip_address(normalized)
+        if ipaddress.ip_address(normalized).is_loopback:
+            return "loopback"
     except ValueError:
-        return "tailnet" if normalized.endswith(".ts.net") else "public"
-    if address.is_loopback:
-        return "loopback"
-    if isinstance(address, ipaddress.IPv4Address) and address in _TAILSCALE_IPV4:
-        return "tailnet"
-    if isinstance(address, ipaddress.IPv6Address) and address in _TAILSCALE_IPV6:
-        return "tailnet"
-    return "public"
+        pass
+    return "tailnet" if is_tailscale_host(normalized) else "public"
 
 
 def build_support_report(

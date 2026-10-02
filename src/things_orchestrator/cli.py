@@ -13,7 +13,7 @@ from functools import partial
 from getpass import getpass
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any, TextIO, cast
+from typing import Any, Literal, TextIO, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
@@ -506,7 +506,7 @@ def _routines_command(
         parser.error(_LOGIN)
     action = args.routines_action
     if action in {"configure", "setup"}:
-        with _routine_secret_tty(parser) as terminal:
+        with _secret_tty(parser, prefer="inherited") as terminal:
             if action == "setup":
                 _write_routines_setup_guidance(terminal, receiver=args.receiver)
             receiver_url = getattr(args, "url", None) or getpass(
@@ -948,29 +948,26 @@ def _migration_report(parser: argparse.ArgumentParser) -> None:
 
 
 @contextmanager
-def _private_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
-    try:
-        terminal = open("/dev/tty", "r+", encoding="utf-8")
-    except OSError:
-        if sys.stdin.isatty() and sys.stderr.isatty():
+def _secret_tty(
+    parser: argparse.ArgumentParser,
+    *,
+    prefer: Literal["dev_tty", "inherited"],
+) -> Iterator[TextIO]:
+    inherited = sys.stdin.isatty() and sys.stderr.isatty()
+    if prefer == "inherited":
+        if inherited and sys.stderr.writable():
             yield sys.stderr
             return
-        parser.error("This host command needs a private local or SSH terminal.")
-    try:
-        yield terminal
-    finally:
-        terminal.close()
-
-
-@contextmanager
-def _routine_secret_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
-    if sys.stdin.isatty() and sys.stderr.isatty() and sys.stderr.writable():
-        yield sys.stderr
-        return
+        missing = "Routines configuration needs a private terminal."
+    else:
+        missing = "This host command needs a private local or SSH terminal."
     try:
         terminal = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
-        parser.error("Routines configuration needs a private terminal.")
+        if prefer == "dev_tty" and inherited:
+            yield sys.stderr
+            return
+        parser.error(missing)
     try:
         yield terminal
     finally:
@@ -980,7 +977,7 @@ def _routine_secret_tty(parser: argparse.ArgumentParser) -> Iterator[TextIO]:
 def _owner_factor(parser: argparse.ArgumentParser) -> None:
     from .owner_authority import enroll_owner_factor
 
-    with _private_tty(parser) as terminal:
+    with _secret_tty(parser, prefer="dev_tty") as terminal:
         passphrase = getpass("New owner approval passphrase: ", stream=terminal)
         confirm = getpass("Confirm owner approval passphrase: ", stream=terminal)
     if passphrase != confirm:
@@ -1024,7 +1021,7 @@ def _legacy_resolution_command(
     if operation is None:
         parser.error("retained v1 operation is not pending")
     print(render_operation(operation))
-    with _private_tty(parser) as terminal:
+    with _secret_tty(parser, prefer="dev_tty") as terminal:
         passphrase = getpass("Owner approval passphrase: ", stream=terminal)
     try:
         authorization = verified_authorization(

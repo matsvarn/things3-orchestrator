@@ -24,6 +24,8 @@ _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
 _BUILT_IN_SCHEMES = frozenset(("file", "http", "https", "things"))
 _DANGEROUS_SCHEMES = frozenset(("data", "javascript", "vbscript"))
 _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
+_TAILSCALE_IPV4 = ipaddress.ip_network("100.64.0.0/10")
+_TAILSCALE_IPV6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 _DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
@@ -148,6 +150,19 @@ def is_loopback_http(url: McpUrl) -> bool:
         and host is not None
         and host.casefold().removesuffix(".") in _LOOPBACK_HOSTS
     )
+
+
+def is_tailscale_host(host: str) -> bool:
+    hostname = host.casefold().rstrip(".")
+    if hostname.endswith(".ts.net"):
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if address.version == 4:
+        return address in _TAILSCALE_IPV4
+    return address in _TAILSCALE_IPV6
 
 
 def load_credentials(*, path: Path | None = None) -> Credentials:

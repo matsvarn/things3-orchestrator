@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
-from .config import ConfigError, McpBearer, McpUrl
+from .config import ConfigError, McpBearer, McpUrl, is_tailscale_host
 from .deployment import package_version
 
 
@@ -248,9 +248,8 @@ def _is_https_without_known_local_host(url: McpUrl) -> bool:
                 or hostname.endswith(
                     (".localhost", ".local", ".lan", ".home", ".internal")
                 )
-                or hostname.endswith(".ts.net")
+                or is_tailscale_host(hostname)
             )
-    shared = ipaddress.ip_network("100.64.0.0/10")
     return not (
         address.is_private
         or address.is_loopback
@@ -258,5 +257,5 @@ def _is_https_without_known_local_host(url: McpUrl) -> bool:
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
-        or isinstance(address, ipaddress.IPv4Address) and address in shared
+        or is_tailscale_host(str(address))
     )

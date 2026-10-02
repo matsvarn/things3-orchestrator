@@ -329,12 +329,12 @@ def test_cli_reads_secret_only_from_private_tty_and_reports_restart(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
     @contextmanager
-    def tty(_parser: object) -> Iterator[StringIO]:
+    def tty(_parser: object, **_kwargs: object) -> Iterator[StringIO]:
         yield StringIO()
 
     prompts: list[str] = []
     answers = iter(("webhook-secret", "webhook-secret"))
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
 
     def get_private_value(prompt: str, stream: object = None) -> str:
         del stream
@@ -434,11 +434,11 @@ def test_cli_renders_malformed_private_receiver_url_without_traceback_or_value(
     private_url = "https://[private-malformed/automations/webhook/route"
 
     @contextmanager
-    def tty(_parser: object) -> Iterator[StringIO]:
+    def tty(_parser: object, **_kwargs: object) -> Iterator[StringIO]:
         yield StringIO()
 
     answers = iter((private_url, "private-key", "private-key"))
-    monkeypatch.setattr("things_orchestrator.cli._routine_secret_tty", tty)
+    monkeypatch.setattr("things_orchestrator.cli._secret_tty", tty)
     monkeypatch.setattr(
         "things_orchestrator.cli.getpass",
         lambda _prompt, stream=None: next(answers),
