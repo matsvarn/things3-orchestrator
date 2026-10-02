@@ -7,6 +7,9 @@ reach the selected client and model provider.
 This is not fully private. Owner task data can reach the serving host, the MCP
 client, and the configured model provider.
 
+When choosing between a local Mac MCP, this project, and a hosted Cloud login,
+see the [credential boundary comparison](research/comparison.md).
+
 ## Routine boundaries
 
 Routines add one receiver boundary. When enabled, the host polls the unsupported

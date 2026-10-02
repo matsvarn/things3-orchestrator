@@ -168,26 +168,14 @@ client cache is unknown and tells you to export `tools/list`. A closed output
 snapshot against an additive-output host is a required catalog refresh.
 Description-only catalog drift is a recommendation. A version-only host update
 with identical files does not ask you to reapply prompts.
+Reconnect a cached closed output catalog once; see
+[Recover a cached tool catalog](recovery.md).
 
 `--read-id` runs one bounded `things_get` on the fresh `client-sync`
 connection. A failure or non-ok result is not activation success.
 An exit status of zero means file sync succeeded. The JSON status remains
 `files_synced_client_unverified`: neither a fresh read nor a matching exported
 catalog proves the application's current connection or saved prompt is active.
-
-## Refresh a closed output catalog once
-
-Advertised tool output tolerates extra properties on documented result objects.
-Input validation and the server's constructed results stay strict. Unknown
-outcome enums stay closed. Incomplete-note write protection is unchanged.
-
-Clients that cached the older closed output schema reject new fields, including
-`notes_state`. Reconnect that HTTP session so the client repeats `tools/list`.
-Do this once after moving to a host that advertises additive output. Later
-additive fields do not need a catalog refresh unless this client's cache is
-still the closed schema. Catalog metadata names policy `additive_output_v1`.
-A discovery hash change is classified from that policy and bounded schema
-checks. It is not a breaking-change flag by itself.
 
 ## Connection arrangements
 
