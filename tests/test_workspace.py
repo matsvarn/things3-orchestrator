@@ -997,6 +997,37 @@ def test_exact_container_id_returns_the_item_not_membership() -> None:
     assert [item.id for item in project_read.items] == [project.id]
 
 
+def test_within_only_read_pages_direct_membership() -> None:
+    area = Record(uuid="home", kind="area", title="Home")
+    project = Record(uuid="kitchen", kind="project", title="Kitchen", area_uuid="home")
+    heading = Record(
+        uuid="heading", kind="task", title="Heading", parent_uuid="kitchen", heading=True
+    )
+    one = Record(
+        uuid="one", kind="task", title="One", parent_uuid="kitchen", sort_index=1
+    )
+    two = Record(
+        uuid="two", kind="task", title="Two", parent_uuid="kitchen", sort_index=2
+    )
+    nested = Record(uuid="nested", kind="task", title="Nested", parent_uuid="heading")
+    inbox = Record(uuid="inbox", kind="task", title="Inbox", inbox=True)
+    module = workspace([area, project, heading, one, two, nested, inbox])
+
+    first = module.read(ReadCall(within="project:kitchen", limit=1))
+    assert [item.id for item in first.items] == ["task:one"]
+    assert first.items[0].start == "anytime"
+    assert first.cursor is not None
+    second = module.read(ReadCall(cursor=first.cursor, limit=40))
+    assert [item.id for item in second.items] == ["task:two"]
+    assert second.cursor is None
+
+    area_page = module.read(ReadCall(within="area:home"))
+    assert [item.id for item in area_page.items] == ["project:kitchen"]
+    missing = module.read(ReadCall(within="project:missing"))
+    assert missing.status == "needs_input"
+    assert missing.missing_ids == ["project:missing"]
+
+
 def test_logbook_defaults_to_the_last_fourteen_days() -> None:
     recent = Record(
         uuid="recent",

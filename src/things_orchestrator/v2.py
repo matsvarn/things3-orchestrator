@@ -7,13 +7,12 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
-from secrets import token_urlsafe
 from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .interface import ReadCall, StrictModel, TruncatedField, Weekday
+from .interface import ItemFact, ReadCall, StrictModel, TruncatedField, Weekday
 from .journal import AmbiguousV2Request, same_account_id
 from .tools import ITEM_ID
 
@@ -837,18 +836,10 @@ def flat_schema(model: type[BaseModel]) -> dict[str, Any]:
     return cast(dict[str, Any], inline(schema))
 
 
-@dataclass(frozen=True, slots=True)
-class _WithinPage:
-    within: str
-    revision: str
-    remaining_ids: tuple[str, ...]
-
-
 class ThingsV2:
     def __init__(self, workspace: Any) -> None:
         self.workspace = workspace
         self._cursor_routes: dict[str, str] = {}
-        self._within_pages: dict[str, _WithinPage] = {}
         self._last_prune_date: date | None = None
 
     def dispatch(self, name: str, arguments: dict[str, Any] | BaseModel) -> PublicResult:
@@ -929,142 +920,12 @@ class ThingsV2:
         if call.cursor is not None:
             if self._cursor_routes.get(call.cursor) != "find":
                 return self._invalid_read_cursor()
-            if call.cursor in self._within_pages:
-                return self._continue_within_page(call.cursor, call.limit)
             result = self.workspace.read(ReadCall(cursor=call.cursor, limit=call.limit))
         else:
-            if call.text is None:
-                assert call.within is not None
-                membership = self._within_membership(call.within)
-                if isinstance(membership, PublicResult):
-                    return membership
-                records, revision = membership
-                page, rest = records[: call.limit], records[call.limit :]
-                cursor = self._store_within_page(
-                    call.within, revision, [item.id for item in rest]
-                )
-                return self._within_result(page, cursor)
-            else:
-                result = self.workspace.read(
-                    ReadCall(find=call.text, within=call.within, limit=call.limit)
-                )
+            result = self.workspace.read(
+                ReadCall(find=call.text, within=call.within, limit=call.limit)
+            )
         return self._project_read(result, route="find")
-
-    def _within_membership(
-        self, within: str
-    ) -> tuple[list[Any], str] | PublicResult:
-        failed = self.workspace._refresh(force=True)
-        if failed is not None:
-            return PublicResult(
-                state="rejected",
-                code="read_unavailable",
-                next_action="retry_same",
-                instruction="Things Cloud is unavailable; retry this read.",
-            )
-        container = self.workspace._exact_item(within)
-        expected_kind = "project" if within.startswith("project:") else "area"
-        if (
-            container is None
-            or container.kind != expected_kind
-            or container.status != "open"
-            or container.trashed
-        ):
-            return PublicResult(
-                state="rejected",
-                code="missing_target",
-                next_action="correct_request",
-                instruction="That exact active container was not found.",
-                missing_ids=[within],
-            )
-        records = sorted(
-            [
-                item
-                for item in self.workspace._library.records.values()
-                if item.is_open()
-                and (
-                    item.parent_uuid == container.uuid
-                    if container.kind == "project"
-                    else item.area_uuid == container.uuid
-                    and item.parent_uuid is None
-                )
-            ],
-            key=lambda item: (item.sort_index, item.uuid),
-        )
-        return records, self.workspace._scope_revision([container, *records])
-
-    def _continue_within_page(self, cursor: str, limit: int) -> PublicResult:
-        stored = self._within_pages[cursor]
-        membership = self._within_membership(stored.within)
-        if isinstance(membership, PublicResult):
-            if membership.code == "read_unavailable":
-                return membership
-            self._within_pages.pop(cursor, None)
-            self._cursor_routes.pop(cursor, None)
-            return self._invalid_read_cursor()
-        records, revision = membership
-        if revision != stored.revision:
-            return self._invalid_read_cursor()
-        by_id = {item.id: item for item in records}
-        if any(item_id not in by_id for item_id in stored.remaining_ids):
-            return self._invalid_read_cursor()
-        remaining = [by_id[item_id] for item_id in stored.remaining_ids]
-        page, rest = remaining[:limit], remaining[limit:]
-        next_cursor = self._store_within_page(
-            stored.within, revision, [item.id for item in rest]
-        )
-        return self._within_result(page, next_cursor)
-
-    def _store_within_page(
-        self, within: str, revision: str, remaining_ids: list[str]
-    ) -> str | None:
-        if not remaining_ids:
-            return None
-        page = _WithinPage(
-            within=within,
-            revision=revision,
-            remaining_ids=tuple(remaining_ids),
-        )
-        existing = next(
-            (
-                cursor
-                for cursor, stored in self._within_pages.items()
-                if stored == page
-            ),
-            None,
-        )
-        if existing is not None:
-            return existing
-        cursor = "cur_" + token_urlsafe(18)
-        self._within_pages[cursor] = page
-        self._cursor_routes[cursor] = "find"
-        while len(self._within_pages) > 256:
-            expired = next(iter(self._within_pages))
-            del self._within_pages[expired]
-            self._cursor_routes.pop(expired, None)
-        return cursor
-
-    def _within_result(
-        self, records: list[Any], cursor: str | None
-    ) -> PublicResult:
-        return PublicResult(
-            state="ok",
-            code="ok",
-            next_action="continue_read" if cursor else "none",
-            instruction=(
-                "Current Things facts; more results remain. Continue with only this cursor."
-                if cursor
-                else "Current Things facts."
-            ),
-            items=[
-                self._item(
-                    self.workspace._fact(
-                        item, full=False, include_revision=False
-                    )
-                )
-                for item in records
-            ],
-            cursor=cursor,
-        )
 
     def _get(self, ids: list[str]) -> PublicResult:
         result = self.workspace.read(ReadCall(ids=ids))
@@ -1198,6 +1059,14 @@ class ThingsV2:
                 next_action="retry_same",
                 instruction="Things Cloud is unavailable; retry this read.",
             )
+        if result.missing_ids:
+            return PublicResult(
+                state="rejected",
+                code="missing_target",
+                next_action="correct_request",
+                instruction=result.instruction,
+                missing_ids=list(result.missing_ids),
+            )
         return PublicResult(
             state="rejected",
             code="validation_error",
@@ -1222,28 +1091,17 @@ class ThingsV2:
             instruction="That read cursor is invalid or belongs to another tool.",
         )
 
-    def _item(self, item: Any) -> PublicItem:
-        record = self.workspace._library.records.get(item.id.partition(":")[2])
-        start = item.start
-        if (
-            start is None
-            and record is not None
-            and record.kind in {"task", "project"}
-            and not record.heading
-            and not record.inbox
-        ):
-            start = "anytime"
+    @staticmethod
+    def _item(item: ItemFact) -> PublicItem:
         return PublicItem(
             id=item.id,
             kind=item.kind,
             title=TaintedText(value=item.title),
             status=item.status,
-            notes=TaintedText(value=item.notes_markdown)
-            if item.notes_markdown and (record is None or record.notes_format != "unavailable")
-            else None,
-            notes_state="unavailable" if record is not None and record.notes_format == "unavailable" else "available",
+            notes=TaintedText(value=item.notes_markdown) if item.notes_markdown else None,
+            notes_state=item.notes_state,
             into_id=item.into_id,
-            start=start,
+            start=item.start,
             deadline=item.deadline,
             tags=[
                 TaintedText(value=tag.title)

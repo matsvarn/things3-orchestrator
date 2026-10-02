@@ -477,6 +477,9 @@ class ThingsWorkspace:
                 instruction="No match. Try a shorter title token.",
             )
 
+        if call.within is not None:
+            return self._membership_page(call.within, call.limit)
+
         if view == "tags":
             rows = [
                 self._tag_fact(uuid)
@@ -533,6 +536,42 @@ class ThingsWorkspace:
                 if item.public_kind == "project"
             ]
         return list(self._library.areas())
+
+    def _membership_page(self, within: str, limit: int) -> Result:
+        container = self._exact_item(within)
+        expected_kind = "project" if within.startswith("project:") else "area"
+        if (
+            container is None
+            or container.kind != expected_kind
+            or container.status != "open"
+            or container.trashed
+        ):
+            return Result(
+                next="ask",
+                status="needs_input",
+                instruction="That exact active container was not found.",
+                missing_ids=[within],
+            )
+        records = sorted(
+            [
+                item
+                for item in self._library.records.values()
+                if item.is_open()
+                and (
+                    item.parent_uuid == container.uuid
+                    if container.kind == "project"
+                    else item.area_uuid == container.uuid
+                    and item.parent_uuid is None
+                )
+            ],
+            key=lambda item: (item.sort_index, item.uuid),
+        )
+        return self._page(
+            records,
+            limit,
+            full=False,
+            instruction="Current Things facts.",
+        )
 
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
@@ -2880,8 +2919,7 @@ class ThingsWorkspace:
         membership_revision: str | None = None,
     ) -> str:
         self._prune_cursors()
-        token = f"cursor_{token_urlsafe(18)}"
-        self._cursors[token] = _ItemCursor(
+        page = _ItemCursor(
             ids=ids,
             offset=offset,
             snapshot_revision=snapshot_revision,
@@ -2892,6 +2930,18 @@ class ThingsWorkspace:
             expires_at=self._clock() + timedelta(minutes=10),
             membership_revision=membership_revision,
         )
+        existing = next(
+            (
+                token
+                for token, stored in self._cursors.items()
+                if replace(stored, expires_at=page.expires_at) == page
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        token = f"cursor_{token_urlsafe(18)}"
+        self._cursors[token] = page
         return token
 
     def _tag_page(self, rows: list[TagFact], *, offset: int, limit: int) -> Result:
@@ -3250,21 +3300,21 @@ class ThingsWorkspace:
             heading_title=_bounded_title(heading_name) if heading_name else None,
             notes_markdown=(
                 item.notes[note_offset : note_offset + _NOTES_LIMIT]
-                if full and include_notes and want_notes
+                if full
+                and include_notes
+                and want_notes
+                and item.notes_format != "unavailable"
                 else None
+            ),
+            notes_state=(
+                "unavailable" if item.notes_format == "unavailable" else "available"
             ),
             checklist=checklist,
             direct_tags=direct_tags,
             inherited_tags=inherited_tags,
             direct_tag_ids=compact_direct_tag_ids,
             inherited_tag_ids=compact_inherited_tag_ids,
-            start="evening"
-            if item.tonight
-            else "someday"
-            if item.someday
-            else item.start.isoformat()
-            if item.start
-            else None,
+            start=_public_start(item),
             deadline=item.deadline.isoformat() if item.deadline else None,
             remind_at=self._reminder(item),
             recurrence=recurrence,

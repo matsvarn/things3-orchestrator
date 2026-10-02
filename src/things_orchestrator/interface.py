@@ -36,7 +36,7 @@ View = Literal[
 RegistryView = Literal["projects", "areas"]
 CursorView = View | RegistryView
 BULK_ID_LIMIT = 50
-START_PATTERN = r"^(today|evening|tomorrow|someday|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
+START_PATTERN = r"^(today|evening|tomorrow|someday|anytime|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
 RecurrenceKind = Literal[
     "none", "fixed_instance", "after_completion_instance", "template", "unknown"
 ]
@@ -93,6 +93,8 @@ class ReadCall(StrictModel):
         selectors = sum(value is not None for value in (self.view, self.id, self.find))
         if self.ids:
             selectors += 1
+        if self.within is not None and self.find is None and self.within != "trash":
+            selectors += 1
         if selectors > 1:
             raise ValueError("use only one of view, id, find, or ids")
         if "ids" in self.model_fields_set and not self.ids:
@@ -104,8 +106,6 @@ class ReadCall(StrictModel):
                 raise ValueError("within trash needs find")
             if self.view is not None:
                 raise ValueError("within trash cannot combine with view")
-        elif self.within is not None and self.find is None:
-            raise ValueError("within needs find")
         return self
 
 
@@ -200,6 +200,7 @@ class ItemFact(StrictModel):
     heading_id: str | None = Field(default=None, pattern=_HEADING_ID, max_length=512)
     heading_title: str | None = Field(default=None, min_length=1, max_length=1000)
     notes_markdown: str | None = Field(default=None, max_length=50_000)
+    notes_state: Literal["available", "unavailable"] = "available"
     checklist: list[ChecklistFact] = Field(default_factory=list, max_length=100)
     direct_tags: list[TagFact] = Field(default_factory=list, max_length=40)
     inherited_tags: list[TagFact] = Field(default_factory=list, max_length=40)

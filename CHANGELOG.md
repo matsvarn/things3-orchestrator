@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Route `things_find` within-only membership through the workspace read pager
+  and emit `notes_state` and Anytime `start` from item facts, so v2 mapping
+  no longer walks the library.
 - Trim unpublished internal ReadCall language after the three-tool read
   surface retired: drop audit/system/project/area views, `signals_any`,
   logbook from/to, ReviewSection, and unused Result.receipt. Registries

@@ -60,6 +60,9 @@ def test_read_keeps_live_selector_rules() -> None:
 
     trash = ReadCall.model_validate({"find": "Later", "within": "trash"})
     assert trash.within == "trash"
+    membership = ReadCall.model_validate({"within": "project:home"})
+    assert membership.within == "project:home"
+    assert membership.find is None
 
 
 def test_read_limit_and_bulk_ids_stay_bounded() -> None:

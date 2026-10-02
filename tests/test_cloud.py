@@ -1926,7 +1926,7 @@ def test_clear_start_emits_anytime_state_and_keeps_project(
     assert memory.records["later"].someday is False
     assert memory.records["later"].parent_uuid == "project"
     public = ThingsWorkspace(memory).read(ReadCall(id="task:later")).items[0]
-    assert public.start is None
+    assert public.start == "anytime"
     assert "someday" not in public.signals
 
 
