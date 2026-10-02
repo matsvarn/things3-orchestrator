@@ -65,10 +65,6 @@ class RoutineStoreProtocol(Protocol):
     ) -> None: ...
 
 
-class _RoutineDisabled(Exception):
-    pass
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
     state: RuntimeState
@@ -186,14 +182,9 @@ class RoutineWorker:
 
                 if now_mono >= next_delivery:
                     try:
-                        attempted, failed = await self._drain_due(
+                        drained = await self._drain_due(
                             stop=stop, poll_due_at=next_poll
                         )
-                    except _RoutineDisabled:
-                        self._snapshot = self._snapshot_for(
-                            "disabled", cloud_failures, delivery_failures
-                        )
-                        return
                     except Exception:
                         delivery_failures += 1
                         next_delivery = self._monotonic() + self._delivery_delay(
@@ -203,6 +194,12 @@ class RoutineWorker:
                             cloud_failures, delivery_failures
                         )
                     else:
+                        if drained is None:
+                            self._snapshot = self._snapshot_for(
+                                "disabled", cloud_failures, delivery_failures
+                            )
+                            return
+                        attempted, failed = drained
                         delivery_failures = delivery_failures + failed if failed else 0
                         next_delivery = self._monotonic() + (1 if attempted else 5)
                         self._snapshot = self._active_snapshot(
@@ -237,7 +234,7 @@ class RoutineWorker:
 
     async def _drain_due(
         self, *, stop: anyio.Event, poll_due_at: float
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int] | None:
         due = await self._sync(partial(self._store.due_events, now=self._epoch()))
         attempted = 0
         failures = 0
@@ -245,7 +242,7 @@ class RoutineWorker:
             if stop.is_set() or self._monotonic() >= poll_due_at:
                 break
             if not await self._still_enabled():
-                raise _RoutineDisabled
+                return None
             result = await self._sync(
                 partial(self._webhook.deliver, event, timestamp=self._epoch())
             )

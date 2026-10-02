@@ -67,6 +67,14 @@ _CHECKLIST_KINDS = {"ChecklistItem3", "ChecklistItem2", "ChecklistItem"}
 CACHE_VERSION = 11
 
 
+def is_task_kind(kind: str) -> bool:
+    return kind in _TASK_KINDS
+
+
+def is_tag_kind(kind: str) -> bool:
+    return kind in _TAG_KINDS
+
+
 class CloudError(RuntimeError):
     pass
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import threading
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -17,6 +19,25 @@ from things_orchestrator.routines_webhook import (
     _classify_http,
     hermes_signature,
 )
+
+
+@contextmanager
+def silent_local_post(
+    handler: type[BaseHTTPRequestHandler],
+) -> Iterator[HTTPServer]:
+    class Silent(handler):
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = HTTPServer(("127.0.0.1", 0), Silent)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 def _receiver(url: str, secret: str = "receiver-secret") -> HermesReceiver:
@@ -65,13 +86,7 @@ def test_adapter_posts_exact_stored_body_with_fresh_v2_signature() -> None:
             self.end_headers()
             self.wfile.write(b'{"status":"accepted","private":"discard-me"}')
 
-        def log_message(self, format: str, *args: object) -> None:
-            del format, args
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    try:
+    with silent_local_post(Handler) as server:
         body = json.dumps(
             {"event_id": "evt_test", "event_type": "task.created"},
             sort_keys=True,
@@ -81,10 +96,6 @@ def test_adapter_posts_exact_stored_body_with_fresh_v2_signature() -> None:
         result = HermesWebhook(
             _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task")
         ).deliver(event, timestamp=456)
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
 
     assert result.kind == "delivered"
     assert captured == {
@@ -114,21 +125,11 @@ def test_adapter_never_follows_redirect() -> None:
             self.send_response(200)
             self.end_headers()
 
-        def log_message(self, format: str, *args: object) -> None:
-            del format, args
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    try:
+    with silent_local_post(Handler) as server:
         event = StoredEvent("evt", "routine", "task", 1, b"{}", 0)
         result = HermesWebhook(
             _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task")
         ).deliver(event, timestamp=2)
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
 
     assert requests == 1
     assert (result.kind, result.code, result.http_status) == (
@@ -223,22 +224,12 @@ def test_adapter_bounds_acknowledgement_body() -> None:
             self.end_headers()
             self.wfile.write(b'{"status":"accepted","padding":"too-large"}')
 
-        def log_message(self, format: str, *args: object) -> None:
-            del format, args
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    try:
+    with silent_local_post(Handler) as server:
         event = StoredEvent("evt", "routine", "task", 1, b"{}", 0)
         result = HermesWebhook(
             _receiver(f"http://127.0.0.1:{server.server_port}/webhooks/task"),
             max_response_bytes=16,
         ).deliver(event, timestamp=2)
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
 
     assert (result.kind, result.code) == ("retry", "response_too_large")
 

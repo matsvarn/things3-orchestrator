@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Literal, Protocol, assert_never
@@ -81,6 +82,35 @@ def hermes_signature(secret: bytes, timestamp: int, body: bytes) -> str:
     return hmac.new(secret, message, hashlib.sha256).hexdigest()
 
 
+class _WebhookTransport:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        max_response_bytes: int,
+        opener: RoutineHTTPOpener | None,
+    ) -> None:
+        _validate_transport_bounds(timeout_seconds, max_response_bytes)
+        self._timeout_seconds = timeout_seconds
+        self._max_response_bytes = max_response_bytes
+        self._opener = opener or proxyless_no_redirect_opener()
+
+    def send(
+        self,
+        request: Request,
+        classify: Callable[[int, bytes, str | None], DeliveryResult],
+    ) -> DeliveryResult:
+        outcome = _send_bounded(
+            self._opener,
+            request,
+            timeout_seconds=self._timeout_seconds,
+            max_response_bytes=self._max_response_bytes,
+        )
+        if isinstance(outcome, DeliveryResult):
+            return outcome
+        return classify(outcome.status, outcome.body, outcome.retry_after)
+
+
 class HermesWebhook:
     def __init__(
         self,
@@ -90,11 +120,12 @@ class HermesWebhook:
         max_response_bytes: int = 65_536,
         _opener: RoutineHTTPOpener | None = None,
     ) -> None:
-        _validate_transport_bounds(timeout_seconds, max_response_bytes)
         self._receiver = receiver
-        self._timeout_seconds = timeout_seconds
-        self._max_response_bytes = max_response_bytes
-        self._opener = _opener or proxyless_no_redirect_opener()
+        self._transport = _WebhookTransport(
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+            opener=_opener,
+        )
 
     def deliver(self, event: StoredEvent, *, timestamp: int) -> DeliveryResult:
         secret = self._receiver.secret.reveal().encode("utf-8")
@@ -111,15 +142,7 @@ class HermesWebhook:
                 ),
             },
         )
-        outcome = _send_bounded(
-            self._opener,
-            request,
-            timeout_seconds=self._timeout_seconds,
-            max_response_bytes=self._max_response_bytes,
-        )
-        if isinstance(outcome, DeliveryResult):
-            return outcome
-        return _classify_http(outcome.status, outcome.body, outcome.retry_after)
+        return self._transport.send(request, _classify_http)
 
 
 class GrokWebhook:
@@ -131,11 +154,12 @@ class GrokWebhook:
         max_response_bytes: int = 65_536,
         _opener: RoutineHTTPOpener | None = None,
     ) -> None:
-        _validate_transport_bounds(timeout_seconds, max_response_bytes)
         self._receiver = receiver
-        self._timeout_seconds = timeout_seconds
-        self._max_response_bytes = max_response_bytes
-        self._opener = _opener or proxyless_no_redirect_opener()
+        self._transport = _WebhookTransport(
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_response_bytes,
+            opener=_opener,
+        )
 
     def deliver(self, event: StoredEvent, *, timestamp: int) -> DeliveryResult:
         del timestamp
@@ -148,17 +172,7 @@ class GrokWebhook:
                 "Content-Type": "application/json",
             },
         )
-        outcome = _send_bounded(
-            self._opener,
-            request,
-            timeout_seconds=self._timeout_seconds,
-            max_response_bytes=self._max_response_bytes,
-        )
-        if isinstance(outcome, DeliveryResult):
-            return outcome
-        return _classify_grok_http(
-            outcome.status, outcome.body, outcome.retry_after
-        )
+        return self._transport.send(request, _classify_grok_http)
 
 
 def build_webhook(receiver: Receiver) -> Webhook:

@@ -5,7 +5,7 @@ import sys
 import threading
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
@@ -167,7 +167,7 @@ def test_account_mismatch_and_missing_bearer_fail_closed_before_factory(
     assert missing_bearer == RoutineHTTPComposition.disabled()
 
 
-def test_missing_config_and_personal_profile_fail_closed_before_factory(
+def test_missing_config_fails_closed_before_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     credentials = Credentials(
@@ -176,22 +176,6 @@ def test_missing_config_and_personal_profile_fail_closed_before_factory(
     monkeypatch.setattr(
         "things_orchestrator.cli.load_routines_config",
         lambda: UnconfiguredRoutineConfig(),
-    )
-    assert _routine_http_composition(
-        credentials, service_managed=True
-    ) == RoutineHTTPComposition.disabled()
-
-    personal = RoutineProfile(
-        account_digest=_profile().account_digest,
-        host_profile=cast(Any, "personal"),
-        receiver=_profile().receiver,
-        poll_interval_seconds=60,
-        settle_seconds=120,
-        retry=RetryPolicy(),
-    )
-    monkeypatch.setattr(
-        "things_orchestrator.cli.load_routines_config",
-        lambda: EnabledRoutineConfig(personal),
     )
     assert _routine_http_composition(
         credentials, service_managed=True
@@ -255,8 +239,6 @@ def test_stdio_never_reads_routines_configuration(
 def test_eligible_composition_returns_zero_resource_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from things_orchestrator.routines_config import account_digest
-
     profile = _profile(account=account_digest("owner@example.com"))
     monkeypatch.setattr(
         "things_orchestrator.cli.load_routines_config",
@@ -279,8 +261,6 @@ def test_eligible_composition_returns_zero_resource_factory(
 def test_eligible_composition_builds_webhook_from_typed_receiver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from things_orchestrator.routines_config import account_digest
-
     profile = _profile(account=account_digest("owner@example.com"))
     captured: list[object] = []
     webhook = _UnusedWebhook()

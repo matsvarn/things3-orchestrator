@@ -3,10 +3,9 @@ from __future__ import annotations
 import io
 import json
 import socket
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Literal, Never, cast
 from urllib.error import URLError
@@ -14,6 +13,7 @@ from urllib.request import Request, build_opener
 
 import pytest
 
+from tests.test_routines_webhook import silent_local_post
 from things_orchestrator.cli import build_parser, main
 from things_orchestrator.config import ConfigError
 from things_orchestrator.routines_config import (
@@ -698,18 +698,8 @@ def _grok_server(*, status: int, body: bytes) -> Iterator[tuple[str, dict[str, o
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format: str, *args: object) -> None:
-            del format, args
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    try:
+    with silent_local_post(Handler) as server:
         yield f"http://127.0.0.1:{server.server_port}/test", captured
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
 
 
 def _deliver_to_local_grok(

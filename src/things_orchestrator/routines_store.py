@@ -15,8 +15,7 @@ from pathlib import Path
 from secrets import token_bytes
 from typing import cast
 
-from . import cloud
-from .cloud import HistoryBatch, HistoryEvent
+from .cloud import HistoryBatch, HistoryEvent, is_tag_kind, is_task_kind
 from .routines_config import (
     ROUTINE_EVENT_TYPE,
     ROUTINE_TRIGGER_TAG,
@@ -234,9 +233,9 @@ class RoutineStore:
                 if live and phase != "live":
                     phase = "live"
                 for event in group.events:
-                    if _is_tag(event.entity):
+                    if is_tag_kind(event.entity):
                         self._reduce_tag(connection, event)
-                    elif live and _is_task(event.entity):
+                    elif live and is_task_kind(event.entity):
                         self._reduce_task(connection, event, group.index, observed_at)
             cursor += len(batch.groups)
             if phase == "seeding" and cursor >= baseline_head:
@@ -570,14 +569,6 @@ def _lifecycle(value: object) -> str:
         if value == 2
         else "unknown"
     )
-
-
-def _is_task(entity: str) -> bool:
-    return entity in cloud._TASK_KINDS
-
-
-def _is_tag(entity: str) -> bool:
-    return entity in cloud._TAG_KINDS
 
 
 def _count(connection: sqlite3.Connection, table: str) -> int:
