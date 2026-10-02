@@ -12,8 +12,6 @@ from .tools import ITEM_ID
 
 
 class StrictModel(BaseModel):
-    """Reject values that are not part of the model interface."""
-
     model_config = ConfigDict(extra="forbid", strict=True)
 
 

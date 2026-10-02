@@ -275,8 +275,6 @@ _Result = TypeVar("_Result", covariant=True)
 
 
 class _MutationHandler(Protocol[_Result]):
-    """Visitor interface implemented by each mutation adapter."""
-
     def create(self, mutation: _CreateMutation) -> _Result: ...
     def edit(self, mutation: _EditMutation) -> _Result: ...
     def lifecycle(self, mutation: _LifecycleMutation) -> _Result: ...
@@ -285,8 +283,7 @@ class _MutationHandler(Protocol[_Result]):
     def recurrence(self, mutation: _RecurrenceMutation) -> _Result: ...
 
 
-def _compile_mutation(write: Write) -> _Mutation:
-    """Compile the journal form to the small internal mutation interface."""
+def compile_mutation(write: Write) -> _Mutation:
     action = write.action
     if action in {"create", "create_heading"}:
         return _CreateMutation(write, heading=action == "create_heading")
@@ -606,7 +603,7 @@ class MemoryLibrary:
         return all(self._write_matches(write) for write in normalized)
 
     def _write_matches(self, write: Write) -> bool:
-        return _compile_mutation(write).dispatch(_MutationVerifier(self))
+        return compile_mutation(write).dispatch(_MutationVerifier(self))
 
     @staticmethod
     def _placement_matches(item: Record, write: Write) -> bool:
@@ -646,7 +643,7 @@ class MemoryLibrary:
         handler.finish()
         return handler.result()
 
-    def _find_checklist(self, uuid: str) -> tuple[Record | None, ChecklistLine | None]:
+    def find_checklist(self, uuid: str) -> tuple[Record | None, ChecklistLine | None]:
         for parent in self.records.values():
             for line in parent.checklists:
                 if line.uuid == uuid:
@@ -679,7 +676,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
         )
 
     def apply(self, write: Write) -> None:
-        mutation = _compile_mutation(write)
+        mutation = compile_mutation(write)
         if write.tag_uuids is not None:
             write = replace(
                 write,
@@ -687,7 +684,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
                     self.tag_aliases.get(uuid, uuid) for uuid in write.tag_uuids
                 ],
             )
-            mutation = _compile_mutation(write)
+            mutation = compile_mutation(write)
         self._validate_heading(write)
         mutation.dispatch(self)
 
@@ -985,7 +982,7 @@ class _MemoryApplyHandler(_MutationHandler[None]):
 
     def checklist(self, mutation: _ChecklistMutation) -> None:
         write = mutation.write
-        parent, line = self.library._find_checklist(write.uuid)
+        parent, line = self.library.find_checklist(write.uuid)
         if write.checklist_remove:
             if parent is not None:
                 parent.checklists = [
@@ -1145,7 +1142,7 @@ class _MutationVerifier(_MutationHandler[bool]):
 
     def checklist(self, mutation: _ChecklistMutation) -> bool:
         write = mutation.write
-        parent, row = self.library._find_checklist(write.uuid)
+        parent, row = self.library.find_checklist(write.uuid)
         if write.checklist_remove:
             return row is None
         return (

@@ -8,14 +8,15 @@ import hmac
 import json
 import os
 import sqlite3
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_bytes
 from threading import Lock, RLock, get_ident
-from typing import Callable, ContextManager, Iterator, Literal, Protocol, cast, overload
+from typing import Literal, Protocol, cast, overload
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -156,10 +157,10 @@ class Journal(Protocol):
     def create_v2(self, operation: V2Operation) -> tuple[Literal["created", "existing", "conflict", "blocked"], V2Operation | None, list[str]]: ...
     def apply_session_v2(
         self, operation_id: str
-    ) -> ContextManager[V2ApplySession | None]: ...
+    ) -> AbstractContextManager[V2ApplySession | None]: ...
     def create_apply_session_v2(
         self, operation: V2Operation
-    ) -> ContextManager[V2CreateApplyStart]: ...
+    ) -> AbstractContextManager[V2CreateApplyStart]: ...
     def settle_v2(self, operation_id: str, *, expected: V2State, state: V2ApplyState, response: JsonDict, rows: list[JsonDict], authorization: object = None, action: str | None = None) -> bool: ...
     def v2_receipt_page(self, account_id: str, operation_id: str, *, limit: int, cursor: str | None = None) -> V2ReceiptPage: ...
     def prune_v2(self, *, now: str, retention_days: int = 7) -> int: ...
@@ -591,7 +592,7 @@ class MemoryJournal:
             if (
                 current is None or current.state != "pending"
                 or current.fingerprint != expected_fingerprint
-                or _legacy_plan_digest(current.plan) != expected_plan_digest
+                or legacy_plan_digest(current.plan) != expected_plan_digest
             ):
                 return False
             self._records[intent_id] = replace(current, state=state, plan={}, result=_copy_json(result))
@@ -1189,7 +1190,7 @@ class SQLiteJournal:
             ).fetchone()
             if (
                 row is None or str(row["fingerprint"]) != expected_fingerprint
-                or _legacy_plan_digest(cast(JsonDict, json.loads(str(row["plan_json"])))) != expected_plan_digest
+                or legacy_plan_digest(cast(JsonDict, json.loads(str(row["plan_json"])))) != expected_plan_digest
             ):
                 connection.rollback()
                 return False
@@ -1388,7 +1389,7 @@ def v2_manifest_is_valid(operation: V2Operation) -> bool:
     )
 
 
-def _legacy_plan_digest(plan: JsonDict) -> str:
+def legacy_plan_digest(plan: JsonDict) -> str:
     return "sha256:v1:" + sha256(_json(plan).encode()).hexdigest()
 
 
@@ -1417,7 +1418,7 @@ def legacy_owner_operation_is_valid(operation: V2Operation) -> bool:
         == "sha256:v1:legacy-no-replay-resolution"
         and operation.request_hash == operation.manifest_hash
         and hmac.compare_digest(
-            _legacy_plan_digest(cast(JsonDict, legacy_plan)),
+            legacy_plan_digest(cast(JsonDict, legacy_plan)),
             operation.manifest_hash,
         )
         and set(manifest)

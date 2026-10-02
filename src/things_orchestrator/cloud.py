@@ -30,7 +30,6 @@ from .library import (
     Status,
     Write,
     _ChecklistMutation,
-    _compile_mutation,
     _CreateMutation,
     _EditMutation,
     _LifecycleMutation,
@@ -38,6 +37,7 @@ from .library import (
     _MutationHandler,
     _RecurrenceMutation,
     _TagMutation,
+    compile_mutation,
     day_ts,
     from_ts,
     offset_from_remind,
@@ -978,11 +978,11 @@ class CloudLibrary(MemoryLibrary):
         return _CloudPlanHandler(self).plan(writes)
 
     def _envelope(self, write: Write) -> Envelope:
-        return _compile_mutation(write).dispatch(_CloudEnvelopeHandler(self))
+        return compile_mutation(write).dispatch(_CloudEnvelopeHandler(self))
 
     def _pulled_matches(self, envelope: Envelope) -> bool:
         if envelope.kind in _CHECKLIST_KINDS:
-            parent, line = self._find_checklist(envelope.uuid)
+            parent, line = self.find_checklist(envelope.uuid)
             if envelope.action == 2:
                 return line is None
             if line is None or parent is None:
@@ -1018,7 +1018,7 @@ class CloudLibrary(MemoryLibrary):
             if write.action == "ensure_tag":
                 continue
             if write.action == "checklist":
-                _, line = self._find_checklist(write.uuid)
+                _, line = self.find_checklist(write.uuid)
                 if write.checklist_remove:
                     verified.append(write.title or write.uuid)
                 elif line is not None:
@@ -1228,7 +1228,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
             if current is not None and current.heading:
                 self.project_heading_moves[current.uuid] = write.into_uuid
         for write in writes:
-            mutation = _compile_mutation(write)
+            mutation = compile_mutation(write)
             mutation = self._prepare(mutation)
             mutation.dispatch(self)
         envelopes = _coalesce_envelopes(self.envelopes)
@@ -1371,7 +1371,7 @@ class _CloudPlanHandler(_MutationHandler[None]):
 
     def checklist(self, mutation: _ChecklistMutation) -> None:
         write = mutation.write
-        parent, _ = self.library._find_checklist(write.uuid)  # noqa: SLF001
+        parent, _ = self.library.find_checklist(write.uuid)
         destination_uuid = write.checklist_parent_uuid or (
             parent.uuid if parent else None
         )
@@ -1452,7 +1452,7 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
 
     def checklist(self, mutation: _ChecklistMutation) -> Envelope:
         write = mutation.write
-        parent, existing = self.library._find_checklist(write.uuid)  # noqa: SLF001
+        parent, existing = self.library.find_checklist(write.uuid)
         if write.checklist_remove:
             return Envelope(
                 uuid=write.uuid, action=2, kind="ChecklistItem3", payload={}

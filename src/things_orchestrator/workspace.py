@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import re
 from calendar import monthrange
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .cloud import CloudError, CloudWriteRejected
 from .config import Preferences
@@ -44,7 +44,7 @@ from .journal import (
     V2ApplyState,
     V2Operation,
     V2State,
-    _legacy_plan_digest,
+    legacy_plan_digest,
     same_account_id,
     v2_manifest_is_valid,
 )
@@ -63,6 +63,9 @@ from .library import (
     template_uuid_of,
 )
 from .recurrence import RecurrenceReadError, RecurrenceState, RepeatMode, new_rule
+
+if TYPE_CHECKING:
+    from .v2 import OperationDraft, OperationManifest
 
 _READ_LIMIT = 40
 _BULK_TEXT_BUDGET = 100_000
@@ -314,8 +317,6 @@ _SEARCH_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 
 @dataclass(frozen=True)
 class _NormalizedSearchText:
-    """Keep the old substring search and provide exact token fallback."""
-
     folded: str
     tokens: tuple[str, ...]
 
@@ -609,7 +610,7 @@ class ThingsWorkspace:
                 signals.append("canceled")
         return count, list(dict.fromkeys(signals))
 
-    def execute_v2(self, draft: object) -> JsonDict:
+    def execute_v2(self, draft: OperationDraft) -> JsonDict:
         """Prepare one immutable v2 operation and run or stage its manifest."""
 
         from .v2 import OperationDraft
@@ -714,7 +715,7 @@ class ThingsWorkspace:
             ),
         }
 
-    def _prepare_v2_manifest(self, draft: object) -> Any | JsonDict:
+    def _prepare_v2_manifest(self, draft: OperationDraft) -> OperationManifest | JsonDict:
         from .v2 import OperationDraft, OperationManifest
 
         assert isinstance(draft, OperationDraft)
@@ -2056,7 +2057,7 @@ class ThingsWorkspace:
                     return False
                 continue
             if item_id.startswith("check:"):
-                _parent, row = self._library._find_checklist(
+                _parent, row = self._library.find_checklist(
                     item_id.removeprefix("check:")
                 )
                 if row is None or self._checklist_revision(row) != expected:
@@ -2209,7 +2210,7 @@ class ThingsWorkspace:
             self._journal.resolve_v1_pending(
                 intent_id,
                 expected_fingerprint=record.fingerprint,
-                expected_plan_digest=_legacy_plan_digest(record.plan),
+                expected_plan_digest=legacy_plan_digest(record.plan),
                 state="applied",
                 result=result,
             )
@@ -2224,7 +2225,7 @@ class ThingsWorkspace:
         record = self._journal.get(intent_id)
         if record is None or record.state != "pending":
             return None
-        digest = _legacy_plan_digest(record.plan)
+        digest = legacy_plan_digest(record.plan)
         raw_writes = record.plan.get("writes", [])
         writes = raw_writes if isinstance(raw_writes, list) else []
         display_titles = [
@@ -2403,7 +2404,7 @@ class ThingsWorkspace:
         self, write: Write, fields: Sequence[str]
     ) -> JsonDict | None:
         if write.action == "checklist":
-            parent, row = self._library._find_checklist(write.uuid)
+            parent, row = self._library.find_checklist(write.uuid)
             if parent is None or row is None:
                 return None
             return {
@@ -2663,7 +2664,7 @@ class ThingsWorkspace:
 
         # Retry only with whole content words after the normal substring search
         # finds nothing. Articles are safe filler to ignore; all other words
-        # must occur in one field. This avoids stemming and fuzzy matches.
+        # must occur in one field.
         terms = {token for token in needle.tokens if token not in _SEARCH_ARTICLES}
         if not terms:
             return False
