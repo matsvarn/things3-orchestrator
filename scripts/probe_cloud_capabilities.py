@@ -1,8 +1,7 @@
 """Run an explicitly requested, read-only v2 diagnostic against Things Cloud.
 
-Mutation proof belongs to deterministic Cloud fixtures. This script does not
-automate the owner factor, create disposable records, or permanently delete
-anything.
+Mutation proof belongs to deterministic Cloud fixtures. This script is
+read-only; no mutations / no disposable records.
 """
 
 from __future__ import annotations

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Drop unlinked `docs/owner.md`, stub superseded ADR 0006 to ADR 0007, and
+  trim leftover v1/approval phrasing from routines and the live Cloud probe.
 - Trim unpublished internal ReadCall language after the three-tool read
   surface retired: drop audit/system/project/area views, `signals_any`,
   logbook from/to, ReviewSection, and unused Result.receipt. Registries

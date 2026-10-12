@@ -4,9 +4,9 @@ Routines are optional and disabled by default. Version 0.12.0 has one built-in
 routine. It selects a new normal, open, untrashed task only when that task has a
 direct tag titled exactly `AI`.
 
-`AI` is the v1 opt-in convention in Things Orchestrator. Things Cloud does not
-require this tag. The fixed trigger keeps the first release understandable and
-auditable.
+`AI` is the first-release fixed trigger in Things Orchestrator. Things Cloud
+does not require this tag. The fixed trigger keeps the first release
+understandable and auditable.
 
 ## Check the host
 

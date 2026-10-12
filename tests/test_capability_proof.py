@@ -67,8 +67,8 @@ def test_live_probe_is_read_only_v2_and_has_no_legacy_approval_path() -> None:
 
 def test_public_contract_defers_advanced_mutation_surfaces() -> None:
     skill = (ROOT / "plugin/skills/things-orchestrator/SKILL.md").read_text().lower()
-    owner = (ROOT / "docs/owner.md").read_text().lower()
-    for text in (skill, owner):
+    readme = (ROOT / "README.md").read_text().lower()
+    for text in (skill, readme):
         assert "advanced" in text
-        assert "recurrence" in text
         assert "permanent" in text
+    assert "recurrence" in skill
