@@ -150,8 +150,7 @@ class RoutineStore:
         self._lock_fd = descriptor
         try:
             with closing(self._connect()) as connection, connection:
-                version_row = connection.execute("PRAGMA user_version").fetchone()
-                version = int(version_row[0]) if version_row is not None else 0
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                 if version not in {0, 1}:
                     raise RoutineStoreError(
                         "Routines database has an unsupported schema version"
@@ -224,7 +223,8 @@ class RoutineStore:
                 raise RoutineHistoryIdentityChanged(
                     "Things Cloud history identity changed"
                 )
-            assert isinstance(baseline_head, int)
+            if baseline_head is None:
+                raise RoutineStoreError("Routines database baseline head is missing")
             if phase == "seeding" and batch.current_head < baseline_head:
                 raise RoutineHistoryIdentityChanged(
                     "Things Cloud history head regressed during seeding"
@@ -350,12 +350,6 @@ class RoutineStore:
                 "DELETE FROM candidates WHERE task_uuid = ?", (event.uuid,)
             )
             return
-        exists = (
-            connection.execute(
-                "SELECT 1 FROM candidates WHERE task_uuid = ?", (event.uuid,)
-            ).fetchone()
-            is not None
-        )
         if event.action == 0:
             connection.execute(
                 "DELETE FROM candidates WHERE task_uuid = ?", (event.uuid,)
@@ -373,7 +367,12 @@ class RoutineStore:
                     observed_at + self.profile.settle_seconds,
                 ),
             )
-        elif not exists:
+        elif (
+            connection.execute(
+                "SELECT 1 FROM candidates WHERE task_uuid = ?", (event.uuid,)
+            ).fetchone()
+            is None
+        ):
             return
         else:
             assignments = ["last_observed_at = ?", "settle_after = ?"]
