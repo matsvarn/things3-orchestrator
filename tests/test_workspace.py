@@ -185,7 +185,9 @@ def test_find_includes_active_headings_for_rename() -> None:
 
     assert review.status == "ok"
     assert review.items[0].id == "heading:prep"
-    assert review.instruction.startswith("Current Things facts.")
+    assert review.instruction.startswith(
+        "These matches. Name one to open or stop."
+    )
 
 
 def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:
@@ -305,6 +307,7 @@ def test_template_lists_both_recurrence_relationship_forms_without_duplicates() 
     assert uuid_only.recurrence is not None
     assert links_only.recurrence.template_id == template.id
 
+
 def test_trash_view_returns_recoverable_exact_items() -> None:
     trashed = Record(uuid="trash-view", kind="task", title="Recover", trashed=True)
     active = Record(uuid="active-view", kind="task", title="Keep")
@@ -314,7 +317,7 @@ def test_trash_view_returns_recoverable_exact_items() -> None:
 
     assert [item.id for item in result.items] == [trashed.id]
     assert "trashed" in result.items[0].signals
-    assert result.instruction.startswith("Current Things facts.")
+    assert "Read an item to restore or purge." in result.instruction
     assert "purpose=change" not in result.instruction
 
 
@@ -392,6 +395,7 @@ def test_task_search_scope_never_falls_back_to_global_search() -> None:
     assert result.status == "needs_input"
     assert result.next == "ask"
     assert result.items == []
+
 
 def test_cursor_is_short_and_rejects_changed_snapshot() -> None:
     records = [
@@ -1240,7 +1244,7 @@ def test_find_within_trash_ignores_living_notes_hits() -> None:
     trash_hit = module.read(ReadCall(find="Later", within="trash"))
     assert [item.id for item in trash_hit.items] == [heading.id]
     assert "trashed" in trash_hit.items[0].signals
-    assert trash_hit.instruction.startswith("Current Things facts.")
+    assert "Read one to restore or purge." in trash_hit.instruction
     assert "purpose=change" not in trash_hit.instruction
 
 
@@ -1290,4 +1294,6 @@ def test_tags_page_instruction_is_the_catalog() -> None:
     result = module.read(ReadCall(view="tags"))
 
     assert result.status == "ok"
-    assert result.instruction.startswith("Current Things tags.")
+    assert "catalog" in result.instruction
+    assert "tag_ids" in result.instruction
+    assert "change_tags" in result.instruction

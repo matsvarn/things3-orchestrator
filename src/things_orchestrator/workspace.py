@@ -407,7 +407,7 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction=(
-                        "Current Things facts."
+                        "These Trash matches. Read one to restore or purge."
                         if matches
                         else "No Trash item matched that find."
                     ),
@@ -426,7 +426,7 @@ class ThingsWorkspace:
                     matches,
                     call.limit,
                     full=False,
-                    instruction="Current Things facts.",
+                    instruction="These matches. Name one to open or stop.",
                 )
             closed = [
                 item
@@ -436,7 +436,8 @@ class ThingsWorkspace:
             if closed:
                 only_trash = all(item.trashed for item in closed)
                 instruction = (
-                    "Current Things facts."
+                    "These matches are in Trash. "
+                    "Read one to restore or purge, or view=trash."
                     if only_trash
                     else "These matches are not active. "
                     "Read the exact id, or view=trash."
@@ -465,11 +466,13 @@ class ThingsWorkspace:
             return self._tag_page(rows, offset=0, limit=call.limit)
 
         visible = self._view_items(view)
-        instruction = "Current Things facts."
+        instruction = "Use this review as current evidence."
         if view in {"today", "inbox", "week"}:
             instruction = (
                 "Each into_id is the Area or Project home. Titles are on into_title."
             )
+        elif view == "trash":
+            instruction = "This is Trash. Read an item to restore or purge."
         return self._page(
             visible,
             call.limit,
@@ -1515,13 +1518,20 @@ class ThingsWorkspace:
                     )
                     display_titles.append(graph_write.title or projected.title)
             else:
-                for write in self._copy_checklist_writes(
-                    projected.checklists, template_uuid
-                ):
-                    writes.append(write)
+                for row in projected.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=row.title,
+                            checklist_parent_uuid=template_uuid,
+                            checklist_status="open",
+                            checklist_index=row.sort_index,
+                        )
+                    )
                     before.append(None)
                     touched.append([])
-                    display_titles.append(write.title or projected.title)
+                    display_titles.append(row.title)
             writes.append(
                 Write(
                     action="repeat_link",
@@ -1694,13 +1704,20 @@ class ThingsWorkspace:
                     )
                     display_titles.append(graph_write.title or template.title)
             else:
-                for write in self._copy_checklist_writes(
-                    template.checklists, next_uuid
-                ):
-                    writes.append(write)
+                for row in template.checklists:
+                    writes.append(
+                        Write(
+                            action="checklist",
+                            uuid=new_uuid(),
+                            title=row.title,
+                            checklist_parent_uuid=next_uuid,
+                            checklist_status="open",
+                            checklist_index=row.sort_index,
+                        )
+                    )
                     before.append(None)
                     touched.append([])
-                    display_titles.append(write.title or template.title)
+                    display_titles.append(row.title)
             writes.append(
                 Write(
                     action="repeat_next",
@@ -2641,7 +2658,7 @@ class ThingsWorkspace:
 
     @staticmethod
     def _is_searchable(item: Record, *, closed: bool = False) -> bool:
-        """Search open records, or every record when closed."""
+        """Search active work, or any record when ending or restoring work."""
 
         if closed:
             return True
@@ -2856,7 +2873,11 @@ class ThingsWorkspace:
             Result(
                 next="done",
                 status="ok",
-                instruction="Current Things tags.",
+                instruction=(
+                    "These TagFact titles and ids are the catalog to reuse on "
+                    "tag_ids and tags_add. Send this scope_revision as "
+                    "tags_revision only with change_tags."
+                ),
                 tags=page_rows,
                 truncated=cursor is not None,
                 cursor=cursor,
@@ -2866,7 +2887,7 @@ class ThingsWorkspace:
 
     @staticmethod
     def _follow_cursor(result: Result) -> Result:
-        """A cursor means this read continues."""
+        """Keep next honest: a cursor means the model should read again."""
         if result.cursor is None:
             return result
         instruction = result.instruction
@@ -2998,8 +3019,6 @@ class ThingsWorkspace:
         *,
         full: bool,
         include_revision: bool = True,
-        include_notes: bool = True,
-        note_offset: int = 0,
         checklist: list[ChecklistFact] | None = None,
         direct_tags: list[TagFact] | None = None,
         inherited_tags: list[TagFact] | None = None,
@@ -3090,8 +3109,8 @@ class ThingsWorkspace:
             heading_id=heading_id,
             heading_title=_bounded_title(heading_name) if heading_name else None,
             notes_markdown=(
-                item.notes[note_offset : note_offset + _NOTES_LIMIT]
-                if full and include_notes and want_notes
+                item.notes[:_NOTES_LIMIT]
+                if full and want_notes
                 else None
             ),
             checklist=checklist,
@@ -3122,12 +3141,7 @@ class ThingsWorkspace:
             ),
             truncated_fields=_truncated_fields(
                 notes=notes_truncated
-                or (
-                    full
-                    and want_notes
-                    and include_notes
-                    and note_offset + _NOTES_LIMIT < len(item.notes)
-                ),
+                or (full and want_notes and _NOTES_LIMIT < len(item.notes)),
                 checklist=checklist_truncated,
                 tags=tags_truncated,
                 recurrence=links_truncated,
@@ -3138,12 +3152,7 @@ class ThingsWorkspace:
                 tags_truncated=tags_truncated,
                 notes_truncated=(
                     notes_truncated
-                    or (
-                        full
-                        and want_notes
-                        and include_notes
-                        and note_offset + _NOTES_LIMIT < len(item.notes)
-                    )
+                    or (full and want_notes and _NOTES_LIMIT < len(item.notes))
                 ),
                 links_truncated=links_truncated,
             ),
@@ -3417,22 +3426,6 @@ class ThingsWorkspace:
         visit(uuid, frozenset({uuid}))
         return ordered
 
-    @staticmethod
-    def _copy_checklist_writes(
-        rows: Sequence[ChecklistLine], parent_uuid: str
-    ) -> list[Write]:
-        return [
-            Write(
-                action="checklist",
-                uuid=new_uuid(),
-                title=row.title,
-                checklist_parent_uuid=parent_uuid,
-                checklist_status="open",
-                checklist_index=row.sort_index,
-            )
-            for row in rows
-        ]
-
     def _clone_project_graph_writes(
         self,
         source_project_uuid: str,
@@ -3527,15 +3520,20 @@ class ThingsWorkspace:
                 )
             )
         for task in tasks:
-            writes.extend(
-                self._copy_checklist_writes(
-                    sorted(
-                        task.checklists,
-                        key=lambda item: (item.sort_index, item.uuid),
-                    ),
-                    uuid_map[task.uuid],
+            parent_uuid = uuid_map[task.uuid]
+            for row in sorted(
+                task.checklists, key=lambda item: (item.sort_index, item.uuid)
+            ):
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=row.title,
+                        checklist_parent_uuid=parent_uuid,
+                        checklist_status="open",
+                        checklist_index=row.sort_index,
+                    )
                 )
-            )
         return writes
 
     def _repeat_stop_plan(self, template: Record) -> _RepeatStopPlan:
@@ -3628,15 +3626,20 @@ class ThingsWorkspace:
                     )
                 )
         else:
-            writes.extend(
-                self._copy_checklist_writes(
-                    sorted(
-                        template.checklists,
-                        key=lambda item: (item.sort_index, item.uuid),
-                    ),
-                    replacement.uuid,
+            for row in sorted(
+                template.checklists,
+                key=lambda item: (item.sort_index, item.uuid),
+            ):
+                writes.append(
+                    Write(
+                        action="checklist",
+                        uuid=new_uuid(),
+                        title=row.title,
+                        checklist_parent_uuid=replacement.uuid,
+                        checklist_status="open",
+                        checklist_index=row.sort_index,
+                    )
                 )
-            )
         for row in sorted(
             template.checklists,
             key=lambda item: (item.sort_index, item.uuid),
