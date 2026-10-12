@@ -1545,7 +1545,7 @@ class ThingsWorkspace:
                     writes.append(write)
                     before.append(None)
                     touched.append([])
-                    display_titles.append(write.title)
+                    display_titles.append(write.title or "")
             writes.append(
                 Write(
                     action="repeat_link",
@@ -1724,7 +1724,7 @@ class ThingsWorkspace:
                     writes.append(write)
                     before.append(None)
                     touched.append([])
-                    display_titles.append(write.title)
+                    display_titles.append(write.title or "")
             writes.append(
                 Write(
                     action="repeat_next",
