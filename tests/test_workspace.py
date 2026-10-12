@@ -102,12 +102,14 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     library.tags["focus"] = "Focus"
     module = ThingsWorkspace(library, clock=lambda: NOW)
 
-    item = module.read(ReadCall(id="task:task1")).items[0]
+    result = module.read(ReadCall(id="task:task1"))
+    item = result.items[0]
 
     assert item.notes_markdown == "## Outcome\n\nShip it."
     assert item.checklist[0].id == "check:row1"
     assert item.checklist[0].status == "canceled"
-    assert item.direct_tags[0].id == "tag:focus"
+    assert item.direct_tag_ids == ["tag:focus"]
+    assert [tag.id for tag in result.tags] == ["tag:focus"]
     assert item.revision.startswith("r_")
 
 
@@ -306,96 +308,6 @@ def test_template_lists_both_recurrence_relationship_forms_without_duplicates() 
     assert links_only.recurrence.template_id == template.id
 
 
-def test_template_detail_pages_mixed_recurrence_relationships() -> None:
-    template = Record(
-        uuid="page-template",
-        kind="task",
-        title="Template",
-        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule={"tp": 0}),
-    )
-    instances = []
-    for index in range(25):
-        instances.append(
-            Record(
-                uuid=f"link-{index:02d}",
-                kind="task",
-                title=f"Link {index}",
-                sort_index=index,
-                recurrence=RecurrenceState(role="instance", links=(template.uuid,)),
-            )
-        )
-        instances.append(
-            Record(
-                uuid=f"uuid-{index:02d}",
-                kind="task",
-                title=f"UUID {index}",
-                sort_index=index + 25,
-                recurrence=RecurrenceState(
-                    role="instance", template_uuid=template.uuid
-                ),
-            )
-        )
-    module = workspace([template, *instances])
-
-    result = module.read(ReadCall(id=template.id, limit=20))
-    found: list[str] = []
-    pages = 0
-    while True:
-        pages += 1
-        item = result.items[0]
-        assert item.recurrence is not None
-        found.extend(item.recurrence.linked_item_ids)
-        if result.cursor is None:
-            break
-        result = module.read(ReadCall(cursor=result.cursor, limit=20))
-
-    assert pages == 3
-    assert len(found) == 50
-    assert len(set(found)) == 50
-    assert {f"task:link-{index:02d}" for index in range(25)}.issubset(found)
-    assert {f"task:uuid-{index:02d}" for index in range(25)}.issubset(found)
-
-
-def test_template_detail_cursor_stales_when_an_instance_is_removed() -> None:
-    template = Record(
-        uuid="stale-template",
-        kind="task",
-        title="Template",
-        recurrence=RecurrenceState(role="template", repeat_type="fixed", rule={"tp": 0}),
-    )
-    instances = [
-        Record(
-            uuid=f"c{index:02d}",
-            kind="task",
-            title=f"Copy {index}",
-            sort_index=index,
-            recurrence=RecurrenceState(
-                role="instance",
-                template_uuid=template.uuid,
-                links=(template.uuid,),
-            ),
-        )
-        for index in range(25)
-    ]
-    library = MemoryLibrary([template, *instances])
-    module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
-
-    first = module.read(ReadCall(id=template.id, limit=10))
-    assert first.cursor is not None
-    assert first.items[0].recurrence is not None
-    assert first.items[0].recurrence.linked_item_ids == [
-        f"task:c{index:02d}" for index in range(10)
-    ]
-    del library.records["c00"]
-    stale = module.read(ReadCall(cursor=first.cursor, limit=10))
-
-    assert stale.status == "stale"
-    assert stale.next == "read"
-
-
-
-
-
 def test_trash_view_returns_recoverable_exact_items() -> None:
     trashed = Record(uuid="trash-view", kind="task", title="Recover", trashed=True)
     active = Record(uuid="active-view", kind="task", title="Keep")
@@ -450,14 +362,12 @@ def test_exact_read_bounds_external_text_and_order_facts() -> None:
     result = module.read(ReadCall(id=task.id))
 
     assert result.status == "ok"
-    assert "continue the exact item" in result.instruction
     item = result.items[0]
     assert len(item.title) == 1000
     assert len(item.notes_markdown or "") == 50_000
     assert len(item.checklist[0].title) == 1000
-    assert all(
-        len(tag.title) == 1000 for tag in [*item.direct_tags, *item.inherited_tags]
-    )
+    assert result.tags
+    assert all(len(tag.title) == 1000 for tag in result.tags)
     assert item.order == -(2**63)
     assert item.today_order == 2**63 - 1
     assert item.checklist[0].order == 2**63 - 1
@@ -484,246 +394,6 @@ def test_task_search_scope_never_falls_back_to_global_search() -> None:
 
     assert result.status == "needs_input"
     assert result.next == "ask"
-    assert result.items == []
-
-
-def test_exact_detail_pages_checklist_and_tag_facts_once_in_stable_order() -> None:
-    area_tags = [f"area-tag-{index}" for index in range(20)]
-    project_tags = [f"project-tag-{index}" for index in range(25)]
-    direct_tags = [f"direct-tag-{index}" for index in range(45)]
-    area = Record(
-        uuid="area",
-        kind="area",
-        title="Work",
-        tag_uuids=area_tags,
-    )
-    project = Record(
-        uuid="project",
-        kind="project",
-        title="Launch",
-        area_uuid=area.uuid,
-        tag_uuids=project_tags,
-    )
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Ship",
-        notes="Keep this note once.",
-        parent_uuid=project.uuid,
-        tag_uuids=direct_tags,
-        checklists=[
-            ChecklistLine(f"row-{index}", f"Step {index}", sort_index=index)
-            for index in range(45)
-        ],
-    )
-    library = MemoryLibrary([area, project, task])
-    library.tags = {
-        uuid: uuid.replace("-", " ").title()
-        for uuid in [*area_tags, *project_tags, *direct_tags]
-    }
-    module = ThingsWorkspace(library, clock=lambda: NOW)
-
-    result = module.read(ReadCall(id=task.id, limit=40))
-    revision = result.scope_revision
-    item_revision = result.items[0].revision
-    checklist_ids: list[str] = []
-    direct_ids: list[str] = []
-    inherited_ids: list[str] = []
-    notes: list[str | None] = []
-    pages = 0
-    while True:
-        pages += 1
-        item = result.items[0]
-        checklist_ids.extend(row.id for row in item.checklist)
-        direct_ids.extend(tag.id for tag in item.direct_tags)
-        inherited_ids.extend(tag.id for tag in item.inherited_tags)
-        notes.append(item.notes_markdown)
-        assert result.scope_revision == revision
-        assert item.revision == item_revision
-        if result.cursor is None:
-            assert result.truncated is False
-            break
-        assert result.truncated is True
-        result = module.read(ReadCall(cursor=result.cursor, limit=40))
-
-    assert pages == 4
-    assert checklist_ids == [f"check:row-{index}" for index in range(45)]
-    assert direct_ids == [f"tag:{uuid}" for uuid in direct_tags]
-    assert inherited_ids == [
-        *(f"tag:{uuid}" for uuid in project_tags),
-        *(f"tag:{uuid}" for uuid in area_tags),
-    ]
-    assert notes == ["Keep this note once.", None, None, None]
-    assert "checklist_truncated" not in result.items[0].signals
-    assert "tags_truncated" not in result.items[0].signals
-
-
-def test_empty_note_is_returned_only_on_the_first_detail_page() -> None:
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Empty note",
-        notes="",
-        checklists=[
-            ChecklistLine(f"row-{index}", f"Step {index}", sort_index=index)
-            for index in range(21)
-        ],
-    )
-    module = workspace([task])
-
-    first = module.read(ReadCall(id=task.id, limit=20))
-    assert first.cursor is not None
-    second = module.read(ReadCall(cursor=first.cursor, limit=20))
-
-    assert first.items[0].notes_markdown == ""
-    assert second.items[0].notes_markdown is None
-
-
-def test_detail_cursor_rejects_a_repeated_view() -> None:
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Paged detail",
-        notes="x" * 50_001,
-    )
-    module = workspace([task])
-
-    first = module.read(ReadCall(id=task.id))
-    assert first.cursor is not None
-    continued = module.read(
-        ReadCall.model_validate({"cursor": first.cursor, "view": "today"})
-    )
-
-    assert continued.status == "needs_input"
-    assert continued.next == "ask"
-    assert continued.items == []
-
-
-def test_exact_detail_cursor_rejects_a_changed_inherited_tag() -> None:
-    parent = Record(
-        uuid="project",
-        kind="project",
-        title="Launch",
-        tag_uuids=["context"],
-    )
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Ship",
-        parent_uuid=parent.uuid,
-        checklists=[
-            ChecklistLine(f"row-{index}", f"Step {index}", sort_index=index)
-            for index in range(41)
-        ],
-    )
-    library = MemoryLibrary([parent, task])
-    library.tags["context"] = "Context"
-    module = ThingsWorkspace(library, clock=lambda: NOW)
-
-    first = module.read(ReadCall(id=task.id, limit=40))
-    assert first.cursor is not None
-    library.tags["context"] = "Changed context"
-
-    result = module.read(ReadCall(cursor=first.cursor, limit=40))
-
-    assert result.status == "stale"
-    assert result.next == "read"
-
-
-@pytest.mark.parametrize("length", [50_001, 120_001])
-def test_exact_detail_pages_long_notes_without_repeat_or_loss(length: int) -> None:
-    notes = "".join(str(index % 10) for index in range(length))
-    task = Record(uuid="task", kind="task", title="Long note", notes=notes)
-    module = workspace([task])
-
-    result = module.read(ReadCall(id=task.id))
-    chunks: list[str] = []
-    signals: list[list[str]] = []
-    while True:
-        item = result.items[0]
-        if item.notes_markdown is not None:
-            chunks.append(item.notes_markdown)
-        signals.append(item.signals)
-        if result.cursor is None:
-            assert result.truncated is False
-            break
-        assert result.truncated is True
-        result = module.read(ReadCall(cursor=result.cursor))
-
-    assert "".join(chunks) == notes
-    assert [len(chunk) for chunk in chunks] == [
-        *([50_000] * (length // 50_000)),
-        *([length % 50_000] if length % 50_000 else []),
-    ]
-    assert all("notes_truncated" in page for page in signals[:-1])
-    assert "notes_truncated" not in signals[-1]
-
-
-def test_long_notes_and_detail_rows_advance_together_to_one_final_page() -> None:
-    notes = "n" * 100_001
-    task = Record(
-        uuid="task",
-        kind="task",
-        title="Mixed detail",
-        notes=notes,
-        tag_uuids=[f"direct-{index}" for index in range(45)],
-        checklists=[
-            ChecklistLine(f"row-{index}", f"Step {index}", sort_index=index)
-            for index in range(45)
-        ],
-    )
-    parent = Record(
-        uuid="project",
-        kind="project",
-        title="Parent",
-        tag_uuids=[f"inherited-{index}" for index in range(45)],
-    )
-    task.parent_uuid = parent.uuid
-    library = MemoryLibrary([parent, task])
-    library.tags = {uuid: uuid for uuid in [*task.tag_uuids, *parent.tag_uuids]}
-    module = ThingsWorkspace(library, clock=lambda: NOW)
-
-    result = module.read(ReadCall(id=task.id, limit=20))
-    chunks: list[str] = []
-    checklist_ids: list[str] = []
-    direct_ids: list[str] = []
-    inherited_ids: list[str] = []
-    pages = 0
-    while True:
-        pages += 1
-        item = result.items[0]
-        if item.notes_markdown is not None:
-            chunks.append(item.notes_markdown)
-        checklist_ids.extend(row.id for row in item.checklist)
-        direct_ids.extend(tag.id for tag in item.direct_tags)
-        inherited_ids.extend(tag.id for tag in item.inherited_tags)
-        if result.cursor is None:
-            assert result.truncated is False
-            assert "notes_truncated" not in item.signals
-            assert "checklist_truncated" not in item.signals
-            assert "tags_truncated" not in item.signals
-            break
-        result = module.read(ReadCall(cursor=result.cursor, limit=20))
-
-    assert pages == 7
-    assert "".join(chunks) == notes
-    assert [len(chunk) for chunk in chunks] == [50_000, 50_000, 1]
-    assert checklist_ids == [f"check:row-{index}" for index in range(45)]
-    assert direct_ids == [f"tag:direct-{index}" for index in range(45)]
-    assert inherited_ids == [f"tag:inherited-{index}" for index in range(45)]
-
-
-def test_long_note_cursor_stales_after_the_note_changes() -> None:
-    task = Record(uuid="task", kind="task", title="Long", notes="x" * 50_001)
-    module = workspace([task])
-    first = module.read(ReadCall(id=task.id))
-    assert first.cursor is not None
-    task.notes = "changed" + task.notes
-
-    result = module.read(ReadCall(cursor=first.cursor))
-
-    assert result.status == "stale"
-    assert result.next == "read"
     assert result.items == []
 
 
@@ -1104,7 +774,8 @@ def test_bulk_read_keeps_bounded_inherited_tags_when_already_truncated() -> None
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
     exact = module.read(ReadCall(id=task.id, limit=40))
-    assert len(exact.items[0].inherited_tags) == 40
+    assert len(exact.items[0].inherited_tag_ids) == 40
+    assert exact.items[0].inherited_tags == []
     assert "tags" in exact.items[0].truncated_fields
     assert "tags_truncated" in exact.items[0].signals
 

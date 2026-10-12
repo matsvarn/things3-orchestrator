@@ -357,15 +357,6 @@ class _TagCursor:
     expires_at: datetime
 
 
-@dataclass(frozen=True)
-class _DetailCursor:
-    item_id: str
-    row_offset: int
-    note_offset: int
-    revision: str
-    expires_at: datetime
-
-
 class _Abort(Exception):
     def __init__(self, result: Result) -> None:
         super().__init__(result.instruction)
@@ -391,7 +382,6 @@ class ThingsWorkspace:
         self._preferences = preferences or Preferences
         self._cursors: dict[str, _ItemCursor] = {}
         self._tag_cursors: dict[str, _TagCursor] = {}
-        self._detail_cursors: dict[str, _DetailCursor] = {}
 
     def read(self, call: ReadCall) -> Result:
         failed = self._refresh()
@@ -400,22 +390,10 @@ class ThingsWorkspace:
         if call.cursor is not None:
             return self._continue(call.cursor, call.limit, view=call.view)
 
-        if call.ids:
+        if call.ids or call.id is not None:
             return self._bulk_exact(call)
 
         view = call.view or "today"
-        if call.id is not None:
-            item = self._exact_item(call.id)
-            if item is None:
-                return self._needs_input(
-                    "I could not find that exact item. Read or search again."
-                )
-            return self._detail_page(
-                item,
-                row_offset=0,
-                note_offset=0,
-                limit=call.limit,
-            )
 
         if call.find is not None:
             if call.within == "trash":
@@ -537,7 +515,7 @@ class ThingsWorkspace:
     def _bulk_exact(self, call: ReadCall) -> Result:
         items: list[Record] = []
         missing: list[str] = []
-        for item_id in call.ids:
+        for item_id in call.ids or ([call.id] if call.id is not None else []):
             item = self._exact_item(item_id)
             if item is None:
                 missing.append(item_id)
@@ -2761,24 +2739,6 @@ class ThingsWorkspace:
         return self._follow_cursor(result)
 
     def _continue(self, cursor: str, limit: int, *, view: View | None = None) -> Result:
-        detail_saved = self._detail_cursors.get(cursor)
-        if detail_saved is not None:
-            if error := self._cursor_view_error(view, expected=None, repeatable=False):
-                return self._needs_input(error)
-            item = self._exact_item(detail_saved.item_id)
-            if (
-                detail_saved.expires_at <= self._clock()
-                or item is None
-                or self._detail_revision(item) != detail_saved.revision
-            ):
-                return self._stale("That item changed. Read it again.")
-            return self._detail_page(
-                item,
-                row_offset=detail_saved.row_offset,
-                note_offset=detail_saved.note_offset,
-                limit=limit,
-                expected_revision=detail_saved.revision,
-            )
         tag_saved = self._tag_cursors.get(cursor)
         if tag_saved is not None:
             if error := self._cursor_view_error(view, expected="tags"):
@@ -2925,94 +2885,6 @@ class ThingsWorkspace:
             )
         )
 
-    def _detail_page(
-        self,
-        item: Record,
-        *,
-        row_offset: int,
-        note_offset: int,
-        limit: int,
-        expected_revision: str | None = None,
-    ) -> Result:
-        revision = self._detail_revision(item)
-        if expected_revision is not None and revision != expected_revision:
-            return self._stale("That item changed. Read it again.")
-        checklist, direct, inherited = self._detail_lists(item)
-        linked = [candidate.id for candidate in self._library.recurrence_instances(item.uuid)]
-        page_start = row_offset
-        page_end = row_offset + min(limit, _READ_LIMIT)
-
-        checklist_start = 0
-        direct_start = len(checklist)
-        inherited_start = direct_start + len(direct)
-        linked_start = inherited_start + len(inherited)
-        total = linked_start + len(linked)
-
-        def bounds(group_start: int, length: int) -> slice:
-            start = max(page_start - group_start, 0)
-            end = max(min(page_end - group_start, length), 0)
-            return slice(start, end)
-
-        checklist_page = checklist[bounds(checklist_start, len(checklist))]
-        direct_page = direct[bounds(direct_start, len(direct))]
-        inherited_page = inherited[bounds(inherited_start, len(inherited))]
-        linked_page = linked[bounds(linked_start, len(linked))]
-        next_row_offset = min(page_end, total)
-        include_notes = note_offset < len(item.notes) or (
-            note_offset == 0 and not item.notes
-        )
-        next_note_offset = (
-            (min(note_offset + _NOTES_LIMIT, len(item.notes)) if item.notes else 1)
-            if include_notes
-            else note_offset
-        )
-        notes_remaining = next_note_offset < len(item.notes)
-        rows_remaining = next_row_offset < total
-        next_cursor = None
-        if notes_remaining or rows_remaining:
-            self._prune_cursors()
-            next_cursor = f"cursor_{token_urlsafe(18)}"
-            self._detail_cursors[next_cursor] = _DetailCursor(
-                item_id=item.id,
-                row_offset=next_row_offset,
-                note_offset=next_note_offset,
-                revision=revision,
-                expires_at=self._clock() + timedelta(minutes=10),
-            )
-        return self._follow_cursor(
-            Result(
-                next="done",
-                status="ok",
-                instruction=(
-                    "Use this note chunk and continue the exact item."
-                    if notes_remaining
-                    else "Use these current facts."
-                    if row_offset == 0 and note_offset == 0
-                    else "Continue this exact item."
-                ),
-                items=[
-                    self._fact(
-                        item,
-                        full=True,
-                        include_notes=include_notes,
-                        note_offset=note_offset,
-                        checklist=checklist_page,
-                        direct_tags=direct_page,
-                        inherited_tags=inherited_page,
-                        checklist_truncated=next_row_offset < len(checklist),
-                        tags_truncated=bool(direct or inherited)
-                        and next_row_offset < linked_start,
-                        notes_truncated=notes_remaining,
-                        linked_item_ids=linked_page,
-                        links_truncated=next_row_offset < linked_start + len(linked),
-                    )
-                ],
-                scope_revision=revision,
-                cursor=next_cursor,
-                truncated=next_cursor is not None,
-            )
-        )
-
     @staticmethod
     def _follow_cursor(result: Result) -> Result:
         """Keep next honest: a cursor means the model should read again."""
@@ -3033,21 +2905,11 @@ class ThingsWorkspace:
             for key, value in self._tag_cursors.items()
             if value.expires_at > now
         }
-        self._detail_cursors = {
-            key: value
-            for key, value in self._detail_cursors.items()
-            if value.expires_at > now
-        }
-        while (
-            len(self._cursors) + len(self._tag_cursors) + len(self._detail_cursors)
-            >= 100
-        ):
+        while len(self._cursors) + len(self._tag_cursors) >= 100:
             if self._cursors:
                 del self._cursors[next(iter(self._cursors))]
             elif self._tag_cursors:
                 del self._tag_cursors[next(iter(self._tag_cursors))]
-            elif self._detail_cursors:
-                del self._detail_cursors[next(iter(self._detail_cursors))]
 
     def _enforce_bulk_result(
         self,
@@ -3157,8 +3019,6 @@ class ThingsWorkspace:
         *,
         full: bool,
         include_revision: bool = True,
-        include_notes: bool = True,
-        note_offset: int = 0,
         checklist: list[ChecklistFact] | None = None,
         direct_tags: list[TagFact] | None = None,
         inherited_tags: list[TagFact] | None = None,
@@ -3249,8 +3109,8 @@ class ThingsWorkspace:
             heading_id=heading_id,
             heading_title=_bounded_title(heading_name) if heading_name else None,
             notes_markdown=(
-                item.notes[note_offset : note_offset + _NOTES_LIMIT]
-                if full and include_notes and want_notes
+                item.notes[:_NOTES_LIMIT]
+                if full and want_notes
                 else None
             ),
             checklist=checklist,
@@ -3281,12 +3141,7 @@ class ThingsWorkspace:
             ),
             truncated_fields=_truncated_fields(
                 notes=notes_truncated
-                or (
-                    full
-                    and want_notes
-                    and include_notes
-                    and note_offset + _NOTES_LIMIT < len(item.notes)
-                ),
+                or (full and want_notes and _NOTES_LIMIT < len(item.notes)),
                 checklist=checklist_truncated,
                 tags=tags_truncated,
                 recurrence=links_truncated,
@@ -3297,12 +3152,7 @@ class ThingsWorkspace:
                 tags_truncated=tags_truncated,
                 notes_truncated=(
                     notes_truncated
-                    or (
-                        full
-                        and want_notes
-                        and include_notes
-                        and note_offset + _NOTES_LIMIT < len(item.notes)
-                    )
+                    or (full and want_notes and _NOTES_LIMIT < len(item.notes))
                 ),
                 links_truncated=links_truncated,
             ),
@@ -3319,30 +3169,6 @@ class ThingsWorkspace:
         elif item.area_uuid and (area := self._library.records.get(item.area_uuid)):
             sources.append(area)
         return sources
-
-    def _detail_revision(self, item: Record) -> str:
-        sources = self._tag_sources(item)
-        tag_ids = list(
-            dict.fromkeys(
-                [
-                    *item.tag_uuids,
-                    *(uuid for source in sources for uuid in source.tag_uuids),
-                ]
-            )
-        )
-        return "s_" + _digest(
-            [
-                item.id,
-                self._revision(item),
-                [[source.id, source.tag_uuids] for source in sources],
-                [[uuid, self._library.tags.get(uuid)] for uuid in tag_ids],
-                (
-                    self._recurrence_scope_revision(item.uuid)
-                    if item.recurrence.role == "template"
-                    else None
-                ),
-            ]
-        )
 
     def _item_signals(
         self,
