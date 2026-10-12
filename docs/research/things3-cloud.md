@@ -182,28 +182,11 @@ Risks this repo does **not** mitigate:
 - `crc32fast` for notes. ([src/common.rs](https://github.com/evanpurkhiser/things3-cloud/blob/1281f43bc677325968a6fdea242a5c39bb04d208/src/common.rs))
 - One commit per command plan; sibling `ix` updates ride along. ([src/commands/new.rs](https://github.com/evanpurkhiser/things3-cloud/blob/1281f43bc677325968a6fdea242a5c39bb04d208/src/commands/new.rs), [src/client.rs](https://github.com/evanpurkhiser/things3-cloud/blob/1281f43bc677325968a6fdea242a5c39bb04d208/src/client.rs))
 
-## Steal vs skip (our Cloud adapter)
+## What this adapter kept vs skipped
 
-Steal:
-
-- Disk cache: NDJSON history + versioned folded state + byte offset.
-- Overlap fetch with a stale fold, then fold again.
-- Pagination stop condition `end-total-content-size >= latest-total-content-size` — verify against our GROUP COUNT vs `current-item-index` loop; keep whichever matches live Cloud.
-- Mac headers on **all** methods (`Schema`, `App-Id`, `things-client-info`), not only POST.
-- `ancestor-index` from `current-item-index` / `server-head-index`; batch every planned UUID into one commit.
-- Full `Task7` create (`xx` conflict object, empty arrays, `nt` null when empty). Keep Base58 IDs.
-- Notes `{_t:"tx", ch:crc32, v, t:1}` (we already do this).
-- Emit `Task7` for Task6 and Task7 mutations. Keep `Area3` for Area writes. Filter `tp=2` and `rr` templates from listings.
-- Sparse patches that can send JSON `null` to clear `sr`/`tir`/`dd`.
-- Atomic tmp+rename for any cache we add; version the snapshot so old files are discarded.
-
-Skip / do not copy:
-
-- Missing 1 req/s limiter and 2s sync debounce. Keep ours.
-- Auth only on `/account`. Keep `Authorization: Password …` on every request unless we prove history-key-only GETs are stable.
-- Default `App-Instance-Id = "things3-cloud"` and `Push-Priority: 10`. Keep a Mac-shaped instance id; treat priority 5 vs 10 as unknown.
-- Setting `md` on create (they send now; we send `md: null` on create). Do not change create `md` without a Things.app round-trip.
-- SHA1-truncating hyphenated UUIDs on parse. Keep one identity form (compact Base58) end to end.
-- Plaintext `auth.json` and logging full commit bodies.
-- Wiping nothing when `history-key` changes. If we cache, invalidate on key mismatch.
-- Cache-only `--no-sync` as the MCP default. Fine as an optional fast path, not as the only refresh.
+This adapter caches one folded `state.json` through `CloudLibrary._save_cache`
+and `state_cache_path`. It does not keep an NDJSON history log or a byte-offset
+fold. It does not overlap a history fetch with a stale fold. Reads debounce for
+2 seconds. Writes wait 1 second between POSTs and send `Push-Priority: 5`. Every
+request carries `Authorization`. New IDs are compact Base58 from `new_uuid`, not
+SHA1-truncated UUIDs. Task-family writes emit `Task7`.

@@ -2,34 +2,5 @@
 
 ## Status
 
-Superseded by ADR 0006 and ADR 0007. The three-tool design below remains
-only as a historical record and is not the current implementation contract.
-
-The model-facing Interface is `things_read`, `things_commit`, and
-`things_approve`.
-
-One `ThingsWorkspace` Module owns identity, revision checks, task-system
-meaning, risk, approvals, idempotent intents, and result instructions. The
-model sees exact public IDs. It does not see Things Cloud wire fields.
-
-`things_read` returns fresh, bounded facts. Exact item reads include native
-checklists, Markdown notes, tags, order, recurrence facts, and a revision.
-
-`things_commit` captures new work without a prior read. Existing work needs an
-exact ID and revision. A durable `intent_id` binds retries to one payload.
-Routine work applies at once. Broad, Area, and risky Project changes return an
-immutable plan and write nothing.
-
-`things_approve` accepts only the staged `plan_id`. It checks expiry and all
-bound revisions before it writes.
-
-The Cloud adapter coalesces changes by UUID before commit. It forces a Cloud
-pull after commit and verifies the pulled state. An uncertain outcome returns
-`retry_same`; the journal prevents a blind repost. After three unsettled
-pending attempts the tools stop instead of looping.
-
-We rejected CRUD tools because they repeat identity and safety rules. We
-rejected caller-authored Cloud operations because they expose a shallow seam.
-Repeat interval changes use a semantic workspace field. The Cloud adapter
-keeps and replaces the complete opaque rule. Pattern changes stay disabled
-until their companion fields and lifecycle are proven.
+Superseded by [ADR 0007](0007-authenticated-bounded-v2-writes.md). This ADR is
+not the current public contract.
