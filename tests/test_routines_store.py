@@ -798,6 +798,22 @@ def test_regressed_head_during_seed_is_a_typed_reset_signal(tmp_path: Path) -> N
         store.close()
 
 
+def test_missing_baseline_head_on_seeded_row_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.apply_batch(
+            _batch(0, 5, [[_event("ai", 0, "Tag4", {"tt": "AI"})]], caught_up=False),
+            observed_at=0,
+        )
+        with sqlite3.connect(store.path) as connection:
+            connection.execute("UPDATE meta SET baseline_head = NULL WHERE singleton = 1")
+        with pytest.raises(RoutineStoreError, match="baseline head"):
+            store.apply_batch(_batch(1, 5, [[]], caught_up=False), observed_at=1)
+        assert (store.counts().phase, store.cursor()) == ("seeding", 1)
+    finally:
+        store.close()
+
+
 def test_only_one_process_owner_and_diagnostics_never_create(tmp_path: Path) -> None:
     profile = _profile()
     path = tmp_path / "routines.sqlite3"
