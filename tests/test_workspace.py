@@ -102,12 +102,14 @@ def test_exact_read_returns_markdown_checklist_tags_and_revisions() -> None:
     library.tags["focus"] = "Focus"
     module = ThingsWorkspace(library, clock=lambda: NOW)
 
-    item = module.read(ReadCall(id="task:task1")).items[0]
+    result = module.read(ReadCall(id="task:task1"))
+    item = result.items[0]
 
     assert item.notes_markdown == "## Outcome\n\nShip it."
     assert item.checklist[0].id == "check:row1"
     assert item.checklist[0].status == "canceled"
-    assert item.direct_tags[0].id == "tag:focus"
+    assert item.direct_tag_ids == ["tag:focus"]
+    assert [tag.id for tag in result.tags] == ["tag:focus"]
     assert item.revision.startswith("r_")
 
 
@@ -361,9 +363,8 @@ def test_exact_read_bounds_external_text_and_order_facts() -> None:
     assert len(item.title) == 1000
     assert len(item.notes_markdown or "") == 50_000
     assert len(item.checklist[0].title) == 1000
-    assert all(
-        len(tag.title) == 1000 for tag in [*item.direct_tags, *item.inherited_tags]
-    )
+    assert result.tags
+    assert all(len(tag.title) == 1000 for tag in result.tags)
     assert item.order == -(2**63)
     assert item.today_order == 2**63 - 1
     assert item.checklist[0].order == 2**63 - 1
@@ -769,7 +770,8 @@ def test_bulk_read_keeps_bounded_inherited_tags_when_already_truncated() -> None
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
 
     exact = module.read(ReadCall(id=task.id, limit=40))
-    assert len(exact.items[0].inherited_tags) == 40
+    assert len(exact.items[0].inherited_tag_ids) == 40
+    assert exact.items[0].inherited_tags == []
     assert "tags" in exact.items[0].truncated_fields
     assert "tags_truncated" in exact.items[0].signals
 
