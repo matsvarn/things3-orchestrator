@@ -429,7 +429,7 @@ class ThingsWorkspace:
                     call.limit,
                     full=False,
                     instruction=(
-                        "These Trash matches. Read one to restore or purge."
+                        "These Trash matches."
                         if matches
                         else "No Trash item matched that find."
                     ),
@@ -448,7 +448,7 @@ class ThingsWorkspace:
                     matches,
                     call.limit,
                     full=False,
-                    instruction="These matches. Name one to open or stop.",
+                    instruction="These matches.",
                 )
             closed = [
                 item
@@ -458,8 +458,7 @@ class ThingsWorkspace:
             if closed:
                 only_trash = all(item.trashed for item in closed)
                 instruction = (
-                    "These matches are in Trash. "
-                    "Read one to restore or purge, or view=trash."
+                    "These matches are in Trash."
                     if only_trash
                     else "These matches are not active. "
                     "Read the exact id, or view=trash."
@@ -494,7 +493,7 @@ class ThingsWorkspace:
                 "Each into_id is the Area or Project home. Titles are on into_title."
             )
         elif view == "trash":
-            instruction = "This is Trash. Read an item to restore or purge."
+            instruction = "This is Trash."
         return self._page(
             visible,
             call.limit,
@@ -1540,20 +1539,13 @@ class ThingsWorkspace:
                     )
                     display_titles.append(graph_write.title or projected.title)
             else:
-                for row in projected.checklists:
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=new_uuid(),
-                            title=row.title,
-                            checklist_parent_uuid=template_uuid,
-                            checklist_status="open",
-                            checklist_index=row.sort_index,
-                        )
-                    )
+                for write in self._copy_checklist_writes(
+                    projected.checklists, template_uuid
+                ):
+                    writes.append(write)
                     before.append(None)
                     touched.append([])
-                    display_titles.append(row.title)
+                    display_titles.append(write.title)
             writes.append(
                 Write(
                     action="repeat_link",
@@ -1726,20 +1718,13 @@ class ThingsWorkspace:
                     )
                     display_titles.append(graph_write.title or template.title)
             else:
-                for row in template.checklists:
-                    writes.append(
-                        Write(
-                            action="checklist",
-                            uuid=new_uuid(),
-                            title=row.title,
-                            checklist_parent_uuid=next_uuid,
-                            checklist_status="open",
-                            checklist_index=row.sort_index,
-                        )
-                    )
+                for write in self._copy_checklist_writes(
+                    template.checklists, next_uuid
+                ):
+                    writes.append(write)
                     before.append(None)
                     touched.append([])
-                    display_titles.append(row.title)
+                    display_titles.append(write.title)
             writes.append(
                 Write(
                     action="repeat_next",
@@ -2680,7 +2665,7 @@ class ThingsWorkspace:
 
     @staticmethod
     def _is_searchable(item: Record, *, closed: bool = False) -> bool:
-        """Search active work, or any record when ending or restoring work."""
+        """Search active work, or any record including closed and Trash."""
 
         if closed:
             return True
@@ -2913,11 +2898,7 @@ class ThingsWorkspace:
             Result(
                 next="done",
                 status="ok",
-                instruction=(
-                    "These TagFact titles and ids are the catalog to reuse on "
-                    "tag_ids and tags_add. Send this scope_revision as "
-                    "tags_revision only with change_tags."
-                ),
+                instruction="Current Things tags.",
                 tags=page_rows,
                 truncated=cursor is not None,
                 cursor=cursor,
@@ -3015,7 +2996,7 @@ class ThingsWorkspace:
 
     @staticmethod
     def _follow_cursor(result: Result) -> Result:
-        """Keep next honest: a cursor means the model should read again."""
+        """Keep next=read when a cursor remains."""
         if result.cursor is None:
             return result
         instruction = result.instruction
@@ -3536,6 +3517,22 @@ class ThingsWorkspace:
     def _checklist_revision(row: ChecklistLine) -> str:
         return "r_" + _digest([row.uuid, row.title, row.status, row.sort_index])
 
+    @staticmethod
+    def _copy_checklist_writes(
+        rows: Sequence[ChecklistLine], parent_uuid: str
+    ) -> list[Write]:
+        return [
+            Write(
+                action="checklist",
+                uuid=new_uuid(),
+                title=row.title,
+                checklist_parent_uuid=parent_uuid,
+                checklist_status="open",
+                checklist_index=row.sort_index,
+            )
+            for row in rows
+        ]
+
     def _scope_revision(self, items: list[Record]) -> str:
         unique = {item.id: item for item in items}
         return "s_" + _digest(
@@ -3694,20 +3691,15 @@ class ThingsWorkspace:
                 )
             )
         for task in tasks:
-            parent_uuid = uuid_map[task.uuid]
-            for row in sorted(
-                task.checklists, key=lambda item: (item.sort_index, item.uuid)
-            ):
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=new_uuid(),
-                        title=row.title,
-                        checklist_parent_uuid=parent_uuid,
-                        checklist_status="open",
-                        checklist_index=row.sort_index,
-                    )
+            writes.extend(
+                self._copy_checklist_writes(
+                    sorted(
+                        task.checklists,
+                        key=lambda item: (item.sort_index, item.uuid),
+                    ),
+                    uuid_map[task.uuid],
                 )
+            )
         return writes
 
     def _repeat_stop_plan(self, template: Record) -> _RepeatStopPlan:
@@ -3800,20 +3792,15 @@ class ThingsWorkspace:
                     )
                 )
         else:
-            for row in sorted(
-                template.checklists,
-                key=lambda item: (item.sort_index, item.uuid),
-            ):
-                writes.append(
-                    Write(
-                        action="checklist",
-                        uuid=new_uuid(),
-                        title=row.title,
-                        checklist_parent_uuid=replacement.uuid,
-                        checklist_status="open",
-                        checklist_index=row.sort_index,
-                    )
+            writes.extend(
+                self._copy_checklist_writes(
+                    sorted(
+                        template.checklists,
+                        key=lambda item: (item.sort_index, item.uuid),
+                    ),
+                    replacement.uuid,
                 )
+            )
         for row in sorted(
             template.checklists,
             key=lambda item: (item.sort_index, item.uuid),
