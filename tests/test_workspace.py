@@ -183,9 +183,7 @@ def test_find_includes_active_headings_for_rename() -> None:
 
     assert review.status == "ok"
     assert review.items[0].id == "heading:prep"
-    assert review.instruction.startswith(
-        "These matches. Name one to open or stop."
-    )
+    assert review.instruction.startswith("These matches.")
 
 
 def test_review_find_returns_closed_matches_when_nothing_is_active() -> None:
@@ -405,7 +403,7 @@ def test_trash_view_returns_recoverable_exact_items() -> None:
 
     assert [item.id for item in result.items] == [trashed.id]
     assert "trashed" in result.items[0].signals
-    assert "Read an item to restore or purge." in result.instruction
+    assert "This is Trash." in result.instruction
     assert "purpose=change" not in result.instruction
 
 
@@ -1573,7 +1571,7 @@ def test_find_within_trash_ignores_living_notes_hits() -> None:
     trash_hit = module.read(ReadCall(find="Later", within="trash"))
     assert [item.id for item in trash_hit.items] == [heading.id]
     assert "trashed" in trash_hit.items[0].signals
-    assert "Read one to restore or purge." in trash_hit.instruction
+    assert "These Trash matches." in trash_hit.instruction
     assert "purpose=change" not in trash_hit.instruction
 
 
@@ -1615,7 +1613,7 @@ def test_exact_id_keeps_order_and_omits_none_recurrence() -> None:
     assert "recurrence" not in payload["items"][0]
 
 
-def test_tags_page_instruction_is_the_catalog() -> None:
+def test_tags_page_instruction_is_current_facts() -> None:
     library = MemoryLibrary()
     library.tags["errands"] = "Errands"
     module = ThingsWorkspace(library, journal=MemoryJournal(), clock=lambda: NOW)
@@ -1623,6 +1621,4 @@ def test_tags_page_instruction_is_the_catalog() -> None:
     result = module.read(ReadCall(view="tags"))
 
     assert result.status == "ok"
-    assert "catalog" in result.instruction
-    assert "tag_ids" in result.instruction
-    assert "change_tags" in result.instruction
+    assert result.instruction.startswith("Current Things tags.")
