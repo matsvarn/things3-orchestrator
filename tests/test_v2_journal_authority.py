@@ -143,7 +143,12 @@ def _inject_v2_operation(
         return
     with sqlite3.connect(journal.path) as connection:
         connection.execute(
-            "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO owner_operations_v2 (
+                account_id, api_version, request_id, request_hash, operation_id,
+                tool, state, manifest_json, manifest_hash, safety_policy_digest,
+                expires_at, response_json, authorization, receipt_hash,
+                dispatch_started
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             _v2_sql_values(operation),
         )
         connection.execute(
@@ -252,7 +257,12 @@ def test_duplicate_casefolded_requests_fail_closed_without_selecting_by_login(
     else:
         with sqlite3.connect(journal.path) as connection:
             connection.execute(
-                "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO owner_operations_v2 (
+                    account_id, api_version, request_id, request_hash, operation_id,
+                    tool, state, manifest_json, manifest_hash, safety_policy_digest,
+                    expires_at, response_json, authorization, receipt_hash,
+                    dispatch_started
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 _v2_sql_values(conflicting),
             )
 
@@ -501,17 +511,27 @@ def test_resume_maps_leftover_awaiting_owner_to_stale_without_cloud_io() -> None
 
 
 def test_settlement_cannot_bypass_leftover_awaiting_owner(tmp_path: Path) -> None:
+    rows = [
+        {
+            "sequence": 1,
+            "action": "create",
+            "target_id": "task:a",
+            "desired": {},
+            "observed": {},
+            "result": "applied",
+        }
+    ]
     for journal in (MemoryJournal(), SQLiteJournal(tmp_path / "journal.sqlite3")):
         operation = _operation("op_awaiting", request_id="0198f0ee-98d4-7bd5-91ba-8e76019b2735", state="awaiting_owner")
         _inject_v2_operation(journal, operation)
         assert not journal.settle_v2(
             operation.operation_id,
-            expected="awaiting_owner",
-            state="pending",
-            response={"state": "pending"},
-            rows=[],
+            expected="pending",
+            state="applied",
+            response={"state": "applied"},
+            rows=rows,
         )
-        assert journal.get_v2_operation(operation.operation_id).state == "awaiting_owner"  # type: ignore[union-attr]
+        assert journal.get_v2_operation(operation.operation_id) == operation
 
 
 def test_journal_owns_v2_initial_and_pending_lifecycle(tmp_path: Path) -> None:
@@ -1213,13 +1233,15 @@ def test_sqlite_migration_marks_legacy_pending_as_possibly_dispatched(
                 UNIQUE(account_id, api_version, request_id)
             )"""
         )
+        pending_values = _v2_sql_values(pending)
+        awaiting_values = _v2_sql_values(awaiting)
         connection.execute(
             "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            _v2_sql_values(pending)[:-1],
+            (*pending_values[:-2], None, pending_values[-2]),
         )
         connection.execute(
             "INSERT INTO owner_operations_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            _v2_sql_values(awaiting)[:-1],
+            (*awaiting_values[:-2], None, awaiting_values[-2]),
         )
 
     journal = SQLiteJournal(path)
