@@ -1513,10 +1513,11 @@ class _CloudEnvelopeHandler(_MutationHandler[Envelope]):
                 kind=entity,
                 payload={"tr": write.action == "trash", "md": _now()},
             )
+        now = _now()
         payload = {
-            "md": _now(),
-            "ss": 3 if write.action == "complete" else 2,
-            "sp": _now(),
+            "md": now,
+            "ss": _status_code("done" if write.action == "complete" else "dropped"),
+            "sp": now,
         }
         return Envelope(uuid=write.uuid, action=1, kind=entity, payload=payload)
 

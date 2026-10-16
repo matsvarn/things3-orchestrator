@@ -776,9 +776,12 @@ class SQLiteJournal:
                 connection.rollback()
                 return "blocked", None, blockers
             connection.execute(
-                """INSERT INTO owner_operations_v2 VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-                )""",
+                """INSERT INTO owner_operations_v2 (
+                    account_id, api_version, request_id, request_hash, operation_id,
+                    tool, state, manifest_json, manifest_hash, safety_policy_digest,
+                    expires_at, response_json, authorization, receipt_hash,
+                    dispatch_started
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 _v2_sql_values(operation),
             )
             created_at = _utc_now()
@@ -1532,7 +1535,6 @@ def _v2_sql_values(operation: V2Operation) -> tuple[object, ...]:
         operation.expires_at,
         _json(operation.response) if operation.response is not None else None,
         operation.authorization,
-        None,
         operation.receipt_hash,
         int(operation.dispatch_started),
     )
